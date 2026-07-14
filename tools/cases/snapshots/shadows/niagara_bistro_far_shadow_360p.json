@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "id": "shadows.niagara_bistro.far_shadow_360p",
+  "suite": "shadows",
+  "description": "Niagara Bistro Ultra far-camera shadow cascades and tiled shadow-map preview from an alternate angle",
+  "scene": {
+    "kind": "prefab",
+    "pathBase": "modelsRoot",
+    "path": "NiagaraBistro/bistrox.gltf"
+  },
+  "backend": "nvrhi",
+  "resolution": [640, 360],
+  "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 12,
+  "captureFrame": 18,
+  "authoritative": false,
+  "presentMode": "immediate",
+  "windowMode": "visible",
+  "camera": {
+    "position": [148.077130, 60.409850, 63.917066],
+    "target": [-34.294270, 2.883850, 5.338666],
+    "verticalFovDegrees": 60.0,
+    "nearPlane": 0.05,
+    "farPlane": 500.0
+  },
+  "settings": {
+    "antiAliasing": {"mode": "TAA", "temporalProvider": "Reference", "qualityPreset": "Ultra"},
+    "ambientOcclusion": {"mode": "GTAO", "preset": "Ultra"},
+    "shadow": {
+      "enabled": true,
+      "qualityPreset": "Ultra",
+      "debug": {
+        "showShadowMapViewport": true,
+        "previewMode": "SelectedCascade",
+        "debugCascadeIndex": 3,
+        "previewDepthInvert": true,
+        "previewDepthLog": true,
+        "visualizeShadowFactor": true
+      }
+    }
+  },
+  "requirements": {
+    "assets": ["modelsRoot:NiagaraBistro/bistrox.gltf"],
+    "backends": ["nvrhi"],
+    "allowVisibleWindow": true
+  },
+  "captures": [
+    {"target": "shadow_factor", "profile": "scalar", "required": true},
+    {"target": "shadow_cascade_2", "profile": "shadow_depth", "required": true},
+    {"target": "shadow_cascade_3", "profile": "shadow_depth", "required": true},
+    {"target": "shadow_preview", "profile": "debug_preview", "required": true}
+  ]
+}

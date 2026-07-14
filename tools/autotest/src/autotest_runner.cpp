@@ -16,6 +16,7 @@
 #include "nuri/tools/snapshot/snapshot_image.h"
 
 #include "nuri/core/profiling.h"
+#include "nuri/resources/gpu/resource_manager.h"
 
 #include <algorithm>
 #include <array>
@@ -431,14 +432,44 @@ void applyAssertionExitStatus(const std::vector<AutotestAssertionResult> &items,
 }
 
 [[nodiscard]] std::map<std::string, double>
-readoutValuesFromOpaquePick(const OpaquePickResult &readout) {
-  return {{"hit", readout.hit ? 1.0 : 0.0},
-          {"renderableIndex", static_cast<double>(readout.renderableIndex)}};
+readoutValuesFromOpaquePick(const OpaquePickResult &readout,
+                            const RenderFrameContext &frameContext) {
+  std::map<std::string, double> values{
+      {"hit", readout.hit ? 1.0 : 0.0},
+      {"renderableIndex", static_cast<double>(readout.renderableIndex)}};
+  if (!readout.hit || frameContext.scene == nullptr ||
+      frameContext.resources == nullptr) {
+    return values;
+  }
+
+  const Renderable *renderable =
+      frameContext.scene->renderable(readout.renderableIndex);
+  if (renderable == nullptr) {
+    return values;
+  }
+  values.emplace("nodeIndex", static_cast<double>(indexOf(renderable->node)));
+
+  const ModelRecord *modelRecord =
+      frameContext.resources->tryGet(renderable->model);
+  if (modelRecord == nullptr || !modelRecord->model) {
+    return values;
+  }
+  const BoundingBox worldBounds =
+      modelRecord->model->bounds().getTransformed(renderable->modelMatrix);
+  const glm::vec3 worldCenter = worldBounds.getCenter();
+  values.emplace("worldCenterX", worldCenter.x);
+  values.emplace("worldCenterY", worldCenter.y);
+  values.emplace("worldCenterZ", worldCenter.z);
+  return values;
 }
 
 [[nodiscard]] std::map<std::string, double>
 readoutValuesFromShadowInspect(const ShadowInspectResult &readout) {
   return {{"valid", readout.valid ? 1.0 : 0.0},
+          {"shadowed",
+           readout.valid && readout.receiverCompareDepth > readout.sampledDepth
+               ? 1.0
+               : 0.0},
           {"receiverDepth", readout.receiverDepth},
           {"receiverCompareDepth", readout.receiverCompareDepth},
           {"sampledDepth", readout.sampledDepth},
@@ -501,7 +532,8 @@ void resolvePendingReadoutsForFrame(
   };
   if (frameContext.opaquePickResult.has_value()) {
     resolveById(frameContext.opaquePickResult->requestId, "opaquePick",
-                readoutValuesFromOpaquePick(*frameContext.opaquePickResult));
+                readoutValuesFromOpaquePick(*frameContext.opaquePickResult,
+                                            frameContext));
   }
   if (frameContext.shadowInspectResult.has_value()) {
     resolveById(

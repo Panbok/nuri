@@ -131,6 +131,16 @@ void flattenAutotestRendererMetrics(std::map<std::string, double> &out,
             opaque.meshletModeRequired);
   addMetric(out, "renderer.opaque.meshlet_mode_active",
             opaque.meshletModeActive);
+  addMetric(out, "renderer.opaque.meshlet_hybrid_active",
+            opaque.meshletHybridActive);
+  addMetric(out, "renderer.opaque.meshlet_hybrid_classic_batches",
+            opaque.meshletHybridClassicBatches);
+  addMetric(out, "renderer.opaque.meshlet_hybrid_classic_instances",
+            opaque.meshletHybridClassicInstances);
+  addMetric(out, "renderer.opaque.meshlet_hybrid_meshlet_batches",
+            opaque.meshletHybridMeshletBatches);
+  addMetric(out, "renderer.opaque.meshlet_hybrid_meshlet_instances",
+            opaque.meshletHybridMeshletInstances);
   addMetric(out, "renderer.opaque.meshlet_rejected_missing_feature",
             opaque.meshletRejectedMissingFeature);
   addMetric(out, "renderer.opaque.meshlet_rejected_missing_asset_data",
@@ -189,6 +199,30 @@ void flattenAutotestRendererMetrics(std::map<std::string, double> &out,
             visibility.meshletRejectedOcclusion);
   addMetric(out, "renderer.visibility.meshlet_occlusion_available",
             visibility.meshletOcclusionAvailable);
+  addMetric(out, "renderer.visibility.meshlet_occlusion_mode",
+            visibility.meshletOcclusionMode);
+  addMetric(out, "renderer.visibility.meshlet_occlusion_source_frame",
+            visibility.meshletOcclusionSourceFrame);
+  addMetric(out, "renderer.visibility.meshlet_occlusion_source_age",
+            visibility.meshletOcclusionSourceAge);
+  addMetric(out, "renderer.visibility.current_frame_hiz_active",
+            visibility.currentFrameHiZActive);
+  addMetric(out, "renderer.visibility.meshlet_pre_task_compaction_active",
+            visibility.meshletPreTaskCompactionActive);
+  addMetric(out, "renderer.visibility.meshlet_pre_task_candidates_input",
+            visibility.meshletPreTaskCandidatesInput);
+  addMetric(out, "renderer.visibility.meshlet_pre_task_candidates_output",
+            visibility.meshletPreTaskCandidatesOutput);
+  addMetric(out, "renderer.visibility.meshlet_pre_task_task_groups_input",
+            visibility.meshletPreTaskTaskGroupsInput);
+  addMetric(out, "renderer.visibility.meshlet_pre_task_task_groups_output",
+            visibility.meshletPreTaskTaskGroupsOutput);
+  addMetric(out, "renderer.visibility.meshlet_pre_task_task_groups_saved",
+            visibility.meshletPreTaskTaskGroupsSaved);
+  addMetric(out, "renderer.visibility.meshlet_pre_task_overflow_count",
+            visibility.meshletPreTaskOverflowCount);
+  addMetric(out, "renderer.visibility.meshlet_pre_task_mismatch_count",
+            visibility.meshletPreTaskMismatchCount);
   addMetric(out, "renderer.visibility.meshlet_payload_overflow_count",
             visibility.meshletPayloadOverflowCount);
   addMetric(out, "renderer.visibility.meshlet_readback_available",
@@ -209,19 +243,6 @@ void flattenAutotestRendererMetrics(std::map<std::string, double> &out,
             visibility.shadowCpuCandidates);
   addMetric(out, "renderer.visibility.shadow_cpu_rejected",
             visibility.shadowCpuRejected);
-  addMetric(out, "renderer.visibility.shadow_meshlet_candidates",
-            visibility.shadowMeshletCandidates);
-  addMetric(out, "renderer.visibility.shadow_meshlet_readback_available",
-            visibility.shadowMeshletReadbackAvailable);
-  addMetric(out, "renderer.visibility.shadow_meshlet_readback_source_frame",
-            visibility.shadowMeshletReadbackSourceFrame);
-  addMetric(out,
-            "renderer.visibility.shadow_meshlet_readback_stale_frame_count",
-            visibility.shadowMeshletReadbackStaleFrameCount);
-  addMetric(out, "renderer.visibility.shadow_meshlet_readback_error_count",
-            visibility.shadowMeshletReadbackErrorCount);
-  addMetric(out, "renderer.visibility.shadow_meshlet_rejected_bounds",
-            visibility.shadowMeshletRejectedBounds);
   addMetric(out, "renderer.visibility.occlusion_available",
             visibility.occlusionAvailable);
 
@@ -238,12 +259,13 @@ void flattenAutotestRendererMetrics(std::map<std::string, double> &out,
   addMetric(out, "renderer.shadow.static_batch_templates",
             shadow.staticBatchTemplateCount);
   addMetric(out, "renderer.shadow.batch_entries", shadow.shadowBatchEntryCount);
-  addMetric(out, "renderer.shadow.meshlet_dispatches",
-            shadow.shadowMeshletDispatchCount);
-  addMetric(out, "renderer.shadow.meshlet_task_groups",
-            shadow.shadowMeshletTaskGroupCount);
   addMetric(out, "renderer.shadow.instance_remaps",
             shadow.shadowInstanceRemapCount);
+  addMetric(out, "renderer.shadow.submitted_draw_items",
+            shadow.submittedDrawItemCount);
+  addMetric(out, "renderer.shadow.indirect_commands",
+            shadow.indirectCommandCount);
+  addMetric(out, "renderer.shadow.draw_packet_bytes", shadow.drawPacketBytes);
   addMetric(out, "renderer.shadow.static_batch_full_emits",
             shadow.staticBatchFullEmitCount);
   addMetric(out, "renderer.shadow.static_light_grid_queries",
@@ -268,26 +290,9 @@ void flattenAutotestRendererMetrics(std::map<std::string, double> &out,
             shadow.staticOnlyReuseMissRasterStateChangedCount);
   addMetric(out, "renderer.shadow.static_only_miss_adaptive_refresh",
             shadow.staticOnlyReuseMissAdaptiveRefreshCount);
-  addMetric(out, "renderer.shadow.static_only_scroll_candidates",
-            shadow.staticOnlyScrollCandidateCount);
-  addMetric(out, "renderer.shadow.static_only_scroll_compatible",
-            shadow.staticOnlyScrollCompatibleCount);
-  addMetric(out, "renderer.shadow.static_only_scroll_dirty_area_bp",
-            shadow.staticOnlyScrollDirtyAreaBasisPoints);
-  addMetric(out, "renderer.shadow.static_only_scroll_dirty_casters",
-            shadow.staticOnlyScrollDirtyCasterEstimate);
-  addMetric(out, "renderer.shadow.static_only_scroll_dirty_indices",
-            shadow.staticOnlyScrollDirtyIndexEstimate);
-  addMetric(out, "renderer.shadow.static_only_scroll_reject_anchor",
-            shadow.staticOnlyScrollRejectAnchorCount);
-  addMetric(out, "renderer.shadow.static_only_scroll_reject_depth",
-            shadow.staticOnlyScrollRejectDepthCount);
-  addMetric(out, "renderer.shadow.static_only_scroll_reject_extent",
-            shadow.staticOnlyScrollRejectExtentCount);
-  addMetric(out, "renderer.shadow.static_only_scroll_reject_shift",
-            shadow.staticOnlyScrollRejectShiftCount);
   addMetric(out, "renderer.shadow.filter_sample_budget",
             shadow.filterSampleBudget);
+  addMetric(out, "renderer.shadow.frame_gpu_bytes", shadow.frameGpuBytes);
   addMetric(out, "renderer.shadow.sdsm_compute_passes",
             shadow.sdsmComputePassCount);
   addBytesAsMiB(out, "gpu.memory.shadow.cascade_texture_mb",

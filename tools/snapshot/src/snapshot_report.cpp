@@ -642,22 +642,6 @@ yyjson_mut_val *makeRendererMetricsObject(yyjson_mut_doc *doc,
                           visibility.shadowCpuCandidates);
   yyjson_mut_obj_add_uint(doc, visibilityObject, "shadowCpuRejected",
                           visibility.shadowCpuRejected);
-  yyjson_mut_obj_add_uint(doc, visibilityObject, "shadowMeshletCandidates",
-                          visibility.shadowMeshletCandidates);
-  yyjson_mut_obj_add_uint(doc, visibilityObject,
-                          "shadowMeshletReadbackAvailable",
-                          visibility.shadowMeshletReadbackAvailable);
-  yyjson_mut_obj_add_uint(doc, visibilityObject,
-                          "shadowMeshletReadbackSourceFrame",
-                          visibility.shadowMeshletReadbackSourceFrame);
-  yyjson_mut_obj_add_uint(doc, visibilityObject,
-                          "shadowMeshletReadbackStaleFrameCount",
-                          visibility.shadowMeshletReadbackStaleFrameCount);
-  yyjson_mut_obj_add_uint(doc, visibilityObject,
-                          "shadowMeshletReadbackErrorCount",
-                          visibility.shadowMeshletReadbackErrorCount);
-  yyjson_mut_obj_add_uint(doc, visibilityObject, "shadowMeshletRejectedBounds",
-                          visibility.shadowMeshletRejectedBounds);
   yyjson_mut_obj_add_uint(doc, visibilityObject, "occlusionAvailable",
                           visibility.occlusionAvailable);
   yyjson_mut_obj_add_val(doc, object, "visibility", visibilityObject);
@@ -671,10 +655,6 @@ yyjson_mut_val *makeRendererMetricsObject(yyjson_mut_doc *doc,
   yyjson_mut_obj_add_uint(doc, shadowObject, "totalDraws", shadow.totalDraws);
   yyjson_mut_obj_add_uint(doc, shadowObject, "totalCulledDraws",
                           shadow.totalCulledDraws);
-  yyjson_mut_obj_add_uint(doc, shadowObject, "meshletDispatchCount",
-                          shadow.shadowMeshletDispatchCount);
-  yyjson_mut_obj_add_uint(doc, shadowObject, "meshletTaskGroupCount",
-                          shadow.shadowMeshletTaskGroupCount);
   yyjson_mut_obj_add_uint(doc, shadowObject, "staticCasterEntries",
                           shadow.staticCasterEntries);
   yyjson_mut_obj_add_uint(doc, shadowObject, "dynamicCasterEntries",
@@ -1166,24 +1146,6 @@ void readRendererMetrics(yyjson_val *object, RenderFrameMetrics &metrics) {
                 visibility.shadowCpuCandidates);
     visibility.shadowCpuRejected = readU32(
         visibilityObject, "shadowCpuRejected", visibility.shadowCpuRejected);
-    visibility.shadowMeshletCandidates =
-        readU32(visibilityObject, "shadowMeshletCandidates",
-                visibility.shadowMeshletCandidates);
-    visibility.shadowMeshletReadbackAvailable =
-        readU32(visibilityObject, "shadowMeshletReadbackAvailable",
-                visibility.shadowMeshletReadbackAvailable);
-    visibility.shadowMeshletReadbackSourceFrame =
-        readU32(visibilityObject, "shadowMeshletReadbackSourceFrame",
-                visibility.shadowMeshletReadbackSourceFrame);
-    visibility.shadowMeshletReadbackStaleFrameCount =
-        readU32(visibilityObject, "shadowMeshletReadbackStaleFrameCount",
-                visibility.shadowMeshletReadbackStaleFrameCount);
-    visibility.shadowMeshletReadbackErrorCount =
-        readU32(visibilityObject, "shadowMeshletReadbackErrorCount",
-                visibility.shadowMeshletReadbackErrorCount);
-    visibility.shadowMeshletRejectedBounds =
-        readU32(visibilityObject, "shadowMeshletRejectedBounds",
-                visibility.shadowMeshletRejectedBounds);
     visibility.occlusionAvailable = readU32(
         visibilityObject, "occlusionAvailable", visibility.occlusionAvailable);
   }
@@ -1198,12 +1160,6 @@ void readRendererMetrics(yyjson_val *object, RenderFrameMetrics &metrics) {
     shadow.totalDraws = readU32(shadowObject, "totalDraws", shadow.totalDraws);
     shadow.totalCulledDraws =
         readU32(shadowObject, "totalCulledDraws", shadow.totalCulledDraws);
-    shadow.shadowMeshletDispatchCount =
-        readU32(shadowObject, "meshletDispatchCount",
-                shadow.shadowMeshletDispatchCount);
-    shadow.shadowMeshletTaskGroupCount =
-        readU32(shadowObject, "meshletTaskGroupCount",
-                shadow.shadowMeshletTaskGroupCount);
     shadow.staticCasterEntries = readU32(shadowObject, "staticCasterEntries",
                                          shadow.staticCasterEntries);
     shadow.dynamicCasterEntries = readU32(shadowObject, "dynamicCasterEntries",

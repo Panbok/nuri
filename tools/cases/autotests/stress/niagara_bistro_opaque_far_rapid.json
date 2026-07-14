@@ -1,0 +1,134 @@
+{
+  "schemaVersion": 1,
+  "id": "stress.niagara_bistro.opaque_far_rapid",
+  "suite": "stress",
+  "description": "Editor-scale-equivalent far Bistro orbit for fixed-LOD meshlet stability during rapid camera movement",
+  "scene": {
+    "kind": "prefab",
+    "pathBase": "modelsRoot",
+    "path": "NiagaraBistro/bistrox.gltf",
+    "importOptions": {
+      "mesh": {
+        "generateMeshlets": true,
+        "meshletMaxVertices": 64,
+        "meshletMaxPrimitives": 124,
+        "meshletConeWeight": 0.0
+      }
+    }
+  },
+  "backend": "nvrhi",
+  "resolution": [1280, 720],
+  "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 12,
+  "endFrame": 108,
+  "authoritative": false,
+  "presentMode": "immediate",
+  "windowMode": "visible",
+  "renderGraph": {
+    "workerCount": 1,
+    "parallelCompile": false,
+    "parallelRecording": false
+  },
+  "camera": {
+    "position": [99.873961, 40.744786, 43.110307],
+    "target": [-23.130544, 1.945078, 3.600784],
+    "verticalFovDegrees": 60.0,
+    "nearPlane": 0.033724,
+    "farPlane": 337.236281
+  },
+  "settings": {
+    "opaque": {
+      "enabled": true,
+      "meshletMode": "Opportunistic",
+      "hybridClassicMaxMeshlets": 128,
+      "enableMeshletFrustumCulling": true,
+      "enableMeshletConeCulling": true,
+      "enableDepthPrepass": true,
+      "enableDepthPyramid": true,
+      "enableInstanceCompute": false,
+      "enableInstanceAnimation": false,
+      "enableMeshLod": false,
+      "enableTessellation": false,
+      "forcedMeshLod": 0
+    },
+    "visibility": {
+      "mainViewMode": "GpuDriven",
+      "occlusionMode": "CurrentFrameHiZExperimental",
+      "enableMeshletFrustumCulling": true,
+      "enableMeshletConeCulling": true,
+      "enableIndirectMeshDispatch": true,
+      "enableMeshletPreTaskCompaction": false,
+      "visibleOnUncertain": true
+    },
+    "antiAliasing": {"mode": "None"},
+    "ambientOcclusion": {"mode": "Disabled"},
+    "shadow": {"enabled": false},
+    "hdrPostProcess": {"bloomEnabled": false, "adaptationEnabled": false},
+    "transmission": {"enabled": false},
+    "transparent": {"enabled": false},
+    "textureFiltering": {"mode": "Anisotropic", "anisotropy": 8}
+  },
+  "timeline": {
+    "cameraPaths": [
+      {
+        "id": "bistro_far_rapid_orbit",
+        "startFrame": 0,
+        "endFrame": 108,
+        "interpolation": "linear",
+        "keyframes": [
+          {"frame": 0, "position": [99.873961, 40.744786, 43.110307], "target": [-23.130544, 1.945078, 3.600784]},
+          {"frame": 12, "position": [99.873961, 40.744786, 43.110307], "target": [-23.130544, 1.945078, 3.600784]},
+          {"frame": 24, "position": [70.0, 30.0, 55.0], "target": [-23.130544, 1.945078, 3.600784]},
+          {"frame": 36, "position": [45.0, 18.0, 30.0], "target": [-23.130544, 1.945078, 3.600784]},
+          {"frame": 48, "position": [75.0, 28.0, 15.0], "target": [-23.130544, 1.945078, 3.600784]},
+          {"frame": 60, "position": [99.873961, 40.744786, 43.110307], "target": [-23.130544, 1.945078, 3.600784]},
+          {"frame": 72, "position": [120.0, 45.0, 20.0], "target": [-23.130544, 1.945078, 3.600784]},
+          {"frame": 84, "position": [80.0, 38.0, 65.0], "target": [-23.130544, 1.945078, 3.600784]},
+          {"frame": 96, "position": [99.873961, 40.744786, 43.110307], "target": [-23.130544, 1.945078, 3.600784]},
+          {"frame": 108, "position": [99.873961, 40.744786, 43.110307], "target": [-23.130544, 1.945078, 3.600784]}
+        ]
+      }
+    ]
+  },
+  "checkpoints": [
+    {
+      "id": "far_hold_start",
+      "frame": 12,
+      "captures": [{"target": "final_color", "profile": "ldr_color", "required": true, "compare": false}],
+      "assertions": [
+        {"id": "meshlets_active", "metric": "renderer.opaque.meshlet_mode_active", "equals": 1},
+        {"id": "gtao_disabled", "metric": "renderer.ao.active", "equals": 0},
+        {"id": "shadows_disabled", "metric": "renderer.shadow.total_draws", "equals": 0},
+        {"id": "taa_disabled", "metric": "renderer.aa.taa_resolve_passes", "equals": 0}
+      ]
+    },
+    {"id": "far_orbit_near_035", "frame": 35, "captures": [{"target": "final_color", "profile": "ldr_color", "required": true, "compare": false}]},
+    {"id": "far_orbit_near_036", "frame": 36, "captures": [{"target": "final_color", "profile": "ldr_color", "required": true, "compare": false}]},
+    {"id": "far_orbit_near_037", "frame": 37, "captures": [{"target": "final_color", "profile": "ldr_color", "required": true, "compare": false}]},
+    {"id": "far_return_059", "frame": 59, "captures": [{"target": "final_color", "profile": "ldr_color", "required": true, "compare": false}]},
+    {"id": "far_return_060", "frame": 60, "captures": [{"target": "final_color", "profile": "ldr_color", "required": true, "compare": false}]},
+    {"id": "far_return_061", "frame": 61, "captures": [{"target": "final_color", "profile": "ldr_color", "required": true, "compare": false}]},
+    {"id": "far_repeat", "frame": 96, "captures": [{"target": "final_color", "profile": "ldr_color", "required": true, "compare": false}]},
+    {"id": "far_hold_end", "frame": 108, "captures": [{"target": "final_color", "profile": "ldr_color", "required": true, "compare": false}]}
+  ],
+  "metricWindows": [
+    {
+      "id": "far_rapid_orbit",
+      "frames": [12, 108],
+      "assertions": [
+        {"id": "meshlet_mode_stays_active", "metric": "renderer.opaque.meshlet_mode_active", "equals": 1},
+        {"id": "meshlet_mode_never_rejected", "metric": "renderer.opaque.meshlet_rejected_incompatible_frame", "equals": 0},
+        {"id": "meshlet_dispatches_nonzero", "metric": "renderer.opaque.meshlet_dispatches", "medianMin": 1},
+        {"id": "no_meshlet_payload_overflow", "metric": "renderer.visibility.meshlet_payload_overflow_count", "equals": 0},
+        {"id": "gtao_stays_disabled", "metric": "renderer.ao.active", "equals": 0},
+        {"id": "shadows_stay_disabled", "metric": "renderer.shadow.total_draws", "equals": 0},
+        {"id": "taa_stays_disabled", "metric": "renderer.aa.taa_resolve_passes", "equals": 0}
+      ]
+    }
+  ],
+  "requirements": {
+    "assets": ["modelsRoot:NiagaraBistro/bistrox.gltf"],
+    "backends": ["nvrhi"],
+    "allowVisibleWindow": true
+  }
+}

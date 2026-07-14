@@ -180,9 +180,7 @@
     },
     "shadow": {
       "enabled": true,
-      "qualityPreset": "Ultra",
-      "enableMeshletDepth": true,
-      "enableMeshletCascadeCulling": true
+      "qualityPreset": "Ultra"
     },
     "hdrPostProcess": {
       "bloomEnabled": false,

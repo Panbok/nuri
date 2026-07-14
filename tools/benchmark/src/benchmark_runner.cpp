@@ -1586,6 +1586,16 @@ void addRendererFrameMetrics(BenchmarkFrameMeasurements &measurements,
                opaque.depthPrepassDraws);
   addIfNonzero(measurements, "renderer.opaque.tessellated_draws",
                opaque.tessellatedDraws);
+  addIfNonzero(measurements, "renderer.opaque.meshlet_hybrid_active",
+               opaque.meshletHybridActive);
+  addIfNonzero(measurements, "renderer.opaque.meshlet_hybrid_classic_batches",
+               opaque.meshletHybridClassicBatches);
+  addIfNonzero(measurements, "renderer.opaque.meshlet_hybrid_classic_instances",
+               opaque.meshletHybridClassicInstances);
+  addIfNonzero(measurements, "renderer.opaque.meshlet_hybrid_meshlet_batches",
+               opaque.meshletHybridMeshletBatches);
+  addIfNonzero(measurements, "renderer.opaque.meshlet_hybrid_meshlet_instances",
+               opaque.meshletHybridMeshletInstances);
 
   const VisibilityFrameMetrics &visibility = metrics.visibility;
   addIfNonzero(measurements, "renderer.visibility.cpu_main_candidates",
@@ -1646,6 +1656,39 @@ void addRendererFrameMetrics(BenchmarkFrameMeasurements &measurements,
                visibility.meshletRejectedOcclusion);
   addIfNonzero(measurements, "renderer.visibility.meshlet_occlusion_available",
                visibility.meshletOcclusionAvailable);
+  addIfNonzero(measurements, "renderer.visibility.meshlet_occlusion_mode",
+               visibility.meshletOcclusionMode);
+  addIfNonzero(measurements,
+               "renderer.visibility.meshlet_occlusion_source_frame",
+               visibility.meshletOcclusionSourceFrame);
+  addIfNonzero(measurements, "renderer.visibility.meshlet_occlusion_source_age",
+               visibility.meshletOcclusionSourceAge);
+  addIfNonzero(measurements, "renderer.visibility.current_frame_hiz_active",
+               visibility.currentFrameHiZActive);
+  addIfNonzero(measurements,
+               "renderer.visibility.meshlet_pre_task_compaction_active",
+               visibility.meshletPreTaskCompactionActive);
+  addIfNonzero(measurements,
+               "renderer.visibility.meshlet_pre_task_candidates_input",
+               visibility.meshletPreTaskCandidatesInput);
+  addIfNonzero(measurements,
+               "renderer.visibility.meshlet_pre_task_candidates_output",
+               visibility.meshletPreTaskCandidatesOutput);
+  addIfNonzero(measurements,
+               "renderer.visibility.meshlet_pre_task_task_groups_input",
+               visibility.meshletPreTaskTaskGroupsInput);
+  addIfNonzero(measurements,
+               "renderer.visibility.meshlet_pre_task_task_groups_output",
+               visibility.meshletPreTaskTaskGroupsOutput);
+  addIfNonzero(measurements,
+               "renderer.visibility.meshlet_pre_task_task_groups_saved",
+               visibility.meshletPreTaskTaskGroupsSaved);
+  addIfNonzero(measurements,
+               "renderer.visibility.meshlet_pre_task_overflow_count",
+               visibility.meshletPreTaskOverflowCount);
+  addIfNonzero(measurements,
+               "renderer.visibility.meshlet_pre_task_mismatch_count",
+               visibility.meshletPreTaskMismatchCount);
   addIfNonzero(measurements,
                "renderer.visibility.meshlet_payload_overflow_count",
                visibility.meshletPayloadOverflowCount);
@@ -1669,23 +1712,6 @@ void addRendererFrameMetrics(BenchmarkFrameMeasurements &measurements,
                visibility.shadowCpuCandidates);
   addIfNonzero(measurements, "renderer.visibility.shadow_cpu_rejected",
                visibility.shadowCpuRejected);
-  addIfNonzero(measurements, "renderer.visibility.shadow_meshlet_candidates",
-               visibility.shadowMeshletCandidates);
-  addIfNonzero(measurements,
-               "renderer.visibility.shadow_meshlet_readback_available",
-               visibility.shadowMeshletReadbackAvailable);
-  addIfNonzero(measurements,
-               "renderer.visibility.shadow_meshlet_readback_source_frame",
-               visibility.shadowMeshletReadbackSourceFrame);
-  addIfNonzero(measurements,
-               "renderer.visibility.shadow_meshlet_readback_stale_frame_count",
-               visibility.shadowMeshletReadbackStaleFrameCount);
-  addIfNonzero(measurements,
-               "renderer.visibility.shadow_meshlet_readback_error_count",
-               visibility.shadowMeshletReadbackErrorCount);
-  addIfNonzero(measurements,
-               "renderer.visibility.shadow_meshlet_rejected_bounds",
-               visibility.shadowMeshletRejectedBounds);
   addIfNonzero(measurements, "renderer.visibility.occlusion_available",
                visibility.occlusionAvailable);
 
@@ -1698,8 +1724,24 @@ void addRendererFrameMetrics(BenchmarkFrameMeasurements &measurements,
                shadow.staticCasterEntries);
   addIfNonzero(measurements, "renderer.shadow.dynamic_caster_entries",
                shadow.dynamicCasterEntries);
+  addIfNonzero(measurements, "renderer.shadow.static_batch_templates",
+               shadow.staticBatchTemplateCount);
+  addIfNonzero(measurements, "renderer.shadow.batch_entries",
+               shadow.shadowBatchEntryCount);
+  addIfNonzero(measurements, "renderer.shadow.instance_remaps",
+               shadow.shadowInstanceRemapCount);
+  addIfNonzero(measurements, "renderer.shadow.total_index_count_estimate",
+               shadow.totalIndexCountEstimate);
+  addIfNonzero(measurements, "renderer.shadow.submitted_draw_items",
+               shadow.submittedDrawItemCount);
+  addIfNonzero(measurements, "renderer.shadow.indirect_commands",
+               shadow.indirectCommandCount);
+  addIfNonzero(measurements, "renderer.shadow.draw_packet_bytes",
+               shadow.drawPacketBytes);
   addIfNonzero(measurements, "renderer.shadow.filter_sample_budget",
                shadow.filterSampleBudget);
+  addIfNonzero(measurements, "renderer.shadow.frame_gpu_bytes",
+               shadow.frameGpuBytes);
   addIfNonzero(measurements, "renderer.shadow.sdsm_compute_passes",
                shadow.sdsmComputePassCount);
   addBytesAsMiB(measurements, "gpu.memory.shadow.cascade_texture_mb",

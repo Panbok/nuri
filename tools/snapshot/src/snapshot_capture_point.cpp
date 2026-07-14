@@ -71,6 +71,13 @@ constexpr std::array kCatalog{
         .coverageArea = "final GTAO visibility",
     },
     SnapshotCaptureCatalogEntry{
+        .name = "shadow_factor",
+        .kind = RenderCaptureValueKind::Scalar,
+        .defaultCompareProfile = "scalar",
+        .producer = "OpaqueRenderer shadow debug output",
+        .coverageArea = "applied directional shadow factor",
+    },
+    SnapshotCaptureCatalogEntry{
         .name = "shadow_cascade_0",
         .kind = RenderCaptureValueKind::ShadowDepth,
         .lifetime = RenderCaptureLifetimeClass::FeaturePersistentTexture,

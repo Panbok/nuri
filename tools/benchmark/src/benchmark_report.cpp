@@ -694,6 +694,8 @@ makeSettingsSignature(const RenderSettings &sourceSettings) {
                        settings.opaque.enableCpuFrustumCulling);
   appendSignatureField(out, "opaque.meshletMode",
                        enumValue(settings.opaque.meshletMode));
+  appendSignatureField(out, "opaque.hybridClassicMaxMeshlets",
+                       settings.opaque.hybridClassicMaxMeshlets);
   appendSignatureField(out, "opaque.meshletFrustum",
                        settings.opaque.enableMeshletFrustumCulling);
   appendSignatureField(out, "opaque.meshletCone",
@@ -718,10 +720,6 @@ makeSettingsSignature(const RenderSettings &sourceSettings) {
   appendSignatureField(out, "shadow.enabled", settings.shadow.enabled);
   appendSignatureField(out, "shadow.quality",
                        enumValue(settings.shadow.qualityPreset));
-  appendSignatureField(out, "shadow.meshletDepth",
-                       settings.shadow.enableMeshletDepth);
-  appendSignatureField(out, "shadow.meshletCascadeCulling",
-                       settings.shadow.enableMeshletCascadeCulling);
   appendSignatureField(out, "visibility.main",
                        enumValue(settings.visibility.mainViewMode));
   appendSignatureField(out, "visibility.shadow",
@@ -732,14 +730,14 @@ makeSettingsSignature(const RenderSettings &sourceSettings) {
                        settings.visibility.enableMeshletFrustumCulling);
   appendSignatureField(out, "visibility.meshletCone",
                        settings.visibility.enableMeshletConeCulling);
-  appendSignatureField(out, "visibility.shadowMeshlet",
-                       settings.visibility.enableShadowMeshletCulling);
   appendSignatureField(out, "visibility.gpuInstance",
                        settings.visibility.enableGpuInstanceCulling);
   appendSignatureField(out, "visibility.gpuIndirect",
                        settings.visibility.enableGpuIndirectDraw);
   appendSignatureField(out, "visibility.indirectMesh",
                        settings.visibility.enableIndirectMeshDispatch);
+  appendSignatureField(out, "visibility.preTaskCompaction",
+                       settings.visibility.enableMeshletPreTaskCompaction);
   appendSignatureField(out, "visibility.visibleOnUncertain",
                        settings.visibility.visibleOnUncertain);
   appendSignatureField(out, "hdr.bloom", settings.hdrPostProcess.bloomEnabled);
@@ -915,6 +913,8 @@ yyjson_mut_val *makeSettingsObject(yyjson_mut_doc *doc,
                           settings.opaque.enableCpuFrustumCulling);
   addString(doc, opaque, "meshletMode",
             meshletRenderModeName(settings.opaque.meshletMode));
+  yyjson_mut_obj_add_uint(doc, opaque, "hybridClassicMaxMeshlets",
+                          settings.opaque.hybridClassicMaxMeshlets);
   yyjson_mut_obj_add_bool(doc, opaque, "enableMeshletFrustumCulling",
                           settings.opaque.enableMeshletFrustumCulling);
   yyjson_mut_obj_add_bool(doc, opaque, "enableMeshletConeCulling",
@@ -950,10 +950,6 @@ yyjson_mut_val *makeSettingsObject(yyjson_mut_doc *doc,
   yyjson_mut_obj_add_bool(doc, shadow, "enabled", settings.shadow.enabled);
   addString(doc, shadow, "qualityPreset",
             shadowQualityPresetName(settings.shadow.qualityPreset));
-  yyjson_mut_obj_add_bool(doc, shadow, "enableMeshletDepth",
-                          settings.shadow.enableMeshletDepth);
-  yyjson_mut_obj_add_bool(doc, shadow, "enableMeshletCascadeCulling",
-                          settings.shadow.enableMeshletCascadeCulling);
   yyjson_mut_obj_add_val(doc, object, "shadow", shadow);
 
   yyjson_mut_val *visibility = yyjson_mut_obj(doc);
@@ -967,14 +963,14 @@ yyjson_mut_val *makeSettingsObject(yyjson_mut_doc *doc,
                           settings.visibility.enableMeshletFrustumCulling);
   yyjson_mut_obj_add_bool(doc, visibility, "enableMeshletConeCulling",
                           settings.visibility.enableMeshletConeCulling);
-  yyjson_mut_obj_add_bool(doc, visibility, "enableShadowMeshletCulling",
-                          settings.visibility.enableShadowMeshletCulling);
   yyjson_mut_obj_add_bool(doc, visibility, "enableGpuInstanceCulling",
                           settings.visibility.enableGpuInstanceCulling);
   yyjson_mut_obj_add_bool(doc, visibility, "enableGpuIndirectDraw",
                           settings.visibility.enableGpuIndirectDraw);
   yyjson_mut_obj_add_bool(doc, visibility, "enableIndirectMeshDispatch",
                           settings.visibility.enableIndirectMeshDispatch);
+  yyjson_mut_obj_add_bool(doc, visibility, "enableMeshletPreTaskCompaction",
+                          settings.visibility.enableMeshletPreTaskCompaction);
   yyjson_mut_obj_add_bool(doc, visibility, "visibleOnUncertain",
                           settings.visibility.visibleOnUncertain);
   yyjson_mut_obj_add_val(doc, object, "visibility", visibility);
@@ -1453,6 +1449,9 @@ readEnumValue(yyjson_val *object, const char *key, Enum defaultValue,
                       {{"Disabled", MeshletRenderMode::Disabled},
                        {"Opportunistic", MeshletRenderMode::Opportunistic},
                        {"Required", MeshletRenderMode::Required}});
+    settings.opaque.hybridClassicMaxMeshlets =
+        readU32(opaque, "hybridClassicMaxMeshlets",
+                settings.opaque.hybridClassicMaxMeshlets);
     settings.opaque.enableMeshletFrustumCulling =
         readBool(opaque, "enableMeshletFrustumCulling",
                  settings.opaque.enableMeshletFrustumCulling);
@@ -1520,11 +1519,6 @@ readEnumValue(yyjson_val *object, const char *key, Enum defaultValue,
                        {"Medium", ShadowQualityPreset::Medium},
                        {"High", ShadowQualityPreset::High},
                        {"Ultra", ShadowQualityPreset::Ultra}});
-    settings.shadow.enableMeshletDepth = readBool(
-        shadow, "enableMeshletDepth", settings.shadow.enableMeshletDepth);
-    settings.shadow.enableMeshletCascadeCulling =
-        readBool(shadow, "enableMeshletCascadeCulling",
-                 settings.shadow.enableMeshletCascadeCulling);
   }
 
   yyjson_val *visibility = yyjson_obj_get(object, "visibility");
@@ -1560,9 +1554,6 @@ readEnumValue(yyjson_val *object, const char *key, Enum defaultValue,
     settings.visibility.enableMeshletConeCulling =
         readBool(visibility, "enableMeshletConeCulling",
                  settings.visibility.enableMeshletConeCulling);
-    settings.visibility.enableShadowMeshletCulling =
-        readBool(visibility, "enableShadowMeshletCulling",
-                 settings.visibility.enableShadowMeshletCulling);
     settings.visibility.enableGpuInstanceCulling =
         readBool(visibility, "enableGpuInstanceCulling",
                  settings.visibility.enableGpuInstanceCulling);
@@ -1572,6 +1563,9 @@ readEnumValue(yyjson_val *object, const char *key, Enum defaultValue,
     settings.visibility.enableIndirectMeshDispatch =
         readBool(visibility, "enableIndirectMeshDispatch",
                  settings.visibility.enableIndirectMeshDispatch);
+    settings.visibility.enableMeshletPreTaskCompaction =
+        readBool(visibility, "enableMeshletPreTaskCompaction",
+                 settings.visibility.enableMeshletPreTaskCompaction);
     settings.visibility.visibleOnUncertain =
         readBool(visibility, "visibleOnUncertain",
                  settings.visibility.visibleOnUncertain);

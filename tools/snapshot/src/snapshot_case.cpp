@@ -34,6 +34,7 @@ void sanitizeSnapshotRenderSettings(RenderSettings &settings) {
       sanitizeAmbientOcclusionMode(settings.ambientOcclusion.mode);
   settings.ambientOcclusion.preset =
       sanitizeAmbientOcclusionPreset(settings.ambientOcclusion.preset);
+  sanitizeShadowSettings(settings.shadow);
   settings.textureFiltering.mode =
       sanitizeTextureFilterMode(settings.textureFiltering.mode);
   settings.textureFiltering.anisotropy =

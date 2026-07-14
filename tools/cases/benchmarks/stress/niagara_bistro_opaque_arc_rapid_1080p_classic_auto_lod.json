@@ -1,0 +1,103 @@
+{
+  "schemaVersion": 1,
+  "id": "stress.niagara_bistro.opaque_arc_rapid_1080p.classic_auto_lod",
+  "suite": "stress",
+  "comparisonGroup": "stress.niagara_bistro.opaque_arc_rapid_1080p",
+  "variant": "classic_auto_lod",
+  "description": "Classic indexed automatic-LOD path with depth pre-pass",
+  "scene": {
+    "kind": "prefab",
+    "pathBase": "modelsRoot",
+    "path": "NiagaraBistro/bistrox.gltf",
+    "importOptions": {
+      "mesh": {
+        "generateMeshlets": true,
+        "meshletMaxVertices": 64,
+        "meshletMaxPrimitives": 124,
+        "meshletConeWeight": 0.0
+      }
+    }
+  },
+  "backend": "nvrhi",
+  "resolution": [1920, 1080],
+  "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 96,
+  "measurementFrames": 96,
+  "cooldownFrames": 2,
+  "maxDrainFrames": 180,
+  "drainTimeoutMs": 8000,
+  "samples": 3,
+  "authoritative": false,
+  "presentMode": "immediate",
+  "renderGraph": {"workerCount": 1, "parallelCompile": false, "parallelRecording": false},
+  "camera": {
+    "position": [-26.1, 6.0, 5.4],
+    "target": [2.8, 4.1, 26.3],
+    "verticalFovDegrees": 60.0,
+    "nearPlane": 0.05,
+    "farPlane": 500.0
+  },
+  "timeline": {
+    "cameraPaths": [{
+      "id": "bistro_arc_rapid_crossings",
+      "startFrame": 0,
+      "endFrame": 191,
+      "interpolation": "linear",
+      "keyframes": [
+        {"frame": 0, "position": [-26.1, 6.0, 5.4], "target": [2.8, 4.1, 26.3]},
+        {"frame": 12, "position": [-26.1, 6.0, 5.4], "target": [2.8, 4.1, 26.3]},
+        {"frame": 24, "position": [-3.0, 2.2, 24.8], "target": [16.34, 2.2, 29.90]},
+        {"frame": 32, "position": [2.8, 2.2, 26.3], "target": [22.14, 2.2, 31.40]},
+        {"frame": 40, "position": [8.6, 2.2, 27.8], "target": [27.94, 2.2, 32.90]},
+        {"frame": 44, "position": [15.3, 4.6, 29.4], "target": [10.2, 4.6, 48.74]},
+        {"frame": 48, "position": [22.0, 7.0, 31.0], "target": [2.8, 4.1, 26.3]},
+        {"frame": 60, "position": [22.0, 7.0, 31.0], "target": [2.8, 4.1, 26.3]},
+        {"frame": 72, "position": [8.6, 2.2, 27.8], "target": [-10.74, 2.2, 22.70]},
+        {"frame": 80, "position": [2.8, 2.2, 26.3], "target": [-16.54, 2.2, 21.20]},
+        {"frame": 88, "position": [-3.0, 2.2, 24.8], "target": [-22.34, 2.2, 19.70]},
+        {"frame": 92, "position": [-14.55, 4.1, 15.1], "target": [-19.65, 4.1, 34.44]},
+        {"frame": 96, "position": [-26.1, 6.0, 5.4], "target": [2.8, 4.1, 26.3]},
+        {"frame": 108, "position": [-26.1, 6.0, 5.4], "target": [2.8, 4.1, 26.3]},
+        {"frame": 120, "position": [-3.0, 2.2, 24.8], "target": [16.34, 2.2, 29.90]},
+        {"frame": 128, "position": [2.8, 2.2, 26.3], "target": [22.14, 2.2, 31.40]},
+        {"frame": 136, "position": [8.6, 2.2, 27.8], "target": [27.94, 2.2, 32.90]},
+        {"frame": 140, "position": [15.3, 4.6, 29.4], "target": [10.2, 4.6, 48.74]},
+        {"frame": 144, "position": [22.0, 7.0, 31.0], "target": [2.8, 4.1, 26.3]},
+        {"frame": 156, "position": [22.0, 7.0, 31.0], "target": [2.8, 4.1, 26.3]},
+        {"frame": 168, "position": [8.6, 2.2, 27.8], "target": [-10.74, 2.2, 22.70]},
+        {"frame": 176, "position": [2.8, 2.2, 26.3], "target": [-16.54, 2.2, 21.20]},
+        {"frame": 184, "position": [-3.0, 2.2, 24.8], "target": [-22.34, 2.2, 19.70]},
+        {"frame": 188, "position": [-16.2, 4.371429, 13.714286], "target": [-21.3, 4.371429, 33.054286]},
+        {"frame": 191, "position": [-26.1, 6.0, 5.4], "target": [2.8, 4.1, 26.3]}
+      ]
+    }]
+  },
+  "settings": {
+    "opaque": {"enabled":true,"meshletMode":"Disabled","enableMeshletFrustumCulling":false,"enableMeshletConeCulling":false,"enableDepthPrepass":true,"enableInstanceCompute":false,"enableInstanceAnimation":false,"enableMeshLod":true,"enableTessellation":false,"forcedMeshLod":-1},
+    "antiAliasing": {"mode": "None"},
+    "ambientOcclusion": {"mode": "Disabled"},
+    "shadow": {"enabled": false},
+    "hdrPostProcess": {"bloomEnabled": false, "adaptationEnabled": false},
+    "transmission": {"enabled": false},
+    "transparent": {"enabled": false},
+    "textureFiltering": {"mode": "Anisotropic", "anisotropy": 8}
+  },
+  "requirements": {
+    "assets": ["modelsRoot:NiagaraBistro/bistrox.gltf"],
+    "backends": ["nvrhi"],
+    "allowVisibleWindow": true
+  },
+  "thresholds": {
+    "failPercent": 12.0,
+    "failAbsoluteMs": 0.35,
+    "warnPercent": 6.0,
+    "warnAbsoluteMs": 0.18
+  },
+  "requiredMetrics": [
+    "cpu.render_submit_ms",
+    "gpu.frame_ms",
+    "gpu.scopes.opaque_ms",
+    "gpu.scopes_sum_ms"
+  ]
+}
+

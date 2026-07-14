@@ -1,0 +1,118 @@
+{
+  "schemaVersion": 1,
+  "id": "stress.niagara_bistro.opaque_rapid_wide_720p.meshlet_culled",
+  "suite": "stress",
+  "comparisonGroup": "stress.niagara_bistro.opaque_rapid_wide_720p",
+  "variant": "meshlet_culled",
+  "description": "Opaque-only Niagara Bistro wide rapid-camera stress with current-frame Hi-Z meshlet culling",
+  "scene": {
+    "kind": "prefab",
+    "pathBase": "modelsRoot",
+    "path": "NiagaraBistro/bistrox.gltf",
+    "importOptions": {
+      "mesh": {
+        "generateMeshlets": true,
+        "meshletMaxVertices": 64,
+        "meshletMaxPrimitives": 124,
+        "meshletConeWeight": 0.0
+      }
+    }
+  },
+  "backend": "nvrhi",
+  "resolution": [1280, 720],
+  "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 30,
+  "measurementFrames": 180,
+  "cooldownFrames": 2,
+  "maxDrainFrames": 180,
+  "drainTimeoutMs": 8000,
+  "samples": 5,
+  "authoritative": false,
+  "presentMode": "immediate",
+  "renderGraph": {
+    "workerCount": 1,
+    "parallelCompile": false,
+    "parallelRecording": false
+  },
+  "camera": {
+    "position": [-25.175787, 5.760150, 8.267586],
+    "target": [-34.294270, 2.883850, 5.338666],
+    "verticalFovDegrees": 60.0,
+    "nearPlane": 0.05,
+    "farPlane": 500.0
+  },
+  "timeline": {
+    "cameraPaths": [
+      {
+        "id": "bistro_wide_rapid_turns",
+        "startFrame": 0,
+        "endFrame": 191,
+        "interpolation": "linear",
+        "keyframes": [
+          {"frame": 0, "position": [-25.175787, 5.760150, 8.267586], "target": [-34.294270, 2.883850, 5.338666]},
+          {"frame": 24, "position": [-12.0, 6.0, 18.0], "target": [-34.0, 2.5, -2.0]},
+          {"frame": 36, "position": [-26.0, 6.0, 4.0], "target": [-5.81, 6.0, -18.19]},
+          {"frame": 48, "position": [-40.0, 6.0, -10.0], "target": [-20.0, 3.0, 12.0]},
+          {"frame": 72, "position": [-15.0, 8.0, -8.0], "target": [-38.0, 2.0, 16.0]},
+          {"frame": 84, "position": [-28.5, 6.5, 4.5], "target": [-54.49, 6.5, -20.41]},
+          {"frame": 96, "position": [-42.0, 5.0, 17.0], "target": [-12.0, 4.0, -9.0]},
+          {"frame": 120, "position": [-20.0, 9.0, 15.0], "target": [-45.0, 1.0, -12.0]},
+          {"frame": 132, "position": [-27.5, 7.25, 4.5], "target": [-1.08, 7.25, -19.94]},
+          {"frame": 144, "position": [-35.0, 5.5, -6.0], "target": [-10.0, 4.0, 18.0]},
+          {"frame": 156, "position": [-24.5, 6.25, 3.0], "target": [-48.76, 6.25, 28.23]},
+          {"frame": 168, "position": [-14.0, 7.0, 12.0], "target": [-43.0, 2.5, -8.0]},
+          {"frame": 191, "position": [-25.175787, 5.760150, 8.267586], "target": [-34.294270, 2.883850, 5.338666]}
+        ]
+      }
+    ]
+  },
+  "settings": {
+    "opaque": {
+      "enabled": true,
+      "meshletMode": "Required",
+      "enableMeshletFrustumCulling": true,
+      "enableMeshletConeCulling": true,
+      "enableDepthPrepass": true,
+      "enableDepthPyramid": true,
+      "enableInstanceCompute": false,
+      "enableInstanceAnimation": false,
+      "enableMeshLod": false,
+      "enableTessellation": false,
+      "forcedMeshLod": 0
+    },
+    "visibility": {
+      "mainViewMode": "GpuDriven",
+      "occlusionMode": "CurrentFrameHiZExperimental",
+      "enableMeshletFrustumCulling": true,
+      "enableMeshletConeCulling": true,
+      "enableIndirectMeshDispatch": true,
+      "visibleOnUncertain": true
+    },
+    "antiAliasing": {"mode": "None"},
+    "ambientOcclusion": {"mode": "Disabled"},
+    "shadow": {"enabled": false},
+    "hdrPostProcess": {"bloomEnabled": false, "adaptationEnabled": false},
+    "transmission": {"enabled": false},
+    "transparent": {"enabled": false},
+    "textureFiltering": {"mode": "Anisotropic", "anisotropy": 8}
+  },
+  "requirements": {
+    "assets": ["modelsRoot:NiagaraBistro/bistrox.gltf"],
+    "backends": ["nvrhi"],
+    "allowVisibleWindow": true
+  },
+  "thresholds": {
+    "failPercent": 12.0,
+    "failAbsoluteMs": 0.35,
+    "warnPercent": 6.0,
+    "warnAbsoluteMs": 0.18
+  },
+  "requiredMetrics": [
+    "cpu.render_submit_ms",
+    "gpu.scopes.opaque_ms",
+    "gpu.scopes_sum_ms",
+    "renderer.visibility.current_frame_hiz_active",
+    "renderer.visibility.meshlet_occlusion_source_age",
+    "renderer.visibility.meshlet_rejected_occlusion"
+  ]
+}

@@ -301,6 +301,7 @@ parseOpaqueSettings(yyjson_val *object, RenderSettings &settings,
       std::string_view("meshletMode"),
       std::string_view("enableMeshletFrustumCulling"),
       std::string_view("enableMeshletConeCulling"),
+      std::string_view("hybridClassicMaxMeshlets"),
       std::string_view("enableInstanceAnimation"),
       std::string_view("enableTessellation"),
       std::string_view("forcedMeshLod"),
@@ -363,6 +364,14 @@ parseOpaqueSettings(yyjson_val *object, RenderSettings &settings,
   if (enumResult.hasError()) {
     return enumResult;
   }
+  auto hybridClassicMaxMeshlets =
+      readU32(object, "hybridClassicMaxMeshlets", path,
+              settings.opaque.hybridClassicMaxMeshlets);
+  if (hybridClassicMaxMeshlets.hasError()) {
+    return Result<bool, std::string>::makeError(
+        hybridClassicMaxMeshlets.error());
+  }
+  settings.opaque.hybridClassicMaxMeshlets = hybridClassicMaxMeshlets.value();
   b = readBool(object, "enableMeshletFrustumCulling", path,
                settings.opaque.enableMeshletFrustumCulling);
   if (b.hasError()) {
@@ -480,9 +489,16 @@ parseAmbientOcclusionSettings(yyjson_val *object, RenderSettings &settings,
 parseShadowSettings(yyjson_val *object, RenderSettings &settings,
                     std::string_view path) {
   static constexpr std::array keys{
-      std::string_view("enabled"), std::string_view("qualityPreset"),
-      std::string_view("enableMeshletDepth"),
-      std::string_view("enableMeshletCascadeCulling")};
+      std::string_view("enabled"),
+      std::string_view("qualityPreset"),
+      std::string_view("depthFormat"),
+      std::string_view("maxDistance"),
+      std::string_view("maxDistanceFadeFraction"),
+      std::string_view("splitLambda"),
+      std::string_view("cascadeBlendFraction"),
+      std::string_view("pcfSampleCount"),
+      std::string_view("sdsmTemporalBlend"),
+      std::string_view("enableCascadeCasterCulling")};
   auto keysResult = rejectUnknownKeys(object, keys, path);
   if (keysResult.hasError()) {
     return keysResult;
@@ -505,18 +521,53 @@ parseShadowSettings(yyjson_val *object, RenderSettings &settings,
   if (optionalObject(object, "qualityPreset") != nullptr) {
     applyShadowQualityPreset(settings.shadow, preset);
   }
-  enabled = readBool(object, "enableMeshletDepth", path,
-                     settings.shadow.enableMeshletDepth);
+  auto enumResult = readEnumField(
+      object, "depthFormat", path, settings.shadow.depthFormat,
+      {{"D16_UNORM", Format::D16_UNORM}, {"D32_FLOAT", Format::D32_FLOAT}});
+  if (enumResult.hasError()) {
+    return enumResult;
+  }
+  auto number =
+      readDouble(object, "maxDistance", path, settings.shadow.maxDistance);
+  if (number.hasError()) {
+    return Result<bool, std::string>::makeError(number.error());
+  }
+  settings.shadow.maxDistance = static_cast<float>(number.value());
+  number = readDouble(object, "maxDistanceFadeFraction", path,
+                      settings.shadow.maxDistanceFadeFraction);
+  if (number.hasError()) {
+    return Result<bool, std::string>::makeError(number.error());
+  }
+  settings.shadow.maxDistanceFadeFraction = static_cast<float>(number.value());
+  number = readDouble(object, "splitLambda", path, settings.shadow.splitLambda);
+  if (number.hasError()) {
+    return Result<bool, std::string>::makeError(number.error());
+  }
+  settings.shadow.splitLambda = static_cast<float>(number.value());
+  number = readDouble(object, "cascadeBlendFraction", path,
+                      settings.shadow.cascadeBlendFraction);
+  if (number.hasError()) {
+    return Result<bool, std::string>::makeError(number.error());
+  }
+  settings.shadow.cascadeBlendFraction = static_cast<float>(number.value());
+  auto count =
+      readU32(object, "pcfSampleCount", path, settings.shadow.pcfSampleCount);
+  if (count.hasError()) {
+    return Result<bool, std::string>::makeError(count.error());
+  }
+  settings.shadow.pcfSampleCount = count.value();
+  number = readDouble(object, "sdsmTemporalBlend", path,
+                      settings.shadow.sdsmTemporalBlend);
+  if (number.hasError()) {
+    return Result<bool, std::string>::makeError(number.error());
+  }
+  settings.shadow.sdsmTemporalBlend = static_cast<float>(number.value());
+  enabled = readBool(object, "enableCascadeCasterCulling", path,
+                     settings.shadow.debug.enableCascadeCasterCulling);
   if (enabled.hasError()) {
     return Result<bool, std::string>::makeError(enabled.error());
   }
-  settings.shadow.enableMeshletDepth = enabled.value();
-  enabled = readBool(object, "enableMeshletCascadeCulling", path,
-                     settings.shadow.enableMeshletCascadeCulling);
-  if (enabled.hasError()) {
-    return Result<bool, std::string>::makeError(enabled.error());
-  }
-  settings.shadow.enableMeshletCascadeCulling = enabled.value();
+  settings.shadow.debug.enableCascadeCasterCulling = enabled.value();
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -529,10 +580,10 @@ parseVisibilitySettings(yyjson_val *object, RenderSettings &settings,
       std::string_view("occlusionMode"),
       std::string_view("enableMeshletFrustumCulling"),
       std::string_view("enableMeshletConeCulling"),
-      std::string_view("enableShadowMeshletCulling"),
       std::string_view("enableGpuInstanceCulling"),
       std::string_view("enableGpuIndirectDraw"),
       std::string_view("enableIndirectMeshDispatch"),
+      std::string_view("enableMeshletPreTaskCompaction"),
       std::string_view("visibleOnUncertain")};
   auto keysResult = rejectUnknownKeys(object, keys, path);
   if (keysResult.hasError()) {
@@ -577,12 +628,6 @@ parseVisibilitySettings(yyjson_val *object, RenderSettings &settings,
     return Result<bool, std::string>::makeError(b.error());
   }
   settings.visibility.enableMeshletConeCulling = b.value();
-  b = readBool(object, "enableShadowMeshletCulling", path,
-               settings.visibility.enableShadowMeshletCulling);
-  if (b.hasError()) {
-    return Result<bool, std::string>::makeError(b.error());
-  }
-  settings.visibility.enableShadowMeshletCulling = b.value();
   b = readBool(object, "enableGpuInstanceCulling", path,
                settings.visibility.enableGpuInstanceCulling);
   if (b.hasError()) {
@@ -601,6 +646,12 @@ parseVisibilitySettings(yyjson_val *object, RenderSettings &settings,
     return Result<bool, std::string>::makeError(b.error());
   }
   settings.visibility.enableIndirectMeshDispatch = b.value();
+  b = readBool(object, "enableMeshletPreTaskCompaction", path,
+               settings.visibility.enableMeshletPreTaskCompaction);
+  if (b.hasError()) {
+    return Result<bool, std::string>::makeError(b.error());
+  }
+  settings.visibility.enableMeshletPreTaskCompaction = b.value();
   b = readBool(object, "visibleOnUncertain", path,
                settings.visibility.visibleOnUncertain);
   if (b.hasError()) {

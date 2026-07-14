@@ -79,8 +79,9 @@ makeSelection(const SnapshotImage &base, const SnapshotImage *mask,
       std::move(selected));
 }
 
-[[nodiscard]] uint32_t largestEightConnectedComponent(
-    std::span<const uint8_t> pixels, uint32_t width, uint32_t height) {
+[[nodiscard]] uint32_t
+largestEightConnectedComponent(std::span<const uint8_t> pixels, uint32_t width,
+                               uint32_t height) {
   std::vector<uint8_t> visited(pixels.size(), 0u);
   std::vector<size_t> queue;
   uint32_t largest = 0u;
@@ -150,10 +151,10 @@ bilinearLuma(const SnapshotImage &image, double uvX, double uvY,
       return std::nullopt;
     }
   }
-  const double top = std::lerp(luma(image, pixels[0]),
-                               luma(image, pixels[1]), tx);
-  const double bottom = std::lerp(luma(image, pixels[2]),
-                                  luma(image, pixels[3]), tx);
+  const double top =
+      std::lerp(luma(image, pixels[0]), luma(image, pixels[1]), tx);
+  const double bottom =
+      std::lerp(luma(image, pixels[2]), luma(image, pixels[3]), tx);
   return std::lerp(top, bottom, ty);
 }
 
@@ -173,13 +174,10 @@ struct EdgeMetrics {
 };
 
 [[nodiscard]] std::optional<double>
-crossingPosition(std::span<const double> profile, double target,
-                 bool forward) {
+crossingPosition(std::span<const double> profile, double target, bool forward) {
   for (size_t step = 1u; step < profile.size(); ++step) {
-    const size_t previousIndex =
-        forward ? step - 1u : profile.size() - step;
-    const size_t currentIndex =
-        forward ? step : profile.size() - step - 1u;
+    const size_t previousIndex = forward ? step - 1u : profile.size() - step;
+    const size_t currentIndex = forward ? step : profile.size() - step - 1u;
     const double previous = profile[previousIndex];
     const double current = profile[currentIndex];
     if (previous <= target && current >= target && current != previous) {
@@ -191,9 +189,10 @@ crossingPosition(std::span<const double> profile, double target,
   return std::nullopt;
 }
 
-[[nodiscard]] EdgeMetrics evaluateEdgeAxis(
-    const SnapshotImage &output, const SnapshotImage &reference,
-    std::span<const uint8_t> selected, double lscale, bool horizontal) {
+[[nodiscard]] EdgeMetrics evaluateEdgeAxis(const SnapshotImage &output,
+                                           const SnapshotImage &reference,
+                                           std::span<const uint8_t> selected,
+                                           double lscale, bool horizontal) {
   EdgeMetrics metrics{.axis = horizontal ? "horizontal" : "vertical"};
   const uint32_t lineCount = horizontal ? output.height : output.width;
   const uint32_t profileLength = horizontal ? output.width : output.height;
@@ -267,8 +266,8 @@ crossingPosition(std::span<const double> profile, double target,
   return metrics;
 }
 
-[[nodiscard]] bool validConfiguration(
-    const AutotestQualityOracle &oracle) noexcept {
+[[nodiscard]] bool
+validConfiguration(const AutotestQualityOracle &oracle) noexcept {
   const AutotestQualityOracleBudgets &budgets = oracle.budgets;
   return oracle.schemaVersion == 1u && std::isfinite(oracle.lscale) &&
          oracle.lscale > 0.0 && finiteNonNegative(budgets.normalizedMaeMax) &&
@@ -359,8 +358,9 @@ evaluateAutotestQualityOracle(const AutotestQualityOracle &oracle,
     }
     ++report.finitePixelCount;
     for (uint32_t channel = 0u; channel < 3u; ++channel) {
-      const double error = static_cast<double>(output.values[outputBase + channel]) -
-                           reference.values[referenceBase + channel];
+      const double error =
+          static_cast<double>(output.values[outputBase + channel]) -
+          reference.values[referenceBase + channel];
       absoluteErrorSum += std::abs(error);
       squaredErrorSum += error * error;
       ++finiteComponentCount;
@@ -383,9 +383,9 @@ evaluateAutotestQualityOracle(const AutotestQualityOracle &oracle,
         "quality oracle selected no pixels");
   }
   if (finiteComponentCount > 0u) {
-    report.normalizedHdrMae =
-        absoluteErrorSum / static_cast<double>(finiteComponentCount) /
-        oracle.lscale;
+    report.normalizedHdrMae = absoluteErrorSum /
+                              static_cast<double>(finiteComponentCount) /
+                              oracle.lscale;
     report.normalizedHdrRmse =
         std::sqrt(squaredErrorSum / static_cast<double>(finiteComponentCount)) /
         oracle.lscale;
@@ -398,13 +398,11 @@ evaluateAutotestQualityOracle(const AutotestQualityOracle &oracle,
         std::max(0.0, outputLumaSquaredSum / count - outputMean * outputMean);
     const double referenceVariance = std::max(
         0.0, referenceLumaSquaredSum / count - referenceMean * referenceMean);
-    const double covariance =
-        lumaCrossSum / count - outputMean * referenceMean;
+    const double covariance = lumaCrossSum / count - outputMean * referenceMean;
     const double c1 = std::pow(0.01 * oracle.lscale, 2.0);
     const double c2 = std::pow(0.03 * oracle.lscale, 2.0);
     report.lumaSsim =
-        ((2.0 * outputMean * referenceMean + c1) *
-         (2.0 * covariance + c2)) /
+        ((2.0 * outputMean * referenceMean + c1) * (2.0 * covariance + c2)) /
         ((outputMean * outputMean + referenceMean * referenceMean + c1) *
          (outputVariance + referenceVariance + c2));
     report.relativeLumaEnergyDrift =
@@ -414,8 +412,8 @@ evaluateAutotestQualityOracle(const AutotestQualityOracle &oracle,
   report.darkCollapsePercent =
       100.0 * static_cast<double>(report.darkCollapsePixelCount) /
       static_cast<double>(report.selectedPixelCount);
-  report.darkCollapseMaxComponentPixels = largestEightConnectedComponent(
-      darkCollapse, output.width, output.height);
+  report.darkCollapseMaxComponentPixels =
+      largestEightConnectedComponent(darkCollapse, output.width, output.height);
 
   const EdgeMetrics horizontal =
       evaluateEdgeAxis(output, reference, selected, oracle.lscale, true);
@@ -491,9 +489,9 @@ evaluateAutotestQualityOracle(const AutotestQualityOracle &oracle,
           "quality oracle temporal mask has no valid warped samples");
     }
     report.temporalAvailable = true;
-    report.temporalError =
-        temporalErrorSum / static_cast<double>(report.temporalSampleCount) /
-        oracle.lscale;
+    report.temporalError = temporalErrorSum /
+                           static_cast<double>(report.temporalSampleCount) /
+                           oracle.lscale;
 
     auto revealSelection =
         makeSelection(output, inputs.revealMask, "quality oracle reveal");
@@ -527,8 +525,7 @@ evaluateAutotestQualityOracle(const AutotestQualityOracle &oracle,
     }
     report.revealAvailable = true;
     report.ghostEnergy =
-        ghostSum / static_cast<double>(report.revealPixelCount) /
-        oracle.lscale;
+        ghostSum / static_cast<double>(report.revealPixelCount) / oracle.lscale;
     report.recoveryRmse =
         std::sqrt(recoverySquaredSum /
                   static_cast<double>(recoveryComponentCount)) /
@@ -555,8 +552,7 @@ evaluateAutotestQualityOracle(const AutotestQualityOracle &oracle,
       budgets.darkCollapseComponentMaxPixels) {
     report.failedThresholds.emplace_back("dark_collapse_component_pixels");
   }
-  if (report.relativeLumaEnergyDrift >
-      budgets.relativeLumaEnergyDriftMax) {
+  if (report.relativeLumaEnergyDrift > budgets.relativeLumaEnergyDriftMax) {
     report.failedThresholds.emplace_back("relative_luma_energy_drift");
   }
   if (report.edgeAvailable) {
