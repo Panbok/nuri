@@ -305,6 +305,8 @@ parseSettings(yyjson_val *object, RenderSettings &settings) {
         std::string_view("enableIndirectDraw"),
         std::string_view("enableInstancedDraw"),
         std::string_view("enableMeshLod"),
+        std::string_view("meshLodTargetPixelError"),
+        std::string_view("meshLodHysteresisRatio"),
         std::string_view("enableCpuFrustumCulling"),
         std::string_view("enableTessellation"),
         std::string_view("forcedMeshLod"),
@@ -364,6 +366,21 @@ parseSettings(yyjson_val *object, RenderSettings &settings) {
       return Result<bool, std::string>::makeError(boolean.error());
     }
     settings.opaque.enableMeshLod = boolean.value();
+    auto lodNumber =
+        readDouble(opaque, "meshLodTargetPixelError", "settings.opaque",
+                   settings.opaque.meshLodTargetPixelError);
+    if (lodNumber.hasError()) {
+      return Result<bool, std::string>::makeError(lodNumber.error());
+    }
+    settings.opaque.meshLodTargetPixelError =
+        static_cast<float>(lodNumber.value());
+    lodNumber = readDouble(opaque, "meshLodHysteresisRatio", "settings.opaque",
+                           settings.opaque.meshLodHysteresisRatio);
+    if (lodNumber.hasError()) {
+      return Result<bool, std::string>::makeError(lodNumber.error());
+    }
+    settings.opaque.meshLodHysteresisRatio =
+        static_cast<float>(lodNumber.value());
     boolean = readBool(opaque, "enableCpuFrustumCulling", "settings.opaque",
                        settings.opaque.enableCpuFrustumCulling);
     if (boolean.hasError()) {

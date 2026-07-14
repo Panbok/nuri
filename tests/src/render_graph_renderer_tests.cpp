@@ -27,6 +27,7 @@
 #include "nuri/gfx/pipeline/render_feature_pass.h"
 #include "nuri/gfx/pipeline/render_pipeline.h"
 #include "nuri/gfx/renderer.h"
+#include "nuri/gfx/renderers/detail/opaque_lod_selection.h"
 #include "nuri/gfx/renderers/detail/opaque_meshlet_routing.h"
 #include "nuri/gfx/renderers/detail/shadow_math.h"
 #include "nuri/gfx/visibility/visibility.h"
@@ -602,49 +603,78 @@ private:
 TEST(OpaqueMeshletRoutingTest, OpportunisticHybridUsesResolvedLodBoundary) {
   using detail::shouldUseMeshletsForOpaqueBatch;
 
-  EXPECT_FALSE(shouldUseMeshletsForOpaqueBatch(MeshletRenderMode::Opportunistic,
-                                               true, true, 8u, 8u));
-  EXPECT_TRUE(shouldUseMeshletsForOpaqueBatch(MeshletRenderMode::Opportunistic,
-                                              true, true, 9u, 8u));
-  EXPECT_TRUE(shouldUseMeshletsForOpaqueBatch(MeshletRenderMode::Opportunistic,
-                                              true, true, 1u, 0u));
+  EXPECT_FALSE(shouldUseMeshletsForOpaqueBatch(
+      MeshletRenderMode::Opportunistic, true, false, false, true, 8u, 8u));
+  EXPECT_TRUE(shouldUseMeshletsForOpaqueBatch(
+      MeshletRenderMode::Opportunistic, true, false, false, true, 9u, 8u));
+  EXPECT_TRUE(shouldUseMeshletsForOpaqueBatch(
+      MeshletRenderMode::Opportunistic, true, false, false, true, 1u, 0u));
 }
 
 TEST(OpaqueMeshletRoutingTest, RequiredModePreservesAllMeshletSemantics) {
   using detail::shouldUseMeshletsForOpaqueBatch;
 
   EXPECT_TRUE(shouldUseMeshletsForOpaqueBatch(MeshletRenderMode::Required, true,
-                                              true, 1u, 64u));
-  EXPECT_TRUE(shouldUseMeshletsForOpaqueBatch(MeshletRenderMode::Required,
-                                              false, true, 1u, 64u));
-  EXPECT_FALSE(shouldUseMeshletsForOpaqueBatch(MeshletRenderMode::Required,
-                                               true, false, 1u, 64u));
+                                              true, true, true, 1u, 64u));
+  EXPECT_TRUE(shouldUseMeshletsForOpaqueBatch(
+      MeshletRenderMode::Required, false, true, true, true, 1u, 64u));
+  EXPECT_FALSE(shouldUseMeshletsForOpaqueBatch(
+      MeshletRenderMode::Required, true, false, false, false, 1u, 64u));
 }
 
 TEST(OpaqueMeshletRoutingTest, IneligibleOpportunisticFramesStayAllMeshlet) {
   using detail::shouldUseMeshletsForOpaqueBatch;
 
-  EXPECT_TRUE(shouldUseMeshletsForOpaqueBatch(MeshletRenderMode::Opportunistic,
-                                              false, true, 1u, 64u));
-  EXPECT_FALSE(shouldUseMeshletsForOpaqueBatch(MeshletRenderMode::Disabled,
-                                               true, true, 128u, 64u));
-  EXPECT_FALSE(shouldUseMeshletsForOpaqueBatch(MeshletRenderMode::Opportunistic,
-                                               true, true, 0u, 64u));
+  EXPECT_TRUE(shouldUseMeshletsForOpaqueBatch(
+      MeshletRenderMode::Opportunistic, false, true, true, true, 1u, 64u));
+  EXPECT_FALSE(shouldUseMeshletsForOpaqueBatch(
+      MeshletRenderMode::Disabled, true, false, false, true, 128u, 64u));
+  EXPECT_FALSE(shouldUseMeshletsForOpaqueBatch(
+      MeshletRenderMode::Opportunistic, true, false, false, true, 0u, 64u));
 }
 
-TEST(OpaqueMeshletRoutingTest, StaticMeshletsResolveAutomaticLodPerBatch) {
-  using detail::shouldUseGpuMeshletLod;
+TEST(OpaqueMeshletRoutingTest,
+     OpportunisticHybridRoutesCoverageSensitiveBatchesIndexed) {
+  using detail::shouldUseMeshletsForOpaqueBatch;
 
-  EXPECT_FALSE(shouldUseGpuMeshletLod(true, true, -1, false));
-  EXPECT_TRUE(shouldUseGpuMeshletLod(true, true, -1, true));
+  EXPECT_FALSE(shouldUseMeshletsForOpaqueBatch(
+      MeshletRenderMode::Opportunistic, true, true, false, true, 128u, 64u));
+  EXPECT_FALSE(shouldUseMeshletsForOpaqueBatch(
+      MeshletRenderMode::Opportunistic, true, false, true, true, 128u, 64u));
 }
 
-TEST(OpaqueMeshletRoutingTest, FixedOrDisabledLodNeverUsesGpuSelection) {
-  using detail::shouldUseGpuMeshletLod;
+TEST(OpaqueLodSelectionTest, ChoosesCoarsestLodInsidePixelBudget) {
+  const std::array<float, 3> worldErrors{0.0f, 0.5f, 1.5f};
+  const detail::OpaqueLodProjection projection{.pixelScaleY = 2.0f,
+                                               .nearestDepth = 2.0f};
 
-  EXPECT_FALSE(shouldUseGpuMeshletLod(false, true, -1, true));
-  EXPECT_FALSE(shouldUseGpuMeshletLod(true, false, -1, true));
-  EXPECT_FALSE(shouldUseGpuMeshletLod(true, true, 0, true));
+  EXPECT_EQ(detail::selectOpaqueLod(worldErrors, 1.0f, 0.2f, projection), 1u);
+}
+
+TEST(OpaqueLodSelectionTest, HysteresisPreventsBoundaryOscillation) {
+  const std::array<float, 2> worldErrors{0.0f, 1.0f};
+  detail::OpaqueLodProjection projection{.pixelScaleY = 1.0f,
+                                         .nearestDepth = 1.0f};
+
+  EXPECT_EQ(detail::selectOpaqueLod(worldErrors, 1.0f, 0.2f, projection, 0u),
+            0u);
+  EXPECT_EQ(detail::selectOpaqueLod(worldErrors, 1.0f, 0.2f, projection, 1u),
+            1u);
+
+  projection.nearestDepth = 0.8f;
+  EXPECT_EQ(detail::selectOpaqueLod(worldErrors, 1.0f, 0.2f, projection, 1u),
+            0u);
+  projection.nearestDepth = 1.25f;
+  EXPECT_EQ(detail::selectOpaqueLod(worldErrors, 1.0f, 0.2f, projection, 0u),
+            1u);
+}
+
+TEST(OpaqueLodSelectionTest, OrthographicProjectionIgnoresDepth) {
+  const std::array<float, 2> worldErrors{0.0f, 0.25f};
+  const detail::OpaqueLodProjection projection{
+      .pixelScaleY = 4.0f, .nearestDepth = 0.01f, .orthographic = true};
+
+  EXPECT_EQ(detail::selectOpaqueLod(worldErrors, 1.0f, 0.0f, projection), 1u);
 }
 
 TEST(OpaqueMeshletRoutingTest, AutomaticLodUsesOnlyStableGeneratedLevels) {

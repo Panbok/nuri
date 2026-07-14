@@ -7,6 +7,13 @@
 
 namespace nuri {
 
+enum class SwapchainPresentMode : uint8_t {
+  Unknown = 0,
+  Immediate,
+  Mailbox,
+  Fifo,
+};
+
 // Handle types with index + generation for safety
 struct BufferHandle {
   uint32_t index = 0;

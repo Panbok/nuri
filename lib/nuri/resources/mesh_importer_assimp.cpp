@@ -1407,6 +1407,8 @@ buildLodIndexBuffers(const MeshImportOptions &options,
   }
 
   const size_t baseIndexCount = lodIndexBuffers[0].size();
+  const float simplificationScale = meshopt_simplifyScale(
+      &vertices.front().position.x, vertices.size(), sizeof(Vertex));
   for (uint32_t requestedLodIndex = 1; requestedLodIndex < requestedLodCount;
        ++requestedLodIndex) {
     const std::pmr::vector<uint32_t> &sourceIndices =
@@ -1443,7 +1445,8 @@ buildLodIndexBuffers(const MeshImportOptions &options,
       optimizeIndexOrder(simplifiedIndices, vertices);
     }
     lodIndexBuffers[generatedLodCount] = std::move(simplifiedIndices);
-    lodErrors[generatedLodCount] = lodErrors[generatedLodCount - 1] + stepError;
+    lodErrors[generatedLodCount] =
+        lodErrors[generatedLodCount - 1] + stepError * simplificationScale;
     ++generatedLodCount;
   }
   NURI_PROFILER_ZONE_END();

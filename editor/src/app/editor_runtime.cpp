@@ -1082,6 +1082,7 @@ void EditorRuntime::initializeEditorOverlay() {
   }
   textOverlayEnabled_ = false;
   const EditorServices editorServices{
+      .application = &app_,
       .scene = &scene_,
       .cameraSystem = &cameraSystem_,
       .gpu = &app_.getGPU(),

@@ -25,6 +25,12 @@ public:
   uint32_t getSwapchainImageIndex() const override;
   uint32_t getSwapchainImageCount() const override;
   double getTime() const override;
+  [[nodiscard]] bool
+  supportsSwapchainPresentModeChange() const noexcept override;
+  [[nodiscard]] SwapchainPresentMode
+  getSwapchainPresentMode() const noexcept override;
+  Result<SwapchainPresentMode, std::string>
+  setSwapchainPresentMode(SwapchainPresentMode mode) override;
 
   Result<BufferHandle, std::string>
   createBuffer(const BufferDesc &desc,

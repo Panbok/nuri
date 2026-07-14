@@ -137,10 +137,23 @@ void flattenAutotestRendererMetrics(std::map<std::string, double> &out,
             opaque.meshletHybridClassicBatches);
   addMetric(out, "renderer.opaque.meshlet_hybrid_classic_instances",
             opaque.meshletHybridClassicInstances);
+  addMetric(out, "renderer.opaque.meshlet_hybrid_coverage_classic_batches",
+            opaque.meshletHybridCoverageClassicBatches);
+  addMetric(out, "renderer.opaque.meshlet_hybrid_coverage_classic_instances",
+            opaque.meshletHybridCoverageClassicInstances);
   addMetric(out, "renderer.opaque.meshlet_hybrid_meshlet_batches",
             opaque.meshletHybridMeshletBatches);
   addMetric(out, "renderer.opaque.meshlet_hybrid_meshlet_instances",
             opaque.meshletHybridMeshletInstances);
+  addMetric(out, "renderer.opaque.auto_lod_active", opaque.autoLodActive);
+  addMetric(out, "renderer.opaque.auto_lod_history_reset",
+            opaque.autoLodHistoryReset);
+  addMetric(out, "renderer.opaque.auto_lod_transitions",
+            opaque.autoLodTransitions);
+  addMetric(out, "renderer.opaque.auto_lod_lod0_instances",
+            opaque.autoLodLod0Instances);
+  addMetric(out, "renderer.opaque.auto_lod_lod1_instances",
+            opaque.autoLodLod1Instances);
   addMetric(out, "renderer.opaque.meshlet_rejected_missing_feature",
             opaque.meshletRejectedMissingFeature);
   addMetric(out, "renderer.opaque.meshlet_rejected_missing_asset_data",

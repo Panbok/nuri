@@ -846,12 +846,16 @@ TEST(GltfScenePrefabImport, GeneratesProgressiveAttributeAwareLodChain) {
       sizeof(lodAttributes.front()), kAttributeWeights.data(),
       kAttributeWeights.size(), nullptr, lod2.indexCount,
       options.lodTargetError, 0, &stepError);
+  const float simplificationScale =
+      meshopt_simplifyScale(&mesh.vertices.front().position.x,
+                            mesh.vertices.size(), sizeof(nuri::Vertex));
 
   ASSERT_EQ(expectedCount, lod2Indices.size());
   EXPECT_TRUE(std::equal(expectedLod2.begin(),
                          expectedLod2.begin() + expectedCount,
                          lod2Indices.begin(), lod2Indices.end()));
-  EXPECT_NEAR(lod2.error, lod1.error + stepError, 1.0e-6f);
+  EXPECT_NEAR(lod2.error, lod1.error + stepError * simplificationScale,
+              1.0e-6f);
 }
 
 TEST(GltfScenePrefabImport, StopsQuietlyAtTheLastReducibleLod) {

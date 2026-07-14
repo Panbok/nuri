@@ -8,7 +8,23 @@
 #include "nuri/gfx/pipeline/default_render_pipeline.h"
 #include "nuri/gfx/renderer.h"
 
+#include <thread>
+
 namespace nuri {
+namespace {
+
+using FrameClock = std::chrono::steady_clock;
+
+[[nodiscard]] FrameClock::duration
+frameIntervalForRate(uint32_t framesPerSecond) {
+  NURI_ASSERT(framesPerSecond != 0u, "Frame rate limit must be non-zero");
+  return std::max(FrameClock::duration{1},
+                  std::chrono::duration_cast<FrameClock::duration>(
+                      std::chrono::duration<double>(
+                          1.0 / static_cast<double>(framesPerSecond))));
+}
+
+} // namespace
 
 ApplicationConfig makeApplicationConfig(const RuntimeConfig &config) {
   return ApplicationConfig{
@@ -102,6 +118,7 @@ void Application::run() {
 
   while (!window_->shouldClose()) {
     NURI_PROFILER_FRAME("Frame");
+    waitForFrameRateLimit();
 
     input_.beginFrame();
     {
@@ -170,6 +187,51 @@ void Application::run() {
 }
 
 double Application::getTime() const { return gpu_->getTime(); }
+
+void Application::setFrameRateLimit(uint32_t framesPerSecond) {
+  if (frameRateLimit_ == framesPerSecond) {
+    return;
+  }
+  frameRateLimit_ = framesPerSecond;
+  nextFrameDeadline_ =
+      framesPerSecond != 0u
+          ? FrameClock::now() + frameIntervalForRate(framesPerSecond)
+          : FrameClock::time_point{};
+  if (framesPerSecond != 0u) {
+    NURI_LOG_INFO("Application: frame rate limit set to %u FPS",
+                  framesPerSecond);
+  } else {
+    NURI_LOG_INFO("Application: frame rate limit disabled");
+  }
+}
+
+uint32_t Application::frameRateLimit() const noexcept {
+  return frameRateLimit_;
+}
+
+void Application::waitForFrameRateLimit() {
+  if (frameRateLimit_ == 0u) {
+    return;
+  }
+
+  const FrameClock::duration frameInterval =
+      frameIntervalForRate(frameRateLimit_);
+  FrameClock::time_point now = FrameClock::now();
+  if (nextFrameDeadline_ == FrameClock::time_point{}) {
+    nextFrameDeadline_ = now + frameInterval;
+    return;
+  }
+
+  if (now < nextFrameDeadline_) {
+    NURI_PROFILER_ZONE("Application::FrameRateLimit", NURI_PROFILER_COLOR_WAIT);
+    std::this_thread::sleep_until(nextFrameDeadline_);
+    NURI_PROFILER_ZONE_END();
+    now = FrameClock::now();
+  }
+
+  const auto elapsedIntervals = (now - nextFrameDeadline_) / frameInterval + 1;
+  nextFrameDeadline_ += frameInterval * elapsedIntervals;
+}
 
 GPUDevice &Application::getGPU() { return *gpu_; }
 

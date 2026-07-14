@@ -604,12 +604,7 @@ private:
   Result<bool, std::string>
   ensureGsTessOverlayPipeline(bool requireMsaa = false);
   void resetOverlayPipelineState();
-  void invalidateAutoLodCache();
-  void updateFastAutoLodCache(
-      const Submesh *submesh, const glm::vec3 &cameraPosition,
-      const std::array<float, 3> &sortedLodThresholds,
-      const std::array<size_t, Submesh::kMaxLodCount> &bucketCounts,
-      size_t remapCount, size_t instanceCount, uint64_t frameIndex);
+  void invalidateAutoLodHistory();
   void invalidateStaticBatchCache();
   void invalidateSingleInstanceBatchCache();
   void invalidateIndirectPackCache();
@@ -901,19 +896,8 @@ private:
   bool instanceStaticBuffersDirty_ = true;
   bool uniformSingleSubmeshPath_ = false;
 
-  struct AutoLodCache {
-    bool valid = false;
-    glm::vec3 cameraPos{0.0f};
-    std::array<float, 3> thresholds = {0.0f, 0.0f, 0.0f};
-    std::array<size_t, Submesh::kMaxLodCount> bucketCounts{};
-    size_t remapCount = 0;
-    size_t instanceCount = 0;
-    const Submesh *submesh = nullptr;
-    uint64_t frameIndex = std::numeric_limits<uint64_t>::max();
-  };
   static constexpr size_t kSingleInstanceCacheVariantCount =
       static_cast<size_t>(Submesh::kMaxLodCount) * 2u;
-  AutoLodCache autoLodCache_{};
   std::pmr::vector<SingleInstanceBatchCache> singleInstanceBatchCaches_;
   uint64_t singleInstanceTemplateRevision_ = 1;
   IndirectPackCache indirectPackCache_{};
@@ -940,6 +924,8 @@ private:
   std::pmr::vector<glm::mat4> instanceBaseMatrices_;
   std::pmr::vector<InstanceData> instanceMatricesCpuCache_;
   std::pmr::vector<glm::vec4> instanceLodCentersInvRadiusSq_;
+  std::pmr::vector<glm::vec4> instanceAutoLodWorldErrors_;
+  std::pmr::vector<uint8_t> instanceAutoLodCounts_;
   std::pmr::vector<TextureHandle> materialTextureAccessHandles_;
   std::pmr::vector<uint32_t> instanceAutoLodLevels_;
   std::pmr::vector<uint8_t> instanceTessSelection_;
@@ -1065,8 +1051,16 @@ private:
       std::numeric_limits<uint64_t>::max();
   uint64_t cachedRemapSignature_ = std::numeric_limits<uint64_t>::max();
   bool cachedRemapSignatureValid_ = false;
-  glm::vec3 cachedMeshLodThresholdsInput_{std::numeric_limits<float>::max()};
-  std::array<float, 3> cachedSortedLodThresholds_{0.0f, 0.0f, 0.0f};
+  bool autoLodHistoryValid_ = false;
+  bool autoLodWasActive_ = false;
+  float cachedAutoLodTargetPixelError_ =
+      std::numeric_limits<float>::quiet_NaN();
+  float cachedAutoLodHysteresisRatio_ = std::numeric_limits<float>::quiet_NaN();
+  float cachedAutoLodProjectionScaleY_ =
+      std::numeric_limits<float>::quiet_NaN();
+  float cachedAutoLodNearPlane_ = std::numeric_limits<float>::quiet_NaN();
+  glm::uvec2 cachedAutoLodRenderExtent_{0u};
+  ProjectionType cachedAutoLodProjectionType_ = ProjectionType::Perspective;
 
   PersistentBufferId persistentCentersPhaseBuffer_{};
   PersistentBufferId persistentBaseMatricesBuffer_{};

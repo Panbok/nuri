@@ -641,6 +641,13 @@ struct RenderSettings {
     // Zero disables hybrid routing.
     uint32_t hybridClassicMaxMeshlets = 96u;
     int32_t forcedMeshLod = -1;
+    // Automatic LOD uses projected simplification error. The hysteresis ratio
+    // creates a dead band around the pixel-error target to prevent pop-in when
+    // camera motion hovers near a transition.
+    float meshLodTargetPixelError = 1.0f;
+    float meshLodHysteresisRatio = 0.2f;
+    // Kept for source compatibility with scene setup code. Automatic LOD no
+    // longer uses distance thresholds.
     glm::vec3 meshLodDistanceThresholds{8.0f, 16.0f, 32.0f};
     bool enableInstanceAnimation = true;
     bool enableTessellation = false;
@@ -2049,8 +2056,15 @@ struct OpaqueFrameMetrics {
   uint32_t meshletHybridActive = 0;
   uint32_t meshletHybridClassicBatches = 0;
   uint32_t meshletHybridClassicInstances = 0;
+  uint32_t meshletHybridCoverageClassicBatches = 0;
+  uint32_t meshletHybridCoverageClassicInstances = 0;
   uint32_t meshletHybridMeshletBatches = 0;
   uint32_t meshletHybridMeshletInstances = 0;
+  uint32_t autoLodActive = 0;
+  uint32_t autoLodHistoryReset = 0;
+  uint32_t autoLodTransitions = 0;
+  uint32_t autoLodLod0Instances = 0;
+  uint32_t autoLodLod1Instances = 0;
   uint32_t meshletRejectedMissingFeature = 0;
   uint32_t meshletRejectedMissingAssetData = 0;
   uint32_t meshletRejectedIncompatibleFrame = 0;

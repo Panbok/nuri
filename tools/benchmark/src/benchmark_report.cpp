@@ -412,6 +412,7 @@ validateBenchmarkReportV1(yyjson_val *root) {
       JsonField{"drainFrames", JsonType::Unsigned},
       JsonField{"drainTimeoutMs", JsonType::Unsigned},
       JsonField{"missingGpuTimingFrames", JsonType::Unsigned},
+      JsonField{"scopeContainmentViolations", JsonType::Unsigned, false},
       JsonField{"droppedGpuTimingReports", JsonType::Unsigned},
   };
   valid = validateObject(yyjson_obj_get(root, "timingDrain"), drainFields,
@@ -690,6 +691,10 @@ makeSettingsSignature(const RenderSettings &sourceSettings) {
   appendSignatureField(out, "opaque.instancedDraw",
                        settings.opaque.enableInstancedDraw);
   appendSignatureField(out, "opaque.meshLod", settings.opaque.enableMeshLod);
+  appendSignatureField(out, "opaque.meshLodTargetPixelError",
+                       settings.opaque.meshLodTargetPixelError);
+  appendSignatureField(out, "opaque.meshLodHysteresisRatio",
+                       settings.opaque.meshLodHysteresisRatio);
   appendSignatureField(out, "opaque.cpuFrustum",
                        settings.opaque.enableCpuFrustumCulling);
   appendSignatureField(out, "opaque.meshletMode",
@@ -909,6 +914,10 @@ yyjson_mut_val *makeSettingsObject(yyjson_mut_doc *doc,
                           settings.opaque.enableInstancedDraw);
   yyjson_mut_obj_add_bool(doc, opaque, "enableMeshLod",
                           settings.opaque.enableMeshLod);
+  yyjson_mut_obj_add_real(doc, opaque, "meshLodTargetPixelError",
+                          settings.opaque.meshLodTargetPixelError);
+  yyjson_mut_obj_add_real(doc, opaque, "meshLodHysteresisRatio",
+                          settings.opaque.meshLodHysteresisRatio);
   yyjson_mut_obj_add_bool(doc, opaque, "enableCpuFrustumCulling",
                           settings.opaque.enableCpuFrustumCulling);
   addString(doc, opaque, "meshletMode",
@@ -1441,6 +1450,12 @@ readEnumValue(yyjson_val *object, const char *key, Enum defaultValue,
         opaque, "enableInstancedDraw", settings.opaque.enableInstancedDraw);
     settings.opaque.enableMeshLod =
         readBool(opaque, "enableMeshLod", settings.opaque.enableMeshLod);
+    settings.opaque.meshLodTargetPixelError =
+        static_cast<float>(readReal(opaque, "meshLodTargetPixelError",
+                                    settings.opaque.meshLodTargetPixelError));
+    settings.opaque.meshLodHysteresisRatio =
+        static_cast<float>(readReal(opaque, "meshLodHysteresisRatio",
+                                    settings.opaque.meshLodHysteresisRatio));
     settings.opaque.enableCpuFrustumCulling =
         readBool(opaque, "enableCpuFrustumCulling",
                  settings.opaque.enableCpuFrustumCulling);
@@ -2164,6 +2179,8 @@ writeBenchmarkReportJson(const BenchmarkReport &report, bool verboseFrames) {
                           report.timingDrain.drainTimeoutMs);
   yyjson_mut_obj_add_uint(doc.get(), drain, "missingGpuTimingFrames",
                           report.timingDrain.missingGpuTimingFrames);
+  yyjson_mut_obj_add_uint(doc.get(), drain, "scopeContainmentViolations",
+                          report.timingDrain.scopeContainmentViolations);
   yyjson_mut_obj_add_uint(doc.get(), drain, "droppedGpuTimingReports",
                           report.timingDrain.droppedGpuTimingReports);
   yyjson_mut_obj_add_val(doc.get(), root, "timingDrain", drain);
@@ -2559,6 +2576,8 @@ readBenchmarkReportFile(const std::filesystem::path &path) {
     report.timingDrain.drainTimeoutMs = readU32(drain, "drainTimeoutMs");
     report.timingDrain.missingGpuTimingFrames =
         readU32(drain, "missingGpuTimingFrames");
+    report.timingDrain.scopeContainmentViolations =
+        readU32(drain, "scopeContainmentViolations");
     report.timingDrain.droppedGpuTimingReports =
         readU64(drain, "droppedGpuTimingReports");
   }

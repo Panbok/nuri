@@ -236,6 +236,86 @@ struct GpuTimingScopeMergeDesc {
   uint32_t bit = 0u;
 };
 
+inline constexpr auto kGpuTimingScopeDescs =
+    std::to_array<GpuTimingScopeMergeDesc>({
+        {GpuTimingScope::Shadow, &GpuTimingReport::shadowTimeMs,
+         &GpuTimingReport::shadowSourceFrameIndex,
+         gpuTimingScopeToBit(GpuTimingScope::Shadow)},
+        {GpuTimingScope::ShadowDepth, &GpuTimingReport::shadowDepthTimeMs,
+         &GpuTimingReport::shadowDepthSourceFrameIndex,
+         gpuTimingScopeToBit(GpuTimingScope::ShadowDepth)},
+        {GpuTimingScope::ShadowSdsm, &GpuTimingReport::shadowSdsmTimeMs,
+         &GpuTimingReport::shadowSdsmSourceFrameIndex,
+         gpuTimingScopeToBit(GpuTimingScope::ShadowSdsm)},
+        {GpuTimingScope::SceneColorDownsample,
+         &GpuTimingReport::sceneColorDownsampleTimeMs,
+         &GpuTimingReport::sceneColorDownsampleSourceFrameIndex,
+         gpuTimingScopeToBit(GpuTimingScope::SceneColorDownsample)},
+        {GpuTimingScope::Transmission, &GpuTimingReport::transmissionTimeMs,
+         &GpuTimingReport::transmissionSourceFrameIndex,
+         gpuTimingScopeToBit(GpuTimingScope::Transmission)},
+        {GpuTimingScope::TemporalAAResolve,
+         &GpuTimingReport::temporalAAResolveTimeMs,
+         &GpuTimingReport::temporalAAResolveSourceFrameIndex,
+         gpuTimingScopeToBit(GpuTimingScope::TemporalAAResolve)},
+        {GpuTimingScope::TemporalAADebug,
+         &GpuTimingReport::temporalAADebugTimeMs,
+         &GpuTimingReport::temporalAADebugSourceFrameIndex,
+         gpuTimingScopeToBit(GpuTimingScope::TemporalAADebug)},
+        {GpuTimingScope::SpatialAA, &GpuTimingReport::spatialAATimeMs,
+         &GpuTimingReport::spatialAASourceFrameIndex,
+         gpuTimingScopeToBit(GpuTimingScope::SpatialAA)},
+        {GpuTimingScope::Opaque, &GpuTimingReport::opaqueTimeMs,
+         &GpuTimingReport::opaqueSourceFrameIndex,
+         gpuTimingScopeToBit(GpuTimingScope::Opaque)},
+        {GpuTimingScope::MsaaResolve, &GpuTimingReport::msaaResolveTimeMs,
+         &GpuTimingReport::msaaResolveSourceFrameIndex,
+         gpuTimingScopeToBit(GpuTimingScope::MsaaResolve)},
+        {GpuTimingScope::GTAO, &GpuTimingReport::gtaoTimeMs,
+         &GpuTimingReport::gtaoSourceFrameIndex,
+         gpuTimingScopeToBit(GpuTimingScope::GTAO)},
+        {GpuTimingScope::HDRPostProcess, &GpuTimingReport::hdrPostProcessTimeMs,
+         &GpuTimingReport::hdrPostProcessSourceFrameIndex,
+         gpuTimingScopeToBit(GpuTimingScope::HDRPostProcess)},
+        {GpuTimingScope::Skybox, &GpuTimingReport::skyboxTimeMs,
+         &GpuTimingReport::skyboxSourceFrameIndex,
+         gpuTimingScopeToBit(GpuTimingScope::Skybox)},
+        {GpuTimingScope::Velocity, &GpuTimingReport::velocityTimeMs,
+         &GpuTimingReport::velocitySourceFrameIndex,
+         gpuTimingScopeToBit(GpuTimingScope::Velocity)},
+        {GpuTimingScope::ReactiveMask, &GpuTimingReport::reactiveMaskTimeMs,
+         &GpuTimingReport::reactiveMaskSourceFrameIndex,
+         gpuTimingScopeToBit(GpuTimingScope::ReactiveMask)},
+        {GpuTimingScope::TemporalAACopyBack,
+         &GpuTimingReport::temporalAACopyBackTimeMs,
+         &GpuTimingReport::temporalAACopyBackSourceFrameIndex,
+         gpuTimingScopeToBit(GpuTimingScope::TemporalAACopyBack)},
+        {GpuTimingScope::GTAOTemporal, &GpuTimingReport::gtaoTemporalTimeMs,
+         &GpuTimingReport::gtaoTemporalSourceFrameIndex,
+         gpuTimingScopeToBit(GpuTimingScope::GTAOTemporal)},
+        {GpuTimingScope::WholeFrame, &GpuTimingReport::wholeFrameTimeMs,
+         &GpuTimingReport::wholeFrameSourceFrameIndex,
+         gpuTimingScopeToBit(GpuTimingScope::WholeFrame)},
+    });
+
+[[nodiscard]] constexpr const GpuTimingScopeMergeDesc *
+gpuTimingScopeDesc(GpuTimingScope scope) noexcept {
+  for (const GpuTimingScopeMergeDesc &desc : kGpuTimingScopeDescs) {
+    if (desc.scope == scope) {
+      return &desc;
+    }
+  }
+  return nullptr;
+}
+
+[[nodiscard]] constexpr uint64_t
+gpuTimingScopeSourceFrame(const GpuTimingReport &report,
+                          GpuTimingScope scope) noexcept {
+  const GpuTimingScopeMergeDesc *desc = gpuTimingScopeDesc(scope);
+  return desc != nullptr ? report.*desc->sourceFrameIndex
+                         : std::numeric_limits<uint64_t>::max();
+}
+
 inline void mergeGpuTimingReportScope(GpuTimingReport &dst,
                                       const GpuTimingReport &src,
                                       GpuTimingScopeMergeDesc desc) {
@@ -249,66 +329,7 @@ inline void mergeGpuTimingReportScope(GpuTimingReport &dst,
 
 inline void mergeGpuTimingReportScopes(GpuTimingReport &dst,
                                        const GpuTimingReport &src) {
-  static constexpr auto kScopeDescs = std::to_array<GpuTimingScopeMergeDesc>({
-      {GpuTimingScope::Shadow, &GpuTimingReport::shadowTimeMs,
-       &GpuTimingReport::shadowSourceFrameIndex,
-       gpuTimingScopeToBit(GpuTimingScope::Shadow)},
-      {GpuTimingScope::ShadowDepth, &GpuTimingReport::shadowDepthTimeMs,
-       &GpuTimingReport::shadowDepthSourceFrameIndex,
-       gpuTimingScopeToBit(GpuTimingScope::ShadowDepth)},
-      {GpuTimingScope::ShadowSdsm, &GpuTimingReport::shadowSdsmTimeMs,
-       &GpuTimingReport::shadowSdsmSourceFrameIndex,
-       gpuTimingScopeToBit(GpuTimingScope::ShadowSdsm)},
-      {GpuTimingScope::SceneColorDownsample,
-       &GpuTimingReport::sceneColorDownsampleTimeMs,
-       &GpuTimingReport::sceneColorDownsampleSourceFrameIndex,
-       gpuTimingScopeToBit(GpuTimingScope::SceneColorDownsample)},
-      {GpuTimingScope::Transmission, &GpuTimingReport::transmissionTimeMs,
-       &GpuTimingReport::transmissionSourceFrameIndex,
-       gpuTimingScopeToBit(GpuTimingScope::Transmission)},
-      {GpuTimingScope::TemporalAAResolve,
-       &GpuTimingReport::temporalAAResolveTimeMs,
-       &GpuTimingReport::temporalAAResolveSourceFrameIndex,
-       gpuTimingScopeToBit(GpuTimingScope::TemporalAAResolve)},
-      {GpuTimingScope::TemporalAADebug, &GpuTimingReport::temporalAADebugTimeMs,
-       &GpuTimingReport::temporalAADebugSourceFrameIndex,
-       gpuTimingScopeToBit(GpuTimingScope::TemporalAADebug)},
-      {GpuTimingScope::SpatialAA, &GpuTimingReport::spatialAATimeMs,
-       &GpuTimingReport::spatialAASourceFrameIndex,
-       gpuTimingScopeToBit(GpuTimingScope::SpatialAA)},
-      {GpuTimingScope::Opaque, &GpuTimingReport::opaqueTimeMs,
-       &GpuTimingReport::opaqueSourceFrameIndex,
-       gpuTimingScopeToBit(GpuTimingScope::Opaque)},
-      {GpuTimingScope::MsaaResolve, &GpuTimingReport::msaaResolveTimeMs,
-       &GpuTimingReport::msaaResolveSourceFrameIndex,
-       gpuTimingScopeToBit(GpuTimingScope::MsaaResolve)},
-      {GpuTimingScope::GTAO, &GpuTimingReport::gtaoTimeMs,
-       &GpuTimingReport::gtaoSourceFrameIndex,
-       gpuTimingScopeToBit(GpuTimingScope::GTAO)},
-      {GpuTimingScope::HDRPostProcess, &GpuTimingReport::hdrPostProcessTimeMs,
-       &GpuTimingReport::hdrPostProcessSourceFrameIndex,
-       gpuTimingScopeToBit(GpuTimingScope::HDRPostProcess)},
-      {GpuTimingScope::Skybox, &GpuTimingReport::skyboxTimeMs,
-       &GpuTimingReport::skyboxSourceFrameIndex,
-       gpuTimingScopeToBit(GpuTimingScope::Skybox)},
-      {GpuTimingScope::Velocity, &GpuTimingReport::velocityTimeMs,
-       &GpuTimingReport::velocitySourceFrameIndex,
-       gpuTimingScopeToBit(GpuTimingScope::Velocity)},
-      {GpuTimingScope::ReactiveMask, &GpuTimingReport::reactiveMaskTimeMs,
-       &GpuTimingReport::reactiveMaskSourceFrameIndex,
-       gpuTimingScopeToBit(GpuTimingScope::ReactiveMask)},
-      {GpuTimingScope::TemporalAACopyBack,
-       &GpuTimingReport::temporalAACopyBackTimeMs,
-       &GpuTimingReport::temporalAACopyBackSourceFrameIndex,
-       gpuTimingScopeToBit(GpuTimingScope::TemporalAACopyBack)},
-      {GpuTimingScope::GTAOTemporal, &GpuTimingReport::gtaoTemporalTimeMs,
-       &GpuTimingReport::gtaoTemporalSourceFrameIndex,
-       gpuTimingScopeToBit(GpuTimingScope::GTAOTemporal)},
-      {GpuTimingScope::WholeFrame, &GpuTimingReport::wholeFrameTimeMs,
-       &GpuTimingReport::wholeFrameSourceFrameIndex,
-       gpuTimingScopeToBit(GpuTimingScope::WholeFrame)},
-  });
-  for (const GpuTimingScopeMergeDesc desc : kScopeDescs) {
+  for (const GpuTimingScopeMergeDesc desc : kGpuTimingScopeDescs) {
     mergeGpuTimingReportScope(dst, src, desc);
   }
 }

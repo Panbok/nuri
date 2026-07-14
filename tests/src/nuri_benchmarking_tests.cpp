@@ -1297,6 +1297,7 @@ TEST(NuriBenchmarkingTest, ReportWritesReadsAndComputesMeasuredStats) {
   report.timingDrain.drainFrames = 4u;
   report.timingDrain.drainTimeoutMs = 500u;
   report.timingDrain.missingGpuTimingFrames = 1u;
+  report.timingDrain.scopeContainmentViolations = 3u;
   report.timingDrain.droppedGpuTimingReports = 2u;
   report.unavailableMetrics = {"gpu.scopes_sum_ms"};
   report.warnings = {"timing incomplete"};
@@ -1476,6 +1477,7 @@ TEST(NuriBenchmarkingTest, ReportWritesReadsAndComputesMeasuredStats) {
   EXPECT_EQ(loaded.value().timingDrain.drainComplete, false);
   EXPECT_EQ(loaded.value().timingDrain.drainFrames, 4u);
   EXPECT_EQ(loaded.value().timingDrain.missingGpuTimingFrames, 1u);
+  EXPECT_EQ(loaded.value().timingDrain.scopeContainmentViolations, 3u);
   EXPECT_EQ(loaded.value().timingDrain.droppedGpuTimingReports, 2u);
   ASSERT_EQ(loaded.value().unavailableMetrics.size(), 1u);
   EXPECT_EQ(loaded.value().unavailableMetrics[0], "gpu.scopes_sum_ms");

@@ -1,9 +1,11 @@
 #define NURI_OPAQUE_MESHLET_BATCHED 1
+// clang-format off
+#include "meshlet_common.sp"
+#include "opaque_meshlet_vertex.sp"
 #include "BRDF.sp"
 #include "material_inputs.sp"
 #include "material_lighting.sp"
-#include "meshlet_common.sp"
-#include "opaque_meshlet_vertex.sp"
+// clang-format on
 
 layout(location = 0) in OpaqueMeshletVertex vtx;
 layout(location = 5) flat in uint meshletDebugId;

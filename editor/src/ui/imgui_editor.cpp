@@ -4,6 +4,7 @@
 
 #include "nuri/app/editor_animation_player_service.h"
 #include "nuri/bakery/bakery_system.h"
+#include "nuri/core/application.h"
 #include "nuri/core/log.h"
 #include "nuri/core/pmr_scratch.h"
 #include "nuri/core/profiling.h"
@@ -69,6 +70,7 @@ constexpr const char *kCameraControllerWindowName = "Camera Controller";
 constexpr const char *kCameraHelpWindowName = "Camera Help";
 constexpr const char *kGizmoControlsWindowName = "Gizmo Controls";
 constexpr const char *kTelemetryWindowName = "Telemetry";
+constexpr const char *kFramePacingWindowName = "Frame Pacing";
 constexpr std::array<uint8_t, 4> kTextureFilterAnisotropyLevels = {2u, 4u, 8u,
                                                                    16u};
 constexpr std::array<const char *, 4> kTextureFilterAnisotropyLabels = {
@@ -81,6 +83,21 @@ constexpr std::array<const char *, 5> kTemporalAAQualityPresetLabels = {
     "Performance", "Balanced", "Quality", "Ultra", "Custom"};
 constexpr std::array<const char *, 2> kAmbientOcclusionModeLabels = {"Disabled",
                                                                      "GTAO"};
+
+[[nodiscard]] std::string_view
+presentModeLabel(SwapchainPresentMode mode) noexcept {
+  switch (mode) {
+  case SwapchainPresentMode::Immediate:
+    return "Immediate";
+  case SwapchainPresentMode::Mailbox:
+    return "Mailbox";
+  case SwapchainPresentMode::Fifo:
+    return "FIFO";
+  case SwapchainPresentMode::Unknown:
+  default:
+    return "Unknown";
+  }
+}
 constexpr std::array<const char *, 5> kAmbientOcclusionPresetLabels = {
     "Low", "Balanced", "High", "Ultra", "Custom"};
 constexpr std::array<const char *, 4> kAmbientOcclusionDebugViewLabels = {
@@ -1545,8 +1562,42 @@ void drawSkyboxSettings(RenderSettings::SkyboxSettings &skybox) {
   ImGui::Text("Skybox background: %s", skybox.enabled ? "enabled" : "disabled");
 }
 
+[[nodiscard]] std::string_view
+meshletModeLabel(MeshletRenderMode mode) noexcept {
+  switch (mode) {
+  case MeshletRenderMode::Disabled:
+    return "Indexed";
+  case MeshletRenderMode::Opportunistic:
+    return "Hybrid";
+  case MeshletRenderMode::Required:
+    return "Mesh shaders only";
+  default:
+    return "Unknown";
+  }
+}
+
+[[nodiscard]] std::string_view
+activeGeometryRouteLabel(MeshletRenderMode requestedMode,
+                         const OpaqueFrameMetrics &metrics) noexcept {
+  if (metrics.meshletModeActive != 0u) {
+    return metrics.meshletHybridActive != 0u ? "Hybrid" : "Mesh shaders";
+  }
+  if (metrics.meshletRejectedMissingFeature != 0u) {
+    return "Indexed fallback (mesh shaders unavailable)";
+  }
+  if (metrics.meshletRejectedMissingAssetData != 0u) {
+    return "Indexed fallback (meshlet data missing)";
+  }
+  if (metrics.meshletRejectedIncompatibleFrame != 0u) {
+    return "Indexed fallback (frame incompatible)";
+  }
+  return requestedMode == MeshletRenderMode::Disabled ? "Indexed"
+                                                      : "Indexed fallback";
+}
+
 void drawOpaqueSettings(RenderSettings::OpaqueSettings &opaque,
-                        const RenderSettings::ShadowSettings &shadow) {
+                        const RenderSettings::ShadowSettings &shadow,
+                        const OpaqueFrameMetrics &metrics) {
   constexpr const char *kDebugModes[] = {
       "None",
       "Wire Overlay",
@@ -1565,6 +1616,31 @@ void drawOpaqueSettings(RenderSettings::OpaqueSettings &opaque,
       OpaqueDebugVisualization::TessPatchEdgesHeatmap) {
     ImGui::TextUnformatted(
         "Patch mode auto-enables tessellation for visualization.");
+  }
+
+  ImGui::Separator();
+  ImGui::TextUnformatted("Geometry Route");
+  constexpr const char *kGeometryRoutes[] = {
+      "Indexed",
+      "Hybrid",
+      "Mesh shaders only",
+  };
+  int geometryRoute = std::clamp(static_cast<int>(opaque.meshletMode), 0, 2);
+  if (ImGui::Combo("Route##OpaquePass", &geometryRoute, kGeometryRoutes,
+                   IM_ARRAYSIZE(kGeometryRoutes))) {
+    opaque.meshletMode = static_cast<MeshletRenderMode>(geometryRoute);
+  }
+  const std::string_view requestedRoute = meshletModeLabel(opaque.meshletMode);
+  const std::string_view activeRoute =
+      activeGeometryRouteLabel(opaque.meshletMode, metrics);
+  ImGui::Text("Requested: %.*s", static_cast<int>(requestedRoute.size()),
+              requestedRoute.data());
+  ImGui::Text("Active: %.*s", static_cast<int>(activeRoute.size()),
+              activeRoute.data());
+  if (metrics.meshletHybridActive != 0u) {
+    ImGui::Text("Hybrid batches: %u indexed / %u meshlet",
+                metrics.meshletHybridClassicBatches,
+                metrics.meshletHybridMeshletBatches);
   }
 
   ImGui::Separator();
@@ -1593,17 +1669,14 @@ void drawOpaqueSettings(RenderSettings::OpaqueSettings &opaque,
   ImGui::Checkbox("Enable Mesh LOD##OpaquePass", &opaque.enableMeshLod);
   ImGui::SliderInt("Forced LOD##OpaquePass", &opaque.forcedMeshLod, -1, 3);
 
-  float lodThresholds[3] = {
-      opaque.meshLodDistanceThresholds.x,
-      opaque.meshLodDistanceThresholds.y,
-      opaque.meshLodDistanceThresholds.z,
-  };
-  if (ImGui::SliderFloat3("LOD Distance##OpaquePass", lodThresholds, 0.5f,
-                          128.0f, "%.1f")) {
-    std::sort(std::begin(lodThresholds), std::end(lodThresholds));
-    opaque.meshLodDistanceThresholds =
-        glm::vec3(lodThresholds[0], lodThresholds[1], lodThresholds[2]);
-  }
+  ImGui::SliderFloat("LOD Pixel Error##OpaquePass",
+                     &opaque.meshLodTargetPixelError, 0.1f, 8.0f, "%.2f");
+  ImGui::SliderFloat("LOD Hysteresis##OpaquePass",
+                     &opaque.meshLodHysteresisRatio, 0.0f, 0.75f, "%.2f");
+  ImGui::Text("Auto LOD: %s, L0 %u / L1 %u, transitions %u",
+              metrics.autoLodActive != 0u ? "active" : "inactive",
+              metrics.autoLodLod0Instances, metrics.autoLodLod1Instances,
+              metrics.autoLodTransitions);
 
   ImGui::Separator();
   ImGui::TextUnformatted("Tessellation");
@@ -3690,7 +3763,8 @@ void drawPassInspector(RenderSettings &renderSettings,
           drawShadowSettings(renderSettings.shadow);
           break;
         case PassInspectorKind::Opaque:
-          drawOpaqueSettings(renderSettings.opaque, renderSettings.shadow);
+          drawOpaqueSettings(renderSettings.opaque, renderSettings.shadow,
+                             frameMetrics.opaque);
           break;
         case PassInspectorKind::Transmission:
           drawTransmissionSettings(renderSettings.transmission);
@@ -5232,47 +5306,21 @@ struct OverlayGpuFrameTime {
 };
 
 [[nodiscard]] OverlayGpuFrameTime
-computeOverlayGpuFrameTime(const RenderFrameMetrics &metrics) {
+computeOverlayGpuFrameTime(const GpuTimingReport &report) {
   OverlayGpuFrameTime frameTime{};
-  const auto addScope = [&frameTime](uint32_t timingAvailable,
-                                     float milliseconds) {
-    if (timingAvailable == 0u) {
-      return;
-    }
-
-    frameTime.available = true;
-    if (std::isfinite(milliseconds) && milliseconds > 0.0f) {
-      frameTime.milliseconds += milliseconds;
-    }
-  };
-
-  addScope(metrics.shadow.gpuTimingAvailable, metrics.shadow.gpuTimeMs);
-  addScope(metrics.shadow.depthGpuTimingAvailable,
-           metrics.shadow.depthGpuTimeMs);
-  addScope(metrics.shadow.sdsmGpuTimingAvailable, metrics.shadow.sdsmGpuTimeMs);
-  addScope(metrics.opaque.gpuTimingAvailable, metrics.opaque.gpuTimeMs);
-  addScope(metrics.ambientOcclusion.gpuTimingAvailable,
-           metrics.ambientOcclusion.gpuTimeMs);
-  addScope(metrics.antiAliasing.taaResolveGpuTimingAvailable,
-           metrics.antiAliasing.taaResolveGpuTimeMs);
-  addScope(metrics.antiAliasing.taaDebugGpuTimingAvailable,
-           metrics.antiAliasing.taaDebugGpuTimeMs);
-  addScope(metrics.antiAliasing.taaSceneColorDownsampleGpuTimingAvailable,
-           metrics.antiAliasing.taaSceneColorDownsampleGpuTimeMs);
-  addScope(metrics.antiAliasing.taaTransmissionGpuTimingAvailable,
-           metrics.antiAliasing.taaTransmissionGpuTimeMs);
-  addScope(metrics.antiAliasing.spatialAAGpuTimingAvailable,
-           metrics.antiAliasing.spatialAAGpuTimeMs);
-  addScope(metrics.antiAliasing.msaaResolveGpuTimingAvailable,
-           metrics.antiAliasing.msaaResolveGpuTimeMs);
-  addScope(metrics.hdrPostProcess.gpuTimingAvailable,
-           metrics.hdrPostProcess.gpuTimeMs);
-
+  if (!hasGpuTimingScope(report, GpuTimingScope::WholeFrame)) {
+    return frameTime;
+  }
+  frameTime.available = true;
+  if (std::isfinite(report.wholeFrameTimeMs) &&
+      report.wholeFrameTimeMs > 0.0f) {
+    frameTime.milliseconds = report.wholeFrameTimeMs;
+  }
   return frameTime;
 }
 
 void drawFpsOverlay(const FPSCounter &fpsCounter, LinearGraph &fpsGraph,
-                    LinearGraph &frametimeGraph,
+                    LinearGraph &frametimeGraph, GPUDevice &gpu,
                     const RenderFrameMetrics &frameMetrics,
                     const RenderSettings &renderSettings,
                     const TelemetryOverlayUiState &telemetryState,
@@ -5303,7 +5351,7 @@ void drawFpsOverlay(const FPSCounter &fpsCounter, LinearGraph &fpsGraph,
     const float cpuMilliseconds =
         sanitizeSample(static_cast<float>(frameDeltaSeconds * 1000.0));
     const OverlayGpuFrameTime gpuFrameTime =
-        computeOverlayGpuFrameTime(frameMetrics);
+        computeOverlayGpuFrameTime(gpu.getLatestCompletedGpuTimingReport());
     bool drewStats = false;
     if (telemetryState.showFpsMs) {
       ImGui::Text("FPS   : %i", static_cast<int>(fps));
@@ -5348,22 +5396,10 @@ void drawFpsOverlay(const FPSCounter &fpsCounter, LinearGraph &fpsGraph,
       ImGui::Text("Dispatch: %u x%u", frameMetrics.opaque.computeDispatches,
                   frameMetrics.opaque.computeDispatchX);
       const OpaqueFrameMetrics &opaqueMetrics = frameMetrics.opaque;
-      const bool meshletsRequested =
-          renderSettings.opaque.meshletMode != MeshletRenderMode::Disabled;
-      const char *meshletStatus = "Off";
-      if (opaqueMetrics.meshletModeActive != 0u) {
-        meshletStatus = "Active";
-      } else if (opaqueMetrics.meshletRejectedMissingFeature != 0u) {
-        meshletStatus = "No feature";
-      } else if (opaqueMetrics.meshletRejectedMissingAssetData != 0u) {
-        meshletStatus = "No assets";
-      } else if (opaqueMetrics.meshletRejectedIncompatibleFrame != 0u) {
-        meshletStatus = "Frame fallback";
-      } else if (meshletsRequested) {
-        meshletStatus = "Requested";
-      }
-      ImGui::Text("Meshlets: %s D:%u G:%u", meshletStatus,
-                  opaqueMetrics.meshletDispatches,
+      const std::string_view activeRoute = activeGeometryRouteLabel(
+          renderSettings.opaque.meshletMode, opaqueMetrics);
+      ImGui::Text("Route: %.*s D:%u G:%u", static_cast<int>(activeRoute.size()),
+                  activeRoute.data(), opaqueMetrics.meshletDispatches,
                   opaqueMetrics.meshletTaskGroups);
       drewStats = true;
     }
@@ -5470,15 +5506,20 @@ struct ImGuiEditor::Impl {
   };
 
   Impl(Window &windowIn, GPUDevice &gpuIn, const EditorServices &services)
-      : window(windowIn), gpu(gpuIn), scene(services.scene),
-        resources(services.resources), renderPipeline(services.renderPipeline),
+      : window(windowIn), gpu(gpuIn), application(services.application),
+        scene(services.scene), resources(services.resources),
+        renderPipeline(services.renderPipeline),
         selectionState(services.selectionState != nullptr
                            ? services.selectionState
                            : &localSelectionState),
         textSystem(services.textSystem), cameraSystem(services.cameraSystem),
         bakery(services.bakery),
         renderGraphTelemetry(services.renderGraphTelemetry),
-        animationPlayer(services.animationPlayer) {}
+        animationPlayer(services.animationPlayer) {
+    if (application != nullptr && application->frameRateLimit() != 0u) {
+      frameRateLimitFps = static_cast<int>(application->frameRateLimit());
+    }
+  }
 
   ~Impl() { resetSceneUiState(); }
 
@@ -5547,7 +5588,36 @@ struct ImGuiEditor::Impl {
     }
   }
 
-  void applyDeferredUiActions() {
+  void applyDeferredFramePacingActions() {
+    if (pendingPresentMode.has_value()) {
+      const SwapchainPresentMode requested = *pendingPresentMode;
+      auto result = gpu.setSwapchainPresentMode(requested);
+      if (result.hasError()) {
+        framePacingStatus = result.error();
+        framePacingStatusIsError = true;
+      } else {
+        const SwapchainPresentMode active = result.value();
+        framePacingStatus =
+            requested == active
+                ? std::format("Present mode changed to {}.",
+                              presentModeLabel(active))
+                : std::format("Requested {}, but the device selected {}.",
+                              presentModeLabel(requested),
+                              presentModeLabel(active));
+        framePacingStatusIsError = false;
+      }
+      pendingPresentMode.reset();
+    }
+
+    if (pendingFrameRateLimit.has_value()) {
+      if (application != nullptr) {
+        application->setFrameRateLimit(*pendingFrameRateLimit);
+      }
+      pendingFrameRateLimit.reset();
+    }
+  }
+
+  void applyDeferredAnimationActions() {
     if (animationPlayer == nullptr || deferredAnimationActions.empty()) {
       return;
     }
@@ -5579,6 +5649,11 @@ struct ImGuiEditor::Impl {
       }
     }
     deferredAnimationActions.clear();
+  }
+
+  void applyDeferredUiActions() {
+    applyDeferredFramePacingActions();
+    applyDeferredAnimationActions();
   }
 
   void validateSelectionState() {
@@ -6640,6 +6715,7 @@ struct ImGuiEditor::Impl {
     }
 
     if (ImGui::BeginMenu("Debug")) {
+      ImGui::MenuItem("Frame Pacing", nullptr, &showFramePacingWindow);
       ImGui::MenuItem("Render Graph Telemetry", nullptr,
                       &showRenderGraphTelemetryWindow);
       ImGui::MenuItem("Passes Metrics", nullptr, &showPassMetricsWindow);
@@ -6655,6 +6731,78 @@ struct ImGuiEditor::Impl {
     }
 
     ImGui::EndMainMenuBar();
+  }
+
+  void drawFramePacingWindow() {
+    if (!ImGui::Begin(kFramePacingWindowName, &showFramePacingWindow)) {
+      ImGui::End();
+      return;
+    }
+
+    const SwapchainPresentMode activeMode = gpu.getSwapchainPresentMode();
+    const std::string_view activeModeName = presentModeLabel(activeMode);
+    ImGui::Text("Present mode: %.*s", static_cast<int>(activeModeName.size()),
+                activeModeName.data());
+    ImGui::Text("Swapchain images: %u", gpu.getSwapchainImageCount());
+
+    const bool canChangePresentMode = gpu.supportsSwapchainPresentModeChange();
+    bool vsyncEnabled = activeMode == SwapchainPresentMode::Mailbox ||
+                        activeMode == SwapchainPresentMode::Fifo;
+    ImGui::BeginDisabled(!canChangePresentMode);
+    if (ImGui::Checkbox("VSync (Mailbox)", &vsyncEnabled)) {
+      pendingPresentMode = vsyncEnabled ? SwapchainPresentMode::Mailbox
+                                        : SwapchainPresentMode::Immediate;
+      framePacingStatus.clear();
+    }
+    ImGui::EndDisabled();
+    if (!canChangePresentMode) {
+      ImGui::TextWrapped(
+          "This graphics backend cannot change present mode at runtime.");
+    } else {
+      ImGui::TextDisabled(
+          "VSync prefers Mailbox, falls back to FIFO, and recreates the "
+          "swapchain.");
+    }
+
+    ImGui::Separator();
+    const bool hasApplication = application != nullptr;
+    bool frameLimitEnabled =
+        hasApplication && application->frameRateLimit() != 0u;
+    ImGui::BeginDisabled(!hasApplication);
+    if (ImGui::Checkbox("Enable Frame Limit", &frameLimitEnabled)) {
+      pendingFrameRateLimit =
+          frameLimitEnabled ? static_cast<uint32_t>(frameRateLimitFps) : 0u;
+    }
+    ImGui::BeginDisabled(!frameLimitEnabled);
+    if (ImGui::InputInt("FPS Limit", &frameRateLimitFps, 1, 10)) {
+      frameRateLimitFps = std::clamp(frameRateLimitFps, 1, 1000);
+      pendingFrameRateLimit = static_cast<uint32_t>(frameRateLimitFps);
+    }
+    ImGui::EndDisabled();
+    ImGui::EndDisabled();
+
+    if (hasApplication) {
+      const uint32_t activeLimit = application->frameRateLimit();
+      if (activeLimit != 0u) {
+        ImGui::Text("Active limit: %u FPS", activeLimit);
+      } else {
+        ImGui::TextUnformatted("Active limit: unlimited");
+      }
+      ImGui::TextDisabled(
+          "The limiter sleeps on the CPU and is independent of VSync.");
+    }
+
+    if (!framePacingStatus.empty()) {
+      ImGui::Separator();
+      if (framePacingStatusIsError) {
+        ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "%s",
+                           framePacingStatus.c_str());
+      } else {
+        ImGui::TextWrapped("%s", framePacingStatus.c_str());
+      }
+    }
+
+    ImGui::End();
   }
 
   void updateMetricGraphs(double deltaSeconds) {
@@ -6907,6 +7055,12 @@ struct ImGuiEditor::Impl {
       ImGui::End();
       NURI_PROFILER_ZONE_END();
     }
+    if (showFramePacingWindow) {
+      NURI_PROFILER_ZONE("ImGuiEditor::DrawFramePacingWindow",
+                         NURI_PROFILER_COLOR_CMD_DRAW);
+      drawFramePacingWindow();
+      NURI_PROFILER_ZONE_END();
+    }
     if (showTelemetrySettingsWindow) {
       NURI_PROFILER_ZONE("ImGuiEditor::DrawTelemetrySettingsWindow",
                          NURI_PROFILER_COLOR_CMD_DRAW);
@@ -6947,7 +7101,7 @@ struct ImGuiEditor::Impl {
         overlayRightBoundaryX = inspectorWindowMinX;
       }
     }
-    drawFpsOverlay(fpsCounter, *fpsGraph, *frametimeGraph, frameMetrics,
+    drawFpsOverlay(fpsCounter, *fpsGraph, *frametimeGraph, gpu, frameMetrics,
                    renderSettings, telemetryOverlayState, frameDeltaSeconds,
                    overlayRightBoundaryX);
     NURI_PROFILER_ZONE_END();
@@ -7031,6 +7185,7 @@ struct ImGuiEditor::Impl {
   bool showRenderGraphTelemetryWindow = false;
   bool showPassMetricsWindow = false;
   bool showGizmoControlsWindow = false;
+  bool showFramePacingWindow = false;
   bool showTelemetrySettingsWindow = false;
   bool showCameraControllerWindow = false;
   bool showCameraHelpWindow = false;
@@ -7080,6 +7235,12 @@ struct ImGuiEditor::Impl {
   int hierarchySelectedRowIndex = -1;
   bool hierarchySceneRootOpen = true;
   std::vector<DeferredAnimationAction> deferredAnimationActions{};
+  std::optional<SwapchainPresentMode> pendingPresentMode{};
+  std::optional<uint32_t> pendingFrameRateLimit{};
+  int frameRateLimitFps = 60;
+  std::string framePacingStatus{};
+  bool framePacingStatusIsError = false;
+  Application *application = nullptr;
   RenderScene *scene = nullptr;
   ResourceManager *resources = nullptr;
   RenderPipeline *renderPipeline = nullptr;

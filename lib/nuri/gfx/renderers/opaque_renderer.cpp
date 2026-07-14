@@ -8,6 +8,7 @@
 #include "nuri/core/pmr_scratch.h"
 #include "nuri/core/profiling.h"
 #include "nuri/gfx/frame/presentation_aa_plan.h"
+#include "nuri/gfx/renderers/detail/opaque_lod_selection.h"
 #include "nuri/gfx/renderers/detail/opaque_meshlet_routing.h"
 #include "nuri/gfx/renderers/detail/renderable_material_resolution.h"
 #include "nuri/gfx/renderers/detail/shadow_math.h"
@@ -24,10 +25,6 @@
 namespace nuri {
 namespace {
 constexpr float kMinLodRadius = 1.0e-4f;
-constexpr float kAutoLodCameraReuseEpsilon = 2.5e-2f;
-constexpr float kAutoLodThresholdReuseEpsilon = 1.0e-4f;
-constexpr size_t kAutoLodTemporalReuseMinInstances = 4096u;
-constexpr uint64_t kAutoLodTemporalReuseFrameInterval = 2ull;
 constexpr float kBoundsRadiusHalf = 0.5f;
 constexpr size_t kMaxBatchReserve = 128;
 constexpr float kClearDepthOne = 1.0f;
@@ -554,12 +551,6 @@ uint64_t textureStorageBytes(GPUDevice &gpu, TextureHandle texture) {
          textureBytesPerPixel(gpu.getTextureFormat(texture));
 }
 
-bool nearlyEqualThresholds(const std::array<float, 3> &a,
-                           const std::array<float, 3> &b, float epsilon) {
-  return std::abs(a[0] - b[0]) <= epsilon && std::abs(a[1] - b[1]) <= epsilon &&
-         std::abs(a[2] - b[2]) <= epsilon;
-}
-
 uint64_t computeRemapSignature(std::span<const uint32_t> remap) {
   uint64_t signature = hashCombine64(kFnvOffsetBasis64, remap.size());
   for (const uint32_t value : remap) {
@@ -872,6 +863,8 @@ OpaqueRenderer::OpaqueRenderer(GPUDevice &gpu, OpaqueRendererConfig config,
       instanceBaseMatrices_(resolveMemoryResource(memory)),
       instanceMatricesCpuCache_(resolveMemoryResource(memory)),
       instanceLodCentersInvRadiusSq_(resolveMemoryResource(memory)),
+      instanceAutoLodWorldErrors_(resolveMemoryResource(memory)),
+      instanceAutoLodCounts_(resolveMemoryResource(memory)),
       materialTextureAccessHandles_(resolveMemoryResource(memory)),
       instanceAutoLodLevels_(resolveMemoryResource(memory)),
       instanceTessSelection_(resolveMemoryResource(memory)),
@@ -1150,6 +1143,8 @@ void OpaqueRenderer::onDetach() {
   velocityGeometryCpuCache_.clear();
   instanceMatricesUploadVersions_.clear();
   instanceLodCentersInvRadiusSq_.clear();
+  instanceAutoLodWorldErrors_.clear();
+  instanceAutoLodCounts_.clear();
   materialTextureAccessHandles_.clear();
   instanceAutoLodLevels_.clear();
   instanceTessSelection_.clear();
@@ -1274,7 +1269,7 @@ void OpaqueRenderer::onDetach() {
       std::numeric_limits<uint64_t>::max();
   instanceStaticBuffersDirty_ = true;
   uniformSingleSubmeshPath_ = false;
-  invalidateAutoLodCache();
+  invalidateAutoLodHistory();
   invalidateSingleInstanceBatchCache();
   invalidateIndirectPackCache();
   cachedRemapSignature_ = kInvalidDrawSignature;
@@ -2282,8 +2277,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   const bool transformDirty =
       topologyDirty ||
       cachedTransformVersion_ != frame.scene->transformVersion();
-  if (topologyDirty || transformDirty) {
-    invalidateAutoLodCache();
+  if (topologyDirty) {
+    invalidateAutoLodHistory();
   }
 
   const size_t instanceCount = renderableTemplates_.size();
@@ -2304,10 +2299,14 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     instanceBaseMatrices_.clear();
     instanceMatricesCpuCache_.clear();
     instanceLodCentersInvRadiusSq_.clear();
+    instanceAutoLodWorldErrors_.clear();
+    instanceAutoLodCounts_.clear();
     instanceCentersPhase_.reserve(instanceCount);
     instanceBaseMatrices_.reserve(instanceCount);
     instanceMatricesCpuCache_.reserve(instanceCount);
     instanceLodCentersInvRadiusSq_.reserve(instanceCount);
+    instanceAutoLodWorldErrors_.reserve(instanceCount);
+    instanceAutoLodCounts_.reserve(instanceCount);
 
     const bool animateInstances = settings.opaque.enableInstanceAnimation;
     for (size_t i = 0; i < instanceCount; ++i) {
@@ -2336,11 +2335,27 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
           kBoundsRadiusHalf * glm::length(bounds.getSize());
       const glm::vec3 worldCenter =
           glm::vec3(renderable->modelMatrix * glm::vec4(localCenter, 1.0f));
-      const float worldRadius = std::max(
-          localRadius * maxAxisScale(renderable->modelMatrix), kMinLodRadius);
+      const float worldScale = maxAxisScale(renderable->modelMatrix);
+      const float worldRadius =
+          std::max(localRadius * worldScale, kMinLodRadius);
       const float invRadiusSq = 1.0f / (worldRadius * worldRadius);
       instanceLodCentersInvRadiusSq_.push_back(
           glm::vec4(worldCenter, invRadiusSq));
+
+      glm::vec4 worldErrors(0.0f);
+      uint32_t availableLodCount = 1u;
+      for (const Submesh &submesh : model->submeshes()) {
+        const uint32_t stableLodCount = std::min(
+            submesh.lodCount, detail::kMaxStableGeneratedOpaqueLod + 1u);
+        availableLodCount = std::max(availableLodCount, stableLodCount);
+        for (uint32_t lod = 1u; lod < stableLodCount; ++lod) {
+          worldErrors[lod] =
+              std::max(worldErrors[lod],
+                       std::max(submesh.lods[lod].error, 0.0f) * worldScale);
+        }
+      }
+      instanceAutoLodWorldErrors_.push_back(worldErrors);
+      instanceAutoLodCounts_.push_back(static_cast<uint8_t>(availableLodCount));
     }
 
     cachedTransformVersion_ = frame.scene->transformVersion();
@@ -2944,9 +2959,9 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   const MeshletRenderMode meshletMode = settings.opaque.meshletMode;
   const bool meshletRequested = meshletMode != MeshletRenderMode::Disabled;
   const bool meshletRequired = meshletMode == MeshletRenderMode::Required;
-  const bool meshletUsesGpuLod = detail::shouldUseGpuMeshletLod(
-      meshletRequested, settings.opaque.enableMeshLod,
-      settings.opaque.forcedMeshLod, settings.opaque.enableInstanceCompute);
+  // LOD selection is CPU-owned for both indexed and meshlet routes so route
+  // changes cannot select different geometry for the same frame.
+  constexpr bool meshletUsesGpuLod = false;
   frame.metrics.opaque.meshletModeRequired = meshletRequired ? 1u : 0u;
   const bool wireOverlayRequested =
       debugVisualization == OpaqueDebugVisualization::WireframeOverlay;
@@ -3206,18 +3221,9 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       }
     }
   }
-  if (settings.opaque.meshLodDistanceThresholds !=
-      cachedMeshLodThresholdsInput_) {
-    cachedMeshLodThresholdsInput_ = settings.opaque.meshLodDistanceThresholds;
-    cachedSortedLodThresholds_ = {
-        settings.opaque.meshLodDistanceThresholds.x,
-        settings.opaque.meshLodDistanceThresholds.y,
-        settings.opaque.meshLodDistanceThresholds.z,
-    };
-    std::sort(cachedSortedLodThresholds_.begin(),
-              cachedSortedLodThresholds_.end());
-  }
-  const std::array<float, 3> &sortedLodThresholds = cachedSortedLodThresholds_;
+  // Retained only for the dormant shader-side LOD fields. CPU-owned LOD uses
+  // simplification error below and never sets the GPU LOD flag.
+  constexpr std::array<float, 3> sortedLodThresholds{0.0f, 0.0f, 0.0f};
   const glm::vec3 cameraPosition = glm::vec3(frame.camera.cameraPos);
   const bool useAutoLod = settings.opaque.enableMeshLod &&
                           settings.opaque.forcedMeshLod < 0 &&
@@ -3230,44 +3236,98 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       settings.opaque.forcedMeshLod < 0
           ? 0u
           : static_cast<uint32_t>(settings.opaque.forcedMeshLod);
-  if (useAutoLod && !canUseUniformAutoLodFastPath) {
+  if (useAutoLod) {
     NURI_PROFILER_ZONE("OpaqueRenderer.auto_lod_resolve",
                        NURI_PROFILER_COLOR_CMD_DRAW);
-    if (instanceLodCentersInvRadiusSq_.size() != renderableTemplates_.size()) {
+    if (instanceLodCentersInvRadiusSq_.size() != instanceCount ||
+        instanceAutoLodWorldErrors_.size() != instanceCount ||
+        instanceAutoLodCounts_.size() != instanceCount) {
       return Result<bool, std::string>::makeError(
           "OpaqueRenderer::buildOpaquePasses: LOD cache size mismatch");
     }
 
-    instanceAutoLodLevels_.clear();
-    instanceAutoLodLevels_.resize(renderableTemplates_.size(), 0u);
-    const float lodThreshold0Sq =
-        sortedLodThresholds[0] * sortedLodThresholds[0];
-    const float lodThreshold1Sq =
-        sortedLodThresholds[1] * sortedLodThresholds[1];
-    const float lodThreshold2Sq =
-        sortedLodThresholds[2] * sortedLodThresholds[2];
-    const float cameraX = cameraPosition.x;
-    const float cameraY = cameraPosition.y;
-    const float cameraZ = cameraPosition.z;
-    for (size_t i = 0; i < instanceLodCentersInvRadiusSq_.size(); ++i) {
-      const glm::vec4 lodCache = instanceLodCentersInvRadiusSq_[i];
-      const float dx = cameraX - lodCache.x;
-      const float dy = cameraY - lodCache.y;
-      const float dz = cameraZ - lodCache.z;
-      const float normalizedDistanceSq =
-          (dx * dx + dy * dy + dz * dz) * lodCache.w;
-
-      uint32_t lodIndex = 0;
-      if (normalizedDistanceSq >= lodThreshold2Sq) {
-        lodIndex = 3;
-      } else if (normalizedDistanceSq >= lodThreshold1Sq) {
-        lodIndex = 2;
-      } else if (normalizedDistanceSq >= lodThreshold0Sq) {
-        lodIndex = 1;
-      }
-      instanceAutoLodLevels_[i] = lodIndex;
+    const float targetPixelError =
+        std::max(settings.opaque.meshLodTargetPixelError, 1.0e-3f);
+    const float hysteresisRatio =
+        std::clamp(settings.opaque.meshLodHysteresisRatio, 0.0f, 0.95f);
+    const float projectionScaleY =
+        std::abs(frame.camera.currentUnjitteredProj[1][1]);
+    const bool cameraCut = frame.camera.historyResetReason ==
+                           TemporalHistoryResetReason::CameraCut;
+    bool historyReset =
+        !autoLodHistoryValid_ || !autoLodWasActive_ ||
+        instanceAutoLodLevels_.size() != instanceCount ||
+        cachedAutoLodTargetPixelError_ != targetPixelError ||
+        cachedAutoLodHysteresisRatio_ != hysteresisRatio ||
+        cachedAutoLodProjectionScaleY_ != projectionScaleY ||
+        cachedAutoLodNearPlane_ != frame.camera.nearPlane ||
+        cachedAutoLodRenderExtent_ != frame.camera.renderExtent ||
+        cachedAutoLodProjectionType_ != frame.camera.projectionType ||
+        cameraCut;
+    if (instanceAutoLodLevels_.size() != instanceCount) {
+      instanceAutoLodLevels_.assign(instanceCount, 0u);
     }
+
+    const float pixelScaleY =
+        0.5f * static_cast<float>(std::max(frame.camera.renderExtent.y, 1u)) *
+        projectionScaleY;
+    const bool orthographic =
+        frame.camera.projectionType == ProjectionType::Orthographic;
+    uint64_t transitionCount = 0u;
+    uint64_t lod0Count = 0u;
+    uint64_t lod1Count = 0u;
+    for (size_t i = 0; i < instanceCount; ++i) {
+      const glm::vec4 lodBounds = instanceLodCentersInvRadiusSq_[i];
+      const glm::vec4 viewCenter =
+          frame.camera.view * glm::vec4(glm::vec3(lodBounds), 1.0f);
+      const float worldRadius =
+          lodBounds.w > 0.0f ? 1.0f / std::sqrt(lodBounds.w) : kMinLodRadius;
+      const float nearestDepth =
+          orthographic
+              ? 1.0f
+              : std::max(-viewCenter.z - worldRadius, frame.camera.nearPlane);
+      const detail::OpaqueLodProjection projection{
+          .pixelScaleY = pixelScaleY,
+          .nearestDepth = nearestDepth,
+          .orthographic = orthographic,
+      };
+      const glm::vec4 worldErrors = instanceAutoLodWorldErrors_[i];
+      const std::array<float, Submesh::kMaxLodCount> errors{
+          worldErrors.x, worldErrors.y, worldErrors.z, worldErrors.w};
+      const uint32_t lodCount = std::clamp<uint32_t>(instanceAutoLodCounts_[i],
+                                                     1u, Submesh::kMaxLodCount);
+      const uint32_t previousLod = instanceAutoLodLevels_[i];
+      const uint32_t selectedLod = detail::selectOpaqueLod(
+          std::span<const float>(errors.data(), lodCount), targetPixelError,
+          hysteresisRatio, projection,
+          historyReset ? std::nullopt : std::optional<uint32_t>(previousLod));
+      instanceAutoLodLevels_[i] = selectedLod;
+      if (!historyReset && selectedLod != previousLod) {
+        ++transitionCount;
+      }
+      if (selectedLod == 0u) {
+        ++lod0Count;
+      } else if (selectedLod == 1u) {
+        ++lod1Count;
+      }
+    }
+
+    autoLodHistoryValid_ = true;
+    autoLodWasActive_ = true;
+    cachedAutoLodTargetPixelError_ = targetPixelError;
+    cachedAutoLodHysteresisRatio_ = hysteresisRatio;
+    cachedAutoLodProjectionScaleY_ = projectionScaleY;
+    cachedAutoLodNearPlane_ = frame.camera.nearPlane;
+    cachedAutoLodRenderExtent_ = frame.camera.renderExtent;
+    cachedAutoLodProjectionType_ = frame.camera.projectionType;
+    frame.metrics.opaque.autoLodActive = 1u;
+    frame.metrics.opaque.autoLodHistoryReset = historyReset ? 1u : 0u;
+    frame.metrics.opaque.autoLodTransitions = saturateToU32(transitionCount);
+    frame.metrics.opaque.autoLodLod0Instances = saturateToU32(lod0Count);
+    frame.metrics.opaque.autoLodLod1Instances = saturateToU32(lod1Count);
     NURI_PROFILER_ZONE_END();
+  } else {
+    autoLodWasActive_ = false;
   }
   const auto refreshTemplateGeometry =
       [this](MeshDrawTemplate &templateEntry) -> Result<bool, std::string> {
@@ -3418,7 +3478,6 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   }
   bool usedUniformFastPath = false;
   bool usedUniformAutoLodFastPath = false;
-  bool reusedUniformAutoLodFastPath = false;
   bool usedUniformAutoLodTessSplit = false;
   std::array<size_t, Submesh::kMaxLodCount> autoLodBucketStarts{};
   std::array<size_t, Submesh::kMaxLodCount> autoLodBucketWrites{};
@@ -3426,7 +3485,6 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   size_t autoLodTessBucketStart = 0;
   size_t autoLodTessBucketWrite = 0;
   size_t autoLodTessBucketCount = 0;
-  const Submesh *activeFastAutoLodSubmesh = nullptr;
   size_t remapCount = 0;
   uint64_t remapSignature = kInvalidDrawSignature;
   bool remapSignatureValid = false;
@@ -3539,128 +3597,68 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
 
     const Submesh &submesh = *templateEntry.submesh;
     const uint32_t submeshMeshletMaxCount = maxMeshletCountForSubmesh(submesh);
-    activeFastAutoLodSubmesh = &submesh;
+    if (instanceLodCentersInvRadiusSq_.size() != instanceCount ||
+        instanceAutoLodLevels_.size() != instanceCount) {
+      return Result<bool, std::string>::makeError(
+          "OpaqueRenderer::buildOpaquePasses: auto-LOD cache size mismatch");
+    }
+    if (tessellationRequested) {
+      instanceTessSelection_.assign(instanceCount, 0u);
+      tessCandidates_.clear();
+      tessCandidates_.reserve(instanceCount);
+    }
 
-    const bool canTemporallyReuseFastAutoLod =
-        instanceCount >= kAutoLodTemporalReuseMinInstances &&
-        autoLodCache_.frameIndex != std::numeric_limits<uint64_t>::max() &&
-        frame.frameIndex > autoLodCache_.frameIndex &&
-        (frame.frameIndex - autoLodCache_.frameIndex) <
-            kAutoLodTemporalReuseFrameInterval;
-    const bool cameraStableForReuse = nearlyEqualVec3(
-        autoLodCache_.cameraPos, cameraPosition, kAutoLodCameraReuseEpsilon);
-    const bool canReuseFastAutoLodCache =
-        !tessellationRequested && autoLodCache_.valid &&
-        autoLodCache_.submesh == &submesh &&
-        autoLodCache_.instanceCount == instanceCount &&
-        autoLodCache_.remapCount == instanceRemap_.size() &&
-        (cameraStableForReuse || canTemporallyReuseFastAutoLod) &&
-        nearlyEqualThresholds(autoLodCache_.thresholds, sortedLodThresholds,
-                              kAutoLodThresholdReuseEpsilon);
-
-    if (canReuseFastAutoLodCache) {
-      autoLodBucketCounts = autoLodCache_.bucketCounts;
-      remapCount = autoLodCache_.remapCount;
-      reusedUniformAutoLodFastPath = true;
-    } else {
-      if (instanceLodCentersInvRadiusSq_.size() != instanceCount) {
-        return Result<bool, std::string>::makeError(
-            "OpaqueRenderer::buildOpaquePasses: auto-LOD cache size "
-            "mismatch");
-      }
-      instanceAutoLodLevels_.clear();
-      instanceAutoLodLevels_.resize(instanceCount, 0u);
-      if (tessellationRequested) {
-        instanceTessSelection_.clear();
-        instanceTessSelection_.resize(instanceCount, 0u);
-        tessCandidates_.clear();
-        // We gather all near LOD0 candidates before applying the cap.
-        tessCandidates_.reserve(instanceCount);
+    for (size_t i = 0; i < instanceCount; ++i) {
+      uint32_t requestedLod = detail::resolveOpaqueAutomaticLod(
+          instanceAutoLodLevels_[i], templateEntry.alphaMasked, true);
+      const auto resolvedLod = resolveAvailableLod(submesh, requestedLod);
+      if (!resolvedLod) {
+        continue;
       }
 
-      const std::array<float, 3> squaredLodThresholds{
-          sortedLodThresholds[0] * sortedLodThresholds[0],
-          sortedLodThresholds[1] * sortedLodThresholds[1],
-          sortedLodThresholds[2] * sortedLodThresholds[2],
-      };
-      const float cameraX = cameraPosition.x;
-      const float cameraY = cameraPosition.y;
-      const float cameraZ = cameraPosition.z;
-
-      std::array<uint32_t, Submesh::kMaxLodCount> resolvedLodByRequested{};
-      std::array<uint8_t, Submesh::kMaxLodCount> hasResolvedLod{};
-      for (uint32_t lod = 0; lod < Submesh::kMaxLodCount; ++lod) {
-        const auto resolved = resolveAvailableLod(submesh, lod);
-        if (resolved) {
-          resolvedLodByRequested[lod] = *resolved;
-          hasResolvedLod[lod] = 1u;
-        }
-      }
-
-      for (size_t i = 0; i < instanceCount; ++i) {
-        const glm::vec4 lodCache = instanceLodCentersInvRadiusSq_[i];
-        const float dx = cameraX - lodCache.x;
-        const float dy = cameraY - lodCache.y;
-        const float dz = cameraZ - lodCache.z;
-        const float worldDistanceSq = dx * dx + dy * dy + dz * dz;
-        const float normalizedDistanceSq = worldDistanceSq * lodCache.w;
-
-        uint32_t requestedLod = 0;
-        if (normalizedDistanceSq >= squaredLodThresholds[2]) {
-          requestedLod = 3;
-        } else if (normalizedDistanceSq >= squaredLodThresholds[1]) {
-          requestedLod = 2;
-        } else if (normalizedDistanceSq >= squaredLodThresholds[0]) {
-          requestedLod = 1;
-        }
-        requestedLod = detail::resolveOpaqueAutomaticLod(
-            requestedLod, templateEntry.alphaMasked, true);
-
-        if (hasResolvedLod[requestedLod] == 0u) {
-          continue;
-        }
-
-        const uint32_t resolvedLod = resolvedLodByRequested[requestedLod];
-        instanceAutoLodLevels_[i] = resolvedLod;
-        ++autoLodBucketCounts[resolvedLod];
-        ++remapCount;
-        if (tessellationRequested && resolvedLod == 0 &&
-            worldDistanceSq <= tessFarDistanceSq) {
+      instanceAutoLodLevels_[i] = *resolvedLod;
+      ++autoLodBucketCounts[*resolvedLod];
+      ++remapCount;
+      if (tessellationRequested && *resolvedLod == 0u) {
+        const glm::vec3 delta =
+            cameraPosition - glm::vec3(instanceLodCentersInvRadiusSq_[i]);
+        const float worldDistanceSq = glm::dot(delta, delta);
+        if (worldDistanceSq <= tessFarDistanceSq) {
           tessCandidates_.push_back(TessCandidate{
               .distanceSq = worldDistanceSq,
               .instanceId = static_cast<uint32_t>(i),
           });
         }
       }
-      if (tessellationRequested && !tessCandidates_.empty()) {
-        const auto candidateCloser = [](const TessCandidate &a,
-                                        const TessCandidate &b) {
-          if (a.distanceSq != b.distanceSq) {
-            return a.distanceSq < b.distanceSq;
-          }
-          return a.instanceId < b.instanceId;
-        };
-        const size_t cappedTessCount =
-            std::min(tessInstanceCap, tessCandidates_.size());
-        if (cappedTessCount < tessCandidates_.size()) {
-          std::nth_element(tessCandidates_.begin(),
-                           tessCandidates_.begin() + cappedTessCount,
-                           tessCandidates_.end(), candidateCloser);
+    }
+    if (tessellationRequested && !tessCandidates_.empty()) {
+      const auto candidateCloser = [](const TessCandidate &a,
+                                      const TessCandidate &b) {
+        if (a.distanceSq != b.distanceSq) {
+          return a.distanceSq < b.distanceSq;
         }
+        return a.instanceId < b.instanceId;
+      };
+      const size_t cappedTessCount =
+          std::min(tessInstanceCap, tessCandidates_.size());
+      if (cappedTessCount < tessCandidates_.size()) {
+        std::nth_element(tessCandidates_.begin(),
+                         tessCandidates_.begin() + cappedTessCount,
+                         tessCandidates_.end(), candidateCloser);
+      }
 
-        autoLodTessBucketCount = cappedTessCount;
-        for (size_t i = 0; i < cappedTessCount; ++i) {
-          const uint32_t instanceId = tessCandidates_[i].instanceId;
-          if (instanceId >= instanceTessSelection_.size()) {
-            continue;
-          }
-          instanceTessSelection_[instanceId] = 1u;
+      autoLodTessBucketCount = cappedTessCount;
+      for (size_t i = 0; i < cappedTessCount; ++i) {
+        const uint32_t instanceId = tessCandidates_[i].instanceId;
+        if (instanceId >= instanceTessSelection_.size()) {
+          continue;
         }
-        if (autoLodBucketCounts[0] >= autoLodTessBucketCount) {
-          autoLodBucketCounts[0] -= autoLodTessBucketCount;
-        } else {
-          autoLodBucketCounts[0] = 0;
-        }
+        instanceTessSelection_[instanceId] = 1u;
+      }
+      if (autoLodBucketCounts[0] >= autoLodTessBucketCount) {
+        autoLodBucketCounts[0] -= autoLodTessBucketCount;
+      } else {
+        autoLodBucketCounts[0] = 0;
       }
     }
 
@@ -3757,9 +3755,10 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   }
 
   const bool isSingleRenderableInstance = instanceCount == 1;
-  if (!cpuMainCullingEnabled && !meshletRequested && !reusedStaticBatchCache &&
-      !usedUniformFastPath && isSingleRenderableInstance &&
-      !meshDrawTemplates_.empty() && !uniformSingleSubmeshPath_) {
+  if (!useAutoLod && !cpuMainCullingEnabled && !meshletRequested &&
+      !reusedStaticBatchCache && !usedUniformFastPath &&
+      isSingleRenderableInstance && !meshDrawTemplates_.empty() &&
+      !uniformSingleSubmeshPath_) {
     NURI_PROFILER_ZONE("OpaqueRenderer.batch_build_single_instance_cache",
                        NURI_PROFILER_COLOR_CMD_DRAW);
 
@@ -4108,9 +4107,6 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   if (!reusedStaticBatchCache) {
     NURI_PROFILER_ZONE("OpaqueRenderer.draw_list_emit",
                        NURI_PROFILER_COLOR_CMD_DRAW);
-    const bool shouldReuseFastAutoLodRemap =
-        usedUniformAutoLodFastPath && reusedUniformAutoLodFastPath;
-    const bool shouldBuildRemap = !shouldReuseFastAutoLodRemap;
     const bool useCachedSingleInstanceBatches =
         activeSingleInstanceCache != nullptr;
     const size_t batchCount = useCachedSingleInstanceBatches
@@ -4123,7 +4119,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
 
     const bool singleRenderableInstance = instanceCount == 1;
     const bool needsBatchWriteOffsets =
-        shouldBuildRemap && !singleRenderableInstance && !usedUniformFastPath;
+        !singleRenderableInstance && !usedUniformFastPath;
     if (needsBatchWriteOffsets) {
       batchWriteOffsets_.resize(batchCount);
     }
@@ -4161,18 +4157,11 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         firstInstance += batch.instanceCount;
       }
     }
-    if (shouldBuildRemap) {
-      if (instanceRemap_.size() != remapCount) {
-        instanceRemap_.resize(remapCount);
-      }
-    } else if (instanceRemap_.size() != remapCount) {
-      return Result<bool, std::string>::makeError(
-          "OpaqueRenderer::buildOpaquePasses: auto-LOD remap reuse mismatch");
+    if (instanceRemap_.size() != remapCount) {
+      instanceRemap_.resize(remapCount);
     }
-    if (shouldBuildRemap) {
-      remapSignature = hashCombine64(kFnvOffsetBasis64, remapCount);
-      remapSignatureValid = true;
-    }
+    remapSignature = hashCombine64(kFnvOffsetBasis64, remapCount);
+    remapSignatureValid = true;
 
     const auto writeRemapEntry =
         [this,
@@ -4192,7 +4181,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       return Result<bool, std::string>::makeResult(true);
     };
 
-    if (shouldBuildRemap && usedUniformAutoLodFastPath) {
+    if (usedUniformAutoLodFastPath) {
       for (uint32_t lod = 0; lod < Submesh::kMaxLodCount; ++lod) {
         autoLodBucketWrites[lod] = autoLodBucketStarts[lod];
       }
@@ -4232,12 +4221,12 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
               hashCombine64(remapSignature, static_cast<uint64_t>(instanceId));
         }
       }
-    } else if (shouldBuildRemap && singleRenderableInstance) {
+    } else if (singleRenderableInstance) {
       for (size_t i = 0; i < instanceRemap_.size(); ++i) {
         instanceRemap_[i] = 0u;
         remapSignature = hashCombine64(remapSignature, 0u);
       }
-    } else if (shouldBuildRemap && usedUniformFastPath) {
+    } else if (usedUniformFastPath) {
       for (uint32_t instanceId = 0; instanceId < instanceCount; ++instanceId) {
         auto writeResult = writeRemapEntry(instanceId, instanceId);
         if (writeResult.hasError()) {
@@ -4246,7 +4235,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         remapSignature =
             hashCombine64(remapSignature, static_cast<uint64_t>(instanceId));
       }
-    } else if (shouldBuildRemap) {
+    } else {
       const size_t remapTemplateCount = cpuMainCullingEnabled
                                             ? visibleMainTemplateIndices.size()
                                             : meshDrawTemplates_.size();
@@ -4272,13 +4261,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
             hashCombine64(remapSignature, static_cast<uint64_t>(instanceId));
       }
     }
-    if (shouldBuildRemap) {
-      cachedRemapSignature_ = remapSignature;
-      cachedRemapSignatureValid_ = true;
-    } else if (cachedRemapSignatureValid_) {
-      remapSignature = cachedRemapSignature_;
-      remapSignatureValid = true;
-    }
+    cachedRemapSignature_ = remapSignature;
+    cachedRemapSignatureValid_ = true;
 
     if (settings.opaque.enableIndirectDraw) {
       indirectDrawSignature = hashCombine64(kFnvOffsetBasis64, batchCount);
@@ -4560,14 +4544,6 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       }
     }
     NURI_PROFILER_ZONE_END();
-  }
-
-  if (usedUniformAutoLodFastPath && !tessellationRequested) {
-    updateFastAutoLodCache(activeFastAutoLodSubmesh, cameraPosition,
-                           sortedLodThresholds, autoLodBucketCounts, remapCount,
-                           instanceCount, frame.frameIndex);
-  } else {
-    invalidateAutoLodCache();
   }
 
   const uint64_t instanceRemapAddress = gpu_.getBufferDeviceAddress(
@@ -5165,6 +5141,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     meshletMainSourceMask.resize(drawItems_.size(), 1u);
     passDrawItems_.clear();
     uint64_t classicInstanceCount = 0u;
+    uint64_t coverageClassicInstanceCount = 0u;
     uint64_t meshletInstanceCount = 0u;
 
     for (size_t i = 0; i < drawItems_.size(); ++i) {
@@ -5174,7 +5151,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
                                     info.meshletCount != 0u &&
                                     info.meshletMaxCount != 0u;
       const bool useMeshlets = detail::shouldUseMeshletsForOpaqueBatch(
-          meshletMode, true, meshletDataValid, info.meshletCount,
+          meshletMode, true, info.alphaMasked, info.doubleSided,
+          meshletDataValid, info.meshletCount,
           settings.opaque.hybridClassicMaxMeshlets);
       meshletMainSourceMask[i] = useMeshlets ? 1u : 0u;
       if (useMeshlets) {
@@ -5184,6 +5162,10 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       }
       ++frame.metrics.opaque.meshletHybridClassicBatches;
       classicInstanceCount += source.instanceCount;
+      if (info.alphaMasked || info.doubleSided) {
+        ++frame.metrics.opaque.meshletHybridCoverageClassicBatches;
+        coverageClassicInstanceCount += source.instanceCount;
+      }
     }
 
     passDrawItems_.reserve(drawItems_.size());
@@ -5201,6 +5183,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
 
     frame.metrics.opaque.meshletHybridClassicInstances =
         saturateToU32(classicInstanceCount);
+    frame.metrics.opaque.meshletHybridCoverageClassicInstances =
+        saturateToU32(coverageClassicInstanceCount);
     frame.metrics.opaque.meshletHybridMeshletInstances =
         saturateToU32(meshletInstanceCount);
     meshletHybridRoutingActive =
@@ -13450,13 +13434,9 @@ void OpaqueRenderer::resetOverlayPipelineState() {
   baseMeshWireframeDraw_ = {};
 }
 
-void OpaqueRenderer::invalidateAutoLodCache() {
-  autoLodCache_.valid = false;
-  autoLodCache_.remapCount = 0;
-  autoLodCache_.instanceCount = 0;
-  autoLodCache_.submesh = nullptr;
-  autoLodCache_.frameIndex = std::numeric_limits<uint64_t>::max();
-  autoLodCache_.bucketCounts.fill(0);
+void OpaqueRenderer::invalidateAutoLodHistory() {
+  autoLodHistoryValid_ = false;
+  autoLodWasActive_ = false;
 }
 
 void OpaqueRenderer::invalidateStaticBatchCache() {
@@ -13703,26 +13683,6 @@ void OpaqueRenderer::resetMeshPipelineState() {
   depthMotionVectorPipelineHandle_ = {};
   depthMotionVectorDrawItem_ = {};
   baseMeshFillDraw_ = {};
-}
-
-void OpaqueRenderer::updateFastAutoLodCache(
-    const Submesh *submesh, const glm::vec3 &cameraPosition,
-    const std::array<float, 3> &sortedLodThresholds,
-    const std::array<size_t, Submesh::kMaxLodCount> &bucketCounts,
-    size_t remapCount, size_t instanceCount, uint64_t frameIndex) {
-  if (submesh == nullptr) {
-    invalidateAutoLodCache();
-    return;
-  }
-
-  autoLodCache_.valid = true;
-  autoLodCache_.cameraPos = cameraPosition;
-  autoLodCache_.thresholds = sortedLodThresholds;
-  autoLodCache_.bucketCounts = bucketCounts;
-  autoLodCache_.remapCount = remapCount;
-  autoLodCache_.instanceCount = instanceCount;
-  autoLodCache_.submesh = submesh;
-  autoLodCache_.frameIndex = frameIndex;
 }
 
 void OpaqueRenderer::destroyDepthPyramidTextures() {

@@ -1,0 +1,121 @@
+{
+  "schemaVersion": 1,
+  "id": "stress.niagara_bistro.opaque_auto_lod_rapid_full_route",
+  "suite": "stress",
+  "description": "Wide Bistro route joining the cafe, arch, street, and outer approaches with rapid turns; validates shared screen-error LOD and hybrid coverage routing",
+  "scene": {
+    "kind": "prefab", "pathBase": "modelsRoot", "path": "NiagaraBistro/bistrox.gltf",
+    "importOptions": {"mesh": {"generateMeshlets": true, "meshletMaxVertices": 64, "meshletMaxPrimitives": 124, "meshletConeWeight": 0.0}}
+  },
+  "environment": {
+    "cubemap": {"pathBase": "texturesRoot", "path": "qwantani_moon_noon_puresky_4k.hdr", "kind": "EquirectHdrCubemap", "debugName": "tool_qwantani_cubemap", "required": true},
+    "irradiance": {"pathBase": "texturesRoot", "path": "qwantani_moon_noon_puresky_4k_irradiance.ktx2", "kind": "Ktx2Cubemap", "debugName": "tool_qwantani_irradiance"},
+    "prefilteredGgx": {"pathBase": "texturesRoot", "path": "qwantani_moon_noon_puresky_4k_prefilter_ggx.ktx2", "kind": "Ktx2Cubemap", "debugName": "tool_qwantani_prefilter_ggx"},
+    "prefilteredCharlie": {"pathBase": "texturesRoot", "path": "qwantani_moon_noon_puresky_4k_prefilter_charlie.ktx2", "kind": "Ktx2Cubemap", "debugName": "tool_qwantani_prefilter_charlie"},
+    "brdfLut": {"pathBase": "texturesRoot", "path": "brdf_lut.ktx2", "kind": "Ktx2Texture2D", "debugName": "tool_brdf_lut"}
+  },
+  "backend": "nvrhi",
+  "resolution": [1280, 720],
+  "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 24,
+  "endFrame": 359,
+  "authoritative": false,
+  "presentMode": "immediate",
+  "windowMode": "visible",
+  "renderGraph": {"workerCount": 1, "parallelCompile": false, "parallelRecording": false},
+  "camera": {"position": [-42.0, 6.0, -10.0], "target": [-20.0, 3.0, 12.0], "verticalFovDegrees": 60.0, "nearPlane": 0.05, "farPlane": 500.0},
+  "settings": {
+    "opaque": {
+      "enabled": true, "meshletMode": "Opportunistic", "hybridClassicMaxMeshlets": 96,
+      "enableMeshletFrustumCulling": true, "enableMeshletConeCulling": true,
+      "enableDepthPrepass": true, "enableDepthPyramid": true,
+      "enableInstanceCompute": false, "enableInstanceAnimation": false,
+      "enableMeshLod": true, "meshLodTargetPixelError": 1.0,
+      "meshLodHysteresisRatio": 0.25, "enableTessellation": false,
+      "forcedMeshLod": -1
+    },
+    "visibility": {
+      "mainViewMode": "GpuDriven", "occlusionMode": "CurrentFrameHiZExperimental",
+      "enableMeshletFrustumCulling": true, "enableMeshletConeCulling": true,
+      "enableIndirectMeshDispatch": true, "enableMeshletPreTaskCompaction": false,
+      "visibleOnUncertain": true
+    },
+    "antiAliasing": {"mode": "None"},
+    "ambientOcclusion": {"mode": "Disabled"},
+    "shadow": {"enabled": false},
+    "hdrPostProcess": {"bloomEnabled": false, "adaptationEnabled": false},
+    "transmission": {"enabled": false},
+    "transparent": {"enabled": false},
+    "textureFiltering": {"mode": "Anisotropic", "anisotropy": 8}
+  },
+  "timeline": {"cameraPaths": [{
+    "id": "bistro_full_rapid_route", "startFrame": 0, "endFrame": 359, "interpolation": "linear",
+    "keyframes": [
+      {"frame": 0, "position": [-42.0, 6.0, -10.0], "target": [-20.0, 3.0, 12.0]},
+      {"frame": 24, "position": [-12.0, 6.0, 18.0], "target": [-40.0, 2.0, -12.0]},
+      {"frame": 40, "position": [-28.5, 6.5, 4.5], "target": [-54.49, 6.5, -20.41]},
+      {"frame": 56, "position": [-15.0, 8.0, -8.0], "target": [-38.0, 2.0, 16.0]},
+      {"frame": 72, "position": [-42.0, 5.0, 17.0], "target": [-12.0, 4.0, -9.0]},
+      {"frame": 88, "position": [-24.5, 6.25, 3.0], "target": [-48.76, 6.25, 28.23]},
+      {"frame": 104, "position": [-3.0, 2.2, 24.8], "target": [16.34, 2.2, 29.90]},
+      {"frame": 120, "position": [22.0, 7.0, 31.0], "target": [2.8, 4.1, 26.3]},
+      {"frame": 136, "position": [8.6, 2.2, 27.8], "target": [-10.74, 2.2, 22.70]},
+      {"frame": 152, "position": [-14.55, 4.1, 15.1], "target": [-19.65, 4.1, 34.44]},
+      {"frame": 168, "position": [-40.0, 6.0, -10.0], "target": [-5.0, 4.0, 22.0]},
+      {"frame": 184, "position": [-14.0, 7.0, 12.0], "target": [-43.0, 2.5, -8.0]},
+      {"frame": 200, "position": [-35.0, 5.5, -6.0], "target": [-10.0, 4.0, 18.0]},
+      {"frame": 216, "position": [-20.0, 9.0, 15.0], "target": [-45.0, 1.0, -12.0]},
+      {"frame": 232, "position": [2.8, 2.2, 26.3], "target": [22.14, 2.2, 31.40]},
+      {"frame": 248, "position": [15.3, 4.6, 29.4], "target": [10.2, 4.6, 48.74]},
+      {"frame": 264, "position": [-3.0, 2.2, 24.8], "target": [-22.34, 2.2, 19.70]},
+      {"frame": 280, "position": [-26.1, 6.0, 5.4], "target": [2.8, 4.1, 26.3]},
+      {"frame": 296, "position": [-12.0, 6.0, 18.0], "target": [-34.0, 2.5, -2.0]},
+      {"frame": 312, "position": [-42.0, 5.0, 17.0], "target": [-12.0, 4.0, -9.0]},
+      {"frame": 328, "position": [22.0, 7.0, 31.0], "target": [-20.0, 3.0, 5.0]},
+      {"frame": 344, "position": [-35.0, 5.5, -6.0], "target": [5.0, 3.0, 30.0]},
+      {"frame": 359, "position": [-42.0, 6.0, -10.0], "target": [-20.0, 3.0, 12.0]}
+    ]
+  }]},
+  "checkpoints": [
+    {
+      "id": "first_wide_turn", "frame": 24,
+      "assertions": [
+        {"id": "meshlet_active", "metric": "renderer.opaque.meshlet_mode_active", "equals": 1},
+        {"id": "auto_lod_active", "metric": "renderer.opaque.auto_lod_active", "equals": 1},
+        {"id": "auto_lod_history_stable", "metric": "renderer.opaque.auto_lod_history_reset", "equals": 0},
+        {"id": "coverage_sensitive_indexed", "metric": "renderer.opaque.meshlet_hybrid_coverage_classic_batches", "greaterOrEqual": 1},
+        {"id": "gtao_disabled", "metric": "renderer.ao.active", "equals": 0},
+        {"id": "shadows_disabled", "metric": "renderer.shadow.total_draws", "equals": 0},
+        {"id": "aa_disabled", "metric": "renderer.aa.taa_resolve_passes", "equals": 0}
+      ]
+    },
+    {"id": "outer_street", "frame": 120, "captures": [{"target": "final_color", "profile": "ldr_color", "required": true, "compare": false}]},
+    {"id": "reverse_arch", "frame": 248, "captures": [{"target": "final_color", "profile": "ldr_color", "required": true, "compare": false}]},
+    {"id": "end", "frame": 359, "assertions": [{"id": "payload_no_overflow", "metric": "renderer.visibility.meshlet_payload_overflow_count", "equals": 0}]}
+  ],
+  "metricWindows": [{
+    "id": "full_rapid_route", "frames": [24, 359],
+    "assertions": [
+      {"id": "meshlet_mode_stays_active", "metric": "renderer.opaque.meshlet_mode_active", "equals": 1},
+      {"id": "auto_lod_stays_active", "metric": "renderer.opaque.auto_lod_active", "equals": 1},
+      {"id": "auto_lod_does_not_reset", "metric": "renderer.opaque.auto_lod_history_reset", "equals": 0},
+      {"id": "lod1_is_exercised", "metric": "renderer.opaque.auto_lod_lod1_instances", "p95Min": 1},
+      {"id": "lod_transition_burst_is_bounded", "metric": "renderer.opaque.auto_lod_transitions", "p95Max": 640},
+      {"id": "coverage_sensitive_batches_stay_indexed", "metric": "renderer.opaque.meshlet_hybrid_coverage_classic_batches", "medianMin": 1},
+      {"id": "gtao_stays_disabled", "metric": "renderer.ao.active", "equals": 0},
+      {"id": "shadows_stay_disabled", "metric": "renderer.shadow.total_draws", "equals": 0},
+      {"id": "aa_stays_disabled", "metric": "renderer.aa.taa_resolve_passes", "equals": 0}
+    ]
+  }],
+  "requirements": {
+    "assets": [
+      "modelsRoot:NiagaraBistro/bistrox.gltf",
+      "texturesRoot:qwantani_moon_noon_puresky_4k.hdr",
+      "texturesRoot:qwantani_moon_noon_puresky_4k_irradiance.ktx2",
+      "texturesRoot:qwantani_moon_noon_puresky_4k_prefilter_ggx.ktx2",
+      "texturesRoot:qwantani_moon_noon_puresky_4k_prefilter_charlie.ktx2",
+      "texturesRoot:brdf_lut.ktx2"
+    ],
+    "backends": ["nvrhi"], "allowVisibleWindow": true
+  }
+}

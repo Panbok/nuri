@@ -53,6 +53,7 @@ namespace {
 
 constexpr uint32_t kMaxGraphicsRecordingContexts = 1u;
 constexpr uint32_t kSwapchainFramesInFlight = 2u;
+constexpr uint32_t kPreferredSwapchainImageCount = 3u;
 constexpr uint32_t kBindlessCapacity = 4096u;
 constexpr uint32_t kMaxNvrhiGpuTimerQueries = 2048u;
 constexpr uint32_t kWholeFrameTimingSlotCount = kSwapchainFramesInFlight + 1u;
@@ -1462,6 +1463,8 @@ struct NvrhiGPUDeviceImpl {
   std::vector<uint64_t> swapchainImageReuseWaitInstances;
   uint32_t semaphoreFrameIndex = 0u;
   uint64_t preparedSwapchainImageWaitInstance = 0u;
+  SwapchainPresentMode requestedPresentMode = SwapchainPresentMode::Mailbox;
+  SwapchainPresentMode activePresentMode = SwapchainPresentMode::Unknown;
 
   nvrhi::vulkan::DeviceHandle nvrhiDevice{};
   nvrhi::CommandListHandle immediateCommandList{};
@@ -1559,68 +1562,9 @@ void flushMappedBufferRange(Impl &impl, BufferResource &buffer, size_t offset,
   }
 }
 
-static constexpr auto kNvrhiTimingScopeDescs =
-    std::to_array<GpuTimingScopeMergeDesc>({
-        {GpuTimingScope::Shadow, &GpuTimingReport::shadowTimeMs,
-         &GpuTimingReport::shadowSourceFrameIndex,
-         gpuTimingScopeToBit(GpuTimingScope::Shadow)},
-        {GpuTimingScope::ShadowDepth, &GpuTimingReport::shadowDepthTimeMs,
-         &GpuTimingReport::shadowDepthSourceFrameIndex,
-         gpuTimingScopeToBit(GpuTimingScope::ShadowDepth)},
-        {GpuTimingScope::ShadowSdsm, &GpuTimingReport::shadowSdsmTimeMs,
-         &GpuTimingReport::shadowSdsmSourceFrameIndex,
-         gpuTimingScopeToBit(GpuTimingScope::ShadowSdsm)},
-        {GpuTimingScope::SceneColorDownsample,
-         &GpuTimingReport::sceneColorDownsampleTimeMs,
-         &GpuTimingReport::sceneColorDownsampleSourceFrameIndex,
-         gpuTimingScopeToBit(GpuTimingScope::SceneColorDownsample)},
-        {GpuTimingScope::Transmission, &GpuTimingReport::transmissionTimeMs,
-         &GpuTimingReport::transmissionSourceFrameIndex,
-         gpuTimingScopeToBit(GpuTimingScope::Transmission)},
-        {GpuTimingScope::TemporalAAResolve,
-         &GpuTimingReport::temporalAAResolveTimeMs,
-         &GpuTimingReport::temporalAAResolveSourceFrameIndex,
-         gpuTimingScopeToBit(GpuTimingScope::TemporalAAResolve)},
-        {GpuTimingScope::TemporalAADebug,
-         &GpuTimingReport::temporalAADebugTimeMs,
-         &GpuTimingReport::temporalAADebugSourceFrameIndex,
-         gpuTimingScopeToBit(GpuTimingScope::TemporalAADebug)},
-        {GpuTimingScope::SpatialAA, &GpuTimingReport::spatialAATimeMs,
-         &GpuTimingReport::spatialAASourceFrameIndex,
-         gpuTimingScopeToBit(GpuTimingScope::SpatialAA)},
-        {GpuTimingScope::Opaque, &GpuTimingReport::opaqueTimeMs,
-         &GpuTimingReport::opaqueSourceFrameIndex,
-         gpuTimingScopeToBit(GpuTimingScope::Opaque)},
-        {GpuTimingScope::MsaaResolve, &GpuTimingReport::msaaResolveTimeMs,
-         &GpuTimingReport::msaaResolveSourceFrameIndex,
-         gpuTimingScopeToBit(GpuTimingScope::MsaaResolve)},
-        {GpuTimingScope::GTAO, &GpuTimingReport::gtaoTimeMs,
-         &GpuTimingReport::gtaoSourceFrameIndex,
-         gpuTimingScopeToBit(GpuTimingScope::GTAO)},
-        {GpuTimingScope::HDRPostProcess, &GpuTimingReport::hdrPostProcessTimeMs,
-         &GpuTimingReport::hdrPostProcessSourceFrameIndex,
-         gpuTimingScopeToBit(GpuTimingScope::HDRPostProcess)},
-        {GpuTimingScope::Skybox, &GpuTimingReport::skyboxTimeMs,
-         &GpuTimingReport::skyboxSourceFrameIndex,
-         gpuTimingScopeToBit(GpuTimingScope::Skybox)},
-        {GpuTimingScope::Velocity, &GpuTimingReport::velocityTimeMs,
-         &GpuTimingReport::velocitySourceFrameIndex,
-         gpuTimingScopeToBit(GpuTimingScope::Velocity)},
-        {GpuTimingScope::ReactiveMask, &GpuTimingReport::reactiveMaskTimeMs,
-         &GpuTimingReport::reactiveMaskSourceFrameIndex,
-         gpuTimingScopeToBit(GpuTimingScope::ReactiveMask)},
-        {GpuTimingScope::TemporalAACopyBack,
-         &GpuTimingReport::temporalAACopyBackTimeMs,
-         &GpuTimingReport::temporalAACopyBackSourceFrameIndex,
-         gpuTimingScopeToBit(GpuTimingScope::TemporalAACopyBack)},
-        {GpuTimingScope::GTAOTemporal, &GpuTimingReport::gtaoTemporalTimeMs,
-         &GpuTimingReport::gtaoTemporalSourceFrameIndex,
-         gpuTimingScopeToBit(GpuTimingScope::GTAOTemporal)},
-    });
-
 void accumulateGpuTimingScope(GpuTimingReport &report, GpuTimingScope scope,
                               float timeMs, uint64_t frameIndex) {
-  for (const GpuTimingScopeMergeDesc desc : kNvrhiTimingScopeDescs) {
+  for (const GpuTimingScopeMergeDesc desc : kGpuTimingScopeDescs) {
     if (desc.scope != scope) {
       continue;
     }
@@ -1805,14 +1749,18 @@ void collectCompletedGpuTimingSubmissions(Impl &impl) {
        readIndex < impl.pendingGpuTimingSubmissions.size(); ++readIndex) {
     PendingGpuTimingSubmission &pending =
         impl.pendingGpuTimingSubmissions[readIndex];
-    bool allQueriesReady =
-        pending.wholeFrameTiming.queryPool == VK_NULL_HANDLE ||
-        pending.submissionInstance <= completedInstance;
-    for (const NvrhiTimingQuery &timingQuery : pending.timingQueries) {
-      if (!timingQuery.query ||
-          !impl.nvrhiDevice->pollTimerQuery(timingQuery.query.Get())) {
-        allQueriesReady = false;
-        break;
+    // Timer-query slots can contain available results from an older owner until
+    // this submission executes its reset commands. Never poll them before the
+    // submission has completed, even when no whole-frame timing slot was
+    // available for this frame.
+    bool allQueriesReady = pending.submissionInstance <= completedInstance;
+    if (allQueriesReady) {
+      for (const NvrhiTimingQuery &timingQuery : pending.timingQueries) {
+        if (!timingQuery.query ||
+            !impl.nvrhiDevice->pollTimerQuery(timingQuery.query.Get())) {
+          allQueriesReady = false;
+          break;
+        }
       }
     }
     if (!allQueriesReady) {
@@ -2685,8 +2633,7 @@ chooseSurfaceFormat(std::span<const VkSurfaceFormatKHR> formats) {
   return formats.empty() ? VkSurfaceFormatKHR{} : formats.front();
 }
 
-[[nodiscard]] VkPresentModeKHR
-choosePresentMode(std::span<const VkPresentModeKHR> modes) {
+[[nodiscard]] SwapchainPresentMode requestedPresentModeFromEnvironment() {
   std::string modeName;
   if (std::optional<std::string> override = readEnvVar("NURI_PRESENT_MODE");
       override.has_value()) {
@@ -2695,10 +2642,50 @@ choosePresentMode(std::span<const VkPresentModeKHR> modes) {
         modeName.begin(), modeName.end(), modeName.begin(),
         [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
   }
-  const VkPresentModeKHR requested =
-      modeName == "immediate" ? VK_PRESENT_MODE_IMMEDIATE_KHR
-      : modeName == "mailbox" ? VK_PRESENT_MODE_MAILBOX_KHR
-                              : VK_PRESENT_MODE_FIFO_KHR;
+  if (modeName == "immediate") {
+    return SwapchainPresentMode::Immediate;
+  }
+  if (modeName == "mailbox") {
+    return SwapchainPresentMode::Mailbox;
+  }
+  if (modeName.empty() || modeName == "default") {
+    return SwapchainPresentMode::Mailbox;
+  }
+  return SwapchainPresentMode::Fifo;
+}
+
+[[nodiscard]] VkPresentModeKHR
+toVkPresentMode(SwapchainPresentMode mode) noexcept {
+  switch (mode) {
+  case SwapchainPresentMode::Immediate:
+    return VK_PRESENT_MODE_IMMEDIATE_KHR;
+  case SwapchainPresentMode::Mailbox:
+    return VK_PRESENT_MODE_MAILBOX_KHR;
+  case SwapchainPresentMode::Fifo:
+  case SwapchainPresentMode::Unknown:
+  default:
+    return VK_PRESENT_MODE_FIFO_KHR;
+  }
+}
+
+[[nodiscard]] SwapchainPresentMode
+fromVkPresentMode(VkPresentModeKHR mode) noexcept {
+  switch (mode) {
+  case VK_PRESENT_MODE_IMMEDIATE_KHR:
+    return SwapchainPresentMode::Immediate;
+  case VK_PRESENT_MODE_MAILBOX_KHR:
+    return SwapchainPresentMode::Mailbox;
+  case VK_PRESENT_MODE_FIFO_KHR:
+    return SwapchainPresentMode::Fifo;
+  default:
+    return SwapchainPresentMode::Unknown;
+  }
+}
+
+[[nodiscard]] VkPresentModeKHR
+choosePresentMode(std::span<const VkPresentModeKHR> modes,
+                  SwapchainPresentMode requestedMode) {
+  const VkPresentModeKHR requested = toVkPresentMode(requestedMode);
   if (std::find(modes.begin(), modes.end(), requested) != modes.end()) {
     return requested;
   }
@@ -2769,9 +2756,11 @@ void destroySwapchain(Impl &impl) {
   }
 
   const VkSurfaceFormatKHR surfaceFormat = chooseSurfaceFormat(formats);
-  const VkPresentModeKHR presentMode = choosePresentMode(modes);
+  const VkPresentModeKHR presentMode =
+      choosePresentMode(modes, impl.requestedPresentMode);
   const VkExtent2D extent = chooseSwapExtent(caps, *impl.window);
-  uint32_t imageCount = std::max(caps.minImageCount, kSwapchainFramesInFlight);
+  uint32_t imageCount =
+      std::max(caps.minImageCount, kPreferredSwapchainImageCount);
   if (caps.maxImageCount > 0u) {
     imageCount = std::min(imageCount, caps.maxImageCount);
   }
@@ -2892,9 +2881,16 @@ void destroySwapchain(Impl &impl) {
     }
   }
 
-  NURI_LOG_INFO("NvrhiGPUDevice: swapchain %ux%u images=%u presentMode=%u",
-                extent.width, extent.height, actualImageCount,
-                static_cast<unsigned>(presentMode));
+  const bool mailboxAvailable =
+      std::find(modes.begin(), modes.end(), VK_PRESENT_MODE_MAILBOX_KHR) !=
+      modes.end();
+  NURI_LOG_INFO(
+      "NvrhiGPUDevice: swapchain %ux%u images=%u requestedPresentMode=%u "
+      "presentMode=%u mailboxAvailable=%s",
+      extent.width, extent.height, actualImageCount,
+      static_cast<unsigned>(toVkPresentMode(impl.requestedPresentMode)),
+      static_cast<unsigned>(presentMode), mailboxAvailable ? "true" : "false");
+  impl.activePresentMode = fromVkPresentMode(presentMode);
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -4458,6 +4454,7 @@ NvrhiGPUDevice::create(Window &window, const GPUDeviceCreateDesc &desc) {
   Impl &impl = *device->impl_;
   impl.window = &window;
   impl.glfwWindow = static_cast<GLFWwindow *>(window.nativeHandle());
+  impl.requestedPresentMode = requestedPresentModeFromEnvironment();
   impl.renderDocAttached = isRenderDocAttached();
   impl.validationEnabled = resolveValidationEnabled(impl.renderDocAttached);
 
@@ -4616,6 +4613,43 @@ uint32_t NvrhiGPUDevice::getSwapchainImageCount() const {
 double NvrhiGPUDevice::getTime() const {
   return impl_ != nullptr && impl_->window != nullptr ? impl_->window->getTime()
                                                       : 0.0;
+}
+
+bool NvrhiGPUDevice::supportsSwapchainPresentModeChange() const noexcept {
+  return impl_ != nullptr && impl_->device != VK_NULL_HANDLE &&
+         impl_->surface != VK_NULL_HANDLE;
+}
+
+SwapchainPresentMode NvrhiGPUDevice::getSwapchainPresentMode() const noexcept {
+  return impl_ != nullptr ? impl_->activePresentMode
+                          : SwapchainPresentMode::Unknown;
+}
+
+Result<SwapchainPresentMode, std::string>
+NvrhiGPUDevice::setSwapchainPresentMode(SwapchainPresentMode mode) {
+  if (!supportsSwapchainPresentModeChange()) {
+    return Result<SwapchainPresentMode, std::string>::makeError(
+        "NVRHI swapchain is not initialized");
+  }
+  if (mode == SwapchainPresentMode::Unknown) {
+    return Result<SwapchainPresentMode, std::string>::makeError(
+        "Unknown is not a selectable swapchain present mode");
+  }
+  if (mode == impl_->requestedPresentMode) {
+    return Result<SwapchainPresentMode, std::string>::makeResult(
+        impl_->activePresentMode);
+  }
+
+  const SwapchainPresentMode previousMode = impl_->requestedPresentMode;
+  impl_->requestedPresentMode = mode;
+  auto swapchainResult = createSwapchain(*impl_);
+  if (swapchainResult.hasError()) {
+    impl_->requestedPresentMode = previousMode;
+    return Result<SwapchainPresentMode, std::string>::makeError(
+        swapchainResult.error());
+  }
+  return Result<SwapchainPresentMode, std::string>::makeResult(
+      impl_->activePresentMode);
 }
 
 Result<BufferHandle, std::string>

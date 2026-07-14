@@ -14,8 +14,7 @@ void main() {
   const uint compactCount = pc.compactionCounters.counts[pc.batchBase];
   const uint compactGroup =
       gl_WorkGroupID.y * pc.sourceFrameIndex + gl_WorkGroupID.x;
-  const uint groupRecordBase =
-      compactGroup * kOpaqueMeshletTaskPayloadCapacity;
+  const uint groupRecordBase = compactGroup * kOpaqueMeshletTaskPayloadCapacity;
   const uint recordLocal = groupRecordBase + gl_LocalInvocationIndex;
 
   if (recordLocal < compactCount) {
@@ -29,11 +28,10 @@ void main() {
 
   barrier();
   if (gl_LocalInvocationIndex == 0u) {
-    const uint emittedCount =
-        groupRecordBase < compactCount
-            ? min(compactCount - groupRecordBase,
-                  kOpaqueMeshletTaskPayloadCapacity)
-            : 0u;
+    const uint emittedCount = groupRecordBase < compactCount
+                                  ? min(compactCount - groupRecordBase,
+                                        kOpaqueMeshletTaskPayloadCapacity)
+                                  : 0u;
     meshletPayload.visibleCount = emittedCount;
     if ((pc.meshletCounterFlags & kMeshletCounterFlagEnabled) != 0u &&
         emittedCount != 0u) {

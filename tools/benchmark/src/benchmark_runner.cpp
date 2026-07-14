@@ -1421,9 +1421,15 @@ resolveTelemetryPassName(const RenderGraphTelemetrySnapshot &snapshot,
                       : std::string_view(name.data(), name.size());
 }
 
-[[nodiscard]] bool shouldIncludeGpuScopeInSum(const GpuTimingReport &report,
-                                              GpuTimingScope scope) {
-  return gpuTimingScopeContributesToScopedSum(report, scope);
+[[nodiscard]] bool
+shouldIncludeGpuScopeInSum(const GpuTimingReport &report, GpuTimingScope scope,
+                           uint64_t sourceFrameIndex) noexcept {
+  if (scope == GpuTimingScope::WholeFrame) {
+    return false;
+  }
+  const GpuTimingScope parent = gpuTimingParentScope(scope);
+  return parent == GpuTimingScope::None || !hasGpuTimingScope(report, parent) ||
+         gpuTimingScopeSourceFrame(report, parent) != sourceFrameIndex;
 }
 
 class TrackingMemoryResource final : public std::pmr::memory_resource {
@@ -1586,16 +1592,50 @@ void addRendererFrameMetrics(BenchmarkFrameMeasurements &measurements,
                opaque.depthPrepassDraws);
   addIfNonzero(measurements, "renderer.opaque.tessellated_draws",
                opaque.tessellatedDraws);
+  addIfNonzero(measurements, "renderer.opaque.meshlet_dispatches",
+               opaque.meshletDispatches);
+  addIfNonzero(measurements, "renderer.opaque.meshlet_task_groups",
+               opaque.meshletTaskGroups);
+  addIfNonzero(measurements, "renderer.opaque.meshlet_candidates",
+               opaque.meshletCandidateCount);
+  addIfNonzero(measurements, "renderer.opaque.meshlet_mode_required",
+               opaque.meshletModeRequired);
+  addIfNonzero(measurements, "renderer.opaque.meshlet_mode_active",
+               opaque.meshletModeActive);
+  addIfNonzero(measurements, "renderer.opaque.meshlet_rejected_missing_feature",
+               opaque.meshletRejectedMissingFeature);
+  addIfNonzero(measurements,
+               "renderer.opaque.meshlet_rejected_missing_asset_data",
+               opaque.meshletRejectedMissingAssetData);
+  addIfNonzero(measurements,
+               "renderer.opaque.meshlet_rejected_incompatible_frame",
+               opaque.meshletRejectedIncompatibleFrame);
   addIfNonzero(measurements, "renderer.opaque.meshlet_hybrid_active",
                opaque.meshletHybridActive);
   addIfNonzero(measurements, "renderer.opaque.meshlet_hybrid_classic_batches",
                opaque.meshletHybridClassicBatches);
   addIfNonzero(measurements, "renderer.opaque.meshlet_hybrid_classic_instances",
                opaque.meshletHybridClassicInstances);
+  addIfNonzero(measurements,
+               "renderer.opaque.meshlet_hybrid_coverage_classic_batches",
+               opaque.meshletHybridCoverageClassicBatches);
+  addIfNonzero(measurements,
+               "renderer.opaque.meshlet_hybrid_coverage_classic_instances",
+               opaque.meshletHybridCoverageClassicInstances);
   addIfNonzero(measurements, "renderer.opaque.meshlet_hybrid_meshlet_batches",
                opaque.meshletHybridMeshletBatches);
   addIfNonzero(measurements, "renderer.opaque.meshlet_hybrid_meshlet_instances",
                opaque.meshletHybridMeshletInstances);
+  addIfNonzero(measurements, "renderer.opaque.auto_lod_active",
+               opaque.autoLodActive);
+  addIfNonzero(measurements, "renderer.opaque.auto_lod_history_reset",
+               opaque.autoLodHistoryReset);
+  addIfNonzero(measurements, "renderer.opaque.auto_lod_transitions",
+               opaque.autoLodTransitions);
+  addIfNonzero(measurements, "renderer.opaque.auto_lod_lod0_instances",
+               opaque.autoLodLod0Instances);
+  addIfNonzero(measurements, "renderer.opaque.auto_lod_lod1_instances",
+               opaque.autoLodLod1Instances);
 
   const VisibilityFrameMetrics &visibility = metrics.visibility;
   addIfNonzero(measurements, "renderer.visibility.cpu_main_candidates",
@@ -2102,104 +2142,94 @@ void addGpuTimingMetric(BenchmarkFrameMeasurements &measurements,
   }
 }
 
-[[nodiscard]] uint64_t reportSourceFrameIndex(const GpuTimingReport &report) {
-  static constexpr uint64_t kInvalid = std::numeric_limits<uint64_t>::max();
-  const std::array<uint64_t, 18> sources{
-      report.wholeFrameSourceFrameIndex,
-      report.shadowSourceFrameIndex,
-      report.shadowDepthSourceFrameIndex,
-      report.shadowSdsmSourceFrameIndex,
-      report.sceneColorDownsampleSourceFrameIndex,
-      report.transmissionSourceFrameIndex,
-      report.temporalAAResolveSourceFrameIndex,
-      report.temporalAADebugSourceFrameIndex,
-      report.spatialAASourceFrameIndex,
-      report.opaqueSourceFrameIndex,
-      report.msaaResolveSourceFrameIndex,
-      report.gtaoSourceFrameIndex,
-      report.hdrPostProcessSourceFrameIndex,
-      report.skyboxSourceFrameIndex,
-      report.velocitySourceFrameIndex,
-      report.reactiveMaskSourceFrameIndex,
-      report.temporalAACopyBackSourceFrameIndex,
-      report.gtaoTemporalSourceFrameIndex,
-  };
-  for (const uint64_t source : sources) {
-    if (source != kInvalid) {
-      return source;
-    }
-  }
-  return kInvalid;
-}
-
 void applyGpuTimingReport(BenchmarkReport &report,
                           const GpuTimingReport &timingReport,
                           const std::map<uint64_t, size_t> &frameByIndex) {
-  const uint64_t frameIndex = reportSourceFrameIndex(timingReport);
-  const auto frameIt = frameByIndex.find(frameIndex);
-  if (frameIt == frameByIndex.end()) {
-    return;
-  }
-  BenchmarkFrameRecord &frame = report.frames[frameIt->second];
-  double sum = 0.0;
-  bool anyScopeAvailable = false;
+  std::map<uint64_t, double> scopeSumsByFrame;
   const auto add = [&](BenchmarkMetricIndex index, GpuTimingScope scope,
-                       float ms) {
-    if (hasGpuTimingScope(timingReport, scope)) {
-      anyScopeAvailable = true;
-      if (shouldIncludeGpuScopeInSum(timingReport, scope)) {
-        sum += static_cast<double>(ms);
-      }
-      frame.measurements.appendRegistered(index, static_cast<double>(ms));
+                       uint64_t sourceFrameIndex, float ms) {
+    if (!hasGpuTimingScope(timingReport, scope)) {
+      return;
+    }
+    const auto frameIt = frameByIndex.find(sourceFrameIndex);
+    if (frameIt == frameByIndex.end()) {
+      return;
+    }
+    report.frames[frameIt->second].measurements.appendRegistered(
+        index, static_cast<double>(ms));
+    if (shouldIncludeGpuScopeInSum(timingReport, scope, sourceFrameIndex)) {
+      scopeSumsByFrame[sourceFrameIndex] += static_cast<double>(ms);
     }
   };
   add(NURI_BENCHMARK_METRIC("gpu.frame_ms"), GpuTimingScope::WholeFrame,
-      timingReport.wholeFrameTimeMs);
+      timingReport.wholeFrameSourceFrameIndex, timingReport.wholeFrameTimeMs);
   add(NURI_BENCHMARK_METRIC("gpu.scopes.shadow_ms"), GpuTimingScope::Shadow,
-      timingReport.shadowTimeMs);
+      timingReport.shadowSourceFrameIndex, timingReport.shadowTimeMs);
   add(NURI_BENCHMARK_METRIC("gpu.scopes.shadow_depth_ms"),
-      GpuTimingScope::ShadowDepth, timingReport.shadowDepthTimeMs);
+      GpuTimingScope::ShadowDepth, timingReport.shadowDepthSourceFrameIndex,
+      timingReport.shadowDepthTimeMs);
   add(NURI_BENCHMARK_METRIC("gpu.scopes.shadow_sdsm_ms"),
-      GpuTimingScope::ShadowSdsm, timingReport.shadowSdsmTimeMs);
+      GpuTimingScope::ShadowSdsm, timingReport.shadowSdsmSourceFrameIndex,
+      timingReport.shadowSdsmTimeMs);
   add(NURI_BENCHMARK_METRIC("gpu.scopes.opaque_ms"), GpuTimingScope::Opaque,
-      timingReport.opaqueTimeMs);
+      timingReport.opaqueSourceFrameIndex, timingReport.opaqueTimeMs);
   add(NURI_BENCHMARK_METRIC("gpu.scopes.gtao_ms"), GpuTimingScope::GTAO,
-      timingReport.gtaoTimeMs);
+      timingReport.gtaoSourceFrameIndex, timingReport.gtaoTimeMs);
   add(NURI_BENCHMARK_METRIC("gpu.scopes.msaa_resolve_ms"),
-      GpuTimingScope::MsaaResolve, timingReport.msaaResolveTimeMs);
+      GpuTimingScope::MsaaResolve, timingReport.msaaResolveSourceFrameIndex,
+      timingReport.msaaResolveTimeMs);
   add(NURI_BENCHMARK_METRIC("gpu.scopes.scene_color_downsample_ms"),
       GpuTimingScope::SceneColorDownsample,
+      timingReport.sceneColorDownsampleSourceFrameIndex,
       timingReport.sceneColorDownsampleTimeMs);
   add(NURI_BENCHMARK_METRIC("gpu.scopes.taa_resolve_ms"),
-      GpuTimingScope::TemporalAAResolve, timingReport.temporalAAResolveTimeMs);
+      GpuTimingScope::TemporalAAResolve,
+      timingReport.temporalAAResolveSourceFrameIndex,
+      timingReport.temporalAAResolveTimeMs);
   add(NURI_BENCHMARK_METRIC("gpu.scopes.taa_debug_ms"),
-      GpuTimingScope::TemporalAADebug, timingReport.temporalAADebugTimeMs);
+      GpuTimingScope::TemporalAADebug,
+      timingReport.temporalAADebugSourceFrameIndex,
+      timingReport.temporalAADebugTimeMs);
   add(NURI_BENCHMARK_METRIC("gpu.scopes.spatial_aa_ms"),
-      GpuTimingScope::SpatialAA, timingReport.spatialAATimeMs);
+      GpuTimingScope::SpatialAA, timingReport.spatialAASourceFrameIndex,
+      timingReport.spatialAATimeMs);
   add(NURI_BENCHMARK_METRIC("gpu.scopes.transmission_ms"),
-      GpuTimingScope::Transmission, timingReport.transmissionTimeMs);
+      GpuTimingScope::Transmission, timingReport.transmissionSourceFrameIndex,
+      timingReport.transmissionTimeMs);
   add(NURI_BENCHMARK_METRIC("gpu.scopes.hdr_postprocess_ms"),
-      GpuTimingScope::HDRPostProcess, timingReport.hdrPostProcessTimeMs);
+      GpuTimingScope::HDRPostProcess,
+      timingReport.hdrPostProcessSourceFrameIndex,
+      timingReport.hdrPostProcessTimeMs);
   add(NURI_BENCHMARK_METRIC("gpu.scopes.skybox_ms"), GpuTimingScope::Skybox,
-      timingReport.skyboxTimeMs);
+      timingReport.skyboxSourceFrameIndex, timingReport.skyboxTimeMs);
   add(NURI_BENCHMARK_METRIC("gpu.scopes.velocity_ms"), GpuTimingScope::Velocity,
-      timingReport.velocityTimeMs);
+      timingReport.velocitySourceFrameIndex, timingReport.velocityTimeMs);
   add(NURI_BENCHMARK_METRIC("gpu.scopes.reactive_mask_ms"),
-      GpuTimingScope::ReactiveMask, timingReport.reactiveMaskTimeMs);
+      GpuTimingScope::ReactiveMask, timingReport.reactiveMaskSourceFrameIndex,
+      timingReport.reactiveMaskTimeMs);
   add(NURI_BENCHMARK_METRIC("gpu.scopes.taa_copy_back_ms"),
       GpuTimingScope::TemporalAACopyBack,
+      timingReport.temporalAACopyBackSourceFrameIndex,
       timingReport.temporalAACopyBackTimeMs);
   add(NURI_BENCHMARK_METRIC("gpu.scopes.gtao_temporal_ms"),
-      GpuTimingScope::GTAOTemporal, timingReport.gtaoTemporalTimeMs);
-  if (anyScopeAvailable) {
-    frame.measurements.appendRegistered(
-        NURI_BENCHMARK_METRIC("gpu.scopes_sum_ms"), sum);
+      GpuTimingScope::GTAOTemporal, timingReport.gtaoTemporalSourceFrameIndex,
+      timingReport.gtaoTemporalTimeMs);
+  for (const auto &[sourceFrameIndex, sum] : scopeSumsByFrame) {
+    const auto frameIt = frameByIndex.find(sourceFrameIndex);
+    if (frameIt != frameByIndex.end()) {
+      report.frames[frameIt->second].measurements.appendRegistered(
+          NURI_BENCHMARK_METRIC("gpu.scopes_sum_ms"), sum);
+    }
   }
   for (uint32_t orderedPassIndex = 0u;
        orderedPassIndex < timingReport.passTimings.size(); ++orderedPassIndex) {
     const GpuTimingReport::PassTiming &timing =
         timingReport.passTimings[orderedPassIndex];
-    frame.measurements.appendOwned(
+    const auto frameIt = frameByIndex.find(timing.sourceFrameIndex);
+    if (frameIt == frameByIndex.end()) {
+      continue;
+    }
+    report.frames[frameIt->second].measurements.appendOwned(
         passTimingMetricId(orderedPassIndex, timing.debugName, "gpu_ms"),
         static_cast<double>(timing.timeMs));
   }
@@ -3615,9 +3645,28 @@ BenchmarkRunResult runBenchmarkCase(BenchmarkCase benchmarkCase,
     gpu->waitIdle();
     drainGpuTimings(*gpu, report, measuredFrameByIndex);
     for (const BenchmarkFrameRecord &frame : report.frames) {
-      if (frame.measured && frame.measurements.find("gpu.scopes_sum_ms") ==
-                                frame.measurements.end()) {
+      if (!frame.measured) {
+        continue;
+      }
+      const auto scopes = frame.measurements.find("gpu.scopes_sum_ms");
+      if (scopes == frame.measurements.end()) {
         ++report.timingDrain.missingGpuTimingFrames;
+        continue;
+      }
+      const auto whole = frame.measurements.find("gpu.frame_ms");
+      const auto commandBuffers = frame.measurements.find(
+          "rendergraph.summary.recorded_command_buffer_count");
+      const auto submitBatches =
+          frame.measurements.find("rendergraph.summary.submit_batch_count");
+      if (whole == frame.measurements.end() ||
+          commandBuffers == frame.measurements.end() ||
+          submitBatches == frame.measurements.end() ||
+          commandBuffers->second != 1.0 || submitBatches->second != 1.0) {
+        continue;
+      }
+      constexpr double kGpuTimingContainmentToleranceMs = 0.05;
+      if (scopes->second > whole->second + kGpuTimingContainmentToleranceMs) {
+        ++report.timingDrain.scopeContainmentViolations;
       }
     }
     if (report.timingDrain.droppedGpuTimingReports > 0u) {
@@ -3629,6 +3678,13 @@ BenchmarkRunResult runBenchmarkCase(BenchmarkCase benchmarkCase,
       report.run.validForComparison = false;
       report.warnings.push_back(
           "one or more measured frames are missing GPU timing reports");
+    }
+    if (report.timingDrain.scopeContainmentViolations > 0u) {
+      report.run.validForComparison = false;
+      report.warnings.push_back(
+          std::to_string(report.timingDrain.scopeContainmentViolations) +
+          " single-command-buffer frames report scoped GPU work outside the "
+          "same frame's whole-GPU interval");
     }
   } catch (const std::exception &ex) {
     result.exitCode = BenchmarkExitCode::RuntimeError;

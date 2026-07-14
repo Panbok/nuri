@@ -63,6 +63,7 @@ struct BenchmarkTimingDrain {
   uint32_t drainFrames = 0u;
   uint32_t drainTimeoutMs = 0u;
   uint32_t missingGpuTimingFrames = 0u;
+  uint32_t scopeContainmentViolations = 0u;
   uint64_t droppedGpuTimingReports = 0u;
 };
 

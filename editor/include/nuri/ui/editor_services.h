@@ -10,6 +10,7 @@
 namespace nuri {
 
 class RenderScene;
+class Application;
 class CameraSystem;
 class GPUDevice;
 class TextSystem;
@@ -50,6 +51,7 @@ struct SceneEditorSelectionState {
 };
 
 struct EditorServices {
+  Application *application = nullptr;
   RenderScene *scene = nullptr;
   CameraSystem *cameraSystem = nullptr;
   GPUDevice *gpu = nullptr;

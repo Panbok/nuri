@@ -26,11 +26,10 @@ resolveOpaqueAutomaticLod(uint32_t requestedLod, bool alphaMasked,
              : requestedLod;
 }
 
-[[nodiscard]] constexpr bool
-shouldUseMeshletsForOpaqueBatch(MeshletRenderMode mode, bool hybridEligible,
-                                bool meshletDataValid,
-                                uint32_t resolvedLodMeshletCount,
-                                uint32_t hybridClassicMaxMeshlets) noexcept {
+[[nodiscard]] constexpr bool shouldUseMeshletsForOpaqueBatch(
+    MeshletRenderMode mode, bool hybridEligible, bool alphaMasked,
+    bool doubleSided, bool meshletDataValid, uint32_t resolvedLodMeshletCount,
+    uint32_t hybridClassicMaxMeshlets) noexcept {
   if (mode == MeshletRenderMode::Disabled || !meshletDataValid ||
       resolvedLodMeshletCount == 0u) {
     return false;
@@ -39,15 +38,10 @@ shouldUseMeshletsForOpaqueBatch(MeshletRenderMode mode, bool hybridEligible,
       hybridClassicMaxMeshlets == 0u) {
     return true;
   }
+  if (alphaMasked || doubleSided) {
+    return false;
+  }
   return resolvedLodMeshletCount > hybridClassicMaxMeshlets;
-}
-
-[[nodiscard]] constexpr bool
-shouldUseGpuMeshletLod(bool meshletRequested, bool meshLodEnabled,
-                       int32_t forcedMeshLod,
-                       bool instanceTransformsComputedOnGpu) noexcept {
-  return meshletRequested && meshLodEnabled && forcedMeshLod < 0 &&
-         instanceTransformsComputedOnGpu;
 }
 
 } // namespace nuri::detail

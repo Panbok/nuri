@@ -12,6 +12,7 @@
 #include "nuri/gfx/pipeline/render_pipeline.h"
 #include "nuri/gfx/renderer.h"
 
+#include <chrono>
 #include <optional>
 
 namespace nuri {
@@ -52,6 +53,8 @@ public:
 
   void run();
   double getTime() const;
+  void setFrameRateLimit(uint32_t framesPerSecond);
+  [[nodiscard]] uint32_t frameRateLimit() const noexcept;
 
   virtual void onInit() = 0;
   virtual void onUpdate(double deltaTime) = 0;
@@ -107,6 +110,7 @@ private:
   // `false` is reserved for a future "already registered / skipped" path.
   [[nodiscard]] Result<bool, std::string>
   registerDefaultRenderPipeline(const RuntimeShaderConfig &shaderConfig);
+  void waitForFrameRateLimit();
 
   LogLifetimeGuard logLifetimeGuard_;
   ApplicationConfig appConfig_{};
@@ -123,6 +127,8 @@ private:
   EventManager eventManager_;
   InputSystem input_;
   SubscriptionToken inputDispatchSubscription_{};
+  uint32_t frameRateLimit_ = 0u;
+  std::chrono::steady_clock::time_point nextFrameDeadline_{};
 };
 
 } // namespace nuri

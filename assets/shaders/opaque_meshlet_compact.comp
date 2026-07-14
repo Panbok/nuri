@@ -103,8 +103,7 @@ bool meshletOcclusionCull(MeshletDescriptorGpuData meshlet, InstanceData inst,
 
   const vec3 localCenter = meshlet.boundsSphere.xyz;
   const float localRadius = max(meshlet.boundsSphere.w, 0.0);
-  const vec3 worldCenter =
-      (inst.modelMatrix * vec4(localCenter, 1.0)).xyz;
+  const vec3 worldCenter = (inst.modelMatrix * vec4(localCenter, 1.0)).xyz;
   const float radius = localRadius * meshletInstanceMaxScale(inst.modelMatrix);
   if (radius <= 0.0) {
     return false;
@@ -118,10 +117,9 @@ bool meshletOcclusionCull(MeshletDescriptorGpuData meshlet, InstanceData inst,
   const mat4 depthViewProj = pc.frameData.proj * pc.frameData.view;
 
   for (uint cornerIndex = 0u; cornerIndex < 8u; ++cornerIndex) {
-    const vec3 corner =
-        vec3((cornerIndex & 1u) != 0u ? bmax.x : bmin.x,
-             (cornerIndex & 2u) != 0u ? bmax.y : bmin.y,
-             (cornerIndex & 4u) != 0u ? bmax.z : bmin.z);
+    const vec3 corner = vec3((cornerIndex & 1u) != 0u ? bmax.x : bmin.x,
+                             (cornerIndex & 2u) != 0u ? bmax.y : bmin.y,
+                             (cornerIndex & 4u) != 0u ? bmax.z : bmin.z);
     const vec4 clip = depthViewProj * vec4(corner, 1.0);
     if (clip.w <= 1.0e-5) {
       return false;
@@ -241,10 +239,9 @@ void main() {
       pc.indirectCommands.words[commandWord + 0u] =
           min(taskGroupCount, pc.compactGridWidth);
       pc.indirectCommands.words[commandWord + 1u] =
-          taskGroupCount == 0u
-              ? 0u
-              : (taskGroupCount + pc.compactGridWidth - 1u) /
-                    pc.compactGridWidth;
+          taskGroupCount == 0u ? 0u
+                               : (taskGroupCount + pc.compactGridWidth - 1u) /
+                                     pc.compactGridWidth;
       pc.indirectCommands.words[commandWord + 2u] =
           taskGroupCount == 0u ? 0u : 1u;
     }
@@ -329,8 +326,7 @@ void main() {
   if (accepted) {
     const uint prefix =
         bitCount(acceptedMask & ((1u << gl_LocalInvocationIndex) - 1u));
-    pc.compactedMeshlets
-        .values[outputRecordBase + compactGroupBase + prefix]
+    pc.compactedMeshlets.values[outputRecordBase + compactGroupBase + prefix]
         .ids = uvec4(meshletIndex, globalInstanceId, selectedLod, batchIndex);
   }
 }

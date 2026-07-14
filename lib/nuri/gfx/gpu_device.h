@@ -57,6 +57,19 @@ public:
   virtual uint32_t getSwapchainImageIndex() const = 0;
   virtual uint32_t getSwapchainImageCount() const = 0;
   virtual double getTime() const = 0;
+  [[nodiscard]] virtual bool
+  supportsSwapchainPresentModeChange() const noexcept {
+    return false;
+  }
+  [[nodiscard]] virtual SwapchainPresentMode
+  getSwapchainPresentMode() const noexcept {
+    return SwapchainPresentMode::Unknown;
+  }
+  virtual Result<SwapchainPresentMode, std::string>
+  setSwapchainPresentMode(SwapchainPresentMode) {
+    return Result<SwapchainPresentMode, std::string>::makeError(
+        "Runtime swapchain present-mode changes are not supported");
+  }
 
   // Resource creation
   virtual Result<BufferHandle, std::string>

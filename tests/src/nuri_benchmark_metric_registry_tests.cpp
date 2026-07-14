@@ -55,6 +55,24 @@ TEST(NuriBenchmarkMetricRegistryTest, CoreDescriptorsAreTypedAndBounded) {
             nullptr);
   EXPECT_NE(findBenchmarkMetricDescriptor("benchmark.camera.direction_delta"),
             nullptr);
+  for (std::string_view metric :
+       {"renderer.opaque.meshlet_dispatches",
+        "renderer.opaque.meshlet_task_groups",
+        "renderer.opaque.meshlet_candidates",
+        "renderer.opaque.meshlet_mode_required",
+        "renderer.opaque.meshlet_mode_active",
+        "renderer.opaque.meshlet_rejected_missing_feature",
+        "renderer.opaque.meshlet_rejected_missing_asset_data",
+        "renderer.opaque.meshlet_rejected_incompatible_frame",
+        "renderer.opaque.meshlet_hybrid_coverage_classic_batches",
+        "renderer.opaque.meshlet_hybrid_coverage_classic_instances",
+        "renderer.opaque.auto_lod_active",
+        "renderer.opaque.auto_lod_history_reset",
+        "renderer.opaque.auto_lod_transitions",
+        "renderer.opaque.auto_lod_lod0_instances",
+        "renderer.opaque.auto_lod_lod1_instances"}) {
+    EXPECT_NE(findBenchmarkMetricDescriptor(metric), nullptr) << metric;
+  }
 
   const BenchmarkMetricDescriptor *frameGpu =
       findBenchmarkMetricDescriptor("gpu.frame_ms");
