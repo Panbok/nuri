@@ -258,56 +258,6 @@ readDebugTemporalAAQualityPreset() {
   return std::nullopt;
 }
 
-[[nodiscard]] std::optional<ShadowSdsmMode> readDebugShadowSdsmMode() {
-  const std::optional<std::string> value =
-      readEnvVar("NURI_DEBUG_SHADOW_SDSM_MODE");
-  if (!value.has_value()) {
-    return std::nullopt;
-  }
-  const std::string_view view = *value;
-  if (stringEqualsIgnoreCase(view, "disabled") ||
-      stringEqualsIgnoreCase(view, "off") ||
-      stringEqualsIgnoreCase(view, "none")) {
-    return ShadowSdsmMode::Disabled;
-  }
-  if (stringEqualsIgnoreCase(view, "previous") ||
-      stringEqualsIgnoreCase(view, "previous_frame") ||
-      stringEqualsIgnoreCase(view, "previous_frame_minmax") ||
-      stringEqualsIgnoreCase(view, "minmax")) {
-    return ShadowSdsmMode::PreviousFrameMinMax;
-  }
-  if (stringEqualsIgnoreCase(view, "histogram")) {
-    return ShadowSdsmMode::Histogram;
-  }
-  NURI_LOG_WARNING(
-      "EditorRuntime: ignoring unrecognized NURI_DEBUG_SHADOW_SDSM_MODE=%s",
-      value->c_str());
-  return std::nullopt;
-}
-
-[[nodiscard]] std::optional<ShadowSdsmReductionBackend>
-readDebugShadowSdsmBackend() {
-  const std::optional<std::string> value =
-      readEnvVar("NURI_DEBUG_SHADOW_SDSM_BACKEND");
-  if (!value.has_value()) {
-    return std::nullopt;
-  }
-  const std::string_view view = *value;
-  if (stringEqualsIgnoreCase(view, "auto")) {
-    return ShadowSdsmReductionBackend::Auto;
-  }
-  if (stringEqualsIgnoreCase(view, "cpu")) {
-    return ShadowSdsmReductionBackend::Cpu;
-  }
-  if (stringEqualsIgnoreCase(view, "gpu")) {
-    return ShadowSdsmReductionBackend::Gpu;
-  }
-  NURI_LOG_WARNING(
-      "EditorRuntime: ignoring unrecognized NURI_DEBUG_SHADOW_SDSM_BACKEND=%s",
-      value->c_str());
-  return std::nullopt;
-}
-
 struct DebugRenderEnvOverrides {
   bool disableOpaque = false;
   bool disableTransmission = false;
@@ -317,8 +267,6 @@ struct DebugRenderEnvOverrides {
   std::optional<TemporalAAQualityPreset> temporalAAQualityPreset{};
   std::optional<bool> temporalAAJitterEnabled{};
   std::optional<bool> temporalAADiagnostics{};
-  std::optional<ShadowSdsmMode> shadowSdsmMode{};
-  std::optional<ShadowSdsmReductionBackend> shadowSdsmBackend{};
   bool shadowDiagnostics = false;
 };
 
@@ -333,8 +281,6 @@ struct DebugRenderEnvOverrides {
       .temporalAAJitterEnabled = readEnvBoolOverride("NURI_DEBUG_TAA_JITTER"),
       .temporalAADiagnostics =
           readEnvBoolOverride("NURI_DEBUG_TAA_DIAGNOSTICS"),
-      .shadowSdsmMode = readDebugShadowSdsmMode(),
-      .shadowSdsmBackend = readDebugShadowSdsmBackend(),
       .shadowDiagnostics = readEnvFlag("NURI_DEBUG_SHADOW_DIAGNOSTICS"),
   };
   return overrides;
@@ -391,18 +337,6 @@ void applyDebugRenderEnvOverrides(RenderSettings &settings) {
     static bool logged = false;
     logDebugRenderOverrideOnce("NURI_DEBUG_TAA_DIAGNOSTICS",
                                "TAA diagnostics overridden", logged);
-  }
-  if (overrides.shadowSdsmMode.has_value()) {
-    settings.shadow.sdsmMode = *overrides.shadowSdsmMode;
-    static bool logged = false;
-    logDebugRenderOverrideOnce("NURI_DEBUG_SHADOW_SDSM_MODE",
-                               "shadow SDSM mode overridden", logged);
-  }
-  if (overrides.shadowSdsmBackend.has_value()) {
-    settings.shadow.sdsmReductionBackend = *overrides.shadowSdsmBackend;
-    static bool logged = false;
-    logDebugRenderOverrideOnce("NURI_DEBUG_SHADOW_SDSM_BACKEND",
-                               "shadow SDSM backend overridden", logged);
   }
   if (overrides.shadowDiagnostics) {
     settings.shadow.debug.logDiagnostics = true;
@@ -1209,15 +1143,25 @@ void EditorRuntime::buildFrameContext(const Camera &camera,
       .materialTableVersion = resources().materialVersion(),
       .environmentVersion = scene_.environmentVersion(),
   };
-  frameContext_.camera = makeTemporalCameraFrameState(
+  auto planResult = buildPresentationAAPlan(
+      frameRenderSettings_, {}, resources().gpuMultisampleCapabilities());
+  NURI_ASSERT(!planResult.hasError(), "Invalid presentation AA plan: %s",
+              planResult.error().c_str());
+  frameContext_.presentationAA = planResult.value();
+  auto cameraResult = temporalFrameService_.prepareFrame(
       camera, app_.getAspectRatio(), frameRenderSettings_.antiAliasing,
+      frameContext_.presentationAA,
       TemporalCameraFrameDesc{
           .renderExtent =
               glm::uvec2(static_cast<uint32_t>(std::max(app_.getWidth(), 0)),
                          static_cast<uint32_t>(std::max(app_.getHeight(), 0))),
           .sceneContent = sceneContent,
       },
-      temporalCameraHistory_);
+      frameContext_.frameIndex, timeSecondsIn, frameDeltaSeconds_);
+  NURI_ASSERT(!cameraResult.hasError(), "Temporal frame prepare failed: %s",
+              cameraResult.error().c_str());
+  frameContext_.camera = cameraResult.value();
+  frameContext_.temporalFrameService = &temporalFrameService_;
   frameRenderSettings_.antiAliasing.debug.resetHistoryRequested = false;
   frameContext_.settings = &frameRenderSettings_;
   frameContext_.metrics = {};

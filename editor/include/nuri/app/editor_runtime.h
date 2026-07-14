@@ -6,6 +6,7 @@
 #include "nuri/core/application.h"
 #include "nuri/core/pmr_scratch.h"
 #include "nuri/gfx/frame/render_frame_context.h"
+#include "nuri/gfx/frame/temporal_frame_service.h"
 #include "nuri/scene/camera_system.h"
 #include "nuri/scene/render_scene.h"
 #include "nuri/scene_runtime/scene_runtime_host.h"
@@ -197,7 +198,7 @@ private:
   // Transient per-frame render settings after frame-local overrides.
   RenderSettings frameRenderSettings_{};
   RenderFrameContext frameContext_{};
-  TemporalCameraHistoryState temporalCameraHistory_{};
+  TemporalFrameService temporalFrameService_{};
   uint64_t frameIndex_ = 0;
   uint64_t simulationFrameIndex_ = 0;
   struct DebugShadowInspectProbeState {

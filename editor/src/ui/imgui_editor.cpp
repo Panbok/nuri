@@ -538,20 +538,6 @@ temporalAAHistoryFilterModeDisplayName(TemporalAAHistoryFilterMode mode) {
 
 const char *boolLogValue(bool value) { return value ? "true" : "false"; }
 
-const char *shadowFilterModeDisplayName(ShadowFilterMode mode) {
-  switch (sanitizeShadowFilterMode(mode)) {
-  case ShadowFilterMode::Hard:
-    return "Hard";
-  case ShadowFilterMode::PCF3x3:
-    return "Grid PCF";
-  case ShadowFilterMode::PoissonPCF:
-    return "Poisson PCF";
-  case ShadowFilterMode::PCSS:
-    return "PCSS";
-  }
-  return "Unknown";
-}
-
 const char *shadowQualityPresetDisplayName(ShadowQualityPreset preset) {
   switch (sanitizeShadowQualityPreset(preset)) {
   case ShadowQualityPreset::Custom:
@@ -564,30 +550,6 @@ const char *shadowQualityPresetDisplayName(ShadowQualityPreset preset) {
     return "High";
   case ShadowQualityPreset::Ultra:
     return "Ultra";
-  }
-  return "Unknown";
-}
-
-const char *shadowCascadeSplitModeDisplayName(ShadowCascadeSplitMode mode) {
-  switch (sanitizeShadowCascadeSplitMode(mode)) {
-  case ShadowCascadeSplitMode::Uniform:
-    return "Uniform";
-  case ShadowCascadeSplitMode::Logarithmic:
-    return "Logarithmic";
-  case ShadowCascadeSplitMode::Practical:
-    return "Practical";
-  }
-  return "Unknown";
-}
-
-const char *shadowSdsmModeDisplayName(ShadowSdsmMode mode) {
-  switch (sanitizeShadowSdsmMode(mode)) {
-  case ShadowSdsmMode::Disabled:
-    return "Disabled";
-  case ShadowSdsmMode::PreviousFrameMinMax:
-    return "Previous-frame min/max";
-  case ShadowSdsmMode::Histogram:
-    return "Histogram";
   }
   return "Unknown";
 }
@@ -634,9 +596,7 @@ const char *shadowStaticOnlyReuseStatusDisplayName(
 
 const char *
 shadowSdsmReductionBackendDisplayName(ShadowSdsmReductionBackend backend) {
-  switch (sanitizeShadowSdsmReductionBackend(backend)) {
-  case ShadowSdsmReductionBackend::Auto:
-    return "Auto";
+  switch (backend) {
   case ShadowSdsmReductionBackend::Cpu:
     return "CPU";
   case ShadowSdsmReductionBackend::Gpu:
@@ -661,7 +621,6 @@ void drawShadowSplitGraph(const ShadowSdsmDebugFrameData &sdsm) {
   const ImU32 barColor = IM_COL32(36, 36, 36, 255);
   const ImU32 fixedColor = IM_COL32(150, 150, 150, 255);
   const ImU32 minMaxColor = IM_COL32(90, 170, 255, 255);
-  const ImU32 histogramColor = IM_COL32(255, 170, 70, 255);
   drawList->AddRectFilled(origin, max, barColor, 4.0f);
   drawList->AddRect(origin, max, borderColor, 4.0f);
 
@@ -685,11 +644,6 @@ void drawShadowSplitGraph(const ShadowSdsmDebugFrameData &sdsm) {
                       ImVec2(minMaxX, max.y - 16.0f), minMaxColor, 1.0f);
   }
   for (uint32_t i = 1u; i < splitCount; ++i) {
-    const float histogramX = normalizedX(sdsm.histogramSplitDepths[i]);
-    drawList->AddLine(ImVec2(histogramX, origin.y + 22.0f),
-                      ImVec2(histogramX, max.y - 22.0f), histogramColor, 1.0f);
-  }
-  for (uint32_t i = 1u; i < splitCount; ++i) {
     const float effectiveX = normalizedX(sdsm.effectiveSplitDepths[i]);
     drawList->AddLine(ImVec2(effectiveX, origin.y + 4.0f),
                       ImVec2(effectiveX, max.y - 4.0f),
@@ -699,38 +653,7 @@ void drawShadowSplitGraph(const ShadowSdsmDebugFrameData &sdsm) {
   }
   ImGui::InvisibleButton("ShadowSplitGraph", graphSize);
   ImGui::TextUnformatted(
-      "Split graph: gray=fixed, blue=min/max, amber=histogram raw, "
-      "cascade colors=effective.");
-}
-
-void drawSdsmHistogramGraph(const ShadowSdsmDebugFrameData &sdsm) {
-  const uint32_t bucketCount = std::clamp(sdsm.histogramBucketCount, 1u,
-                                          kMaxShadowSdsmHistogramBucketCount);
-  const float graphWidth = ImGui::GetContentRegionAvail().x;
-  const ImVec2 graphSize(std::max(graphWidth, 160.0f), 96.0f);
-  const ImVec2 origin = ImGui::GetCursorScreenPos();
-  const ImVec2 max(origin.x + graphSize.x, origin.y + graphSize.y);
-  ImDrawList *drawList = ImGui::GetWindowDrawList();
-  drawList->AddRectFilled(origin, max, IM_COL32(28, 28, 28, 255), 4.0f);
-  drawList->AddRect(origin, max, IM_COL32(110, 110, 110, 255), 4.0f);
-
-  float maxWeight = 0.0f;
-  for (uint32_t i = 0u; i < bucketCount; ++i) {
-    maxWeight = std::max(maxWeight, sdsm.histogramBucketWeights[i]);
-  }
-  maxWeight = std::max(maxWeight, 1.0e-6f);
-  const float bucketWidth = graphSize.x / static_cast<float>(bucketCount);
-  for (uint32_t i = 0u; i < bucketCount; ++i) {
-    const float normalized =
-        std::clamp(sdsm.histogramBucketWeights[i] / maxWeight, 0.0f, 1.0f);
-    const float x0 = origin.x + bucketWidth * static_cast<float>(i);
-    const float x1 = origin.x + bucketWidth * static_cast<float>(i + 1u);
-    const float y1 = max.y - 4.0f;
-    const float y0 = y1 - normalized * (graphSize.y - 8.0f);
-    drawList->AddRectFilled(ImVec2(x0, y0), ImVec2(std::max(x0 + 1.0f, x1), y1),
-                            IM_COL32(235, 160, 60, 255));
-  }
-  ImGui::InvisibleButton("ShadowHistogramGraph", graphSize);
+      "Split graph: gray=fixed, blue=min/max, cascade colors=effective.");
 }
 
 const char *shadowPreviewModeDisplayName(ShadowPreviewMode mode) {
@@ -1652,13 +1575,7 @@ void drawOpaqueSettings(RenderSettings::OpaqueSettings &opaque,
                   &opaque.enableDepthPyramid);
   ImGui::Text("Effective Depth Pre-pass: %s",
               opaque.enableDepthPrepass ? "enabled" : "disabled");
-  const ShadowSdsmMode sanitizedSdsmMode =
-      sanitizeShadowSdsmMode(shadow.sdsmMode);
-  const bool forcedDepthPyramid =
-      shadow.enabled &&
-      (sanitizedSdsmMode == ShadowSdsmMode::PreviousFrameMinMax ||
-       sanitizedSdsmMode == ShadowSdsmMode::Histogram) &&
-      !opaque.enableDepthPyramid;
+  const bool forcedDepthPyramid = shadow.enabled && !opaque.enableDepthPyramid;
   ImGui::Text("Effective Depth Pyramid: %s",
               (opaque.enableDepthPyramid || forcedDepthPyramid) ? "enabled"
                                                                 : "disabled");
@@ -1781,29 +1698,8 @@ void drawShadowSettings(
                 (*shadowDebugFrameData)->maxDistanceFadeStart,
                 (*shadowDebugFrameData)->maxDistanceFadeEnd);
   }
-  constexpr const char *kSplitModeLabels[] = {
-      "Uniform",
-      "Logarithmic",
-      "Practical",
-  };
-  int splitMode =
-      static_cast<int>(sanitizeShadowCascadeSplitMode(shadow.splitMode));
-  if (ImGui::Combo("Split Mode##ShadowPass", &splitMode, kSplitModeLabels,
-                   IM_ARRAYSIZE(kSplitModeLabels))) {
-    shadow.splitMode = static_cast<ShadowCascadeSplitMode>(splitMode);
-    markCustomPreset();
-  }
   if (ImGui::SliderFloat("Split Lambda##ShadowPass", &shadow.splitLambda, 0.0f,
                          1.0f, "%.2f")) {
-    markCustomPreset();
-  }
-  if (sanitizeShadowCascadeSplitMode(shadow.splitMode) !=
-      ShadowCascadeSplitMode::Practical) {
-    ImGui::TextUnformatted(
-        "Split lambda is only used by the practical split mode.");
-  }
-  if (ImGui::Checkbox("Stabilize Texels##ShadowPass",
-                      &shadow.stabilizeCascades)) {
     markCustomPreset();
   }
   if (ImGui::SliderFloat("Cascade Blend Fraction##ShadowPass",
@@ -1853,119 +1749,17 @@ void drawShadowSettings(
 
   ImGui::Separator();
   ImGui::TextUnformatted("Filtering");
-  constexpr const char *kFilterLabels[] = {
-      "Hard",
-      "Grid PCF",
-      "Poisson PCF",
-      "PCSS",
-  };
-  int filterMode =
-      static_cast<int>(sanitizeShadowFilterMode(shadow.filterMode));
-  if (ImGui::Combo("Filter Mode##ShadowPass", &filterMode, kFilterLabels,
-                   IM_ARRAYSIZE(kFilterLabels))) {
-    shadow.filterMode = static_cast<ShadowFilterMode>(filterMode);
-    markCustomPreset();
-  }
   int pcfSamples = static_cast<int>(shadow.pcfSampleCount);
   if (ImGui::SliderInt("PCF Samples##ShadowPass", &pcfSamples, 1, 64)) {
     shadow.pcfSampleCount = static_cast<uint32_t>(std::max(pcfSamples, 1));
     markCustomPreset();
   }
-  int blockerSamples = static_cast<int>(shadow.pcssBlockerSampleCount);
-  if (ImGui::SliderInt("PCSS Blocker Samples##ShadowPass", &blockerSamples, 1,
-                       static_cast<int>(kMaxShadowPcfSamples))) {
-    shadow.pcssBlockerSampleCount =
-        static_cast<uint32_t>(std::max(blockerSamples, 1));
-    markCustomPreset();
-  }
-  int filterSamples = static_cast<int>(shadow.pcssFilterSampleCount);
-  if (ImGui::SliderInt("PCSS Filter Samples##ShadowPass", &filterSamples, 1,
-                       static_cast<int>(kMaxShadowPcfSamples))) {
-    shadow.pcssFilterSampleCount =
-        static_cast<uint32_t>(std::max(filterSamples, 1));
-    markCustomPreset();
-  }
-  if (ImGui::DragFloat("PCSS Light Radius Scale##ShadowPass",
-                       &shadow.pcssLightRadiusScale, 0.05f, 0.0f, 32.0f,
-                       "%.2f")) {
-    markCustomPreset();
-  }
-  if (ImGui::DragFloat("PCSS Search Clamp##ShadowPass",
-                       &shadow.pcssSearchRadiusClampTexels, 1.0f, 0.0f, 256.0f,
-                       "%.1f texels")) {
-    markCustomPreset();
-  }
-  if (ImGui::DragFloat("PCSS Filter Clamp##ShadowPass",
-                       &shadow.pcssFilterRadiusClampTexels, 1.0f, 0.0f, 256.0f,
-                       "%.1f texels")) {
-    markCustomPreset();
-  }
-  if (ImGui::Checkbox("Fixed Poisson Rotation##ShadowPass",
-                      &shadow.debug.fixedPoissonRotation)) {
-    markCustomPreset();
-  }
-  int poissonSeed = static_cast<int>(
-      std::min(shadow.debug.poissonRotationSeed,
-               static_cast<uint32_t>(std::numeric_limits<int>::max())));
-  if (ImGui::DragInt("Poisson Rotation Seed##ShadowPass", &poissonSeed, 1.0f, 0,
-                     std::numeric_limits<int>::max())) {
-    shadow.debug.poissonRotationSeed =
-        static_cast<uint32_t>(std::max(poissonSeed, 0));
-    markCustomPreset();
-  }
 
   ImGui::Separator();
-  ImGui::TextUnformatted("SDSM");
-  constexpr const char *kSdsmLabels[] = {
-      "Disabled",
-      "Previous-frame min/max",
-      "Histogram",
-  };
-  int sdsmMode = static_cast<int>(sanitizeShadowSdsmMode(shadow.sdsmMode));
-  if (ImGui::Combo("SDSM Mode##ShadowPass", &sdsmMode, kSdsmLabels,
-                   IM_ARRAYSIZE(kSdsmLabels))) {
-    shadow.sdsmMode = static_cast<ShadowSdsmMode>(sdsmMode);
-    markCustomPreset();
-  }
-  constexpr const char *kSdsmBackendLabels[] = {
-      "Auto",
-      "CPU",
-      "GPU",
-  };
-  int sdsmBackend = static_cast<int>(
-      sanitizeShadowSdsmReductionBackend(shadow.sdsmReductionBackend));
-  if (ImGui::Combo("SDSM Backend##ShadowPass", &sdsmBackend, kSdsmBackendLabels,
-                   IM_ARRAYSIZE(kSdsmBackendLabels))) {
-    shadow.sdsmReductionBackend =
-        static_cast<ShadowSdsmReductionBackend>(sdsmBackend);
-    markCustomPreset();
-  }
+  ImGui::TextUnformatted("Previous-frame min/max SDSM");
   if (ImGui::SliderFloat("SDSM Temporal Blend##ShadowPass",
                          &shadow.sdsmTemporalBlend, 0.0f, 1.0f, "%.2f")) {
     markCustomPreset();
-  }
-  const bool histogramSdsm =
-      sanitizeShadowSdsmMode(shadow.sdsmMode) == ShadowSdsmMode::Histogram;
-  if (histogramSdsm) {
-    int bucketCount = static_cast<int>(shadow.sdsmHistogramBucketCount);
-    if (ImGui::SliderInt(
-            "Histogram Buckets##ShadowPass", &bucketCount,
-            static_cast<int>(kMinShadowSdsmHistogramBucketCount),
-            static_cast<int>(kMaxShadowSdsmHistogramBucketCount))) {
-      shadow.sdsmHistogramBucketCount = static_cast<uint32_t>(std::max(
-          bucketCount, static_cast<int>(kMinShadowSdsmHistogramBucketCount)));
-      markCustomPreset();
-    }
-    if (ImGui::SliderFloat("Histogram Trim Low##ShadowPass",
-                           &shadow.sdsmHistogramTrimLowPercent, 0.0f, 20.0f,
-                           "%.2f%%")) {
-      markCustomPreset();
-    }
-    if (ImGui::SliderFloat("Histogram Trim High##ShadowPass",
-                           &shadow.sdsmHistogramTrimHighPercent, 0.0f, 20.0f,
-                           "%.2f%%")) {
-      markCustomPreset();
-    }
   }
 
   ImGui::Separator();
@@ -1999,24 +1793,6 @@ void drawShadowSettings(
                   &shadow.debug.visualizeReceiverDepth);
   ImGui::Checkbox("Visualize Shadow Map Depth##ShadowPass",
                   &shadow.debug.visualizeShadowMapDepth);
-  ImGui::Checkbox("Visualize PCSS Blockers##ShadowPass",
-                  &shadow.debug.visualizePCSSBlockers);
-  ImGui::Checkbox("Visualize PCSS Average Blocker Depth##ShadowPass",
-                  &shadow.debug.visualizePCSSAverageBlockerDepth);
-  ImGui::Checkbox("Visualize PCSS Filter Radius##ShadowPass",
-                  &shadow.debug.visualizePCSSFilterRadius);
-  const bool pcssDebugVisualization =
-      shadow.debug.visualizePCSSBlockers ||
-      shadow.debug.visualizePCSSAverageBlockerDepth ||
-      shadow.debug.visualizePCSSFilterRadius;
-  if (pcssDebugVisualization && shadow.filterMode != ShadowFilterMode::PCSS) {
-    ImGui::TextUnformatted(
-        "PCSS debug visualization is meaningful when PCSS filtering is "
-        "active.");
-  }
-  ImGui::Checkbox("Visualize SDSM Histogram##ShadowPass",
-                  &shadow.debug.visualizeSDSMHistogram);
-
   ImGui::Separator();
   ImGui::TextUnformatted("Diagnostic Logs");
   ImGui::Checkbox("Log Shadow Diagnostics##ShadowPass",
@@ -2089,12 +1865,8 @@ void drawShadowSettings(
 
   sanitizeShadowSettings(shadow);
   ImGui::Separator();
-  ImGui::Text("Split Mode: %s",
-              shadowCascadeSplitModeDisplayName(shadow.splitMode));
   ImGui::Text("Quality Preset: %s",
               shadowQualityPresetDisplayName(shadow.qualityPreset));
-  ImGui::Text("Filter: %s", shadowFilterModeDisplayName(shadow.filterMode));
-  ImGui::Text("SDSM: %s", shadowSdsmModeDisplayName(shadow.sdsmMode));
 }
 
 void drawTransparentSettings(RenderSettings::TransparentSettings &transparent) {
@@ -3616,18 +3388,13 @@ void drawShadowsWindow(
 
   ImGui::Separator();
   const ShadowSdsmDebugFrameData &sdsm = shadowDebugFrameData->sdsm;
-  ImGui::TextUnformatted("SDSM");
-  ImGui::Text("Mode: %s", shadowSdsmModeDisplayName(sdsm.mode));
-  ImGui::Text("Requested Backend: %s", shadowSdsmReductionBackendDisplayName(
-                                           sdsm.requestedReductionBackend));
+  ImGui::TextUnformatted("Previous-frame min/max SDSM");
   ImGui::Text("Active Backend: %s", shadowSdsmReductionBackendDisplayName(
                                         sdsm.activeReductionBackend));
   if (sdsm.activeReductionBackend == ShadowSdsmReductionBackend::Gpu ||
       sdsm.gpuResultRingSlotCount > 0u) {
     ImGui::Text("GPU Result: %s",
                 sdsm.gpuReductionResultAvailable ? "available" : "unavailable");
-    ImGui::Text("GPU Split Payload: %s",
-                sdsm.gpuSplitPayloadValid ? "valid" : "not used");
     if (sdsm.gpuResultSelectedSlot != std::numeric_limits<uint32_t>::max()) {
       ImGui::Text("GPU Ring: slot %u of %u", sdsm.gpuResultSelectedSlot,
                   sdsm.gpuResultRingSlotCount);
@@ -3641,11 +3408,6 @@ void drawShadowsWindow(
           "GPU Result Frame: %llu",
           static_cast<unsigned long long>(sdsm.gpuResultSourceFrameIndex));
     }
-  }
-  if (sdsm.mode == ShadowSdsmMode::Histogram) {
-    ImGui::TextUnformatted(
-        "Histogram GPU reduction writes histogram diagnostics; split "
-        "smoothing remains CPU-side.");
   }
   ImGui::Text("Reduction Fallback: %s",
               sdsm.reductionFallbackActive ? "active" : "inactive");
@@ -3664,18 +3426,8 @@ void drawShadowsWindow(
               sdsm.smoothedLinearMax);
   ImGui::Text("Fixed Range: %.6f .. %.6f", sdsm.fixedRangeNear,
               sdsm.fixedRangeFar);
-  ImGui::Text("Histogram Trimmed Range: %.6f .. %.6f",
-              sdsm.histogramTrimmedRangeNear, sdsm.histogramTrimmedRangeFar);
   ImGui::Text("Effective Range: %.6f .. %.6f", sdsm.effectiveRangeNear,
               sdsm.effectiveRangeFar);
-  ImGui::Text("Histogram Source: level %u, %u x %u", sdsm.histogramSourceLevel,
-              sdsm.histogramSourceDimensions.x,
-              sdsm.histogramSourceDimensions.y);
-  ImGui::Text("Histogram Buckets / Tiles: %u / %u", sdsm.histogramBucketCount,
-              sdsm.histogramValidTileCount);
-  ImGui::Text("Histogram Weight: %.2f", sdsm.histogramTotalWeight);
-  ImGui::Text("Histogram Trim: low %.2f%%, high %.2f%%",
-              sdsm.histogramTrimLowPercent, sdsm.histogramTrimHighPercent);
   if (isSdsmWarningStatus(sdsm.status)) {
     ImGui::TextUnformatted(sdsm.fixedFallbackActive
                                ? "Warning: previous-frame SDSM data was not "
@@ -3685,10 +3437,6 @@ void drawShadowsWindow(
                                  "SDSM range.");
   }
   drawShadowSplitGraph(sdsm);
-  if (renderSettings.shadow.debug.visualizeSDSMHistogram &&
-      sdsm.histogramBucketCount > 0u) {
-    drawSdsmHistogramGraph(sdsm);
-  }
 
   ImGui::Separator();
   ImGui::TextUnformatted("Performance");
@@ -3736,24 +3484,13 @@ void drawShadowsWindow(
       frameMetrics.shadow.staticOnlyReuseMissAdaptiveRefreshCount);
   ImGui::Text("Filter Sample Budget: %u",
               frameMetrics.shadow.filterSampleBudget);
-  if (frameMetrics.shadow.pcssBlockerSampleBudget > 0u ||
-      frameMetrics.shadow.pcssFilterSampleBudget > 0u) {
-    ImGui::Text("PCSS Blocker / Filter Budget: %u / %u",
-                frameMetrics.shadow.pcssBlockerSampleBudget,
-                frameMetrics.shadow.pcssFilterSampleBudget);
-    ImGui::Text("PCSS Max Samples: %u per receiver, %u in blend band",
-                frameMetrics.shadow.pcssMaxSamplesPerReceiver,
-                frameMetrics.shadow.pcssMaxSamplesPerBlendedReceiver);
-  }
   ImGui::Text("SDSM Compute Passes: %u",
               frameMetrics.shadow.sdsmComputePassCount);
   ImGui::Text("SDSM Readback Bytes: %u", frameMetrics.shadow.sdsmReadbackBytes);
-  ImGui::Text("SDSM Source Samples: %u reduction, %u histogram",
-              frameMetrics.shadow.sdsmReductionSourceSamples,
-              frameMetrics.shadow.sdsmHistogramSourceSamples);
-  ImGui::Text("SDSM CPU Cost: %.3f ms reduction, %.3f ms histogram",
-              frameMetrics.shadow.sdsmCpuReductionTimeMs,
-              frameMetrics.shadow.sdsmCpuHistogramTimeMs);
+  ImGui::Text("SDSM Reduction Source Samples: %u",
+              frameMetrics.shadow.sdsmReductionSourceSamples);
+  ImGui::Text("SDSM CPU Reduction Cost: %.3f ms",
+              frameMetrics.shadow.sdsmCpuReductionTimeMs);
   if (frameMetrics.shadow.depthGpuTimingAvailable != 0u) {
     if (frameMetrics.shadow.depthGpuTimingSourceFrameIndex !=
         std::numeric_limits<uint64_t>::max()) {

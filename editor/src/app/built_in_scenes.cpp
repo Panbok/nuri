@@ -608,11 +608,10 @@ Result<void, std::string> registerBuiltInScenes(EditorSceneCatalog &catalog,
           configureStaticOpaqueScene(ctx.runtime, glm::vec3(8.0f, 16.0f, 32.0f),
                                      true);
           RenderSettings &settings = ctx.runtime.renderSettings();
+          applyShadowQualityPreset(settings.shadow, ShadowQualityPreset::Low);
           settings.shadow.enabled = true;
           settings.shadow.shadowMapSize = 1024u;
           settings.shadow.maxDistance = 16.0f;
-          settings.shadow.filterMode = ShadowFilterMode::PCF3x3;
-          settings.shadow.pcfSampleCount = 9u;
           settings.shadow.debug.showShadowMapViewport = true;
           settings.shadow.debug.showLightViewBounds = true;
           settings.shadow.debug.previewDepthMin = 0.0f;
@@ -692,35 +691,31 @@ Result<void, std::string> registerBuiltInScenes(EditorSceneCatalog &catalog,
         .fallbackMaterialDebugName = "niagara_bistro_fallback_material",
         .configureRender =
             [](EditorRuntime &runtime) {
-              runtime.renderSettings().opaque.enableInstanceCompute = false;
+              runtime.configureStaticModelOpaqueSettings(
+                  glm::vec3(8.0f, 16.0f, 32.0f));
+              // Do not enable automatic LODs for Bistro. Its generated
+              // index-only LODs are temporally unstable: returning to the same
+              // camera after movement can produce a different visible meshlet
+              // set, causing distant geometry to flicker, pop, or disappear.
+              // Keep authored LOD0 until stable per-LOD vertex data and
+              // transitions pass the far-camera regression test.
               runtime.renderSettings().opaque.enableMeshLod = false;
+              runtime.renderSettings().opaque.forcedMeshLod = 0;
               runtime.renderSettings().opaque.meshletMode =
                   MeshletRenderMode::Opportunistic;
-              runtime.renderSettings().opaque.enableTessellation = false;
-              runtime.renderSettings().opaque.forcedMeshLod = 0;
-              runtime.renderSettings().opaque.meshLodDistanceThresholds =
-                  glm::vec3(8.0f, 24.0f, 48.0f);
-              runtime.renderSettings().opaque.enableInstanceAnimation = false;
+              runtime.renderSettings().opaque.hybridClassicMaxMeshlets = 128u;
+              runtime.renderSettings().opaque.enableDepthPrepass = true;
+              runtime.renderSettings().opaque.enableDepthPyramid = true;
+              runtime.renderSettings().visibility.occlusionMode =
+                  VisibilityOcclusionMode::CurrentFrameHiZExperimental;
               runtime.renderSettings().textureFiltering.mode =
                   TextureFilterMode::Anisotropic;
               runtime.renderSettings().textureFiltering.anisotropy = 8u;
             },
         .configureLoadedScene =
             [](EditorRuntime &, StreamingSceneState &state) {
-              for (ImportedSceneLight &light : state.prefab.fallbackLights) {
-                if (light.light.name == "Sun") {
-                  light.light.intensity = 10.0f;
-                }
-              }
-              for (ScenePrefabLight &light : state.prefab.prefab.lights) {
-                if (light.light.name == "Sun") {
-                  light.light.intensity = 10.0f;
-                }
-              }
               const float scale = glm::length(glm::vec3(state.baseModel[0]));
-              NURI_LOG_INFO("Niagara Bistro reference setup scale=%.6f "
-                            "sunIntensity=10.000",
-                            scale);
+              NURI_LOG_INFO("Niagara Bistro reference setup scale=%.6f", scale);
             },
         .configureCamera =
             [](EditorRuntime &runtime, StreamingSceneState &state) {
