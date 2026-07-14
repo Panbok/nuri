@@ -1,14 +1,15 @@
 #define NURI_OPAQUE_MESHLET_BATCHED 1
-#include "meshlet_common.sp"
 #include "BRDF.sp"
 #include "material_inputs.sp"
 #include "material_lighting.sp"
+#include "meshlet_common.sp"
+#include "opaque_meshlet_vertex.sp"
 
-layout(location = 0) in PerVertex vtx;
-layout(location = 10) flat in uint meshletDebugId;
-layout(location = 11) flat in uint meshletDebugLod;
-layout(location = 12) flat in uint meshletMaterialIndex;
-layout(location = 13) flat in uint meshletFlags;
+layout(location = 0) in OpaqueMeshletVertex vtx;
+layout(location = 5) flat in uint meshletDebugId;
+layout(location = 6) flat in uint meshletDebugLod;
+layout(location = 7) flat in uint meshletMaterialIndex;
+layout(location = 8) flat in uint meshletFlags;
 
 layout(location = 0) out vec4 out_FragColor;
 
@@ -57,7 +58,8 @@ void main() {
   const bool visualizeCascadeIndex =
       shadowDebugFlag(kShadowFrameFlagVisualizeCascadeIndex);
 
-  ShadedMaterial sm = evaluateMaterial(material, vtx);
+  const PerVertex materialVertex = opaqueMeshletMaterialVertex(vtx);
+  ShadedMaterial sm = evaluateMaterial(material, materialVertex);
 
   const float alphaCutoff = materialAlphaCutoff(material);
   if (alphaMode == kAlphaModeMask && sm.baseColor.a < alphaCutoff) {

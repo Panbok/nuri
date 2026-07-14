@@ -2,18 +2,19 @@
 
 #define NURI_OPAQUE_MESHLET_BATCHED 1
 #include "meshlet_common.sp"
+#include "opaque_meshlet_vertex.sp"
 
-layout(local_size_x = 32) in;
+layout(local_size_x = 128) in;
 layout(triangles, max_vertices = 64, max_primitives = 124) out;
 
 out gl_MeshPerVertexEXT { vec4 gl_Position; }
 gl_MeshVerticesEXT[];
 
-layout(location = 0) out PerVertex vtx[];
-layout(location = 10) flat out uint meshletDebugId[];
-layout(location = 11) flat out uint meshletDebugLod[];
-layout(location = 12) flat out uint meshletMaterialIndex[];
-layout(location = 13) flat out uint meshletFlags[];
+layout(location = 0) out OpaqueMeshletVertex vtx[];
+layout(location = 5) flat out uint meshletDebugId[];
+layout(location = 6) flat out uint meshletDebugLod[];
+layout(location = 7) flat out uint meshletMaterialIndex[];
+layout(location = 8) flat out uint meshletFlags[];
 
 taskPayloadSharedEXT MeshletTaskPayload meshletPayload;
 
@@ -52,11 +53,6 @@ void writeMeshletVertex(uint outputIndex, uint vertexIndex, InstanceData inst,
           ? vec4(normalize(transformedTangent), tangent.w)
           : vec4(0.0, 0.0, 0.0, 1.0);
   vtx[outputIndex].worldPos = worldPos4.xyz;
-  vtx[outputIndex].patchBarycentric = vec3(0.0);
-  vtx[outputIndex].triBarycentric = vec3(0.0);
-  vtx[outputIndex].patchOuterFactors = vec3(1.0);
-  vtx[outputIndex].patchInnerFactor = 1.0;
-  vtx[outputIndex].tessellatedFlag = 0.0;
   meshletDebugId[outputIndex] = meshletIndex;
   meshletDebugLod[outputIndex] = selectedLod;
   meshletMaterialIndex[outputIndex] = batch.draw.z;

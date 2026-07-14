@@ -37,8 +37,8 @@ public:
   [[nodiscard]] uint64_t committedFrameIndex() const noexcept {
     return committedFrameIndex_;
   }
-  [[nodiscard]] HistoryInvalidationReason lastInvalidationReason() const
-      noexcept {
+  [[nodiscard]] HistoryInvalidationReason
+  lastInvalidationReason() const noexcept {
     return lastInvalidationReason_;
   }
 

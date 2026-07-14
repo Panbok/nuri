@@ -8,8 +8,7 @@
 
 namespace nuri {
 
-[[nodiscard]] constexpr PresentationAAUnsupportedReason
-msaa4xUnsupportedReason(
+[[nodiscard]] constexpr PresentationAAUnsupportedReason msaa4xUnsupportedReason(
     const PresentationAAGpuCapabilities &capabilities) noexcept {
   if (!capabilities.sample4Color) {
     return PresentationAAUnsupportedReason::Sample4Color;
@@ -91,10 +90,9 @@ buildPresentationAAPlan(
     plan.transparency = TransparencyAAPolicy::SingleSamplePostResolve;
     plan.sampleShadingSupported = gpuCapabilities.sampleRateShading;
     plan.sampleShadingEnabled = false;
-    plan.spatialCleanup =
-        settings.antiAliasing.debug.spatialPostMsaaCleanup
-            ? SpatialCleanupPoint::PostTransparency
-            : SpatialCleanupPoint::Off;
+    plan.spatialCleanup = settings.antiAliasing.debug.spatialPostMsaaCleanup
+                              ? SpatialCleanupPoint::PostTransparency
+                              : SpatialCleanupPoint::Off;
     break;
   case AntiAliasingMode::TAA:
     switch (temporalProvider) {

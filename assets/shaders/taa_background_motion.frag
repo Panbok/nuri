@@ -22,11 +22,9 @@ void main() {
   // fullscreen_copy-style UVs use Y in [1, 2]. Normalize to the canonical
   // TAA screen convention before applying previousUv = currentUv + motionUv.
   const vec2 screenUv = vec2(uv.x, uv.y - 1.0);
-  const vec2 currentNdc =
-      vec2(screenUv.x * 2.0 - 1.0, 1.0 - screenUv.y * 2.0);
+  const vec2 currentNdc = vec2(screenUv.x * 2.0 - 1.0, 1.0 - screenUv.y * 2.0);
   const vec4 previousClip =
-      pc.previousFromCurrentJitteredRotationClip *
-      vec4(currentNdc, 1.0, 1.0);
+      pc.previousFromCurrentJitteredRotationClip * vec4(currentNdc, 1.0, 1.0);
   if (previousClip.w == 0.0) {
     out_FragVelocity = vec2(0.0);
     return;
@@ -34,9 +32,8 @@ void main() {
 
   const vec2 previousUv =
       clipNdcToTaaScreenUv(previousClip.xy / previousClip.w);
-  const vec2 currentJitterUv =
-      vec2(uintBitsToFloat(pc.currentJitterUvXBits),
-           uintBitsToFloat(pc.currentJitterUvYBits));
+  const vec2 currentJitterUv = vec2(uintBitsToFloat(pc.currentJitterUvXBits),
+                                    uintBitsToFloat(pc.currentJitterUvYBits));
   const vec2 currentNoJitterUv = screenUv - currentJitterUv;
   out_FragVelocity = previousUv - currentNoJitterUv;
 }

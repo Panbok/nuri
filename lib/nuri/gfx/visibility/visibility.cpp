@@ -97,6 +97,8 @@ visibilitySettingsFromRenderSettings(const RenderSettings &settings) noexcept {
       .enableIndirectMeshDispatch =
           settings.visibility.enableIndirectMeshDispatch ||
           mainViewMode == VisibilityCullingMode::GpuDriven,
+      .enableMeshletPreTaskCompaction =
+          settings.visibility.enableMeshletPreTaskCompaction,
       .enableGpuIndirectDraw = settings.visibility.enableGpuIndirectDraw ||
                                mainViewMode == VisibilityCullingMode::GpuDriven,
       .enableOcclusionCulling =

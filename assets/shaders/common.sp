@@ -322,6 +322,8 @@ layout(std430, buffer_reference) readonly buffer VelocityRenderableGeometryBuffe
 struct VelocityFrameData {
   mat4 currentViewProjNoJitter;
   mat4 previousViewProjNoJitter;
+  ReadonlyInstanceMatricesBuffer previousInstanceMatrices;
+  VelocityInstanceFlagsBuffer velocityInstanceFlags;
   uvec4 instanceFlagsMode;
   VelocityRenderableGeometryBuffer previousGeometry;
   uvec4 previousGeometryInfo;
@@ -338,6 +340,16 @@ struct StaticVertexDecodeGpuData {
 
 layout(std430, buffer_reference) readonly buffer StaticVertexDecodeBuffer {
   StaticVertexDecodeGpuData values[];
+};
+
+struct ShadowDrawGpuData {
+  PackedVertexWordBuffer vertexBuffer;
+  StaticVertexDecodeBuffer vertexDecodeBuffer;
+  uvec4 metadata; // decode index, packed format, reserved, reserved
+};
+
+layout(std430, buffer_reference) readonly buffer ShadowDrawBuffer {
+  ShadowDrawGpuData values[];
 };
 
 #ifdef NURI_MESHLET_COMMON
@@ -381,6 +393,7 @@ struct VisibilityCounterGpuData {
   uvec4 indirect;
   uvec4 meshlet;
   uvec4 meshlet2;
+  uvec4 meshlet3;
 };
 
 layout(std430, buffer_reference) buffer VisibilityCounterBuffer {
@@ -404,6 +417,61 @@ layout(std430, buffer_reference) readonly buffer MeshletBatchBuffer {
   MeshletBatchGpuData values[];
 };
 
+struct CompactedMeshletGpuData {
+  uvec4 ids; // meshlet, global instance, selected LOD, absolute batch
+};
+
+layout(std430, buffer_reference) buffer CompactedMeshletBuffer {
+  CompactedMeshletGpuData values[];
+};
+
+layout(std430, buffer_reference) readonly buffer ReadonlyCompactedMeshletBuffer {
+  CompactedMeshletGpuData values[];
+};
+
+layout(std430, buffer_reference) buffer MeshletCompactionCounterBuffer {
+  uint counts[];
+};
+
+layout(std430, buffer_reference) readonly buffer ReadonlyMeshletCompactionCounterBuffer {
+  uint counts[];
+};
+
+layout(std430, buffer_reference) buffer MeshletIndirectCommandBuffer {
+  uint words[];
+};
+
+#ifdef NURI_OPAQUE_MESHLET_COMPACTION_COMPUTE
+struct MeshletCompactionWorkItemGpuData {
+  uvec4 data; // absolute batch, candidate base, output dispatch, record base
+};
+
+layout(std430, buffer_reference) readonly buffer MeshletCompactionWorkItemBuffer {
+  MeshletCompactionWorkItemGpuData values[];
+};
+
+layout(push_constant) uniform MeshletCompactionPushConstants {
+  FrameDataBuffer frameData;
+  InstanceMatricesBuffer instanceMatrices;
+  InstanceRemapBuffer instanceRemap;
+  InstanceLodBoundsBuffer instanceLodBounds;
+  MeshletBatchBuffer meshletBatches;
+  MeshletCompactionWorkItemBuffer workItems;
+  CompactedMeshletBuffer compactedMeshlets;
+  MeshletCompactionCounterBuffer compactionCounters;
+  MeshletIndirectCommandBuffer indirectCommands;
+  VisibilityCounterBuffer visibilityCounters;
+  vec4 lodThresholds;
+  uint workItemCount;
+  uint dispatchCount;
+  uint compactGridWidth;
+  uint sourceFrameIndex;
+  uint meshletCounterFlags;
+  uint flags;
+  uint reserved0;
+  uint reserved1;
+} pc;
+#else
 layout(push_constant) uniform MeshletPushConstants {
   FrameDataBuffer frameData;
   InstanceMatricesBuffer instanceMatrices;
@@ -412,14 +480,20 @@ layout(push_constant) uniform MeshletPushConstants {
   vec4 lodThresholds;
   MeshletBatchBuffer meshletBatches;
   VisibilityCounterBuffer visibilityCounters;
-  ReadonlyInstanceMatricesBuffer previousInstanceMatrices;
-  VelocityInstanceFlagsBuffer velocityInstanceFlags;
+#ifdef NURI_OPAQUE_MESHLET_COMPACT_TASK
+  ReadonlyCompactedMeshletBuffer compactedMeshlets;
+  ReadonlyMeshletCompactionCounterBuffer compactionCounters;
+#else
+  CompactedMeshletBuffer compactedMeshlets;
+  MeshletCompactionCounterBuffer compactionCounters;
+#endif
   VelocityFrameDataBuffer velocityFrameData;
   uint batchBase;
   uint candidateOffset;
   uint sourceFrameIndex;
   uint meshletCounterFlags;
 } pc;
+#endif
 #else
 layout(push_constant) uniform MeshletPushConstants {
   FrameDataBuffer frameData;
@@ -449,7 +523,11 @@ layout(push_constant) uniform PushConstants {
   PackedVertexWordBuffer vertexBuffer;
   StaticVertexDecodeBuffer vertexDecodeBuffer;
   InstanceMatricesBuffer instanceMatrices;
+#ifdef NURI_SHADOW_DEPTH
+  ShadowDrawBuffer shadowDraws;
+#else
   ReadonlyInstanceMatricesBuffer previousInstanceMatrices;
+#endif
   InstanceRemapBuffer instanceRemap;
   InstanceCentersPhaseBuffer instanceCentersPhase;
   InstanceBaseMatricesBuffer instanceBaseMatrices;

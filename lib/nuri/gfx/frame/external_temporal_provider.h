@@ -153,8 +153,7 @@ class NURI_API ExternalTemporalProviderBackend {
 public:
   virtual ~ExternalTemporalProviderBackend() = default;
 
-  [[nodiscard]] virtual ExternalTemporalProviderBackendProbe
-  probe() const = 0;
+  [[nodiscard]] virtual ExternalTemporalProviderBackendProbe probe() const = 0;
   [[nodiscard]] virtual Result<ExternalTemporalProviderBackendFramePlan,
                                std::string>
   prepareFrame(const ExternalTemporalProviderPrepareDesc &desc) = 0;

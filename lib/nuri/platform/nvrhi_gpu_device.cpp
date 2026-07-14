@@ -59,6 +59,7 @@ constexpr uint32_t kWholeFrameTimingSlotCount = kSwapchainFramesInFlight + 1u;
 constexpr size_t kPushConstantByteSize = 128u;
 constexpr uint32_t kDefaultMeshletMaxVertices = 64u;
 constexpr uint32_t kDefaultMeshletMaxPrimitives = 124u;
+constexpr uint32_t kDefaultMeshletWorkGroupSize = 32u;
 constexpr std::array<uint8_t, 4> kSupportedAnisotropyLevels = {2u, 4u, 8u, 16u};
 constexpr uint16_t kSpvOpExecutionMode = 16u;
 constexpr uint16_t kSpvOpConstant = 43u;
@@ -521,7 +522,24 @@ toNvrhiAddressMode(SamplerWrapMode mode) {
 }
 
 [[nodiscard]] glslang_resource_t
-makeGlslangResource(const VkPhysicalDeviceLimits &limits) {
+makeGlslangResource(const VkPhysicalDeviceLimits &limits,
+                    const MeshletLimits &meshletLimits) {
+  const int maxMeshOutputVertices =
+      static_cast<int>(meshletLimits.maxMeshOutputVertices != 0u
+                           ? meshletLimits.maxMeshOutputVertices
+                           : kDefaultMeshletMaxVertices);
+  const int maxMeshOutputPrimitives =
+      static_cast<int>(meshletLimits.maxMeshOutputPrimitives != 0u
+                           ? meshletLimits.maxMeshOutputPrimitives
+                           : kDefaultMeshletMaxPrimitives);
+  const int maxMeshWorkGroupSizeX =
+      static_cast<int>(meshletLimits.maxMeshWorkGroupSizeX != 0u
+                           ? meshletLimits.maxMeshWorkGroupSizeX
+                           : kDefaultMeshletWorkGroupSize);
+  const int maxTaskWorkGroupSizeX =
+      static_cast<int>(meshletLimits.maxTaskWorkGroupSizeX != 0u
+                           ? meshletLimits.maxTaskWorkGroupSizeX
+                           : kDefaultMeshletWorkGroupSize);
   const glslang_resource_t resource{
       .max_lights = 32,
       .max_clip_planes = static_cast<int>(limits.maxClipDistances),
@@ -627,21 +645,21 @@ makeGlslangResource(const VkPhysicalDeviceLimits &limits) {
       .max_combined_clip_and_cull_distances =
           static_cast<int>(limits.maxCombinedClipAndCullDistances),
       .max_samples = 4,
-      .max_mesh_output_vertices_nv = 256,
-      .max_mesh_output_primitives_nv = 512,
-      .max_mesh_work_group_size_x_nv = 32,
+      .max_mesh_output_vertices_nv = maxMeshOutputVertices,
+      .max_mesh_output_primitives_nv = maxMeshOutputPrimitives,
+      .max_mesh_work_group_size_x_nv = maxMeshWorkGroupSizeX,
       .max_mesh_work_group_size_y_nv = 1,
       .max_mesh_work_group_size_z_nv = 1,
-      .max_task_work_group_size_x_nv = 32,
+      .max_task_work_group_size_x_nv = maxTaskWorkGroupSizeX,
       .max_task_work_group_size_y_nv = 1,
       .max_task_work_group_size_z_nv = 1,
       .max_mesh_view_count_nv = 4,
-      .max_mesh_output_vertices_ext = 256,
-      .max_mesh_output_primitives_ext = 512,
-      .max_mesh_work_group_size_x_ext = 32,
+      .max_mesh_output_vertices_ext = maxMeshOutputVertices,
+      .max_mesh_output_primitives_ext = maxMeshOutputPrimitives,
+      .max_mesh_work_group_size_x_ext = maxMeshWorkGroupSizeX,
       .max_mesh_work_group_size_y_ext = 1,
       .max_mesh_work_group_size_z_ext = 1,
-      .max_task_work_group_size_x_ext = 32,
+      .max_task_work_group_size_x_ext = maxTaskWorkGroupSizeX,
       .max_task_work_group_size_y_ext = 1,
       .max_task_work_group_size_z_ext = 1,
       .max_mesh_view_count_ext = 4,
@@ -4781,8 +4799,8 @@ NvrhiGPUDevice::createShaderModule(const ShaderDesc &desc) {
   }
   const std::string moduleName(desc.moduleName);
   const std::string patched = patchGlslPrelude(desc.stage, desc.source);
-  const glslang_resource_t resource =
-      makeGlslangResource(impl_->physicalDeviceProperties.limits);
+  const glslang_resource_t resource = makeGlslangResource(
+      impl_->physicalDeviceProperties.limits, impl_->meshletLimits);
   auto compileResult =
       compileGlslToSpirv(desc.stage, patched.c_str(), resource);
   if (compileResult.hasError()) {

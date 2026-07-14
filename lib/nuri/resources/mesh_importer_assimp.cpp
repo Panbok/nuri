@@ -26,6 +26,8 @@
 namespace nuri {
 namespace {
 constexpr float kMeshoptOverdrawThreshold = 1.05f;
+constexpr std::array<float, 5> kLodAttributeWeights{0.5f, 0.5f, 0.5f, 1.0f,
+                                                    1.0f};
 constexpr size_t kTriangleIndexCount = 3;
 constexpr float kDefaultTextureScale = 1.0f;
 constexpr float kDefaultAttenuationDistance = 0.0f;
@@ -1396,27 +1398,43 @@ buildLodIndexBuffers(const MeshImportOptions &options,
                      NURI_PROFILER_COLOR_CREATE);
   std::pmr::memory_resource *mem =
       lodIndexBuffers[0].get_allocator().resource();
+  std::pmr::vector<std::array<float, kLodAttributeWeights.size()>>
+      lodAttributes(mem);
+  lodAttributes.reserve(vertices.size());
+  for (const Vertex &vertex : vertices) {
+    lodAttributes.push_back({vertex.normal.x, vertex.normal.y, vertex.normal.z,
+                             vertex.uv.x, vertex.uv.y});
+  }
+
   const size_t baseIndexCount = lodIndexBuffers[0].size();
-  for (uint32_t lodIndex = 1; lodIndex < requestedLodCount; ++lodIndex) {
+  for (uint32_t requestedLodIndex = 1; requestedLodIndex < requestedLodCount;
+       ++requestedLodIndex) {
+    const std::pmr::vector<uint32_t> &sourceIndices =
+        lodIndexBuffers[generatedLodCount - 1];
     const size_t targetIndexCount =
-        targetLodIndexCount(options, lodIndex, baseIndexCount);
-    if (targetIndexCount == 0 || targetIndexCount >= baseIndexCount) {
+        targetLodIndexCount(options, requestedLodIndex, baseIndexCount);
+    if (targetIndexCount == 0 || targetIndexCount >= sourceIndices.size()) {
       continue;
     }
 
     std::pmr::vector<uint32_t> simplifiedIndices(mem);
-    simplifiedIndices.resize(baseIndexCount);
-    float lodError = 0.0f;
-    size_t simplifiedCount = meshopt_simplify(
-        simplifiedIndices.data(), lodIndexBuffers[0].data(), baseIndexCount,
+    simplifiedIndices.resize(sourceIndices.size());
+    float stepError = 0.0f;
+    size_t simplifiedCount = meshopt_simplifyWithAttributes(
+        simplifiedIndices.data(), sourceIndices.data(), sourceIndices.size(),
         &vertices.front().position.x, vertices.size(), sizeof(Vertex),
-        targetIndexCount, options.lodTargetError, 0, &lodError);
+        lodAttributes.front().data(), sizeof(lodAttributes.front()),
+        kLodAttributeWeights.data(), kLodAttributeWeights.size(), nullptr,
+        targetIndexCount, options.lodTargetError, 0, &stepError);
     simplifiedCount -= simplifiedCount % kTriangleIndexCount;
     if (simplifiedCount < kTriangleIndexCount) {
       NURI_LOG_WARNING(
           "MeshImporter::loadFromFile: Mesh %u LOD%u simplification failed, "
           "keeping previous LODs",
-          meshIndex, lodIndex);
+          meshIndex, requestedLodIndex);
+      break;
+    }
+    if (simplifiedCount >= sourceIndices.size()) {
       break;
     }
 
@@ -1424,9 +1442,9 @@ buildLodIndexBuffers(const MeshImportOptions &options,
     if (optimize) {
       optimizeIndexOrder(simplifiedIndices, vertices);
     }
-    lodIndexBuffers[lodIndex] = std::move(simplifiedIndices);
-    lodErrors[lodIndex] = lodError;
-    generatedLodCount = lodIndex + 1;
+    lodIndexBuffers[generatedLodCount] = std::move(simplifiedIndices);
+    lodErrors[generatedLodCount] = lodErrors[generatedLodCount - 1] + stepError;
+    ++generatedLodCount;
   }
   NURI_PROFILER_ZONE_END();
   return generatedLodCount;

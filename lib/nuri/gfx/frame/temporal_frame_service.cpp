@@ -42,16 +42,16 @@ resetFlags(TemporalHistoryResetReason reason) noexcept {
       TemporalResetReasonFlags::CameraCut |
       TemporalResetReasonFlags::ProjectionChange |
       TemporalResetReasonFlags::BackendRecreation;
-  return (static_cast<uint32_t>(flags) &
-          static_cast<uint32_t>(kViewReasons)) != 0u;
+  return (static_cast<uint32_t>(flags) & static_cast<uint32_t>(kViewReasons)) !=
+         0u;
 }
 
 [[nodiscard]] bool invalidatesGrid(TemporalResetReasonFlags flags) noexcept {
   constexpr TemporalResetReasonFlags kGridReasons =
       TemporalResetReasonFlags::Resize |
       TemporalResetReasonFlags::RenderScaleChange;
-  return (static_cast<uint32_t>(flags) &
-          static_cast<uint32_t>(kGridReasons)) != 0u;
+  return (static_cast<uint32_t>(flags) & static_cast<uint32_t>(kGridReasons)) !=
+         0u;
 }
 
 } // namespace
@@ -71,7 +71,8 @@ struct TemporalFrameService::Impl {
       TemporalResetReasonFlags::None;
 };
 
-TemporalFrameService::TemporalFrameService() : impl_(std::make_unique<Impl>()) {}
+TemporalFrameService::TemporalFrameService()
+    : impl_(std::make_unique<Impl>()) {}
 
 TemporalFrameService::~TemporalFrameService() = default;
 
@@ -98,8 +99,7 @@ Result<CameraFrameState, std::string> TemporalFrameService::prepareFrame(
       camera, aspectRatio, antiAliasing, desc, pending.cameraHistory);
 
   TemporalResetReasonFlags reasons =
-      resetFlags(cameraState.historyResetReason) |
-      impl_->deferredResetReasons;
+      resetFlags(cameraState.historyResetReason) | impl_->deferredResetReasons;
   if (impl_->committedPlan.valid && impl_->committedPlan != plan) {
     reasons |= TemporalResetReasonFlags::ProviderChange;
   }
@@ -112,9 +112,9 @@ Result<CameraFrameState, std::string> TemporalFrameService::prepareFrame(
               std::isfinite(timeSeconds)
           ? std::max(0.0, timeSeconds - impl_->committedFacts.timeSeconds)
           : (std::isfinite(deltaSeconds) ? std::max(0.0, deltaSeconds) : 0.0);
-  pending.facts.cameraContinuityValid =
-      committedHistory.initialized && !invalidatesView(reasons) &&
-      !invalidatesGrid(reasons);
+  pending.facts.cameraContinuityValid = committedHistory.initialized &&
+                                        !invalidatesView(reasons) &&
+                                        !invalidatesGrid(reasons);
   pending.facts.pendingCommit = true;
 
   if (invalidatesView(reasons)) {
@@ -146,8 +146,7 @@ Result<CameraFrameState, std::string> TemporalFrameService::prepareFrame(
   if (!cameraState.jitterEnabled) {
     cameraState.jitterFrozen = false;
   }
-  cameraState.cameraContinuityValid =
-      pending.facts.cameraContinuityValid;
+  cameraState.cameraContinuityValid = pending.facts.cameraContinuityValid;
   if (cameraState.cameraContinuityValid) {
     cameraState.previousUnjitteredViewProj =
         committedHistory.previousUnjitteredViewProj;
@@ -182,13 +181,11 @@ void TemporalFrameService::abandonFrame(uint64_t frameIndex) noexcept {
     return;
   }
   impl_->pending.reset();
-  impl_->deferredResetReasons |=
-      TemporalResetReasonFlags::SkippedHistoryWrite;
+  impl_->deferredResetReasons |= TemporalResetReasonFlags::SkippedHistoryWrite;
 }
 
 void TemporalFrameService::invalidateResources() noexcept {
-  impl_->deferredResetReasons |=
-      TemporalResetReasonFlags::ResourceRecreation;
+  impl_->deferredResetReasons |= TemporalResetReasonFlags::ResourceRecreation;
 }
 
 void TemporalFrameService::invalidateBackend() noexcept {

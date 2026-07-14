@@ -11,7 +11,12 @@ const uint kMeshletFlagShadowCascadeCulling = 1u << 6u;
 const uint kMeshletFlagOcclusionCulling = 1u << 7u;
 const uint kMeshletFlagForcedLodShift = 8u;
 const uint kMeshletFlagForcedLodMask = 0x3u;
+const uint kMeshletFlagCurrentFrameOcclusion = 1u << 10u;
 const uint kOpaqueMeshletTaskPayloadCapacity = 32u;
+// Generated opaque LOD2+ need per-LOD vertex attributes before they are safe
+// for automatic selection. Forced LOD inspection is resolved outside this
+// path and remains unrestricted.
+const uint kMaxStableGeneratedOpaqueLod = 1u;
 
 float meshletInstanceMaxScale(mat4 model) {
   return max(max(length(model[0].xyz), length(model[1].xyz)),

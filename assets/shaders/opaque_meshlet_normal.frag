@@ -1,14 +1,16 @@
 #define NURI_OPAQUE_MESHLET_BATCHED 1
 #include "BRDF.sp"
 #include "meshlet_common.sp"
+#include "opaque_meshlet_vertex.sp"
 
-layout(location = 0) in PerVertex vtx;
-layout(location = 12) flat in uint meshletMaterialIndex;
+layout(location = 0) in OpaqueMeshletVertex vtx;
+layout(location = 7) flat in uint meshletMaterialIndex;
 
 layout(location = 0) out vec4 out_Normal;
 
 void main() {
   const MaterialData material = loadMaterialData(meshletMaterialIndex);
+  const PerVertex materialVertex = opaqueMeshletMaterialVertex(vtx);
   const uint materialSampler = pc.frameData.materialSamplerId;
   const uint normalSampler = pc.frameData.materialDataSamplerId;
   const uint alphaMode = materialAlphaMode(material);
@@ -20,7 +22,7 @@ void main() {
   const uint baseColorTexId =
       getMaterialTextureIndex(material, kMaterialTextureSlotBaseColor);
   const vec2 baseColorUv =
-      transformedUv(material, vtx, kMaterialTextureSlotBaseColor);
+      transformedUv(material, materialVertex, kMaterialTextureSlotBaseColor);
 
   vec4 baseColor = material.header.baseColorFactor;
   if (baseColorTexId != kInvalidTextureBindlessIndex) {
@@ -43,7 +45,7 @@ void main() {
       getMaterialTextureIndex(material, kMaterialTextureSlotNormal);
   if (normalTexId != kInvalidTextureBindlessIndex) {
     const vec2 normalUv =
-        transformedUv(material, vtx, kMaterialTextureSlotNormal);
+        transformedUv(material, materialVertex, kMaterialTextureSlotNormal);
     vec3 tangentNormal =
         textureBindless2D(normalTexId, normalSampler, normalUv).xyz * 2.0 - 1.0;
     tangentNormal.xy *= materialNormalScale(material);

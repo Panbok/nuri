@@ -38,10 +38,10 @@ public:
   }
 
   [[nodiscard]] Result<ExternalTemporalProviderFramePlan, std::string>
-  prepareFrame(const ExternalTemporalProviderPrepareDesc &prepareDesc) override {
+  prepareFrame(
+      const ExternalTemporalProviderPrepareDesc &prepareDesc) override {
     if (prepareDesc.renderExtent.x == 0u || prepareDesc.renderExtent.y == 0u ||
-        prepareDesc.outputExtent.x == 0u ||
-        prepareDesc.outputExtent.y == 0u) {
+        prepareDesc.outputExtent.x == 0u || prepareDesc.outputExtent.y == 0u) {
       return Result<ExternalTemporalProviderFramePlan, std::string>::makeError(
           "external temporal provider prepare extents must be nonzero");
     }
@@ -51,12 +51,13 @@ public:
         probe_.status != ExternalTemporalProviderStatus::BackendUnavailable) {
       auto backendPlan = desc_.backend->prepareFrame(prepareDesc);
       if (backendPlan.hasError()) {
-        return Result<ExternalTemporalProviderFramePlan, std::string>::makeError(
-            backendPlan.error());
+        return Result<ExternalTemporalProviderFramePlan,
+                      std::string>::makeError(backendPlan.error());
       }
       refreshProbe(backendPlan.value());
       if (probe_.status == ExternalTemporalProviderStatus::Ready) {
-        return Result<ExternalTemporalProviderFramePlan, std::string>::makeResult({
+        return Result<ExternalTemporalProviderFramePlan,
+                      std::string>::makeResult({
             .status = probe_.status,
             .jitterPixels = backendPlan.value().jitterPixels,
             .outputExtent = prepareDesc.outputExtent,
@@ -254,8 +255,8 @@ std::unique_ptr<ExternalTemporalProvider> createExternalTemporalProvider() {
   return createExternalTemporalProvider(nullptr);
 }
 
-std::unique_ptr<ExternalTemporalProvider> createExternalTemporalProvider(
-    ExternalTemporalProviderBackend *backend) {
+std::unique_ptr<ExternalTemporalProvider>
+createExternalTemporalProvider(ExternalTemporalProviderBackend *backend) {
   return createExternalTemporalProvider({
       .backend = backend,
       .buildRequested = NURI_WITH_FSR31 != 0,
@@ -263,8 +264,8 @@ std::unique_ptr<ExternalTemporalProvider> createExternalTemporalProvider(
   });
 }
 
-std::unique_ptr<ExternalTemporalProvider> createExternalTemporalProvider(
-    const ExternalTemporalProviderCreateDesc &desc) {
+std::unique_ptr<ExternalTemporalProvider>
+createExternalTemporalProvider(const ExternalTemporalProviderCreateDesc &desc) {
   return std::make_unique<FidelityFxExternalTemporalProvider>(desc);
 }
 

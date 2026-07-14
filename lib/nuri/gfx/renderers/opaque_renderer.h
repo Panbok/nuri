@@ -112,8 +112,8 @@ private:
     glm::vec4 lodThresholds{0.0f};
     uint64_t meshletBatchBufferAddress = 0;
     uint64_t visibilityCounterBufferAddress = 0;
-    uint64_t previousInstanceMatricesAddress = 0;
-    uint64_t velocityInstanceFlagsAddress = 0;
+    uint64_t compactedMeshletBufferAddress = 0;
+    uint64_t compactionCounterBufferAddress = 0;
     uint64_t velocityFrameDataAddress = 0;
     uint32_t batchBase = 0;
     uint32_t candidateOffset = 0;
@@ -128,13 +128,48 @@ private:
                 48u);
   static_assert(offsetof(MeshletPushConstants,
                          visibilityCounterBufferAddress) == 56u);
+  static_assert(offsetof(MeshletPushConstants, compactedMeshletBufferAddress) ==
+                64u);
   static_assert(offsetof(MeshletPushConstants,
-                         previousInstanceMatricesAddress) == 64u);
-  static_assert(offsetof(MeshletPushConstants, velocityInstanceFlagsAddress) ==
-                72u);
+                         compactionCounterBufferAddress) == 72u);
   static_assert(offsetof(MeshletPushConstants, velocityFrameDataAddress) ==
                 80u);
   static_assert(offsetof(MeshletPushConstants, batchBase) == 88u);
+
+  struct alignas(16) MeshletCompactionWorkItemGpuData {
+    glm::uvec4 data{0u};
+  };
+  static_assert(sizeof(MeshletCompactionWorkItemGpuData) == 16u);
+
+  struct alignas(16) CompactedMeshletGpuData {
+    glm::uvec4 ids{0u};
+  };
+  static_assert(sizeof(CompactedMeshletGpuData) == 16u);
+
+  struct alignas(16) MeshletCompactionPushConstants {
+    uint64_t frameDataAddress = 0;
+    uint64_t instanceMatricesAddress = 0;
+    uint64_t instanceRemapAddress = 0;
+    uint64_t instanceLodBoundsAddress = 0;
+    uint64_t meshletBatchBufferAddress = 0;
+    uint64_t workItemBufferAddress = 0;
+    uint64_t compactedMeshletBufferAddress = 0;
+    uint64_t compactionCounterBufferAddress = 0;
+    uint64_t indirectCommandBufferAddress = 0;
+    uint64_t visibilityCounterBufferAddress = 0;
+    glm::vec4 lodThresholds{0.0f};
+    uint32_t workItemCount = 0;
+    uint32_t dispatchCount = 0;
+    uint32_t compactGridWidth = 0;
+    uint32_t sourceFrameIndex = 0;
+    uint32_t meshletCounterFlags = 0;
+    uint32_t flags = 0;
+    uint32_t reserved0 = 0;
+    uint32_t reserved1 = 0;
+  };
+  static_assert(sizeof(MeshletCompactionPushConstants) == 128u);
+  static_assert(offsetof(MeshletCompactionPushConstants, lodThresholds) == 80u);
+  static_assert(offsetof(MeshletCompactionPushConstants, workItemCount) == 96u);
 
   struct alignas(16) MeshletBatchGpuData {
     uint64_t vertexBufferAddress = 0;
@@ -209,6 +244,7 @@ private:
     uint32_t meshletOffset = 0;
     uint32_t meshletCount = 0;
     uint32_t submeshIndex = 0;
+    uint32_t resolvedLod = 0;
     uint32_t meshletMaxCount = 0;
     uint32_t vertexOffset = 0;
     bool doubleSided = false;
@@ -229,6 +265,7 @@ private:
     uint32_t meshletOffset = 0;
     uint32_t meshletCount = 0;
     uint32_t submeshIndex = 0;
+    uint32_t resolvedLod = 0;
     uint32_t meshletMaxCount = 0;
     uint32_t vertexOffset = 0;
     bool doubleSided = false;
@@ -258,6 +295,8 @@ private:
   struct alignas(16) VelocityFrameGpuData {
     glm::mat4 currentViewProjNoJitter{1.0f};
     glm::mat4 previousViewProjNoJitter{1.0f};
+    uint64_t previousInstanceMatricesAddress = 0u;
+    uint64_t velocityInstanceFlagsAddress = 0u;
     glm::uvec4 instanceFlagsMode{0u};
     uint64_t previousGeometryAddress = 0u;
     uint64_t previousGeometryAddressPadding = 0u;
@@ -265,11 +304,15 @@ private:
   };
   static_assert(sizeof(VelocityFrameGpuData) == sizeof(glm::mat4) * 2u +
                                                     sizeof(glm::uvec4) * 2u +
-                                                    sizeof(uint64_t) * 2u,
+                                                    sizeof(uint64_t) * 4u,
                 "OpaqueRenderer::VelocityFrameGpuData layout changed");
+  static_assert(offsetof(VelocityFrameGpuData,
+                         previousInstanceMatricesAddress) == 128u);
+  static_assert(offsetof(VelocityFrameGpuData, velocityInstanceFlagsAddress) ==
+                136u);
   static_assert(offsetof(VelocityFrameGpuData, previousGeometryAddress) ==
-                144u);
-  static_assert(offsetof(VelocityFrameGpuData, previousGeometryInfo) == 160u);
+                160u);
+  static_assert(offsetof(VelocityFrameGpuData, previousGeometryInfo) == 176u);
 
   struct alignas(16) VelocityRenderableGeometryGpuData {
     uint64_t previousVertexBufferAddress = 0u;
@@ -313,6 +356,7 @@ private:
   struct SingleInstanceBatchCache {
     bool valid = false;
     uint32_t requestedLod = 0;
+    bool automaticLod = false;
     bool tessPipelineEnabled = false;
     RenderPipelineHandle basePipeline{};
     RenderPipelineHandle doubleSidedBasePipeline{};
@@ -452,6 +496,8 @@ private:
   ensureVisibilityMeshletIndirectRingCapacity(size_t dispatchBytes,
                                               size_t commandBytes);
   Result<bool, std::string>
+  ensureMeshletCompactionRingCapacity(size_t requiredBytes);
+  Result<bool, std::string>
   ensureVisibilityMeshletIndirectCommandRingCapacity(size_t requiredBytes);
   Result<bool, std::string>
   ensureVisibilityCounterRingCapacity(size_t requiredBytes);
@@ -473,7 +519,7 @@ private:
       bool tessellationRequested, uint32_t requestedLod,
       const glm::vec3 &cameraPosition, float tessFarDistanceSq) const;
   Result<bool, std::string>
-  ensureSingleInstanceBatchCache(uint32_t requestedLod,
+  ensureSingleInstanceBatchCache(uint32_t requestedLod, bool automaticLod,
                                  bool tessPipelineEnabled,
                                  const DrawItem &baseDraw);
   [[nodiscard]] size_t singleInstanceCacheIndex(uint32_t requestedLod,
@@ -513,8 +559,7 @@ private:
   Result<bool, std::string>
   buildOpaquePasses(RenderFrameContext &frame,
                     std::pmr::vector<PreparedGraphPass> &out);
-  Result<bool, std::string>
-  ensureDepthPyramidTextures();
+  Result<bool, std::string> ensureDepthPyramidTextures();
   [[nodiscard]] bool requiresDepthPyramid(const RenderSettings &settings) const;
   [[nodiscard]] bool
   shouldBuildTransmissionVisibilityDepth(const RenderFrameContext &frame,
@@ -601,12 +646,14 @@ private:
   std::unique_ptr<Shader> visibilityShader_;
   std::unique_ptr<Shader> visibilityIndirectDrawShader_;
   std::unique_ptr<Shader> visibilityIndirectMeshDispatchShader_;
+  std::unique_ptr<Shader> meshletCompactionShader_;
   std::unique_ptr<Shader> meshletShader_;
   std::unique_ptr<Pipeline> meshPipeline_;
   std::unique_ptr<Pipeline> computePipeline_;
   std::unique_ptr<Pipeline> visibilityComputePipeline_;
   std::unique_ptr<Pipeline> visibilityIndirectDrawComputePipeline_;
   std::unique_ptr<Pipeline> visibilityIndirectMeshDispatchComputePipeline_;
+  std::unique_ptr<Pipeline> meshletCompactionComputePipeline_;
   std::unique_ptr<Buffer> instanceCentersPhaseBuffer_;
   std::unique_ptr<Buffer> instanceLodBoundsBuffer_;
   std::unique_ptr<Buffer> instanceBaseMatricesBuffer_;
@@ -624,6 +671,7 @@ private:
   std::pmr::vector<DynamicBufferSlot> visibilityCounterRing_;
   std::pmr::vector<DynamicBufferSlot> visibilityMeshletDispatchRing_;
   std::pmr::vector<DynamicBufferSlot> visibilityMeshletIndirectCommandRing_;
+  std::pmr::vector<DynamicBufferSlot> meshletCompactionRing_;
   bool cachedMeshletCounterValid_ = false;
   uint32_t cachedMeshletCounterSourceFrame_ = 0u;
   uint32_t cachedMeshletEmitted_ = 0u;
@@ -679,7 +727,9 @@ private:
   ShaderHandle visibilityComputeShader_{};
   ShaderHandle visibilityIndirectDrawComputeShader_{};
   ShaderHandle visibilityIndirectMeshDispatchComputeShader_{};
+  ShaderHandle meshletCompactionComputeShader_{};
   ShaderHandle meshletTaskShader_{};
+  ShaderHandle meshletCompactedTaskShader_{};
   ShaderHandle meshletMeshShader_{};
   ShaderHandle meshletFragmentShader_{};
   ShaderHandle meshletDepthFragmentShader_{};
@@ -751,10 +801,15 @@ private:
   ComputePipelineHandle visibilityPipelineHandle_{};
   ComputePipelineHandle visibilityIndirectDrawPipelineHandle_{};
   ComputePipelineHandle visibilityIndirectMeshDispatchPipelineHandle_{};
+  ComputePipelineHandle meshletCompactionPipelineHandle_{};
   MeshletPipelineHandle meshletPipelineHandle_{};
   MeshletPipelineHandle meshletDoubleSidedPipelineHandle_{};
+  MeshletPipelineHandle meshletCompactedPipelineHandle_{};
+  MeshletPipelineHandle meshletCompactedDoubleSidedPipelineHandle_{};
   MeshletPipelineHandle meshletMsaaPipelineHandle_{};
   MeshletPipelineHandle meshletMsaaDoubleSidedPipelineHandle_{};
+  MeshletPipelineHandle meshletCompactedMsaaPipelineHandle_{};
+  MeshletPipelineHandle meshletCompactedMsaaDoubleSidedPipelineHandle_{};
   MeshletPipelineHandle meshletDepthPipelineHandle_{};
   MeshletPipelineHandle meshletDepthDoubleSidedPipelineHandle_{};
   MeshletPipelineHandle meshletDepthAlphaPipelineHandle_{};
@@ -960,6 +1015,15 @@ private:
   std::pmr::vector<VisibilityIndirectMeshDispatchPushConstants>
       visibilityIndirectMeshDispatchPushConstants_;
   std::pmr::vector<ComputeDispatchItem> visibilityMeshletGpuDispatches_;
+  std::pmr::vector<MeshletCompactionWorkItemGpuData>
+      meshletCompactionWorkItems_;
+  std::pmr::vector<MeshletCompactionPushConstants>
+      meshletCompactionPushConstants_;
+  std::pmr::vector<ComputeDispatchItem> meshletCompactionDispatches_;
+  std::pmr::vector<uint32_t> meshletCompactionCounterClear_;
+  std::pmr::vector<BufferHandle> meshletCompactionDependencyBuffers_;
+  std::pmr::vector<BufferHandle> meshletCompactionFinalizeDependencyBuffers_;
+  std::pmr::vector<TextureHandle> meshletCompactionDependencyTextures_;
   std::pmr::vector<BufferHandle> visibilityMeshletGpuDependencyBuffers_;
   std::pmr::vector<RenderGraphAccessMode>
       visibilityMeshletGpuDependencyBufferAccessModes_;

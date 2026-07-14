@@ -21,7 +21,8 @@ uint meshletReactiveVelocityFlags(uint globalInstanceId) {
     return 0u;
   }
   if (instanceFlagsMode == kVelocityInstanceFlagsModeBuffer) {
-    return pc.velocityInstanceFlags.flags[globalInstanceId];
+    return pc.velocityFrameData.data.velocityInstanceFlags
+        .flags[globalInstanceId];
   }
   return 1u;
 }

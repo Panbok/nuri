@@ -23,7 +23,8 @@ uint meshletVelocityFlags(uint globalInstanceId) {
     return 1u;
   }
   if (instanceFlagsMode == kVelocityInstanceFlagsModeBuffer) {
-    return pc.velocityInstanceFlags.flags[globalInstanceId];
+    return pc.velocityFrameData.data.velocityInstanceFlags
+        .flags[globalInstanceId];
   }
   return 0u;
 }
@@ -84,7 +85,8 @@ void writeMeshletVelocityVertex(uint outputIndex, uint vertexIndex,
       velocityFlags = 0u;
     } else {
       const InstanceData previousInst =
-          pc.previousInstanceMatrices.instances[globalInstanceId];
+          pc.velocityFrameData.data.previousInstanceMatrices
+              .instances[globalInstanceId];
       previousClipNoJitter =
           pc.velocityFrameData.data.previousViewProjNoJitter *
           previousInst.modelMatrix * vec4(previousPos, 1.0);

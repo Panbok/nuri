@@ -62,12 +62,11 @@ void main() {
   }
 
   const uint motionClass = uint(round(
-      textureBindless2D(pc.motionClassTexId, pc.pointSamplerId, screenUv).r * 255.0));
-  const bool backgroundRotation =
-      motionClass == kMotionClassBackgroundRotation;
+      textureBindless2D(pc.motionClassTexId, pc.pointSamplerId, screenUv).r *
+      255.0));
+  const bool backgroundRotation = motionClass == kMotionClassBackgroundRotation;
   if (motionClass == kMotionClassInvalid ||
-      (backgroundRotation &&
-       (pc.flags & kFlagPreviousDepthValid) == 0u)) {
+      (backgroundRotation && (pc.flags & kFlagPreviousDepthValid) == 0u)) {
     out_FragColor = current;
     return;
   }
@@ -84,13 +83,13 @@ void main() {
   if ((pc.flags & kFlagPreviousDepthValid) != 0u) {
     const float currentDeviceDepth =
         textureBindless2D(pc.depthTexId, pc.pointSamplerId, screenUv).r;
-    const float previousDeviceDepth = textureBindless2D(
-        pc.previousDepthTexId, pc.pointSamplerId, historyUv).r;
+    const float previousDeviceDepth =
+        textureBindless2D(pc.previousDepthTexId, pc.pointSamplerId, historyUv)
+            .r;
     if (backgroundRotation) {
       // Rotational sky history is valid only while both samples remain clear
       // background. Foreground coverage entering either pixel is a hard reject.
-      if (currentDeviceDepth < 0.999999 ||
-          previousDeviceDepth < 0.999999) {
+      if (currentDeviceDepth < 0.999999 || previousDeviceDepth < 0.999999) {
         out_FragColor = current;
         return;
       }
@@ -121,16 +120,16 @@ void main() {
     }
   }
 
-  const vec3 history = textureBindless2D(
-      pc.historyTexId, pc.linearSamplerId, historyUv).rgb;
+  const vec3 history =
+      textureBindless2D(pc.historyTexId, pc.linearSamplerId, historyUv).rgb;
   const vec3 clippedHistory = clamp(history, neighborhoodMin, neighborhoodMax);
-  const float reactive = textureBindless2D(
-      pc.reactiveTexId, pc.pointSamplerId, screenUv).r;
-  const vec3 opaqueScene = textureBindless2D(
-      pc.opaqueSceneTexId, pc.linearSamplerId, screenUv).rgb;
-  const float compositionDelta = max(max(abs(current.r - opaqueScene.r),
-                                        abs(current.g - opaqueScene.g)),
-                                     abs(current.b - opaqueScene.b));
+  const float reactive =
+      textureBindless2D(pc.reactiveTexId, pc.pointSamplerId, screenUv).r;
+  const vec3 opaqueScene =
+      textureBindless2D(pc.opaqueSceneTexId, pc.linearSamplerId, screenUv).rgb;
+  const float compositionDelta =
+      max(max(abs(current.r - opaqueScene.r), abs(current.g - opaqueScene.g)),
+          abs(current.b - opaqueScene.b));
   const float baseCurrentWeight = uintBitsToFloat(pc.currentWeightBits);
   const float motionWeight = clamp(length(motion) * 96.0, 0.0, 0.72);
   const float clampDelta = length(history - clippedHistory);

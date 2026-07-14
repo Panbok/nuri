@@ -28,8 +28,8 @@ temporalScreenUvFromClipNdc(glm::vec2 ndc) noexcept {
     const glm::mat4 &previousUnjitteredViewProjection) noexcept {
   const glm::vec4 currentClip =
       currentUnjitteredViewProjection * glm::vec4(currentWorldPosition, 1.0f);
-  const glm::vec4 previousClip = previousUnjitteredViewProjection *
-                                 glm::vec4(previousWorldPosition, 1.0f);
+  const glm::vec4 previousClip =
+      previousUnjitteredViewProjection * glm::vec4(previousWorldPosition, 1.0f);
   constexpr float kMinimumClipW = 1.0e-8f;
   if (!std::isfinite(currentClip.w) || !std::isfinite(previousClip.w) ||
       std::abs(currentClip.w) <= kMinimumClipW ||
@@ -37,16 +37,15 @@ temporalScreenUvFromClipNdc(glm::vec2 ndc) noexcept {
     return {};
   }
 
-  const glm::vec2 currentUv = temporalScreenUvFromClipNdc(
-      glm::vec2(currentClip) / currentClip.w);
-  const glm::vec2 previousUv = temporalScreenUvFromClipNdc(
-      glm::vec2(previousClip) / previousClip.w);
+  const glm::vec2 currentUv =
+      temporalScreenUvFromClipNdc(glm::vec2(currentClip) / currentClip.w);
+  const glm::vec2 previousUv =
+      temporalScreenUvFromClipNdc(glm::vec2(previousClip) / previousClip.w);
   const glm::vec2 velocityUv = previousUv - currentUv;
-  const bool finite = std::isfinite(currentUv.x) && std::isfinite(currentUv.y) &&
-                      std::isfinite(previousUv.x) &&
-                      std::isfinite(previousUv.y) &&
-                      std::isfinite(velocityUv.x) &&
-                      std::isfinite(velocityUv.y);
+  const bool finite =
+      std::isfinite(currentUv.x) && std::isfinite(currentUv.y) &&
+      std::isfinite(previousUv.x) && std::isfinite(previousUv.y) &&
+      std::isfinite(velocityUv.x) && std::isfinite(velocityUv.y);
   return TemporalMotionEndpoint{
       .currentUv = currentUv,
       .previousUv = previousUv,
@@ -55,9 +54,10 @@ temporalScreenUvFromClipNdc(glm::vec2 ndc) noexcept {
   };
 }
 
-[[nodiscard]] inline float temporalMotionEndpointErrorPixels(
-    glm::vec2 measuredVelocityUv, const TemporalMotionEndpoint &expected,
-    glm::uvec2 renderExtent) noexcept {
+[[nodiscard]] inline float
+temporalMotionEndpointErrorPixels(glm::vec2 measuredVelocityUv,
+                                  const TemporalMotionEndpoint &expected,
+                                  glm::uvec2 renderExtent) noexcept {
   if (!expected.valid || renderExtent.x == 0u || renderExtent.y == 0u ||
       !std::isfinite(measuredVelocityUv.x) ||
       !std::isfinite(measuredVelocityUv.y)) {

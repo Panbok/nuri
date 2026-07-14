@@ -313,6 +313,7 @@ struct VisibilitySettings {
   bool enableGpuInstanceCulling = true;
   bool enableGpuIndirectDraw = true;
   bool enableIndirectMeshDispatch = true;
+  bool enableMeshletPreTaskCompaction = false;
   bool visibleOnUncertain = true;
   VisibilityDebugSettings debug{};
 };
@@ -635,6 +636,10 @@ struct RenderSettings {
     MeshletRenderMode meshletMode = MeshletRenderMode::Disabled;
     bool enableMeshletFrustumCulling = true;
     bool enableMeshletConeCulling = true;
+    // Opportunistic mode shades batches at or below this resolved-LOD
+    // meshlet count with indexed draws. Required mode always uses meshlets.
+    // Zero disables hybrid routing.
+    uint32_t hybridClassicMaxMeshlets = 96u;
     int32_t forcedMeshLod = -1;
     glm::vec3 meshLodDistanceThresholds{8.0f, 16.0f, 32.0f};
     bool enableInstanceAnimation = true;
@@ -1782,10 +1787,9 @@ struct alignas(16) ShadowFrameGpuData {
   // x: compare sampler, y: raw sampler, z: square map size, w: reserved.
   glm::uvec4 sharedSamplerMapSize{kInvalidShadowBindlessIndex,
                                   kInvalidShadowBindlessIndex, 0u, 0u};
-  glm::uvec4 cascadeTextureIds{kInvalidShadowBindlessIndex,
-                               kInvalidShadowBindlessIndex,
-                               kInvalidShadowBindlessIndex,
-                               kInvalidShadowBindlessIndex};
+  glm::uvec4 cascadeTextureIds{
+      kInvalidShadowBindlessIndex, kInvalidShadowBindlessIndex,
+      kInvalidShadowBindlessIndex, kInvalidShadowBindlessIndex};
   std::array<ShadowCascadeGpuData, kMaxShadowCascades> cascades{};
 };
 static_assert(std::is_standard_layout_v<ShadowFrameGpuData>);
@@ -2042,6 +2046,11 @@ struct OpaqueFrameMetrics {
   uint32_t meshletCandidateCount = 0;
   uint32_t meshletModeRequired = 0;
   uint32_t meshletModeActive = 0;
+  uint32_t meshletHybridActive = 0;
+  uint32_t meshletHybridClassicBatches = 0;
+  uint32_t meshletHybridClassicInstances = 0;
+  uint32_t meshletHybridMeshletBatches = 0;
+  uint32_t meshletHybridMeshletInstances = 0;
   uint32_t meshletRejectedMissingFeature = 0;
   uint32_t meshletRejectedMissingAssetData = 0;
   uint32_t meshletRejectedIncompatibleFrame = 0;
@@ -2067,6 +2076,9 @@ struct ShadowFrameMetrics {
   uint32_t staticBatchTemplateCount = 0;
   uint32_t shadowBatchEntryCount = 0;
   uint32_t shadowInstanceRemapCount = 0;
+  uint32_t submittedDrawItemCount = 0;
+  uint32_t indirectCommandCount = 0;
+  uint32_t drawPacketBytes = 0;
   uint32_t staticBatchFullEmitCount = 0;
   uint32_t staticLightGridQueryCount = 0;
   uint32_t staticLightGridFallbackScanCount = 0;
@@ -2079,15 +2091,6 @@ struct ShadowFrameMetrics {
   uint32_t staticOnlyReuseMissNoPreviousCount = 0;
   uint32_t staticOnlyReuseMissRasterStateChangedCount = 0;
   uint32_t staticOnlyReuseMissAdaptiveRefreshCount = 0;
-  uint32_t staticOnlyScrollCandidateCount = 0;
-  uint32_t staticOnlyScrollCompatibleCount = 0;
-  uint32_t staticOnlyScrollDirtyAreaBasisPoints = 0;
-  uint32_t staticOnlyScrollDirtyCasterEstimate = 0;
-  uint64_t staticOnlyScrollDirtyIndexEstimate = 0;
-  uint32_t staticOnlyScrollRejectAnchorCount = 0;
-  uint32_t staticOnlyScrollRejectDepthCount = 0;
-  uint32_t staticOnlyScrollRejectExtentCount = 0;
-  uint32_t staticOnlyScrollRejectShiftCount = 0;
   uint64_t cascadeTextureBytes = 0;
   float minCascadeTexelWorldSize = 0.0f;
   float averageCascadeTexelWorldSize = 0.0f;
@@ -2138,6 +2141,18 @@ struct VisibilityFrameMetrics {
   uint32_t meshletRejectedCone = 0;
   uint32_t meshletRejectedOcclusion = 0;
   uint32_t meshletOcclusionAvailable = 0;
+  uint32_t meshletOcclusionMode = 0;
+  uint32_t meshletOcclusionSourceFrame = 0;
+  uint32_t meshletOcclusionSourceAge = 0;
+  uint32_t currentFrameHiZActive = 0;
+  uint32_t meshletPreTaskCompactionActive = 0;
+  uint32_t meshletPreTaskCandidatesInput = 0;
+  uint32_t meshletPreTaskCandidatesOutput = 0;
+  uint32_t meshletPreTaskTaskGroupsInput = 0;
+  uint32_t meshletPreTaskTaskGroupsOutput = 0;
+  uint32_t meshletPreTaskTaskGroupsSaved = 0;
+  uint32_t meshletPreTaskOverflowCount = 0;
+  uint32_t meshletPreTaskMismatchCount = 0;
   uint32_t meshletPayloadOverflowCount = 0;
   uint32_t meshletReadbackAvailable = 0;
   uint32_t meshletReadbackSourceFrame = 0;

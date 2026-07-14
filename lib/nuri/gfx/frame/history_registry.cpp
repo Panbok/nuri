@@ -18,8 +18,7 @@ HistoryRegistry::prepareFrame(uint64_t frameIndex, uint32_t slotCount) {
 
   const uint32_t safeSlotCount = std::max(slotCount, 1u);
   uint32_t writeSlot = static_cast<uint32_t>(frameIndex % safeSlotCount);
-  if (committedValid_ && safeSlotCount > 1u &&
-      writeSlot == committedSlot_) {
+  if (committedValid_ && safeSlotCount > 1u && writeSlot == committedSlot_) {
     writeSlot = (writeSlot + 1u) % safeSlotCount;
   }
   lease_ = HistoryLease{

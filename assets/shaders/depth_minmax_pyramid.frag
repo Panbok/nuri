@@ -23,9 +23,9 @@ vec2 sampleMinMax(ivec2 coord, ivec2 sourceSize) {
 
 void main() {
   ivec2 sourceSize = max(textureBindlessSize2D(pc.sourceTexId), ivec2(1));
-  ivec2 sourceBase =
-      ivec2(floor(clamp(uv, vec2(0.0), vec2(1.0)) * vec2(sourceSize))) &
-      ivec2(-2);
+  // Reduction is addressed in texels; scene-copy UVs have a different Y
+  // contract and are not valid for constructing this hierarchy.
+  const ivec2 sourceBase = ivec2(gl_FragCoord.xy) * 2;
 
   vec2 s00 = sampleMinMax(sourceBase + ivec2(0, 0), sourceSize);
   vec2 s10 = sampleMinMax(sourceBase + ivec2(1, 0), sourceSize);

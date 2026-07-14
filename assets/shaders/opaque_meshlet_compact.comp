@@ -1,7 +1,7 @@
-#extension GL_EXT_mesh_shader : require
 #extension GL_EXT_nonuniform_qualifier : require
 
 #define NURI_OPAQUE_MESHLET_BATCHED 1
+#define NURI_OPAQUE_MESHLET_COMPACTION_COMPUTE 1
 #include "meshlet_common.sp"
 
 layout(local_size_x = 32) in;
@@ -9,8 +9,8 @@ layout(local_size_x = 32) in;
 layout(set = 0, binding = 0) uniform texture2D kTextures2D[];
 layout(set = 0, binding = 1) uniform sampler kSamplers[];
 
-taskPayloadSharedEXT MeshletTaskPayload meshletPayload;
-shared uint meshletVisibleMask;
+shared uint acceptedMask;
+shared uint compactGroupBase;
 
 vec4 matrixRow(mat4 value, uint row) {
   return vec4(value[0][row], value[1][row], value[2][row], value[3][row]);
@@ -53,7 +53,6 @@ bool meshletConeCull(MeshletDescriptorGpuData meshlet, InstanceData inst,
       (meshletFlags & kMeshletFlagDoubleSided) != 0u) {
     return false;
   }
-
   const vec3 localAxis = meshlet.coneAxisCutoff.xyz;
   if (dot(localAxis, localAxis) <= 1.0e-10) {
     return false;
@@ -84,23 +83,12 @@ bool meshletConeCull(MeshletDescriptorGpuData meshlet, InstanceData inst,
 
 const uint kMeshletOcclusionMaxTexelSpan = 6u;
 const float kMeshletOcclusionTargetTexelSpan = 4.0;
-// Keep same-frame self-occlusion conservative under raster/depth quantization.
 const float kMeshletOcclusionDepthBias = 0.005;
-const uint kMeshletCounterFlagEnabled = 1u << 0u;
-
-vec2 clipNdcToDepthUv(vec2 ndc) {
-  return vec2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
-}
 
 bool meshletOcclusionCull(MeshletDescriptorGpuData meshlet, InstanceData inst,
                           uint meshletFlags) {
-  const uint depthPyramidFlags = pc.frameData.sceneDepthPyramidInfo.w;
-  const bool previousFrameDepth =
-      (depthPyramidFlags & kFrameDataDepthPyramidPreviousFrame) != 0u;
-  const bool currentFrameDepth =
-      (meshletFlags & kMeshletFlagCurrentFrameOcclusion) != 0u;
   if ((meshletFlags & kMeshletFlagOcclusionCulling) == 0u ||
-      (!previousFrameDepth && !currentFrameDepth)) {
+      (meshletFlags & kMeshletFlagCurrentFrameOcclusion) == 0u) {
     return false;
   }
 
@@ -115,7 +103,8 @@ bool meshletOcclusionCull(MeshletDescriptorGpuData meshlet, InstanceData inst,
 
   const vec3 localCenter = meshlet.boundsSphere.xyz;
   const float localRadius = max(meshlet.boundsSphere.w, 0.0);
-  const vec3 worldCenter = (inst.modelMatrix * vec4(localCenter, 1.0)).xyz;
+  const vec3 worldCenter =
+      (inst.modelMatrix * vec4(localCenter, 1.0)).xyz;
   const float radius = localRadius * meshletInstanceMaxScale(inst.modelMatrix);
   if (radius <= 0.0) {
     return false;
@@ -126,25 +115,24 @@ bool meshletOcclusionCull(MeshletDescriptorGpuData meshlet, InstanceData inst,
   vec2 uvMin = vec2(1.0);
   vec2 uvMax = vec2(0.0);
   float nearestDepth = 1.0e20;
-  const mat4 depthViewProj = currentFrameDepth
-                                 ? pc.frameData.proj * pc.frameData.view
-                                 : pc.frameData.previousViewProj;
+  const mat4 depthViewProj = pc.frameData.proj * pc.frameData.view;
 
   for (uint cornerIndex = 0u; cornerIndex < 8u; ++cornerIndex) {
-    const vec3 corner = vec3((cornerIndex & 1u) != 0u ? bmax.x : bmin.x,
-                             (cornerIndex & 2u) != 0u ? bmax.y : bmin.y,
-                             (cornerIndex & 4u) != 0u ? bmax.z : bmin.z);
-    vec4 clip = depthViewProj * vec4(corner, 1.0);
+    const vec3 corner =
+        vec3((cornerIndex & 1u) != 0u ? bmax.x : bmin.x,
+             (cornerIndex & 2u) != 0u ? bmax.y : bmin.y,
+             (cornerIndex & 4u) != 0u ? bmax.z : bmin.z);
+    const vec4 clip = depthViewProj * vec4(corner, 1.0);
     if (clip.w <= 1.0e-5) {
       return false;
     }
 
-    vec3 ndc = clip.xyz / clip.w;
+    const vec3 ndc = clip.xyz / clip.w;
     if (ndc.z < 0.0 || ndc.z > 1.0) {
       return false;
     }
 
-    vec2 uv = clipNdcToDepthUv(ndc.xy);
+    const vec2 uv = vec2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
     uvMin = min(uvMin, uv);
     uvMax = max(uvMax, uv);
     nearestDepth = min(nearestDepth, ndc.z);
@@ -190,7 +178,7 @@ bool meshletOcclusionCull(MeshletDescriptorGpuData meshlet, InstanceData inst,
       }
       const ivec2 texel = texelMin + ivec2(x, y);
       const vec2 uv = (vec2(texel) + vec2(0.5)) / mipSize;
-      vec4 sampleValue =
+      const vec4 sampleValue =
           texture(nonuniformEXT(sampler2D(kTextures2D[nonuniformEXT(texId)],
                                           kSamplers[nonuniformEXT(samplerId)])),
                   uv);
@@ -198,54 +186,6 @@ bool meshletOcclusionCull(MeshletDescriptorGpuData meshlet, InstanceData inst,
     }
   }
   return nearestDepth > occluderMaxDepth + kMeshletOcclusionDepthBias;
-}
-
-void markMeshletCounterFrame(uint meshletFlags) {
-  if ((pc.meshletCounterFlags & kMeshletCounterFlagEnabled) == 0u) {
-    return;
-  }
-  pc.visibilityCounters.data.status.z = pc.sourceFrameIndex;
-  pc.visibilityCounters.data.status.w = 1u;
-  if ((meshletFlags & kMeshletFlagOcclusionCulling) != 0u) {
-    pc.visibilityCounters.data.status.y = 1u;
-  }
-}
-
-void countMeshletFrustumReject() {
-  if ((pc.meshletCounterFlags & kMeshletCounterFlagEnabled) != 0u) {
-    atomicAdd(pc.visibilityCounters.data.meshlet.x, 1u);
-  }
-}
-
-void countMeshletConeReject() {
-  if ((pc.meshletCounterFlags & kMeshletCounterFlagEnabled) != 0u) {
-    atomicAdd(pc.visibilityCounters.data.meshlet.y, 1u);
-  }
-}
-
-void countMeshletOcclusionReject() {
-  if ((pc.meshletCounterFlags & kMeshletCounterFlagEnabled) != 0u) {
-    atomicAdd(pc.visibilityCounters.data.meshlet.z, 1u);
-  }
-}
-
-void countMeshletPayloadOverflow() {
-  if ((pc.meshletCounterFlags & kMeshletCounterFlagEnabled) != 0u) {
-    atomicAdd(pc.visibilityCounters.data.meshlet.w, 1u);
-  }
-}
-
-void countMeshletTaskGroup() {
-  if ((pc.meshletCounterFlags & kMeshletCounterFlagEnabled) != 0u) {
-    atomicAdd(pc.visibilityCounters.data.meshlet2.y, 1u);
-  }
-}
-
-void countMeshletEmitted(uint emittedCount) {
-  if ((pc.meshletCounterFlags & kMeshletCounterFlagEnabled) != 0u &&
-      emittedCount != 0u) {
-    atomicAdd(pc.visibilityCounters.data.meshlet2.x, emittedCount);
-  }
 }
 
 uint resolveAvailableMeshletLod(SubmeshMeshletLodRangeGpuData lodRange,
@@ -256,11 +196,6 @@ uint resolveAvailableMeshletLod(SubmeshMeshletLodRangeGpuData lodRange,
     --candidate;
   }
   return candidate;
-}
-
-uint meshletCandidateSpan(SubmeshMeshletLodRangeGpuData lodRange) {
-  return max(max(lodRange.meshletCount.x, lodRange.meshletCount.y),
-             max(lodRange.meshletCount.z, lodRange.meshletCount.w));
 }
 
 uint selectMeshletLod(SubmeshMeshletLodRangeGpuData lodRange,
@@ -274,7 +209,6 @@ uint selectMeshletLod(SubmeshMeshletLodRangeGpuData lodRange,
   const vec3 delta = pc.frameData.cameraPos.xyz - lodBounds.xyz;
   const float normalizedDistanceSq = dot(delta, delta) * max(lodBounds.w, 0.0);
   const vec3 thresholdsSq = pc.lodThresholds.xyz * pc.lodThresholds.xyz;
-
   uint requestedLod = 0u;
   if (normalizedDistanceSq >= thresholdsSq.z) {
     requestedLod = 3u;
@@ -288,92 +222,115 @@ uint selectMeshletLod(SubmeshMeshletLodRangeGpuData lodRange,
 }
 
 void main() {
-  const uint batchIndex = pc.batchBase + gl_WorkGroupID.y;
+  if ((pc.flags & 4u) != 0u) {
+    if (gl_GlobalInvocationID.x == 0u) {
+      pc.visibilityCounters.data.status.y = 1u;
+      pc.visibilityCounters.data.status.z = pc.sourceFrameIndex;
+      pc.visibilityCounters.data.status.w = 1u;
+    }
+    return;
+  }
+  if ((pc.flags & 2u) != 0u) {
+    const uint dispatchIndex = gl_GlobalInvocationID.x;
+    if (dispatchIndex < pc.dispatchCount) {
+      const uint compactCount = pc.compactionCounters.counts[dispatchIndex];
+      const uint taskGroupCount =
+          (compactCount + kOpaqueMeshletTaskPayloadCapacity - 1u) /
+          kOpaqueMeshletTaskPayloadCapacity;
+      const uint commandWord = dispatchIndex * 3u;
+      pc.indirectCommands.words[commandWord + 0u] =
+          min(taskGroupCount, pc.compactGridWidth);
+      pc.indirectCommands.words[commandWord + 1u] =
+          taskGroupCount == 0u
+              ? 0u
+              : (taskGroupCount + pc.compactGridWidth - 1u) /
+                    pc.compactGridWidth;
+      pc.indirectCommands.words[commandWord + 2u] =
+          taskGroupCount == 0u ? 0u : 1u;
+    }
+    return;
+  }
+  const uint workIndex =
+      gl_WorkGroupID.y * pc.compactGridWidth + gl_WorkGroupID.x;
+  if (workIndex >= pc.workItemCount) {
+    return;
+  }
+
+  if (gl_LocalInvocationIndex == 0u) {
+    acceptedMask = 0u;
+    compactGroupBase = 0u;
+    atomicAdd(pc.visibilityCounters.data.meshlet3.z, 1u);
+  }
+  barrier();
+
+  const MeshletCompactionWorkItemGpuData work = pc.workItems.values[workIndex];
+  const uint batchIndex = work.data.x;
+  const uint candidateBase = work.data.y;
+  const uint outputDispatchIndex = work.data.z;
+  const uint outputRecordBase = work.data.w;
+  if (outputDispatchIndex >= pc.dispatchCount) {
+    return;
+  }
+
   MeshletBatchGpuData batch = pc.meshletBatches.values[batchIndex];
   const uint meshletFlags = batch.flags.x;
   const SubmeshMeshletLodRangeGpuData lodRange =
       batch.meshletLodRanges.values[batch.mesh.z];
   const uint candidateSpan = batch.mesh.w;
-  const uint instanceCount = batch.draw.x;
+  const uint candidate = candidateBase + gl_LocalInvocationIndex;
+  const uint instanceLocal =
+      candidateSpan != 0u ? candidate / candidateSpan : 0u;
 
-  if (gl_LocalInvocationIndex == 0u) {
-    if (gl_WorkGroupID.x == 0u && gl_WorkGroupID.y == 0u) {
-      markMeshletCounterFrame(meshletFlags);
-    }
-    countMeshletTaskGroup();
-    meshletPayload.visibleCount = 0u;
-    meshletVisibleMask = 0u;
-  }
-  barrier();
-
-  bool acceptedMeshlet = false;
-  uint acceptedMeshletIndex = 0u;
-  uint acceptedGlobalInstanceId = 0u;
-  uint acceptedSelectedLod = 0u;
-  if (candidateSpan != 0u && instanceCount != 0u) {
-    const uint candidate =
-        pc.candidateOffset +
-        gl_WorkGroupID.x * kOpaqueMeshletTaskPayloadCapacity +
-        gl_LocalInvocationIndex;
-    const uint instanceLocal = candidate / candidateSpan;
-    if (instanceLocal < instanceCount) {
-      const uint meshletLocal = candidate - instanceLocal * candidateSpan;
-      const uint remapIndex = batch.draw.y + instanceLocal;
-      const uint globalInstanceId = pc.instanceRemap.ids[remapIndex];
-      const uint selectedLod = selectMeshletLod(lodRange, globalInstanceId,
-                                                meshletFlags, batch.flags.y);
-      const uint selectedMeshletCount = lodRange.meshletCount[selectedLod];
-      if (meshletLocal < selectedMeshletCount) {
-        const uint meshletIndex =
-            lodRange.meshletOffset[selectedLod] + meshletLocal;
-        const InstanceData inst =
-            pc.instanceMatrices.instances[globalInstanceId];
-        const MeshletDescriptorGpuData meshlet =
-            batch.meshlets.values[meshletIndex];
-        const bool rejectedByFrustum =
-            meshletFrustumCull(meshlet, inst, meshletFlags);
-        const bool rejectedByCone =
-            !rejectedByFrustum && meshletConeCull(meshlet, inst, meshletFlags);
-        const bool rejectedByOcclusion =
-            !rejectedByFrustum && !rejectedByCone &&
-            meshletOcclusionCull(meshlet, inst, meshletFlags);
-        if (rejectedByFrustum) {
-          countMeshletFrustumReject();
-        } else if (rejectedByCone) {
-          countMeshletConeReject();
-        } else if (rejectedByOcclusion) {
-          countMeshletOcclusionReject();
-        } else {
-          acceptedMeshlet = true;
-          acceptedMeshletIndex = meshletIndex;
-          acceptedGlobalInstanceId = globalInstanceId;
-          acceptedSelectedLod = selectedLod;
-          atomicOr(meshletVisibleMask, 1u << gl_LocalInvocationIndex);
-        }
+  bool accepted = false;
+  uint meshletIndex = 0u;
+  uint globalInstanceId = 0u;
+  uint selectedLod = 0u;
+  if (candidateSpan != 0u && instanceLocal < batch.draw.x) {
+    const uint meshletLocal = candidate - instanceLocal * candidateSpan;
+    globalInstanceId = pc.instanceRemap.ids[batch.draw.y + instanceLocal];
+    selectedLod = selectMeshletLod(lodRange, globalInstanceId, meshletFlags,
+                                   batch.flags.y);
+    const uint selectedMeshletCount = lodRange.meshletCount[selectedLod];
+    if (meshletLocal < selectedMeshletCount) {
+      atomicAdd(pc.visibilityCounters.data.meshlet3.x, 1u);
+      meshletIndex = lodRange.meshletOffset[selectedLod] + meshletLocal;
+      const InstanceData inst = pc.instanceMatrices.instances[globalInstanceId];
+      const MeshletDescriptorGpuData meshlet =
+          batch.meshlets.values[meshletIndex];
+      const bool rejectedByFrustum =
+          meshletFrustumCull(meshlet, inst, meshletFlags);
+      const bool rejectedByCone =
+          !rejectedByFrustum && meshletConeCull(meshlet, inst, meshletFlags);
+      const bool rejectedByOcclusion =
+          !rejectedByFrustum && !rejectedByCone &&
+          meshletOcclusionCull(meshlet, inst, meshletFlags);
+      if (rejectedByFrustum) {
+        atomicAdd(pc.visibilityCounters.data.meshlet.x, 1u);
+      } else if (rejectedByCone) {
+        atomicAdd(pc.visibilityCounters.data.meshlet.y, 1u);
+      } else if (rejectedByOcclusion) {
+        atomicAdd(pc.visibilityCounters.data.meshlet.z, 1u);
+      } else {
+        accepted = true;
+        atomicOr(acceptedMask, 1u << gl_LocalInvocationIndex);
       }
     }
   }
 
   barrier();
-  if (acceptedMeshlet) {
-    const uint payloadIndex =
-        bitCount(meshletVisibleMask & ((1u << gl_LocalInvocationIndex) - 1u));
-    if (payloadIndex < kOpaqueMeshletTaskPayloadCapacity) {
-      meshletPayload.meshletIndex[payloadIndex] = acceptedMeshletIndex;
-      meshletPayload.globalInstanceId[payloadIndex] = acceptedGlobalInstanceId;
-      meshletPayload.selectedLod[payloadIndex] = acceptedSelectedLod;
-      meshletPayload.batchIndex[payloadIndex] = batchIndex;
-    } else {
-      countMeshletPayloadOverflow();
-    }
+  const uint acceptedCount = bitCount(acceptedMask);
+  if (gl_LocalInvocationIndex == 0u && acceptedCount != 0u) {
+    compactGroupBase = atomicAdd(
+        pc.compactionCounters.counts[outputDispatchIndex], acceptedCount);
+    atomicAdd(pc.visibilityCounters.data.meshlet3.y, acceptedCount);
   }
-
   barrier();
-  if (gl_LocalInvocationIndex == 0u) {
-    const uint emittedCount =
-        min(bitCount(meshletVisibleMask), kOpaqueMeshletTaskPayloadCapacity);
-    meshletPayload.visibleCount = emittedCount;
-    countMeshletEmitted(emittedCount);
-    EmitMeshTasksEXT(emittedCount, 1u, 1u);
+
+  if (accepted) {
+    const uint prefix =
+        bitCount(acceptedMask & ((1u << gl_LocalInvocationIndex) - 1u));
+    pc.compactedMeshlets
+        .values[outputRecordBase + compactGroupBase + prefix]
+        .ids = uvec4(meshletIndex, globalInstanceId, selectedLod, batchIndex);
   }
 }

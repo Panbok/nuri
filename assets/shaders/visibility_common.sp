@@ -40,6 +40,7 @@ struct VisibilityCounterGpuData {
   uvec4 indirect;
   uvec4 meshlet;
   uvec4 meshlet2;
+  uvec4 meshlet3;
 };
 
 layout(std430, buffer_reference) buffer VisibilityIndirectWordBuffer {

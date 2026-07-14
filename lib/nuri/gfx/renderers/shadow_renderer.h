@@ -73,7 +73,7 @@ private:
     uint64_t vertexBufferAddress = 0;
     uint64_t vertexDecodeBufferAddress = 0;
     uint64_t instanceMatricesAddress = 0;
-    uint64_t previousInstanceMatricesAddress = 0;
+    uint64_t shadowDrawMetadataAddress = 0;
     uint64_t instanceRemapAddress = 0;
     uint64_t instanceCentersPhaseAddress = 0;
     uint64_t instanceBaseMatricesAddress = 0;
@@ -93,6 +93,7 @@ private:
   };
   static_assert(sizeof(PushConstants) == 128,
                 "ShadowRenderer::PushConstants must match shader layout");
+  static_assert(offsetof(PushConstants, shadowDrawMetadataAddress) == 32u);
   static_assert(offsetof(PushConstants, instanceRemapAddress) == 40u);
   static_assert(offsetof(PushConstants, instanceCentersPhaseAddress) == 48u);
   static_assert(offsetof(PushConstants, instanceBaseMatricesAddress) == 56u);
@@ -302,13 +303,6 @@ private:
     uint32_t dynamicDrawCount = 0u;
   };
 
-  struct StaticOnlyScrollCopyPass {
-    bool active = false;
-    TextureCopyItem copy{};
-    std::array<RectU32, 2u> dirtyRects{};
-    uint32_t dirtyRectCount = 0u;
-  };
-
   struct CascadeStabilizationHistory {
     bool valid = false;
     LightId lightId = kInvalidLightId;
@@ -370,6 +364,8 @@ private:
   ensureInstanceMatricesRingCapacity(size_t requiredBytes);
   Result<bool, std::string>
   ensureInstanceRemapRingCapacity(size_t requiredBytes);
+  Result<bool, std::string>
+  ensureShadowDrawPacketRingCapacity(size_t requiredBytes);
   Result<bool, std::string> ensureShadowFrameRingCapacity(size_t requiredBytes);
   Result<bool, std::string>
   ensureSdsmReduceResultRingCount(uint32_t requiredCount);
@@ -413,15 +409,16 @@ private:
   std::unique_ptr<Shader> shadowShader_;
   std::unique_ptr<Shader> shadowOpaqueShader_;
   std::unique_ptr<Shader> depthShader_;
-  std::unique_ptr<Shader> depthClearShader_;
   std::unique_ptr<Shader> depthAlphaShader_;
   std::unique_ptr<Shader> sdsmReduceShader_;
   std::pmr::vector<DynamicBufferSlot> instanceMatricesRing_;
   std::pmr::vector<DynamicBufferSlot> instanceRemapRing_;
+  std::pmr::vector<DynamicBufferSlot> shadowDrawPacketRing_;
   std::pmr::vector<DynamicBufferSlot> shadowFrameRing_;
   std::pmr::vector<DynamicBufferSlot> sdsmReduceResultRing_;
   std::pmr::vector<uint64_t> instanceDataRingUploadVersions_;
   std::pmr::vector<uint64_t> instanceRemapUploadSignatures_;
+  std::pmr::vector<uint64_t> shadowDrawPacketUploadSignatures_;
   std::pmr::vector<uint64_t> shadowFrameUploadSignatures_;
   std::pmr::vector<uint64_t> sdsmReduceResultRingPublishedFrames_;
   std::pmr::vector<MeshDrawTemplate> meshDrawTemplates_;
@@ -455,8 +452,11 @@ private:
       cascadePushConstants_{};
   std::array<std::pmr::vector<DrawItem>, kMaxShadowCascades>
       cascadeDrawItems_{};
-  std::array<std::array<std::pmr::vector<DrawItem>, 2u>, kMaxShadowCascades>
-      staticOnlyScrollDirtyDrawItems_{};
+  std::array<std::pmr::vector<PushConstants>, kMaxShadowCascades>
+      cascadeIndirectPushConstants_{};
+  std::array<std::pmr::vector<DrawItem>, kMaxShadowCascades>
+      cascadeIndirectDrawItems_{};
+  std::pmr::vector<std::byte> shadowDrawPacketUploadBytes_;
   std::array<uint32_t, kMaxShadowCascades> cascadeDrawCounts_{};
   std::array<uint32_t, kMaxShadowCascades> cascadeCulledCounts_{};
   std::array<uint32_t, kMaxShadowCascades> cascadeDynamicDrawCounts_{};
@@ -468,8 +468,6 @@ private:
   std::array<StaticOnlyCascadeReuseState, kMaxShadowCascades>
       reusableStaticOnlyCascadeStates_{};
   std::array<bool, kMaxShadowCascades> reuseStaticOnlyCascadePass_{};
-  std::array<StaticOnlyScrollCopyPass, kMaxShadowCascades>
-      staticOnlyScrollCopyPasses_{};
   std::array<bool, kMaxShadowCascades> reusableStaticOnlyCascadeValid_{};
   std::pmr::vector<BufferDependency> passBufferDependencies_;
   std::pmr::vector<BufferHandle> passDependencyBuffers_;
@@ -485,7 +483,6 @@ private:
 
   ShaderHandle shadowVertexShader_{};
   ShaderHandle shadowOpaqueVertexShader_{};
-  ShaderHandle shadowDepthClearVertexShader_{};
   ShaderHandle depthFragmentShader_{};
   ShaderHandle depthAlphaFragmentShader_{};
   ShaderHandle sdsmReduceComputeShader_{};
@@ -495,12 +492,10 @@ private:
   RenderPipelineHandle shadowDoubleSidedPipelineHandle_{};
   RenderPipelineHandle shadowAlphaPipelineHandle_{};
   RenderPipelineHandle shadowAlphaDoubleSidedPipelineHandle_{};
-  RenderPipelineHandle shadowDepthClearPipelineHandle_{};
   Format shadowDepthPipelineFormat_ = Format::Count;
   ComputePipelineHandle sdsmReducePipelineHandle_{};
   RenderPipelineHandle previewPipelineHandle_{};
   std::array<TextureHandle, kMaxShadowCascades> shadowDepthTextures_{};
-  std::array<TextureHandle, kMaxShadowCascades> shadowDepthAlternateTextures_{};
   TextureHandle shadowDebugPreviewTexture_{};
   SamplerHandle rawDepthSampler_{};
   SamplerHandle compareDepthSampler_{};

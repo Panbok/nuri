@@ -48,6 +48,7 @@ struct VisibilityResolvedSettings {
   bool enableMeshletFrustumCulling = true;
   bool enableMeshletConeCulling = true;
   bool enableIndirectMeshDispatch = true;
+  bool enableMeshletPreTaskCompaction = false;
   bool enableGpuIndirectDraw = true;
   bool enableOcclusionCulling = false;
   bool visibleOnUncertain = true;
@@ -124,12 +125,14 @@ struct alignas(16) VisibilityCounterGpuData {
   glm::uvec4 indirect{0u};
   glm::uvec4 meshlet{0u};
   glm::uvec4 meshlet2{0u};
+  glm::uvec4 meshlet3{0u};
 };
-static_assert(sizeof(VisibilityCounterGpuData) == 80u);
+static_assert(sizeof(VisibilityCounterGpuData) == 96u);
 static_assert(offsetof(VisibilityCounterGpuData, status) == 16u);
 static_assert(offsetof(VisibilityCounterGpuData, indirect) == 32u);
 static_assert(offsetof(VisibilityCounterGpuData, meshlet) == 48u);
 static_assert(offsetof(VisibilityCounterGpuData, meshlet2) == 64u);
+static_assert(offsetof(VisibilityCounterGpuData, meshlet3) == 80u);
 
 struct alignas(16) VisibilityGpuPushConstants {
   uint64_t candidateBufferAddress = 0u;

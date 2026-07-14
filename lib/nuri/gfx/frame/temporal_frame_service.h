@@ -87,7 +87,8 @@ public:
   void reset() noexcept;
 
   [[nodiscard]] const TemporalFrameFacts &facts() const noexcept;
-  [[nodiscard]] const TemporalCameraHistoryState &cameraHistory() const noexcept;
+  [[nodiscard]] const TemporalCameraHistoryState &
+  cameraHistory() const noexcept;
 
 private:
   struct Impl;

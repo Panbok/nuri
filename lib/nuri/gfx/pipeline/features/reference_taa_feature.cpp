@@ -61,9 +61,10 @@ shaderBasePath(const RuntimeCompositeConfig &config) {
   };
 }
 
-[[nodiscard]] DrawItem makeFullscreenDraw(
-    RenderPipelineHandle pipeline, const ReferenceTAAPushConstants &constants,
-    std::string_view label) {
+[[nodiscard]] DrawItem
+makeFullscreenDraw(RenderPipelineHandle pipeline,
+                   const ReferenceTAAPushConstants &constants,
+                   std::string_view label) {
   DrawItem draw{};
   draw.pipeline = pipeline;
   draw.vertexCount = 3u;
@@ -93,13 +94,12 @@ shaderBasePath(const RuntimeCompositeConfig &config) {
 
 } // namespace
 
-ReferenceTAAResolvePass::ReferenceTAAResolvePass(
-    GPUDevice &gpu, RuntimeCompositeConfig config)
+ReferenceTAAResolvePass::ReferenceTAAResolvePass(GPUDevice &gpu,
+                                                 RuntimeCompositeConfig config)
     : gpu_(gpu) {
   const std::filesystem::path base = shaderBasePath(config);
-  vertexPath_ = config.fullscreenVertex.empty()
-                    ? base / "fullscreen_copy.vert"
-                    : config.fullscreenVertex;
+  vertexPath_ = config.fullscreenVertex.empty() ? base / "fullscreen_copy.vert"
+                                                : config.fullscreenVertex;
   fragmentPath_ = base / "taa_reference.frag";
 }
 
@@ -169,8 +169,7 @@ ReferenceTAAResolvePass::prepare(FrameBuildContext &ctx) {
   }
   linearClampSampler_ = samplerResult.value();
   auto pipelineResult = gpu_.createRenderPipeline(
-      fullscreenPipelineDesc(vertexShader_, fragmentShader_),
-      "taa_reference");
+      fullscreenPipelineDesc(vertexShader_, fragmentShader_), "taa_reference");
   if (pipelineResult.hasError()) {
     return Result<bool, std::string>::makeError(pipelineResult.error());
   }
@@ -193,8 +192,8 @@ ReferenceTAAResolvePass::build(FrameBuildContext &ctx) {
     return Result<bool, std::string>::makeResult(false);
   }
 
-  const bool historyValid = ctx.frame.camera.historyValid &&
-                            ctx.shared.historyColorReadValid;
+  const bool historyValid =
+      ctx.frame.camera.historyValid && ctx.shared.historyColorReadValid;
   const bool previousDepthValid =
       historyValid && nuri::isValid(ctx.shared.previousSceneDepthTexture);
   const TextureHandle previousDepth = previousDepthValid
@@ -253,9 +252,8 @@ ReferenceTAAResolvePass::build(FrameBuildContext &ctx) {
   const RenderSettings &settings = renderSettingsOrDefault(ctx.frame);
   const RenderSettings::AntiAliasingDebugSettings aaDebug =
       effectiveTemporalAADebugSettings(settings.antiAliasing);
-  const float sharpenStrength = aaDebug.taaSharpenEnabled
-                                    ? aaDebug.taaSharpenStrength
-                                    : 0.0f;
+  const float sharpenStrength =
+      aaDebug.taaSharpenEnabled ? aaDebug.taaSharpenStrength : 0.0f;
   ReferenceTAAPushConstants constants{
       .currentTexId = currentTexId,
       .opaqueSceneTexId = opaqueSceneTexId,
@@ -349,8 +347,7 @@ ReferenceTAAResolvePass::build(FrameBuildContext &ctx) {
   metrics.taaSharpenEnabled = aaDebug.taaSharpenEnabled;
   metrics.taaSharpenActive = historyValid && sharpenStrength > 0.0f;
   metrics.taaSharpenStrength = sharpenStrength;
-  metrics.taaSharpenConfidenceThreshold =
-      aaDebug.taaSharpenConfidenceThreshold;
+  metrics.taaSharpenConfidenceThreshold = aaDebug.taaSharpenConfidenceThreshold;
   metrics.taaResolvedSceneColorPublished = true;
   if (!historyValid) {
     ++metrics.taaCurrentFallbackFrameCount;
