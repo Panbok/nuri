@@ -327,6 +327,52 @@ TEST(NuriAutotestingTest, ManifestRejectsUnknownKeys) {
   std::filesystem::remove(path, ec);
 }
 
+TEST(NuriAutotestingTest, ManifestAppliesShadowPresetBeforeExplicitOverrides) {
+  const std::filesystem::path path =
+      makeTempPath("autotest_shadow_overrides", ".json");
+  const std::string manifest = R"json({
+    "schemaVersion": 1,
+    "id": "shadow.overrides",
+    "suite": "shadow",
+    "endFrame": 4,
+    "settings": {"shadow": {
+      "qualityPreset": "Ultra",
+      "depthFormat": "D32_FLOAT",
+      "maxDistance": 73.0,
+      "maxDistanceFadeFraction": 0.25,
+      "splitLambda": 0.2,
+      "cascadeBlendFraction": 0.03,
+      "pcfSampleCount": 7,
+      "sdsmTemporalBlend": 0.4,
+      "enableCascadeCasterCulling": false,
+      "debug": {"visualizeShadowFactor": true}
+    }}
+  })json";
+  writeFile(path, manifest);
+
+  auto loaded = loadAutotestCaseManifest(path);
+  ASSERT_FALSE(loaded.hasError()) << loaded.error();
+  const RenderSettings::ShadowSettings &shadow = loaded.value().settings.shadow;
+  EXPECT_EQ(shadow.qualityPreset, ShadowQualityPreset::Ultra);
+  EXPECT_EQ(shadow.depthFormat, Format::D32_FLOAT);
+  EXPECT_FLOAT_EQ(shadow.maxDistance, 73.0f);
+  EXPECT_FLOAT_EQ(shadow.maxDistanceFadeFraction, 0.25f);
+  EXPECT_FLOAT_EQ(shadow.splitLambda, 0.2f);
+  EXPECT_FLOAT_EQ(shadow.cascadeBlendFraction, 0.03f);
+  EXPECT_EQ(shadow.pcfSampleCount, 7u);
+  EXPECT_FLOAT_EQ(shadow.sdsmTemporalBlend, 0.4f);
+  EXPECT_FALSE(shadow.debug.enableCascadeCasterCulling);
+  EXPECT_TRUE(shadow.debug.visualizeShadowFactor);
+
+  writeFile(path, replaceFirst(manifest, "D32_FLOAT", "invalid"));
+  auto invalid = loadAutotestCaseManifest(path);
+  EXPECT_TRUE(invalid.hasError());
+  EXPECT_NE(invalid.error().find("depthFormat"), std::string::npos);
+
+  std::error_code ec;
+  std::filesystem::remove(path, ec);
+}
+
 TEST(NuriAutotestingTest, ManifestRejectsUnsafeCaseId) {
   const std::filesystem::path path =
       makeTempPath("autotest_unsafe_case_id", ".json");
@@ -1029,11 +1075,9 @@ TEST(NuriAutotestingTest, ReportJsonRoundTripsAndHtmlEscapes) {
   EXPECT_EQ(loaded.value().checkpoints[0].captures[0].snapshot.mip, 1u);
   EXPECT_EQ(loaded.value().checkpoints[0].captures[0].snapshot.layer, 2u);
   EXPECT_EQ(loaded.value().checkpoints[0].captures[0].snapshot.kind, "color");
-  EXPECT_EQ(loaded.value()
-                .checkpoints[0]
-                .captures[0]
-                .snapshot.semanticMetrics.unit,
-            "display_linear");
+  EXPECT_EQ(
+      loaded.value().checkpoints[0].captures[0].snapshot.semanticMetrics.unit,
+      "display_linear");
   EXPECT_DOUBLE_EQ(loaded.value()
                        .checkpoints[0]
                        .captures[0]
@@ -1072,10 +1116,8 @@ TEST(NuriAutotestingTest, ReportJsonRoundTripsAndHtmlEscapes) {
   EXPECT_NE(html.value().find("readout&lt;ok&gt;&amp;"), std::string::npos);
   EXPECT_NE(html.value().find("<html lang=\"en\">"), std::string::npos);
   EXPECT_NE(html.value().find("class=\"skip-link\""), std::string::npos);
-  EXPECT_NE(html.value().find("<main id=\"main-content\""),
-            std::string::npos);
-  EXPECT_NE(html.value().find("id=\"checkpoint-search\""),
-            std::string::npos);
+  EXPECT_NE(html.value().find("<main id=\"main-content\""), std::string::npos);
+  EXPECT_NE(html.value().find("id=\"checkpoint-search\""), std::string::npos);
   EXPECT_NE(html.value().find("aria-live=\"polite\""), std::string::npos);
   EXPECT_NE(html.value().find("<caption>Checkpoint assertion outcomes"),
             std::string::npos);
@@ -1087,10 +1129,8 @@ TEST(NuriAutotestingTest, ReportJsonRoundTripsAndHtmlEscapes) {
   EXPECT_NE(suiteHtml.value().find("suite&lt;auto&gt;&amp;"),
             std::string::npos);
   EXPECT_NE(suiteHtml.value().find("role=\"search\""), std::string::npos);
-  EXPECT_NE(suiteHtml.value().find("id=\"case-results\""),
-            std::string::npos);
-  EXPECT_NE(suiteHtml.value().find("class=\"case-grid\""),
-            std::string::npos);
+  EXPECT_NE(suiteHtml.value().find("id=\"case-results\""), std::string::npos);
+  EXPECT_NE(suiteHtml.value().find("class=\"case-grid\""), std::string::npos);
 
   std::error_code ec;
   std::filesystem::remove(path, ec);
@@ -1106,8 +1146,9 @@ TEST(NuriAutotestingTest, DetailedReportReaderRejectsNestedContractDrift) {
                    "\"measurements\": {\"surprise\": \"bad\","),
       replaceFirst(json.value(), "\"validForComparison\": true",
                    "\"validForComparison\": \"true\""),
-      replaceFirst(json.value(), "\"validForComparison\": true",
-                   "\"validForComparison\": true, \"validForComparison\": true"),
+      replaceFirst(
+          json.value(), "\"validForComparison\": true",
+          "\"validForComparison\": true, \"validForComparison\": true"),
       replaceFirst(json.value(), "artifacts/autotests/contract",
                    "artifacts/../escape"),
       json.value().substr(0u, json.value().size() / 2u)};

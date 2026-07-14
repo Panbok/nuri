@@ -1,5 +1,6 @@
 #include "tests_pch.h"
 
+#include "nuri/core/log.h"
 #include "nuri/resources/gltf_scene_importer.h"
 #include "nuri/resources/mesh_importer.h"
 #include "nuri/resources/scene_importer.h"
@@ -11,6 +12,7 @@
 #include <thread>
 #include <unordered_map>
 
+#include <meshoptimizer.h>
 #include <yyjson.h>
 
 namespace {
@@ -337,6 +339,31 @@ buildImportedNodePaths(const nuri::ImportedScene &scene) {
     visit(scene.rootNodes[rootOrdinal], std::string(), rootOrdinal);
   }
   return paths;
+}
+
+[[nodiscard]] std::string makeWavyGridObj(uint32_t sideLength) {
+  std::ostringstream stream;
+  stream << "o WavyGrid\n";
+  for (uint32_t y = 0; y < sideLength; ++y) {
+    for (uint32_t x = 0; x < sideLength; ++x) {
+      const float z = 0.2f * std::sin(static_cast<float>(x) * 0.45f) *
+                      std::cos(static_cast<float>(y) * 0.35f);
+      stream << "v " << x << ' ' << y << ' ' << z << '\n';
+    }
+  }
+
+  for (uint32_t y = 0; y + 1 < sideLength; ++y) {
+    for (uint32_t x = 0; x + 1 < sideLength; ++x) {
+      const uint32_t topLeft = y * sideLength + x + 1u;
+      const uint32_t topRight = topLeft + 1u;
+      const uint32_t bottomLeft = topLeft + sideLength;
+      const uint32_t bottomRight = bottomLeft + 1u;
+      stream << "f " << topLeft << ' ' << bottomLeft << ' ' << topRight << '\n';
+      stream << "f " << topRight << ' ' << bottomLeft << ' ' << bottomRight
+             << '\n';
+    }
+  }
+  return stream.str();
 }
 
 } // namespace
@@ -766,4 +793,94 @@ TEST(GltfScenePrefabImport, PreservesSingleMeshPrimitiveMaterialBindings) {
   ASSERT_EQ(meshResult.value()[1].submeshes.size(), 1u);
   EXPECT_EQ(meshResult.value()[0].submeshes[0].materialIndex, 0u);
   EXPECT_EQ(meshResult.value()[1].submeshes[0].materialIndex, 1u);
+}
+
+TEST(GltfScenePrefabImport, GeneratesProgressiveAttributeAwareLodChain) {
+  ScopedTempDir dir("nuri_progressive_mesh_lods");
+  const std::filesystem::path meshPath = dir.path / "wavy_grid.obj";
+  writeTextFile(meshPath, makeWavyGridObj(24u));
+
+  nuri::MeshImportOptions options{};
+  options.calcTangents = false;
+  options.optimize = false;
+  options.generateLods = true;
+  options.generateMeshlets = false;
+  options.lodCount = 3u;
+  options.lodTriangleRatios = {0.70f, 0.45f, 0.25f};
+  options.lodTargetError = 1.0f;
+
+  auto importResult =
+      nuri::MeshImporter::loadFromFile(meshPath.string(), options);
+  ASSERT_FALSE(importResult.hasError()) << importResult.error();
+
+  const nuri::MeshData &mesh = importResult.value();
+  ASSERT_EQ(mesh.submeshes.size(), 1u);
+  const nuri::Submesh &submesh = mesh.submeshes.front();
+  ASSERT_GE(submesh.lodCount, 3u);
+  ASSERT_EQ(submesh.vertexOffset, 0u);
+
+  const nuri::SubmeshLod &lod1 = submesh.lods[1];
+  const nuri::SubmeshLod &lod2 = submesh.lods[2];
+  ASSERT_GT(lod1.indexCount, lod2.indexCount);
+  ASSERT_LE(static_cast<size_t>(lod2.indexOffset) + lod2.indexCount,
+            mesh.indices.size());
+
+  const std::span<const uint32_t> lod1Indices(
+      mesh.indices.data() + lod1.indexOffset, lod1.indexCount);
+  const std::span<const uint32_t> lod2Indices(
+      mesh.indices.data() + lod2.indexOffset, lod2.indexCount);
+  std::vector<uint32_t> expectedLod2(lod1Indices.size());
+  std::vector<std::array<float, 5>> lodAttributes;
+  lodAttributes.reserve(mesh.vertices.size());
+  for (const nuri::Vertex &vertex : mesh.vertices) {
+    lodAttributes.push_back({vertex.normal.x, vertex.normal.y, vertex.normal.z,
+                             vertex.uv.x, vertex.uv.y});
+  }
+  constexpr std::array<float, 5> kAttributeWeights{0.5f, 0.5f, 0.5f, 1.0f,
+                                                   1.0f};
+  float stepError = 0.0f;
+  const size_t expectedCount = meshopt_simplifyWithAttributes(
+      expectedLod2.data(), lod1Indices.data(), lod1Indices.size(),
+      &mesh.vertices.front().position.x, mesh.vertices.size(),
+      sizeof(nuri::Vertex), lodAttributes.front().data(),
+      sizeof(lodAttributes.front()), kAttributeWeights.data(),
+      kAttributeWeights.size(), nullptr, lod2.indexCount,
+      options.lodTargetError, 0, &stepError);
+
+  ASSERT_EQ(expectedCount, lod2Indices.size());
+  EXPECT_TRUE(std::equal(expectedLod2.begin(),
+                         expectedLod2.begin() + expectedCount,
+                         lod2Indices.begin(), lod2Indices.end()));
+  EXPECT_NEAR(lod2.error, lod1.error + stepError, 1.0e-6f);
+}
+
+TEST(GltfScenePrefabImport, StopsQuietlyAtTheLastReducibleLod) {
+  ScopedTempDir dir("nuri_terminal_mesh_lod");
+  const std::filesystem::path meshPath = dir.path / "wavy_grid.obj";
+  writeTextFile(meshPath, makeWavyGridObj(12u));
+
+  std::vector<nuri::LogEntry> previousEntries;
+  const nuri::LogReadResult previousLogs =
+      nuri::readLogEntriesSince(0u, previousEntries);
+
+  nuri::MeshImportOptions options{};
+  options.calcTangents = false;
+  options.optimize = false;
+  options.generateLods = true;
+  options.generateMeshlets = false;
+  options.lodCount = 4u;
+  options.lodTargetError = 0.0f;
+
+  auto importResult =
+      nuri::MeshImporter::loadFromFile(meshPath.string(), options);
+  ASSERT_FALSE(importResult.hasError()) << importResult.error();
+
+  std::vector<nuri::LogEntry> importEntries;
+  nuri::readLogEntriesSince(previousLogs.lastSequence, importEntries);
+  const bool emittedFalseFailure =
+      std::ranges::any_of(importEntries, [](const nuri::LogEntry &entry) {
+        return entry.level == nuri::LogLevel::Warning &&
+               entry.message.find("simplification failed") != std::string::npos;
+      });
+  EXPECT_FALSE(emittedFalseFailure);
 }

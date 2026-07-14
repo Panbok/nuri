@@ -36,15 +36,15 @@ TEST(NuriBenchmarkStatsTest, NearZeroBaselineUsesAbsoluteDelta) {
 }
 
 TEST(NuriBenchmarkStatsTest, FewerThanThreeRepetitionsIsLowConfidence) {
-  const auto result = nuri::tools::benchmark::computeRepeatComparison(
-      {1.0}, {2.0});
+  const auto result =
+      nuri::tools::benchmark::computeRepeatComparison({1.0}, {2.0});
   ASSERT_FALSE(result.hasError());
   EXPECT_TRUE(result.value().lowConfidence);
 }
 
 TEST(NuriBenchmarkStatsTest, InvalidRepeatInputFails) {
-  EXPECT_TRUE(nuri::tools::benchmark::computeRepeatComparison({}, {1.0})
-                  .hasError());
+  EXPECT_TRUE(
+      nuri::tools::benchmark::computeRepeatComparison({}, {1.0}).hasError());
   EXPECT_TRUE(nuri::tools::benchmark::computeRepeatComparison({1.0}, {1.0}, 0.0)
                   .hasError());
 }

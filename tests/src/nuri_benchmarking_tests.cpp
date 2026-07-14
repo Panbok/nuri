@@ -241,7 +241,7 @@ writeGovernedBenchmarkSource(const std::filesystem::path &runRoot,
   auto source = loadBenchmarkBaselineSource(runRoot, "case.default");
   EXPECT_FALSE(source.hasError()) << source.error();
   return source.hasError() ? BenchmarkBaselineSource{}
-                            : std::move(source.value());
+                           : std::move(source.value());
 }
 
 BenchmarkCase makeCheckFixtureCase() {
@@ -313,9 +313,8 @@ BenchmarkReport makeCheckFixtureBaseline(double valueScale = 1.0) {
   report.profile.warmupMaxDriftPercent = 15.0;
   report.profile.requiredMetrics = {"cpu.render_submit_ms"};
   report.profile.authorityBlockers = {"baseline profile is investigative"};
-  report.repeatObservations = {.unit = "isolated-process",
-                               .independent = true,
-                               .count = 3u};
+  report.repeatObservations = {
+      .unit = "isolated-process", .independent = true, .count = 3u};
   for (uint32_t index = 0u; index < 3u; ++index) {
     const double cpu = (10.0 + static_cast<double>(index)) * valueScale;
     const double gpu = (8.0 + static_cast<double>(index) * 0.8) * valueScale;
@@ -323,20 +322,17 @@ BenchmarkReport makeCheckFixtureBaseline(double valueScale = 1.0) {
         {.sampleIndex = index,
          .warmupStable = true,
          .measuredFrameCount = 2u,
-         .stats = {{"cpu.render_submit_ms",
-                    metricStats({cpu - 0.5 * valueScale,
-                                 cpu + 0.5 * valueScale})},
-                   {"gpu.scopes_sum_ms",
-                    metricStats({gpu - 0.4 * valueScale,
-                                 gpu + 0.4 * valueScale})}}});
+         .stats = {
+             {"cpu.render_submit_ms",
+              metricStats({cpu - 0.5 * valueScale, cpu + 0.5 * valueScale})},
+             {"gpu.scopes_sum_ms",
+              metricStats({gpu - 0.4 * valueScale, gpu + 0.4 * valueScale})}}});
   }
   report.stats = {
       {"cpu.render_submit_ms",
-       metricStats({10.0 * valueScale, 11.0 * valueScale,
-                    12.0 * valueScale})},
+       metricStats({10.0 * valueScale, 11.0 * valueScale, 12.0 * valueScale})},
       {"gpu.scopes_sum_ms",
-       metricStats({8.0 * valueScale, 8.8 * valueScale,
-                    9.6 * valueScale})}};
+       metricStats({8.0 * valueScale, 8.8 * valueScale, 9.6 * valueScale})}};
   return report;
 }
 
@@ -411,9 +407,9 @@ TEST(NuriBenchmarkingTest,
   ASSERT_EQ(missing.cases.size(), 1u);
   EXPECT_TRUE(missing.cases[0].run.reportPath.empty());
 
-  const std::filesystem::path unverified =
-      options.baselineRoot / profile.id / benchmarkCase.suite /
-      (benchmarkCase.id + ".json");
+  const std::filesystem::path unverified = options.baselineRoot / profile.id /
+                                           benchmarkCase.suite /
+                                           (benchmarkCase.id + ".json");
   auto written =
       writeBenchmarkReportFile(makeCheckFixtureBaseline(), unverified, false);
   ASSERT_FALSE(written.hasError()) << written.error();
@@ -461,7 +457,8 @@ TEST(NuriBenchmarkingTest, BenchmarkCheckReturnsRegressionForGateFailure) {
        .baselineRoot = baselineRoot,
        .repetitionTimeout = std::chrono::seconds(2),
        .requestedSelection = "case:test.check",
-       .command = "nuri-bench check --case test.check --profile fixture-local"});
+       .command =
+           "nuri-bench check --case test.check --profile fixture-local"});
 
   EXPECT_EQ(result.exitCode, BenchmarkExitCode::Regression)
       << result.message << ": "
@@ -490,7 +487,8 @@ TEST(NuriBenchmarkingTest,
        .baselineRoot = baselineRoot,
        .repetitionTimeout = std::chrono::seconds(2),
        .requestedSelection = "case:test.check",
-       .command = "nuri-bench check --case test.check --profile fixture-local"});
+       .command =
+           "nuri-bench check --case test.check --profile fixture-local"});
 
   EXPECT_EQ(result.exitCode, BenchmarkExitCode::Success)
       << result.message << ": "
@@ -538,6 +536,49 @@ TEST(NuriBenchmarkingTest, ManifestRejectsUnknownKeys) {
   std::filesystem::remove(path, ec);
 }
 
+TEST(NuriBenchmarkingTest, ManifestAppliesShadowPresetBeforeExplicitOverrides) {
+  const std::filesystem::path path =
+      makeTempPath("benchmark_shadow_overrides", ".json");
+  const std::string manifest = R"json({
+    "schemaVersion": 1,
+    "id": "shadow.overrides",
+    "suite": "shadow",
+    "settings": {"shadow": {
+      "qualityPreset": "Ultra",
+      "depthFormat": "D32_FLOAT",
+      "maxDistance": 73.0,
+      "maxDistanceFadeFraction": 0.25,
+      "splitLambda": 0.2,
+      "cascadeBlendFraction": 0.03,
+      "pcfSampleCount": 7,
+      "sdsmTemporalBlend": 0.4,
+      "enableCascadeCasterCulling": false
+    }}
+  })json";
+  writeFile(path, manifest);
+
+  auto loaded = loadBenchmarkCaseManifest(path);
+  ASSERT_FALSE(loaded.hasError()) << loaded.error();
+  const RenderSettings::ShadowSettings &shadow = loaded.value().settings.shadow;
+  EXPECT_EQ(shadow.qualityPreset, ShadowQualityPreset::Ultra);
+  EXPECT_EQ(shadow.depthFormat, Format::D32_FLOAT);
+  EXPECT_FLOAT_EQ(shadow.maxDistance, 73.0f);
+  EXPECT_FLOAT_EQ(shadow.maxDistanceFadeFraction, 0.25f);
+  EXPECT_FLOAT_EQ(shadow.splitLambda, 0.2f);
+  EXPECT_FLOAT_EQ(shadow.cascadeBlendFraction, 0.03f);
+  EXPECT_EQ(shadow.pcfSampleCount, 7u);
+  EXPECT_FLOAT_EQ(shadow.sdsmTemporalBlend, 0.4f);
+  EXPECT_FALSE(shadow.debug.enableCascadeCasterCulling);
+
+  writeFile(path, replaceFirst(manifest, "D32_FLOAT", "invalid"));
+  auto invalid = loadBenchmarkCaseManifest(path);
+  EXPECT_TRUE(invalid.hasError());
+  EXPECT_NE(invalid.error().find("depthFormat"), std::string::npos);
+
+  std::error_code ec;
+  std::filesystem::remove(path, ec);
+}
+
 TEST(NuriBenchmarkingTest, ManifestRejectsUnsafeIdentifiers) {
   const std::filesystem::path path =
       makeTempPath("benchmark_unsafe_id", ".json");
@@ -577,10 +618,12 @@ TEST(NuriBenchmarkingTest, DiscoveryRejectsDuplicateExperimentVariants) {
   const std::filesystem::path root =
       makeTempPath("benchmark_duplicate_experiment_variant", "");
   std::filesystem::create_directories(root);
-  writeFile(root / "first.json",
-            R"json({"schemaVersion":1,"id":"aa.first.none","suite":"aa","comparisonGroup":"aa.group","variant":"none"})json");
-  writeFile(root / "second.json",
-            R"json({"schemaVersion":1,"id":"aa.second.none","suite":"aa","comparisonGroup":"aa.group","variant":"none"})json");
+  writeFile(
+      root / "first.json",
+      R"json({"schemaVersion":1,"id":"aa.first.none","suite":"aa","comparisonGroup":"aa.group","variant":"none"})json");
+  writeFile(
+      root / "second.json",
+      R"json({"schemaVersion":1,"id":"aa.second.none","suite":"aa","comparisonGroup":"aa.group","variant":"none"})json");
   auto discovered =
       discoverBenchmarkCases(BenchmarkManifestLoadOptions{.caseRoot = root});
   EXPECT_TRUE(discovered.hasError());
@@ -1304,8 +1347,7 @@ TEST(NuriBenchmarkingTest, ReportWritesReadsAndComputesMeasuredStats) {
   ASSERT_FALSE(loaded.hasError()) << loaded.error();
   EXPECT_EQ(loaded.value().kind, "nuri.benchmark.report");
   EXPECT_EQ(loaded.value().benchmarkCase.id, "smoke.procedural.default");
-  EXPECT_EQ(loaded.value().benchmarkCase.comparisonGroup,
-            "aa.procedural.720p");
+  EXPECT_EQ(loaded.value().benchmarkCase.comparisonGroup, "aa.procedural.720p");
   EXPECT_EQ(loaded.value().benchmarkCase.variant, "reference_taa");
   EXPECT_EQ(loaded.value().benchmarkCase.description, "Smoke benchmark");
   EXPECT_EQ(loaded.value().benchmarkCase.presentMode, "immediate");
@@ -1326,9 +1368,9 @@ TEST(NuriBenchmarkingTest, ReportWritesReadsAndComputesMeasuredStats) {
   EXPECT_EQ(loaded.value().benchmarkCase.requirements.assets[0],
             "modelsRoot:Test/Test.gltf");
   EXPECT_TRUE(loaded.value().benchmarkCase.requirements.msaa4x);
-  EXPECT_TRUE(loaded.value()
-                  .benchmarkCase.settings.antiAliasing.debug
-                  .spatialPostMsaaCleanup);
+  EXPECT_TRUE(
+      loaded.value()
+          .benchmarkCase.settings.antiAliasing.debug.spatialPostMsaaCleanup);
   EXPECT_NE(loaded.value().benchmarkCase.settingsSignature.find("aa.quality=3"),
             std::string::npos);
   EXPECT_NE(loaded.value().benchmarkCase.settingsSignature.find(
@@ -1488,8 +1530,9 @@ TEST(NuriBenchmarkingTest, DetailedReportReaderRejectsAdversarialJson) {
                    "\"profile\": {\"surprise\": 1,"),
       replaceFirst(json.value(), "\"validForComparison\": true",
                    "\"validForComparison\": \"true\""),
-      replaceFirst(json.value(), "\"validForComparison\": true",
-                   "\"validForComparison\": true, \"validForComparison\": true"),
+      replaceFirst(
+          json.value(), "\"validForComparison\": true",
+          "\"validForComparison\": true, \"validForComparison\": true"),
       replaceFirst(json.value(), "artifacts/bench/contract",
                    "artifacts/../escape"),
       json.value().substr(0u, json.value().size() / 2u)};
@@ -1636,12 +1679,12 @@ TEST(NuriBenchmarkingTest,
   EXPECT_TRUE(inconclusive.valid);
   EXPECT_TRUE(inconclusive.authoritative);
   EXPECT_FALSE(inconclusive.regression);
-  const auto noisyMedian = std::find_if(
-      inconclusive.metrics.begin(), inconclusive.metrics.end(),
-      [](const BenchmarkMetricComparison &row) {
-        return row.metricId == "cpu.render_submit_ms" &&
-               row.statistic == "median";
-      });
+  const auto noisyMedian =
+      std::find_if(inconclusive.metrics.begin(), inconclusive.metrics.end(),
+                   [](const BenchmarkMetricComparison &row) {
+                     return row.metricId == "cpu.render_submit_ms" &&
+                            row.statistic == "median";
+                   });
   ASSERT_NE(noisyMedian, inconclusive.metrics.end());
   EXPECT_EQ(noisyMedian->status, "warn");
 

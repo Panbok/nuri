@@ -54,9 +54,8 @@ TEST(NuriProcessTest, TreatsSpecialCharacterExecutablePathAsLiteral) {
   const std::filesystem::path workspace =
       std::filesystem::temp_directory_path() /
       ("nuri process & literal " +
-       std::to_string(std::chrono::steady_clock::now()
-                          .time_since_epoch()
-                          .count()));
+       std::to_string(
+           std::chrono::steady_clock::now().time_since_epoch().count()));
   ASSERT_TRUE(std::filesystem::create_directory(workspace));
   const std::filesystem::path copiedHelper =
       workspace / ("helper (copy)&literal" + helperPath().extension().string());

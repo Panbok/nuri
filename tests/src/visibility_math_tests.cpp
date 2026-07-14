@@ -1,7 +1,7 @@
 #include "tests_pch.h"
 
-#include "nuri/gfx/visibility/visibility.h"
 #include "nuri/gfx/renderers/detail/visibility_math.h"
+#include "nuri/gfx/visibility/visibility.h"
 #include "nuri/scene/camera.h"
 
 #include <array>
@@ -30,17 +30,14 @@ TEST(VisibilityMathTests, ClassifiesNearAndFarSphereEdges) {
       visibility_detail::buildCameraFrustumPlanes(frame);
 
   EXPECT_EQ(visibility_detail::VisibilityClassification::Inside,
-            visibility_detail::classifySphere(frustum,
-                                              glm::vec3(0.0f, 0.0f, -1.0f),
-                                              0.1f));
+            visibility_detail::classifySphere(
+                frustum, glm::vec3(0.0f, 0.0f, -1.0f), 0.1f));
   EXPECT_EQ(visibility_detail::VisibilityClassification::Outside,
-            visibility_detail::classifySphere(frustum,
-                                              glm::vec3(0.0f, 0.0f, -10.25f),
-                                              0.1f));
+            visibility_detail::classifySphere(
+                frustum, glm::vec3(0.0f, 0.0f, -10.25f), 0.1f));
   EXPECT_EQ(visibility_detail::VisibilityClassification::Outside,
-            visibility_detail::classifySphere(frustum,
-                                              glm::vec3(0.0f, 0.0f, 0.25f),
-                                              0.1f));
+            visibility_detail::classifySphere(
+                frustum, glm::vec3(0.0f, 0.0f, 0.25f), 0.1f));
 }
 
 TEST(VisibilityMathTests, ClassifiesSidePlaneSphereEdges) {
@@ -50,17 +47,14 @@ TEST(VisibilityMathTests, ClassifiesSidePlaneSphereEdges) {
       visibility_detail::buildCameraFrustumPlanes(frame);
 
   EXPECT_EQ(visibility_detail::VisibilityClassification::Inside,
-            visibility_detail::classifySphere(frustum,
-                                              glm::vec3(0.0f, 0.0f, -2.0f),
-                                              0.25f));
+            visibility_detail::classifySphere(
+                frustum, glm::vec3(0.0f, 0.0f, -2.0f), 0.25f));
   EXPECT_EQ(visibility_detail::VisibilityClassification::Intersects,
-            visibility_detail::classifySphere(frustum,
-                                              glm::vec3(2.0f, 0.0f, -2.0f),
-                                              0.25f));
+            visibility_detail::classifySphere(
+                frustum, glm::vec3(2.0f, 0.0f, -2.0f), 0.25f));
   EXPECT_EQ(visibility_detail::VisibilityClassification::Outside,
-            visibility_detail::classifySphere(frustum,
-                                              glm::vec3(3.0f, 0.0f, -2.0f),
-                                              0.25f));
+            visibility_detail::classifySphere(
+                frustum, glm::vec3(3.0f, 0.0f, -2.0f), 0.25f));
 }
 
 TEST(VisibilityMathTests, ClassifiesTransformedAabbConservatively) {
@@ -73,39 +67,33 @@ TEST(VisibilityMathTests, ClassifiesTransformedAabbConservatively) {
   EXPECT_EQ(visibility_detail::VisibilityClassification::Inside,
             visibility_detail::classifyTransformedBounds(
                 frustum, localBounds,
-                glm::translate(glm::mat4(1.0f),
-                               glm::vec3(0.0f, 0.0f, -2.0f))));
+                glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 0.0f, -2.0f))));
   EXPECT_EQ(visibility_detail::VisibilityClassification::Intersects,
             visibility_detail::classifyTransformedBounds(
                 frustum, localBounds,
-                glm::translate(glm::mat4(1.0f),
-                               glm::vec3(2.0f, 0.0f, -2.0f))));
+                glm::translate(glm::mat4(1.0f), glm::vec3(2.0f, 0.0f, -2.0f))));
   EXPECT_EQ(visibility_detail::VisibilityClassification::Outside,
             visibility_detail::classifyTransformedBounds(
                 frustum, localBounds,
-                glm::translate(glm::mat4(1.0f),
-                               glm::vec3(4.0f, 0.0f, -2.0f))));
+                glm::translate(glm::mat4(1.0f), glm::vec3(4.0f, 0.0f, -2.0f))));
 }
 
 TEST(VisibilityMathTests, SupportsZeroToOneDepthClipConvention) {
-  const glm::mat4 viewProj = glm::orthoRH_ZO(-1.0f, 1.0f, -1.0f, 1.0f, 0.5f,
-                                             5.0f);
+  const glm::mat4 viewProj =
+      glm::orthoRH_ZO(-1.0f, 1.0f, -1.0f, 1.0f, 0.5f, 5.0f);
   const visibility_detail::FrustumPlanes frustum =
       visibility_detail::buildFrustumPlanes(
           viewProj, visibility_detail::DepthClipConvention::ZeroToOne);
 
   EXPECT_EQ(visibility_detail::VisibilityClassification::Inside,
-            visibility_detail::classifySphere(frustum,
-                                              glm::vec3(0.0f, 0.0f, -1.0f),
-                                              0.1f));
+            visibility_detail::classifySphere(
+                frustum, glm::vec3(0.0f, 0.0f, -1.0f), 0.1f));
   EXPECT_EQ(visibility_detail::VisibilityClassification::Outside,
-            visibility_detail::classifySphere(frustum,
-                                              glm::vec3(0.0f, 0.0f, -5.25f),
-                                              0.1f));
+            visibility_detail::classifySphere(
+                frustum, glm::vec3(0.0f, 0.0f, -5.25f), 0.1f));
   EXPECT_EQ(visibility_detail::VisibilityClassification::Outside,
-            visibility_detail::classifySphere(frustum,
-                                              glm::vec3(0.0f, 0.0f, -0.25f),
-                                              0.1f));
+            visibility_detail::classifySphere(
+                frustum, glm::vec3(0.0f, 0.0f, -0.25f), 0.1f));
 }
 
 TEST(VisibilityMathTests, CpuEvaluationKeepsSubmeshCandidatesIndependent) {
@@ -122,16 +110,14 @@ TEST(VisibilityMathTests, CpuEvaluationKeepsSubmeshCandidatesIndependent) {
   candidates[0].renderableIndex = 0u;
   candidates[0].templateIndex = 3u;
   candidates[0].submeshIndex = 0u;
-  candidates[0].localBounds =
-      BoundingBox(glm::vec3(3.75f, -0.25f, -2.25f),
-                  glm::vec3(4.25f, 0.25f, -1.75f));
+  candidates[0].localBounds = BoundingBox(glm::vec3(3.75f, -0.25f, -2.25f),
+                                          glm::vec3(4.25f, 0.25f, -1.75f));
   candidates[0].worldFromLocal = glm::mat4(1.0f);
   candidates[1].renderableIndex = 0u;
   candidates[1].templateIndex = 4u;
   candidates[1].submeshIndex = 1u;
-  candidates[1].localBounds =
-      BoundingBox(glm::vec3(-0.25f, -0.25f, -2.25f),
-                  glm::vec3(0.25f, 0.25f, -1.75f));
+  candidates[1].localBounds = BoundingBox(glm::vec3(-0.25f, -0.25f, -2.25f),
+                                          glm::vec3(0.25f, 0.25f, -1.75f));
   candidates[1].worldFromLocal = glm::mat4(1.0f);
 
   VisibilityFrameState state;

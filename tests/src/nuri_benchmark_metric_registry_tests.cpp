@@ -34,8 +34,7 @@ TEST(NuriBenchmarkMetricRegistryTest, CoreDescriptorsAreTypedAndBounded) {
   EXPECT_EQ(cpu->direction, BenchmarkMetricDirection::LowerIsBetter);
   EXPECT_EQ(cpu->aggregation,
             BenchmarkMetricAggregation::MedianAndP95AcrossMeasuredFrames);
-  EXPECT_EQ(cpu->availability,
-            BenchmarkMetricAvailability::EveryMeasuredFrame);
+  EXPECT_EQ(cpu->availability, BenchmarkMetricAvailability::EveryMeasuredFrame);
   EXPECT_EQ(cpu->samplingPhase,
             BenchmarkMetricSamplingPhase::CpuMeasuredRegion);
   EXPECT_EQ(cpu->gateRole, BenchmarkMetricGateRole::Primary);
@@ -88,14 +87,14 @@ TEST(NuriBenchmarkMetricRegistryTest,
       findExactBenchmarkMetricIndex("renderer.opaque.total_instances");
   ASSERT_TRUE(cpuIndex.has_value());
   ASSERT_TRUE(counterIndex.has_value());
-  EXPECT_FALSE(findExactBenchmarkMetricIndex(
-                   "rendergraph.pass.000.opaque.cpu_ms")
-                   .has_value());
+  EXPECT_FALSE(
+      findExactBenchmarkMetricIndex("rendergraph.pass.000.opaque.cpu_ms")
+          .has_value());
   ASSERT_EQ(benchmarkMetricDescriptor(*cpuIndex)->idOrRule,
             "cpu.render_submit_ms");
 
-  static_assert(std::contiguous_iterator<
-                BenchmarkFrameMeasurements::const_iterator>);
+  static_assert(
+      std::contiguous_iterator<BenchmarkFrameMeasurements::const_iterator>);
   BenchmarkFrameMeasurements measurements;
   measurements.reserve(3u);
   const size_t reservedCapacity = measurements.capacity();
@@ -123,11 +122,9 @@ TEST(NuriBenchmarkMetricRegistryTest, OnlySafePassTimingRulesAreDynamic) {
   ASSERT_NE(gpu, nullptr);
   EXPECT_EQ(gpu->idRule, BenchmarkMetricIdRule::RenderGraphPassGpuTiming);
 
-  EXPECT_EQ(findBenchmarkMetricDescriptor(
-                "rendergraph.pass.00.opaque.cpu_ms"),
+  EXPECT_EQ(findBenchmarkMetricDescriptor("rendergraph.pass.00.opaque.cpu_ms"),
             nullptr);
-  EXPECT_EQ(findBenchmarkMetricDescriptor(
-                "rendergraph.pass.000.Opaque.cpu_ms"),
+  EXPECT_EQ(findBenchmarkMetricDescriptor("rendergraph.pass.000.Opaque.cpu_ms"),
             nullptr);
   EXPECT_EQ(findBenchmarkMetricDescriptor(
                 "rendergraph.pass.000.opaque/escape.cpu_ms"),
@@ -139,7 +136,8 @@ TEST(NuriBenchmarkMetricRegistryTest, OnlySafePassTimingRulesAreDynamic) {
   EXPECT_EQ(findBenchmarkMetricDescriptor("custom.required_ms"), nullptr);
 }
 
-TEST(NuriBenchmarkMetricRegistryTest, ManifestRejectsUnregisteredRequiredMetric) {
+TEST(NuriBenchmarkMetricRegistryTest,
+     ManifestRejectsUnregisteredRequiredMetric) {
   const std::filesystem::path path = makeMetricRegistryTempPath();
   {
     std::ofstream file(path, std::ios::binary);
@@ -184,8 +182,7 @@ TEST(NuriBenchmarkMetricRegistryTest,
                                  std::istreambuf_iterator<char>());
   auto envelope = nuri::tools::core::readResultEnvelopeV2(envelopeJson);
   ASSERT_FALSE(envelope.hasError()) << envelope.error();
-  EXPECT_EQ(envelope.value().status,
-            nuri::tools::core::ToolOutcome::Invalid);
+  EXPECT_EQ(envelope.value().status, nuri::tools::core::ToolOutcome::Invalid);
   EXPECT_EQ(envelope.value().exitCode,
             static_cast<int>(BenchmarkExitCode::InvalidInput));
   std::error_code error;

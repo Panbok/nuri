@@ -27,6 +27,7 @@
 #include "nuri/gfx/pipeline/render_feature_pass.h"
 #include "nuri/gfx/pipeline/render_pipeline.h"
 #include "nuri/gfx/renderer.h"
+#include "nuri/gfx/renderers/detail/opaque_meshlet_routing.h"
 #include "nuri/gfx/renderers/detail/shadow_math.h"
 #include "nuri/gfx/visibility/visibility.h"
 #include "nuri/resources/gpu/resource_manager.h"
@@ -77,16 +78,6 @@ struct GpuSdsmMinMaxResultProbe {
 };
 static_assert(sizeof(GpuSdsmMinMaxResultProbe) == 16u);
 
-struct alignas(16) GpuSdsmHistogramResultProbe {
-  glm::vec4 rawDeviceMinMaxLinearMinMax{1.0f, 0.0f, 0.0f, 0.0f};
-  glm::vec4 histogramRangeWeightClear{0.0f};
-  glm::uvec4 metadata{0u};
-  glm::vec4 splitDepths0{0.0f};
-  glm::vec4 splitDepths1{0.0f};
-  std::array<float, kMaxShadowSdsmHistogramBucketCount> bucketWeights{};
-};
-static_assert(sizeof(GpuSdsmHistogramResultProbe) == 592u);
-
 std::filesystem::path makeTempRendererPath(std::string_view stem) {
   const auto tick =
       std::chrono::high_resolution_clock::now().time_since_epoch().count();
@@ -122,36 +113,6 @@ RuntimeOpaqueShaderConfig makeShadowConfig(const std::filesystem::path &root) {
   };
 }
 
-CameraFrameState makeSdsmPerspectiveCamera(float farPlane = 100.0f) {
-  return CameraFrameState{
-      .view =
-          glm::lookAt(glm::vec3(0.0f, 2.0f, 6.0f), glm::vec3(0.0f, 0.5f, 0.0f),
-                      glm::vec3(0.0f, 1.0f, 0.0f)),
-      .proj = glm::perspective(glm::radians(60.0f), 1.0f, 0.1f, farPlane),
-      .cameraPos = glm::vec4(0.0f, 2.0f, 6.0f, 1.0f),
-      .aspectRatio = 1.0f,
-      .projectionType = ProjectionType::Perspective,
-      .nearPlane = 0.1f,
-      .farPlane = farPlane,
-      .fovYRadians = glm::radians(60.0f),
-  };
-}
-
-float deviceDepthForViewDepth(float viewDepth, const CameraFrameState &camera) {
-  const float clampedDepth =
-      std::clamp(viewDepth, camera.nearPlane + 1.0e-4f, camera.farPlane);
-  if (camera.projectionType == ProjectionType::Orthographic) {
-    const float depthRange =
-        std::max(camera.farPlane - camera.nearPlane, 1.0e-4f);
-    return std::clamp((clampedDepth - camera.nearPlane) / depthRange, 0.0f,
-                      1.0f);
-  }
-  const float numerator =
-      camera.farPlane - (camera.nearPlane * camera.farPlane) / clampedDepth;
-  return std::clamp(numerator / (camera.farPlane - camera.nearPlane), 0.0f,
-                    1.0f);
-}
-
 bool mat4Near(const glm::mat4 &a, const glm::mat4 &b, float epsilon) {
   for (int c = 0; c < 4; ++c) {
     for (int r = 0; r < 4; ++r) {
@@ -178,46 +139,11 @@ glm::vec2 taaScreenUvFromClipNdc(glm::vec2 ndc) {
   return glm::vec2(ndc.x * 0.5f + 0.5f, 0.5f - ndc.y * 0.5f);
 }
 
-std::array<float, kMaxShadowCascades + 1u>
-expectedHistogramEffectiveSplitDepths(const ShadowSdsmDebugFrameData &sdsm) {
-  std::array<float, kMaxShadowCascades + 1u> expected =
-      sdsm.histogramSplitDepths;
-  const uint32_t cascadeCount =
-      std::clamp(sdsm.splitCount, 1u, kMaxShadowCascades);
-  const float effectiveNear = std::max(sdsm.effectiveRangeNear, 0.01f);
-  const float effectiveFar =
-      std::max(effectiveNear + 1.0e-4f, sdsm.effectiveRangeFar);
-  expected[0] = effectiveNear;
-  if (cascadeCount == 1u) {
-    expected[1] = effectiveFar;
-    return expected;
-  }
-
-  const float histogramNear = sdsm.histogramSplitDepths[0];
-  const float histogramFar = std::max(sdsm.histogramSplitDepths[cascadeCount],
-                                      histogramNear + 1.0e-4f);
-  const float histogramSpan = std::max(histogramFar - histogramNear, 1.0e-4f);
-  const float effectiveSpan = effectiveFar - effectiveNear;
-  for (uint32_t cascadeIndex = 1u; cascadeIndex < cascadeCount;
-       ++cascadeIndex) {
-    const float normalized =
-        std::clamp((sdsm.histogramSplitDepths[cascadeIndex] - histogramNear) /
-                       histogramSpan,
-                   0.0f, 1.0f);
-    expected[cascadeIndex] = effectiveNear + normalized * effectiveSpan;
-  }
-  shadow_detail::enforceMonotonicShadowSplitDepths(expected, cascadeCount,
-                                                   effectiveNear, effectiveFar);
-  return expected;
-}
-
 void expectGpuSdsmResultAvailable(const ShadowSdsmDebugFrameData &sdsm,
-                                  uint64_t sourceFrameIndex,
-                                  bool splitPayloadValid) {
+                                  uint64_t sourceFrameIndex) {
   EXPECT_GT(sdsm.gpuResultRingSlotCount, 0u);
   EXPECT_NE(sdsm.gpuResultSelectedSlot, std::numeric_limits<uint32_t>::max());
   EXPECT_TRUE(sdsm.gpuReductionResultAvailable);
-  EXPECT_EQ(sdsm.gpuSplitPayloadValid, splitPayloadValid);
   EXPECT_EQ(sdsm.gpuResultSourceFrameIndex, sourceFrameIndex);
 }
 
@@ -230,41 +156,6 @@ void addDirectionalLightToScene(RenderScene &scene) {
   auto commitResult = scene.commit();
   ASSERT_FALSE(commitResult.hasError()) << commitResult.error();
   ASSERT_TRUE(commitResult.value());
-}
-
-ShadowSdsmDebugFrameData
-buildShadowSdsmFrame(RenderPipeline &pipeline, Renderer &renderer,
-                     std::pmr::memory_resource &memory, RenderScene &scene,
-                     RenderSettings &settings, const CameraFrameState &camera,
-                     uint64_t frameIndex,
-                     std::optional<uint64_t> sourceFrameIndex,
-                     std::span<const TextureHandle> pyramidTextures) {
-  RenderFrameContext frameContext{};
-  frameContext.frameIndex = frameIndex;
-  frameContext.scene = &scene;
-  frameContext.resources = &renderer.resources();
-  frameContext.settings = &settings;
-  frameContext.camera = camera;
-  for (size_t i = 0u;
-       i < pyramidTextures.size() &&
-       i < frameContext.sharedResources.sceneDepthPyramidTextures.size();
-       ++i) {
-    frameContext.sharedResources.sceneDepthPyramidTextures[i] =
-        pyramidTextures[i];
-  }
-  frameContext.sharedResources.sceneDepthPyramidLevelCount =
-      static_cast<uint32_t>(pyramidTextures.size());
-  frameContext.sharedResources.sceneDepthPyramidSourceFrameIndex =
-      sourceFrameIndex;
-
-  RenderGraphBuilder graph(&memory);
-  graph.beginFrame(frameContext.frameIndex);
-  auto buildResult =
-      pipeline.buildRenderGraph(frameContext, renderer.resources(), graph);
-  EXPECT_FALSE(buildResult.hasError()) << buildResult.error();
-  EXPECT_TRUE(buildResult.value());
-  EXPECT_TRUE(frameContext.sharedResources.shadowDebugFrameData.has_value());
-  return frameContext.sharedResources.shadowDebugFrameData->sdsm;
 }
 
 class FakeFullscreenGpuDevice : public FakeGPUDeviceBase {
@@ -708,6 +599,63 @@ private:
   std::array<RenderFeaturePass *, 1> passes_{};
 };
 
+TEST(OpaqueMeshletRoutingTest, OpportunisticHybridUsesResolvedLodBoundary) {
+  using detail::shouldUseMeshletsForOpaqueBatch;
+
+  EXPECT_FALSE(shouldUseMeshletsForOpaqueBatch(MeshletRenderMode::Opportunistic,
+                                               true, true, 8u, 8u));
+  EXPECT_TRUE(shouldUseMeshletsForOpaqueBatch(MeshletRenderMode::Opportunistic,
+                                              true, true, 9u, 8u));
+  EXPECT_TRUE(shouldUseMeshletsForOpaqueBatch(MeshletRenderMode::Opportunistic,
+                                              true, true, 1u, 0u));
+}
+
+TEST(OpaqueMeshletRoutingTest, RequiredModePreservesAllMeshletSemantics) {
+  using detail::shouldUseMeshletsForOpaqueBatch;
+
+  EXPECT_TRUE(shouldUseMeshletsForOpaqueBatch(MeshletRenderMode::Required, true,
+                                              true, 1u, 64u));
+  EXPECT_TRUE(shouldUseMeshletsForOpaqueBatch(MeshletRenderMode::Required,
+                                              false, true, 1u, 64u));
+  EXPECT_FALSE(shouldUseMeshletsForOpaqueBatch(MeshletRenderMode::Required,
+                                               true, false, 1u, 64u));
+}
+
+TEST(OpaqueMeshletRoutingTest, IneligibleOpportunisticFramesStayAllMeshlet) {
+  using detail::shouldUseMeshletsForOpaqueBatch;
+
+  EXPECT_TRUE(shouldUseMeshletsForOpaqueBatch(MeshletRenderMode::Opportunistic,
+                                              false, true, 1u, 64u));
+  EXPECT_FALSE(shouldUseMeshletsForOpaqueBatch(MeshletRenderMode::Disabled,
+                                               true, true, 128u, 64u));
+  EXPECT_FALSE(shouldUseMeshletsForOpaqueBatch(MeshletRenderMode::Opportunistic,
+                                               true, true, 0u, 64u));
+}
+
+TEST(OpaqueMeshletRoutingTest, StaticMeshletsResolveAutomaticLodPerBatch) {
+  using detail::shouldUseGpuMeshletLod;
+
+  EXPECT_FALSE(shouldUseGpuMeshletLod(true, true, -1, false));
+  EXPECT_TRUE(shouldUseGpuMeshletLod(true, true, -1, true));
+}
+
+TEST(OpaqueMeshletRoutingTest, FixedOrDisabledLodNeverUsesGpuSelection) {
+  using detail::shouldUseGpuMeshletLod;
+
+  EXPECT_FALSE(shouldUseGpuMeshletLod(false, true, -1, true));
+  EXPECT_FALSE(shouldUseGpuMeshletLod(true, false, -1, true));
+  EXPECT_FALSE(shouldUseGpuMeshletLod(true, true, 0, true));
+}
+
+TEST(OpaqueMeshletRoutingTest, AutomaticLodUsesOnlyStableGeneratedLevels) {
+  using detail::resolveOpaqueAutomaticLod;
+
+  EXPECT_EQ(resolveOpaqueAutomaticLod(3u, true, true), 0u);
+  EXPECT_EQ(resolveOpaqueAutomaticLod(3u, false, true), 1u);
+  EXPECT_EQ(resolveOpaqueAutomaticLod(2u, true, false), 2u);
+  EXPECT_EQ(resolveOpaqueAutomaticLod(3u, false, false), 3u);
+}
+
 TEST(RenderGraphRendererTest,
      RendererKeepsBaseImplicitPassUnderSuppressionWithExplicitOutputRoot) {
   EnvVarGuard envGuard("NURI_RENDER_GRAPH_SUPPRESS_INFERRED_SIDE_EFFECTS", "1");
@@ -896,21 +844,12 @@ TEST(RenderGraphRendererTest, ShadowSettingsSanitizeClampsCoreValues) {
   settings.depthFormat = Format::RGBA8_UNORM;
   settings.maxDistance = -10.0f;
   settings.maxDistanceFadeFraction = -1.0f;
-  settings.splitMode = static_cast<ShadowCascadeSplitMode>(99u);
   settings.splitLambda = 2.0f;
   settings.cascadeBlendFraction = -1.0f;
   settings.constantBias = std::numeric_limits<float>::quiet_NaN();
   settings.slopeBias = std::numeric_limits<float>::quiet_NaN();
   settings.normalBias = std::numeric_limits<float>::quiet_NaN();
   settings.pcfSampleCount = 0u;
-  settings.pcssBlockerSampleCount = 0u;
-  settings.pcssFilterSampleCount = 0u;
-  settings.pcssLightRadiusScale = std::numeric_limits<float>::quiet_NaN();
-  settings.pcssSearchRadiusClampTexels =
-      std::numeric_limits<float>::quiet_NaN();
-  settings.pcssFilterRadiusClampTexels =
-      std::numeric_limits<float>::quiet_NaN();
-  settings.debug.showLightPerspectiveViewport = true;
   settings.debug.diagnosticLogLevel = static_cast<LogLevel>(99u);
   settings.debug.diagnosticLogIntervalFrames = 0u;
   settings.debug.debugCascadeIndex = 99u;
@@ -925,21 +864,12 @@ TEST(RenderGraphRendererTest, ShadowSettingsSanitizeClampsCoreValues) {
   EXPECT_EQ(settings.depthFormat, kDefaultShadowMapDepthFormat);
   EXPECT_FLOAT_EQ(settings.maxDistance, 150.0f);
   EXPECT_FLOAT_EQ(settings.maxDistanceFadeFraction, 0.0f);
-  EXPECT_EQ(settings.splitMode, ShadowCascadeSplitMode::Practical);
   EXPECT_FLOAT_EQ(settings.splitLambda, 1.0f);
   EXPECT_FLOAT_EQ(settings.cascadeBlendFraction, 0.0f);
   EXPECT_FLOAT_EQ(settings.constantBias, 0.0005f);
   EXPECT_FLOAT_EQ(settings.slopeBias, 1.5f);
   EXPECT_FLOAT_EQ(settings.normalBias, 0.0f);
   EXPECT_EQ(settings.pcfSampleCount, 1u);
-  EXPECT_EQ(settings.pcssBlockerSampleCount, 1u);
-  EXPECT_EQ(settings.pcssFilterSampleCount, 1u);
-  EXPECT_FLOAT_EQ(settings.pcssLightRadiusScale, kDefaultPcssLightRadiusScale);
-  EXPECT_FLOAT_EQ(settings.pcssSearchRadiusClampTexels,
-                  kDefaultPcssSearchRadiusClampTexels);
-  EXPECT_FLOAT_EQ(settings.pcssFilterRadiusClampTexels,
-                  kDefaultPcssFilterRadiusClampTexels);
-  EXPECT_FALSE(settings.debug.showLightPerspectiveViewport);
   EXPECT_EQ(settings.debug.diagnosticLogLevel, LogLevel::Trace);
   EXPECT_EQ(settings.debug.diagnosticLogIntervalFrames, 1u);
   EXPECT_EQ(settings.debug.debugCascadeIndex, 0u);
@@ -973,12 +903,9 @@ TEST(RenderGraphRendererTest, ShadowQualityPresetAppliesExpectedValues) {
   EXPECT_EQ(settings.shadowMapSize, 1024u);
   EXPECT_EQ(settings.depthFormat, kDefaultShadowMapDepthFormat);
   EXPECT_FLOAT_EQ(settings.maxDistance, 80.0f);
-  EXPECT_FLOAT_EQ(settings.maxDistanceFadeFraction, 0.0f);
+  EXPECT_FLOAT_EQ(settings.maxDistanceFadeFraction, 0.15f);
   EXPECT_FLOAT_EQ(settings.splitLambda, 0.35f);
-  EXPECT_EQ(settings.filterMode, ShadowFilterMode::PCF3x3);
   EXPECT_EQ(settings.pcfSampleCount, 9u);
-  EXPECT_EQ(settings.sdsmMode, ShadowSdsmMode::Disabled);
-  EXPECT_FALSE(settings.debug.fixedPoissonRotation);
   EXPECT_FLOAT_EQ(settings.constantBias, 0.0008f);
   EXPECT_FLOAT_EQ(settings.slopeBias, 2.0f);
   EXPECT_FLOAT_EQ(settings.normalBias, 0.25f);
@@ -990,13 +917,9 @@ TEST(RenderGraphRendererTest, ShadowQualityPresetAppliesExpectedValues) {
   EXPECT_EQ(settings.shadowMapSize, 2048u);
   EXPECT_EQ(settings.depthFormat, kDefaultShadowMapDepthFormat);
   EXPECT_FLOAT_EQ(settings.maxDistance, 120.0f);
-  EXPECT_FLOAT_EQ(settings.maxDistanceFadeFraction, 0.0f);
+  EXPECT_FLOAT_EQ(settings.maxDistanceFadeFraction, 0.12f);
   EXPECT_FLOAT_EQ(settings.splitLambda, 0.30f);
-  EXPECT_EQ(settings.filterMode, ShadowFilterMode::PoissonPCF);
   EXPECT_EQ(settings.pcfSampleCount, 16u);
-  EXPECT_EQ(settings.sdsmMode, ShadowSdsmMode::PreviousFrameMinMax);
-  EXPECT_EQ(settings.sdsmReductionBackend, ShadowSdsmReductionBackend::Auto);
-  EXPECT_TRUE(settings.debug.fixedPoissonRotation);
   EXPECT_FLOAT_EQ(settings.constantBias, 0.0006f);
   EXPECT_FLOAT_EQ(settings.slopeBias, 1.75f);
   EXPECT_FLOAT_EQ(settings.normalBias, 0.35f);
@@ -1007,13 +930,9 @@ TEST(RenderGraphRendererTest, ShadowQualityPresetAppliesExpectedValues) {
   EXPECT_EQ(settings.shadowMapSize, 4096u);
   EXPECT_EQ(settings.depthFormat, kDefaultShadowMapDepthFormat);
   EXPECT_FLOAT_EQ(settings.maxDistance, 150.0f);
-  EXPECT_FLOAT_EQ(settings.maxDistanceFadeFraction, 0.0f);
+  EXPECT_FLOAT_EQ(settings.maxDistanceFadeFraction, 0.10f);
   EXPECT_FLOAT_EQ(settings.splitLambda, 0.25f);
-  EXPECT_EQ(settings.filterMode, ShadowFilterMode::PoissonPCF);
   EXPECT_EQ(settings.pcfSampleCount, 24u);
-  EXPECT_EQ(settings.sdsmMode, ShadowSdsmMode::PreviousFrameMinMax);
-  EXPECT_EQ(settings.sdsmReductionBackend, ShadowSdsmReductionBackend::Auto);
-  EXPECT_TRUE(settings.debug.fixedPoissonRotation);
   EXPECT_FLOAT_EQ(settings.constantBias, 0.0005f);
   EXPECT_FLOAT_EQ(settings.slopeBias, 1.5f);
   EXPECT_FLOAT_EQ(settings.normalBias, 0.50f);
@@ -1022,20 +941,25 @@ TEST(RenderGraphRendererTest, ShadowQualityPresetAppliesExpectedValues) {
   EXPECT_EQ(settings.qualityPreset, ShadowQualityPreset::Ultra);
   EXPECT_EQ(settings.cascadeCount, 4u);
   EXPECT_EQ(settings.shadowMapSize, 8192u);
-  EXPECT_EQ(settings.depthFormat, kDefaultShadowMapDepthFormat);
+  EXPECT_EQ(settings.depthFormat, Format::D32_FLOAT);
   EXPECT_FLOAT_EQ(settings.maxDistance, 220.0f);
-  EXPECT_FLOAT_EQ(settings.maxDistanceFadeFraction, 0.0f);
+  EXPECT_FLOAT_EQ(settings.maxDistanceFadeFraction, 0.08f);
   EXPECT_FLOAT_EQ(settings.splitLambda, 0.50f);
-  EXPECT_EQ(settings.filterMode, ShadowFilterMode::PoissonPCF);
   EXPECT_EQ(settings.pcfSampleCount, 32u);
-  EXPECT_EQ(settings.pcssBlockerSampleCount, 16u);
-  EXPECT_EQ(settings.pcssFilterSampleCount, 32u);
-  EXPECT_EQ(settings.sdsmMode, ShadowSdsmMode::Histogram);
-  EXPECT_EQ(settings.sdsmReductionBackend, ShadowSdsmReductionBackend::Auto);
-  EXPECT_TRUE(settings.debug.fixedPoissonRotation);
   EXPECT_FLOAT_EQ(settings.constantBias, 0.00035f);
   EXPECT_FLOAT_EQ(settings.slopeBias, 1.15f);
   EXPECT_FLOAT_EQ(settings.normalBias, 0.40f);
+}
+
+TEST(RenderGraphRendererTest, ShadowQualityPresetResetsPresetOwnedState) {
+  RenderSettings::ShadowSettings settings{};
+  settings.cascadeBlendFraction = 0.75f;
+  settings.sdsmTemporalBlend = 0.1f;
+
+  applyShadowQualityPreset(settings, ShadowQualityPreset::Ultra);
+
+  EXPECT_FLOAT_EQ(settings.cascadeBlendFraction, 0.08f);
+  EXPECT_FLOAT_EQ(settings.sdsmTemporalBlend, 0.85f);
 }
 
 TEST(RenderGraphRendererTest,
@@ -1459,33 +1383,22 @@ TEST(RenderGraphRendererTest,
               camera.farPlane, 1.0e-4f);
 }
 
-TEST(RenderGraphRendererTest, CascadeSplitDepthsStayMonotonicAcrossModes) {
+TEST(RenderGraphRendererTest, PracticalCascadeSplitDepthsStayMonotonic) {
   CameraFrameState camera{};
   camera.nearPlane = 0.1f;
   camera.farPlane = 100.0f;
 
-  const auto uniformSplits = shadow_detail::computeCascadeSplitDepths(
-      camera, 50.0f, 4u, ShadowCascadeSplitMode::Uniform, 0.75f);
-  const auto logSplits = shadow_detail::computeCascadeSplitDepths(
-      camera, 50.0f, 4u, ShadowCascadeSplitMode::Logarithmic, 0.75f);
-  const auto practicalSplits = shadow_detail::computeCascadeSplitDepths(
-      camera, 50.0f, 4u, ShadowCascadeSplitMode::Practical, 0.75f);
+  const auto practicalSplits =
+      shadow_detail::computeCascadeSplitDepths(camera, 50.0f, 4u, 0.75f);
 
   for (uint32_t i = 0u; i < 4u; ++i) {
-    EXPECT_LT(uniformSplits[i], uniformSplits[i + 1u]);
-    EXPECT_LT(logSplits[i], logSplits[i + 1u]);
     EXPECT_LT(practicalSplits[i], practicalSplits[i + 1u]);
   }
-  EXPECT_NEAR(uniformSplits[0], 0.1f, 1.0e-6f);
-  EXPECT_NEAR(logSplits[0], 0.1f, 1.0e-6f);
   EXPECT_NEAR(practicalSplits[0], 0.1f, 1.0e-6f);
-  EXPECT_NEAR(uniformSplits[4], 50.0f, 1.0e-6f);
-  EXPECT_NEAR(logSplits[4], 50.0f, 1.0e-6f);
   EXPECT_NEAR(practicalSplits[4], 50.0f, 1.0e-6f);
-  EXPECT_NE(uniformSplits[1], practicalSplits[1]);
 
-  const auto rangedSplits = shadow_detail::computeCascadeSplitDepthsForRange(
-      2.0f, 20.0f, 4u, ShadowCascadeSplitMode::Practical, 0.5f);
+  const auto rangedSplits =
+      shadow_detail::computeCascadeSplitDepthsForRange(2.0f, 20.0f, 4u, 0.5f);
   for (uint32_t i = 0u; i < 4u; ++i) {
     EXPECT_LT(rangedSplits[i], rangedSplits[i + 1u]);
   }
@@ -1808,7 +1721,7 @@ TEST(RenderGraphRendererTest, ShadowFeatureBuildsNoGraphPassesWhenDisabled) {
 }
 
 TEST(RenderGraphRendererTest,
-     ShadowFeatureAutoFallsBackToCpuWhenGpuReductionIsUnavailable) {
+     ShadowFeatureUsesCpuWhenGpuReductionIsUnavailable) {
   std::array<std::byte, 64 * 1024> scratchBytes{};
   std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
                                              scratchBytes.size());
@@ -1828,8 +1741,6 @@ TEST(RenderGraphRendererTest,
 
   RenderSettings settings{};
   settings.shadow.enabled = true;
-  settings.shadow.sdsmMode = ShadowSdsmMode::PreviousFrameMinMax;
-  settings.shadow.sdsmReductionBackend = ShadowSdsmReductionBackend::Auto;
 
   RenderFrameContext frameContext{};
   frameContext.frameIndex = 1u;
@@ -1855,9 +1766,6 @@ TEST(RenderGraphRendererTest,
   ASSERT_TRUE(frameContext.sharedResources.shadowDebugFrameData.has_value());
   EXPECT_FALSE(
       frameContext.sharedResources.shadowSdsmGpuReduceTarget.has_value());
-  EXPECT_EQ(frameContext.sharedResources.shadowDebugFrameData->sdsm
-                .requestedReductionBackend,
-            ShadowSdsmReductionBackend::Auto);
   EXPECT_EQ(frameContext.sharedResources.shadowDebugFrameData->sdsm
                 .activeReductionBackend,
             ShadowSdsmReductionBackend::Cpu);
@@ -1894,8 +1802,6 @@ TEST(RenderGraphRendererTest,
 
   RenderSettings publishSettings{};
   publishSettings.shadow.enabled = true;
-  publishSettings.shadow.sdsmMode = ShadowSdsmMode::PreviousFrameMinMax;
-  publishSettings.shadow.sdsmReductionBackend = ShadowSdsmReductionBackend::Gpu;
 
   for (uint64_t publishFrameIndex = 0u; publishFrameIndex < 2u;
        ++publishFrameIndex) {
@@ -1932,8 +1838,6 @@ TEST(RenderGraphRendererTest,
 
   RenderSettings settings{};
   settings.shadow.enabled = true;
-  settings.shadow.sdsmMode = ShadowSdsmMode::PreviousFrameMinMax;
-  settings.shadow.sdsmReductionBackend = ShadowSdsmReductionBackend::Gpu;
   settings.shadow.sdsmTemporalBlend = 0.0f;
 
   RenderFrameContext frameContext{};
@@ -1962,9 +1866,15 @@ TEST(RenderGraphRendererTest,
   EXPECT_FALSE(sdsm.fixedFallbackActive);
   EXPECT_FALSE(sdsm.reductionFallbackActive);
   EXPECT_EQ(sdsm.sourceFrameIndex, 0u);
-  expectGpuSdsmResultAvailable(sdsm, 0u, false);
+  expectGpuSdsmResultAvailable(sdsm, 0u);
   EXPECT_FLOAT_EQ(sdsm.rawDeviceMin, 0.2f);
   EXPECT_FLOAT_EQ(sdsm.rawDeviceMax, 0.5f);
+  ASSERT_EQ(sdsm.splitCount, 4u);
+  EXPECT_EQ(sdsm.effectiveSplitDepths, sdsm.minMaxSplitDepths);
+  EXPECT_NE(sdsm.effectiveSplitDepths, sdsm.fixedSplitDepths);
+  EXPECT_LT(sdsm.effectiveSplitDepths[1], sdsm.fixedSplitDepths[1]);
+  EXPECT_FLOAT_EQ(sdsm.effectiveSplitDepths[sdsm.splitCount],
+                  sdsm.fixedSplitDepths[sdsm.splitCount]);
 }
 
 TEST(RenderGraphRendererTest,
@@ -1996,8 +1906,6 @@ TEST(RenderGraphRendererTest,
 
   RenderSettings publishSettings{};
   publishSettings.shadow.enabled = true;
-  publishSettings.shadow.sdsmMode = ShadowSdsmMode::PreviousFrameMinMax;
-  publishSettings.shadow.sdsmReductionBackend = ShadowSdsmReductionBackend::Gpu;
 
   for (uint64_t publishFrameIndex = 0u; publishFrameIndex < 2u;
        ++publishFrameIndex) {
@@ -2033,8 +1941,6 @@ TEST(RenderGraphRendererTest,
 
   RenderSettings settings{};
   settings.shadow.enabled = true;
-  settings.shadow.sdsmMode = ShadowSdsmMode::PreviousFrameMinMax;
-  settings.shadow.sdsmReductionBackend = ShadowSdsmReductionBackend::Gpu;
   settings.shadow.sdsmTemporalBlend = 0.0f;
 
   RenderFrameContext frameContext{};
@@ -2063,138 +1969,9 @@ TEST(RenderGraphRendererTest,
   EXPECT_FALSE(sdsm.fixedFallbackActive);
   EXPECT_FALSE(sdsm.reductionFallbackActive);
   EXPECT_EQ(sdsm.sourceFrameIndex, 0u);
-  expectGpuSdsmResultAvailable(sdsm, 0u, false);
+  expectGpuSdsmResultAvailable(sdsm, 0u);
   EXPECT_FLOAT_EQ(sdsm.rawDeviceMin, 0.2f);
   EXPECT_FLOAT_EQ(sdsm.rawDeviceMax, 0.5f);
-}
-
-TEST(RenderGraphRendererTest,
-     ShadowFeatureHistogramSdsmTrimSuppressesSparseFarOutliers) {
-  std::array<std::byte, 128 * 1024> scratchBytes{};
-  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
-                                             scratchBytes.size());
-  FakeFullscreenGpuDevice gpu;
-  Renderer renderer(gpu, memory);
-  RenderPipeline pipeline(&memory);
-  pipeline.addProvider(std::make_unique<MaterialTableGpuProvider>(gpu));
-  pipeline.addProvider(std::make_unique<SceneLightingProvider>(gpu));
-  pipeline.addFeature(std::make_unique<ShadowFeature>(gpu, &memory));
-
-  RenderScene scene(&memory);
-  scene.bindResources(&renderer.resources());
-  addDirectionalLightToScene(scene);
-
-  auto pyramidTextureResult =
-      gpu.createTexture(makeTransientTextureDesc(Format::RG32_FLOAT, 4u, 4u),
-                        "sdsm_histogram_trim_texture");
-  ASSERT_FALSE(pyramidTextureResult.hasError()) << pyramidTextureResult.error();
-  const TextureHandle pyramidTexture = pyramidTextureResult.value();
-  const CameraFrameState camera = makeSdsmPerspectiveCamera(100.0f);
-
-  std::vector<float> depths(4u * 4u * 2u, 0.0f);
-  for (size_t tile = 0u; tile < 15u; ++tile) {
-    depths[tile * 2u] = deviceDepthForViewDepth(2.0f, camera);
-    depths[tile * 2u + 1u] = deviceDepthForViewDepth(6.0f, camera);
-  }
-  depths[30] = deviceDepthForViewDepth(80.0f, camera);
-  depths[31] = deviceDepthForViewDepth(90.0f, camera);
-  auto seedResult = gpu.seedTextureBytes(
-      pyramidTexture,
-      std::as_bytes(std::span<const float>(depths.data(), depths.size())));
-  ASSERT_FALSE(seedResult.hasError()) << seedResult.error();
-
-  RenderSettings noTrimSettings{};
-  noTrimSettings.shadow.enabled = true;
-  noTrimSettings.shadow.cascadeCount = 4u;
-  noTrimSettings.shadow.maxDistance = 100.0f;
-  noTrimSettings.shadow.sdsmMode = ShadowSdsmMode::Histogram;
-  noTrimSettings.shadow.sdsmTemporalBlend = 0.0f;
-
-  RenderSettings trimmedSettings = noTrimSettings;
-  trimmedSettings.shadow.sdsmHistogramTrimHighPercent = 10.0f;
-
-  const ShadowSdsmDebugFrameData noTrim = buildShadowSdsmFrame(
-      pipeline, renderer, memory, scene, noTrimSettings, camera, 2u, 1u,
-      std::span<const TextureHandle>(&pyramidTexture, 1u));
-  const ShadowSdsmDebugFrameData trimmed = buildShadowSdsmFrame(
-      pipeline, renderer, memory, scene, trimmedSettings, camera, 2u, 1u,
-      std::span<const TextureHandle>(&pyramidTexture, 1u));
-  ASSERT_EQ(noTrim.status, ShadowSdsmStatus::Active);
-  ASSERT_EQ(trimmed.status, ShadowSdsmStatus::Active);
-  EXPECT_LT(trimmed.histogramTrimmedRangeFar, noTrim.histogramTrimmedRangeFar);
-  EXPECT_LT(trimmed.histogramSplitDepths[3], noTrim.histogramSplitDepths[3]);
-}
-
-TEST(RenderGraphRendererTest,
-     ShadowFeatureHistogramSdsmUsesHistogramDistributionForEffectiveSplits) {
-  std::array<std::byte, 128 * 1024> scratchBytes{};
-  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
-                                             scratchBytes.size());
-  FakeFullscreenGpuDevice gpu;
-  Renderer renderer(gpu, memory);
-  RenderPipeline pipeline(&memory);
-  pipeline.addProvider(std::make_unique<MaterialTableGpuProvider>(gpu));
-  pipeline.addProvider(std::make_unique<SceneLightingProvider>(gpu));
-  pipeline.addFeature(std::make_unique<ShadowFeature>(gpu, &memory));
-
-  RenderScene scene(&memory);
-  scene.bindResources(&renderer.resources());
-  addDirectionalLightToScene(scene);
-
-  auto pyramidTextureResult =
-      gpu.createTexture(makeTransientTextureDesc(Format::RG32_FLOAT, 4u, 4u),
-                        "sdsm_histogram_range_gate_texture");
-  ASSERT_FALSE(pyramidTextureResult.hasError()) << pyramidTextureResult.error();
-  const TextureHandle pyramidTexture = pyramidTextureResult.value();
-
-  RenderSettings settings{};
-  settings.shadow.enabled = true;
-  settings.shadow.cascadeCount = 4u;
-  settings.shadow.maxDistance = 150.0f;
-  settings.shadow.sdsmMode = ShadowSdsmMode::Histogram;
-  settings.shadow.sdsmTemporalBlend = 0.85f;
-  settings.shadow.sdsmHistogramTrimHighPercent = 0.0f;
-
-  const CameraFrameState camera = makeSdsmPerspectiveCamera(150.0f);
-  std::vector<float> nearDepths(4u * 4u * 2u, 0.0f);
-  std::vector<float> outlierDepths(4u * 4u * 2u, 0.0f);
-  for (size_t tile = 0u; tile < nearDepths.size() / 2u; ++tile) {
-    nearDepths[tile * 2u] = deviceDepthForViewDepth(2.0f, camera);
-    nearDepths[tile * 2u + 1u] = deviceDepthForViewDepth(6.0f, camera);
-    outlierDepths[tile * 2u] = deviceDepthForViewDepth(2.0f, camera);
-    outlierDepths[tile * 2u + 1u] = deviceDepthForViewDepth(6.0f, camera);
-  }
-  for (size_t tile = 12u; tile < 16u; ++tile) {
-    outlierDepths[tile * 2u] = deviceDepthForViewDepth(70.0f, camera);
-    outlierDepths[tile * 2u + 1u] = deviceDepthForViewDepth(80.0f, camera);
-  }
-
-  auto seedNearResult = gpu.seedTextureBytes(
-      pyramidTexture, std::as_bytes(std::span<const float>(nearDepths.data(),
-                                                           nearDepths.size())));
-  ASSERT_FALSE(seedNearResult.hasError()) << seedNearResult.error();
-  const ShadowSdsmDebugFrameData nearSdsm = buildShadowSdsmFrame(
-      pipeline, renderer, memory, scene, settings, camera, 2u, 1u,
-      std::span<const TextureHandle>(&pyramidTexture, 1u));
-  ASSERT_EQ(nearSdsm.status, ShadowSdsmStatus::Active);
-
-  auto seedOutlierResult = gpu.seedTextureBytes(
-      pyramidTexture, std::as_bytes(std::span<const float>(
-                          outlierDepths.data(), outlierDepths.size())));
-  ASSERT_FALSE(seedOutlierResult.hasError()) << seedOutlierResult.error();
-  const ShadowSdsmDebugFrameData outlierSdsm = buildShadowSdsmFrame(
-      pipeline, renderer, memory, scene, settings, camera, 3u, 2u,
-      std::span<const TextureHandle>(&pyramidTexture, 1u));
-  ASSERT_EQ(outlierSdsm.status, ShadowSdsmStatus::Active);
-  EXPECT_FLOAT_EQ(outlierSdsm.effectiveRangeFar, outlierSdsm.fixedRangeFar);
-  const auto expectedEffectiveSplits =
-      expectedHistogramEffectiveSplitDepths(outlierSdsm);
-  EXPECT_EQ(outlierSdsm.effectiveSplitDepths, expectedEffectiveSplits);
-  EXPECT_NE(outlierSdsm.effectiveSplitDepths, outlierSdsm.fixedSplitDepths);
-  EXPECT_GT(outlierSdsm.histogramTrimmedRangeFar,
-            outlierSdsm.fixedSplitDepths[outlierSdsm.splitCount - 1u]);
-  EXPECT_LT(outlierSdsm.smoothedLinearMax,
-            outlierSdsm.fixedSplitDepths[outlierSdsm.splitCount - 1u]);
 }
 
 TEST(RenderGraphRendererTest,

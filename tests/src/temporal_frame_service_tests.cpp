@@ -2,10 +2,10 @@
 
 #include <gtest/gtest.h>
 
-#include "nuri/gfx/frame/presentation_aa_plan.h"
 #include "nuri/gfx/frame/history_registry.h"
-#include "nuri/gfx/frame/temporal_motion.h"
+#include "nuri/gfx/frame/presentation_aa_plan.h"
 #include "nuri/gfx/frame/temporal_frame_service.h"
+#include "nuri/gfx/frame/temporal_motion.h"
 #include "nuri/scene/camera.h"
 
 namespace {
@@ -138,9 +138,8 @@ TEST(TemporalFrameServiceTest,
   desc.renderExtent = {1280u, 720u};
   TemporalFrameService service;
 
-  auto first = service.prepareFrame(camera, 16.0f / 9.0f,
-                                    settings.antiAliasing, plan, desc, 10u,
-                                    1.0, 1.0 / 60.0);
+  auto first = service.prepareFrame(camera, 16.0f / 9.0f, settings.antiAliasing,
+                                    plan, desc, 10u, 1.0, 1.0 / 60.0);
   ASSERT_FALSE(first.hasError()) << first.error();
   EXPECT_FALSE(first.value().cameraContinuityValid);
   EXPECT_TRUE(hasTemporalResetReason(service.facts().resetReasons,
@@ -149,21 +148,20 @@ TEST(TemporalFrameServiceTest,
   EXPECT_FALSE(service.cameraHistory().initialized);
   EXPECT_EQ(service.facts().renderedFrameSerial, 0u);
 
-  auto submitted = service.prepareFrame(camera, 16.0f / 9.0f,
-                                        settings.antiAliasing, plan, desc, 11u,
-                                        2.0, 1.0 / 60.0);
+  auto submitted =
+      service.prepareFrame(camera, 16.0f / 9.0f, settings.antiAliasing, plan,
+                           desc, 11u, 2.0, 1.0 / 60.0);
   ASSERT_FALSE(submitted.hasError()) << submitted.error();
   EXPECT_FALSE(submitted.value().cameraContinuityValid);
-  EXPECT_TRUE(hasTemporalResetReason(
-      service.facts().resetReasons,
-      TemporalResetReasonFlags::SkippedHistoryWrite));
+  EXPECT_TRUE(
+      hasTemporalResetReason(service.facts().resetReasons,
+                             TemporalResetReasonFlags::SkippedHistoryWrite));
   ASSERT_TRUE(service.commitFrame(11u));
   EXPECT_TRUE(service.cameraHistory().initialized);
   EXPECT_EQ(service.facts().renderedFrameSerial, 1u);
 
-  auto steady = service.prepareFrame(camera, 16.0f / 9.0f,
-                                     settings.antiAliasing, plan, desc, 12u,
-                                     2.5, 0.5);
+  auto steady = service.prepareFrame(
+      camera, 16.0f / 9.0f, settings.antiAliasing, plan, desc, 12u, 2.5, 0.5);
   ASSERT_FALSE(steady.hasError()) << steady.error();
   EXPECT_TRUE(steady.value().cameraContinuityValid);
   EXPECT_DOUBLE_EQ(service.facts().deltaFromCommittedSeconds, 0.5);
@@ -171,8 +169,7 @@ TEST(TemporalFrameServiceTest,
   EXPECT_EQ(service.facts().renderedFrameSerial, 2u);
 }
 
-TEST(TemporalFrameServiceTest,
-     ProviderAndBackendChangesPublishSeparateEpochs) {
+TEST(TemporalFrameServiceTest, ProviderAndBackendChangesPublishSeparateEpochs) {
   RenderSettings settings{};
   settings.antiAliasing.mode = AntiAliasingMode::TAA;
   PresentationAAPlan plan = requirePlan(settings);
@@ -181,9 +178,8 @@ TEST(TemporalFrameServiceTest,
   desc.renderExtent = {960u, 540u};
   TemporalFrameService service;
 
-  auto frame = service.prepareFrame(camera, 16.0f / 9.0f,
-                                    settings.antiAliasing, plan, desc, 0u,
-                                    0.0, 1.0 / 60.0);
+  auto frame = service.prepareFrame(camera, 16.0f / 9.0f, settings.antiAliasing,
+                                    plan, desc, 0u, 0.0, 1.0 / 60.0);
   ASSERT_FALSE(frame.hasError()) << frame.error();
   ASSERT_TRUE(service.commitFrame(0u));
   const TemporalEpochs initialEpochs = service.facts().epochs;
@@ -191,9 +187,8 @@ TEST(TemporalFrameServiceTest,
   settings.antiAliasing.temporalProvider =
       TemporalReconstructionProvider::Reference;
   plan = requirePlan(settings);
-  frame = service.prepareFrame(camera, 16.0f / 9.0f,
-                               settings.antiAliasing, plan, desc, 1u, 1.0,
-                               1.0 / 60.0);
+  frame = service.prepareFrame(camera, 16.0f / 9.0f, settings.antiAliasing,
+                               plan, desc, 1u, 1.0, 1.0 / 60.0);
   ASSERT_FALSE(frame.hasError()) << frame.error();
   EXPECT_TRUE(frame.value().cameraContinuityValid);
   EXPECT_TRUE(hasTemporalResetReason(service.facts().resetReasons,
@@ -203,14 +198,13 @@ TEST(TemporalFrameServiceTest,
   ASSERT_TRUE(service.commitFrame(1u));
 
   service.invalidateBackend();
-  frame = service.prepareFrame(camera, 16.0f / 9.0f,
-                               settings.antiAliasing, plan, desc, 2u, 2.0,
-                               1.0 / 60.0);
+  frame = service.prepareFrame(camera, 16.0f / 9.0f, settings.antiAliasing,
+                               plan, desc, 2u, 2.0, 1.0 / 60.0);
   ASSERT_FALSE(frame.hasError()) << frame.error();
   EXPECT_FALSE(frame.value().cameraContinuityValid);
-  EXPECT_TRUE(hasTemporalResetReason(
-      service.facts().resetReasons,
-      TemporalResetReasonFlags::BackendRecreation));
+  EXPECT_TRUE(
+      hasTemporalResetReason(service.facts().resetReasons,
+                             TemporalResetReasonFlags::BackendRecreation));
   EXPECT_EQ(service.facts().epochs.resourceGeneration, 1u);
 }
 
@@ -220,22 +214,22 @@ TEST(TemporalFrameServiceTest,
   const glm::mat4 projection =
       glm::ortho(-10.0f, 10.0f, -5.0f, 5.0f, 0.1f, 100.0f);
   const TemporalMotionEndpoint endpoint = projectTemporalMotionEndpoint(
-      glm::vec3(0.04f, 0.0f, -1.0f), glm::vec3(0.0f, 0.0f, -1.0f),
-      projection, projection);
+      glm::vec3(0.04f, 0.0f, -1.0f), glm::vec3(0.0f, 0.0f, -1.0f), projection,
+      projection);
 
   ASSERT_TRUE(endpoint.valid);
   EXPECT_NEAR(endpoint.velocityUv.x * static_cast<float>(extent.x), -2.0f,
               1.0e-4f);
   EXPECT_NEAR(endpoint.velocityUv.y * static_cast<float>(extent.y), 0.0f,
               1.0e-4f);
-  EXPECT_NEAR(temporalMotionEndpointErrorPixels(endpoint.velocityUv, endpoint,
-                                               extent),
-              0.0f, 1.0e-6f);
-  EXPECT_NEAR(temporalMotionEndpointErrorPixels(-endpoint.velocityUv, endpoint,
-                                               extent),
-              4.0f, 1.0e-4f);
+  EXPECT_NEAR(
+      temporalMotionEndpointErrorPixels(endpoint.velocityUv, endpoint, extent),
+      0.0f, 1.0e-6f);
+  EXPECT_NEAR(
+      temporalMotionEndpointErrorPixels(-endpoint.velocityUv, endpoint, extent),
+      4.0f, 1.0e-4f);
   EXPECT_NEAR(temporalMotionEndpointErrorPixels(endpoint.velocityUv * 0.5f,
-                                               endpoint, extent),
+                                                endpoint, extent),
               1.0f, 1.0e-4f);
 }
 
@@ -253,8 +247,7 @@ TEST(TemporalFrameServiceTest,
       projection * previousView);
 
   ASSERT_TRUE(pan.valid);
-  EXPECT_NEAR(pan.velocityUv.x * static_cast<float>(extent.x), 0.25f,
-              1.0e-4f);
+  EXPECT_NEAR(pan.velocityUv.x * static_cast<float>(extent.x), 0.25f, 1.0e-4f);
   EXPECT_NEAR(temporalMotionEndpointErrorPixels(pan.velocityUv, pan, extent),
               0.0f, 1.0e-6f);
 
@@ -265,9 +258,9 @@ TEST(TemporalFrameServiceTest,
       const TemporalMotionEndpoint stable = projectTemporalMotionEndpoint(
           samplePosition, samplePosition, projection, projection);
       ASSERT_TRUE(stable.valid);
-      EXPECT_LT(temporalMotionEndpointErrorPixels(glm::vec2(0.0f), stable,
-                                                 extent),
-                0.01f);
+      EXPECT_LT(
+          temporalMotionEndpointErrorPixels(glm::vec2(0.0f), stable, extent),
+          0.01f);
     }
   }
 }

@@ -96,16 +96,15 @@ using nuri::tools::snapshot::SnapshotImage;
 [[nodiscard]] bool hasFailure(const AutotestQualityOracleReport &report,
                               std::string_view failure) {
   return std::find(report.failedThresholds.begin(),
-                   report.failedThresholds.end(), failure) !=
-         report.failedThresholds.end();
+                   report.failedThresholds.end(),
+                   failure) != report.failedThresholds.end();
 }
 
 [[nodiscard]] std::filesystem::path tempJsonPath(std::string_view stem) {
   const auto tick =
       std::chrono::high_resolution_clock::now().time_since_epoch().count();
   return std::filesystem::temp_directory_path() /
-         ("nuri_" + std::string(stem) + "_" + std::to_string(tick) +
-          ".json");
+         ("nuri_" + std::string(stem) + "_" + std::to_string(tick) + ".json");
 }
 
 void writeText(const std::filesystem::path &path, std::string_view text) {
@@ -212,9 +211,9 @@ TEST(AutotestQualityOracleTest, SlantedEdgeWidthAndExcursionGatesAreMeasured) {
   oracle.budgets.lumaSsimMin = 0.0;
   oracle.budgets.relativeLumaEnergyDriftMax = 1.0;
   const std::array<float, 8> referenceProfile{0.0f, 0.0f, 0.0f, 0.2f,
-                                               0.8f, 1.0f, 1.0f, 1.0f};
-  const std::array<float, 8> blurredProfile{0.0f, 0.05f, 0.2f, 0.35f,
-                                             0.65f, 0.8f, 0.95f, 1.0f};
+                                              0.8f, 1.0f, 1.0f, 1.0f};
+  const std::array<float, 8> blurredProfile{0.0f,  0.05f, 0.2f,  0.35f,
+                                            0.65f, 0.8f,  0.95f, 1.0f};
   SnapshotImage reference = rgbImage(8u, 4u, 0.0f);
   SnapshotImage identical = reference;
   SnapshotImage blurred = reference;
@@ -322,8 +321,7 @@ TEST(AutotestQualityOracleTest, ReportJsonAndHtmlContainCheckpointMetrics) {
   auto json = writeAutotestReportJson(report);
   ASSERT_FALSE(json.hasError()) << json.error();
   EXPECT_NE(json.value().find("\"qualityOracle\""), std::string::npos);
-  EXPECT_NE(json.value().find("\"normalizedHdrRmse\""),
-            std::string::npos);
+  EXPECT_NE(json.value().find("\"normalizedHdrRmse\""), std::string::npos);
   auto html = writeAutotestHtmlReport(report);
   ASSERT_FALSE(html.hasError()) << html.error();
   EXPECT_NE(html.value().find("Deterministic AA quality oracle"),

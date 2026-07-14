@@ -174,10 +174,6 @@ SnapshotReport makeReport(std::filesystem::path caseDir = {}) {
   report.rendererMetrics.visibility.meshletTaskGroupsExecuted = 2u;
   report.rendererMetrics.visibility.shadowCpuCandidates = 9u;
   report.rendererMetrics.visibility.shadowCpuRejected = 4u;
-  report.rendererMetrics.visibility.shadowMeshletReadbackAvailable = 1u;
-  report.rendererMetrics.visibility.shadowMeshletReadbackSourceFrame = 5u;
-  report.rendererMetrics.visibility.shadowMeshletReadbackStaleFrameCount = 3u;
-  report.rendererMetrics.visibility.shadowMeshletReadbackErrorCount = 4u;
   report.rendererMetrics.shadow.cascadeCount = 2u;
   report.rendererMetrics.shadow.totalDraws = 4u;
   report.rendererMetrics.transparent.meshDraws = 5u;
@@ -197,6 +193,53 @@ TEST(NuriSnapshotTestingTest, ManifestRejectsUnknownKeys) {
   auto loaded = loadSnapshotCaseManifest(path);
   EXPECT_TRUE(loaded.hasError());
   EXPECT_NE(loaded.error().find("unknown key"), std::string::npos);
+
+  std::error_code ec;
+  std::filesystem::remove(path, ec);
+}
+
+TEST(NuriSnapshotTestingTest,
+     ManifestAppliesShadowPresetBeforeExplicitOverrides) {
+  const std::filesystem::path path =
+      makeTempPath("snapshot_shadow_overrides", ".json");
+  const std::string manifest = R"json({
+    "schemaVersion": 1,
+    "id": "shadow.overrides",
+    "suite": "shadow",
+    "settings": {"shadow": {
+      "qualityPreset": "Ultra",
+      "depthFormat": "D32_FLOAT",
+      "maxDistance": 73.0,
+      "maxDistanceFadeFraction": 0.25,
+      "splitLambda": 0.2,
+      "cascadeBlendFraction": 0.03,
+      "pcfSampleCount": 7,
+      "sdsmTemporalBlend": 0.4,
+      "enableCascadeCasterCulling": false,
+      "debug": {"visualizeShadowFactor": true}
+    }},
+    "captures": [{"target": "final_color"}]
+  })json";
+  writeFile(path, manifest);
+
+  auto loaded = loadSnapshotCaseManifest(path);
+  ASSERT_FALSE(loaded.hasError()) << loaded.error();
+  const RenderSettings::ShadowSettings &shadow = loaded.value().settings.shadow;
+  EXPECT_EQ(shadow.qualityPreset, ShadowQualityPreset::Ultra);
+  EXPECT_EQ(shadow.depthFormat, Format::D32_FLOAT);
+  EXPECT_FLOAT_EQ(shadow.maxDistance, 73.0f);
+  EXPECT_FLOAT_EQ(shadow.maxDistanceFadeFraction, 0.25f);
+  EXPECT_FLOAT_EQ(shadow.splitLambda, 0.2f);
+  EXPECT_FLOAT_EQ(shadow.cascadeBlendFraction, 0.03f);
+  EXPECT_EQ(shadow.pcfSampleCount, 7u);
+  EXPECT_FLOAT_EQ(shadow.sdsmTemporalBlend, 0.4f);
+  EXPECT_FALSE(shadow.debug.enableCascadeCasterCulling);
+  EXPECT_TRUE(shadow.debug.visualizeShadowFactor);
+
+  writeFile(path, replaceFirst(manifest, "D32_FLOAT", "invalid"));
+  auto invalid = loadSnapshotCaseManifest(path);
+  EXPECT_TRUE(invalid.hasError());
+  EXPECT_NE(invalid.error().find("depthFormat"), std::string::npos);
 
   std::error_code ec;
   std::filesystem::remove(path, ec);
@@ -288,8 +331,7 @@ TEST(NuriSnapshotTestingTest, CatalogListsCapturableAndDiagnosticTargets) {
   const SnapshotCaptureCatalogEntry *motionClass =
       findSnapshotCaptureCatalogEntry("motion_class");
   ASSERT_NE(motionClass, nullptr);
-  EXPECT_EQ(motionClass->availability,
-            SnapshotCaptureAvailability::FirstSlice);
+  EXPECT_EQ(motionClass->availability, SnapshotCaptureAvailability::FirstSlice);
   EXPECT_EQ(motionClass->defaultCompareProfile, "mask");
 
   const SnapshotCaptureCatalogEntry *gtaoPreviousDepth =
@@ -605,19 +647,6 @@ TEST(NuriSnapshotTestingTest, ReportJsonRoundTripsCaptureSummary) {
             2u);
   EXPECT_EQ(loaded.value().rendererMetrics.visibility.shadowCpuCandidates, 9u);
   EXPECT_EQ(loaded.value().rendererMetrics.visibility.shadowCpuRejected, 4u);
-  EXPECT_EQ(
-      loaded.value().rendererMetrics.visibility.shadowMeshletReadbackAvailable,
-      1u);
-  EXPECT_EQ(loaded.value()
-                .rendererMetrics.visibility.shadowMeshletReadbackSourceFrame,
-            5u);
-  EXPECT_EQ(
-      loaded.value()
-          .rendererMetrics.visibility.shadowMeshletReadbackStaleFrameCount,
-      3u);
-  EXPECT_EQ(
-      loaded.value().rendererMetrics.visibility.shadowMeshletReadbackErrorCount,
-      4u);
   EXPECT_EQ(loaded.value().rendererMetrics.shadow.totalDraws, 4u);
   EXPECT_EQ(loaded.value().rendererMetrics.transparent.meshDraws, 5u);
   auto html = writeSnapshotHtmlReport(loaded.value());
@@ -657,14 +686,6 @@ TEST(NuriSnapshotTestingTest, ReportJsonRoundTripsCaptureSummary) {
             std::string::npos);
   EXPECT_NE(json.value().find("\"shadowCpuCandidates\": 9"), std::string::npos);
   EXPECT_NE(json.value().find("\"shadowCpuRejected\": 4"), std::string::npos);
-  EXPECT_NE(json.value().find("\"shadowMeshletReadbackAvailable\": 1"),
-            std::string::npos);
-  EXPECT_NE(json.value().find("\"shadowMeshletReadbackSourceFrame\": 5"),
-            std::string::npos);
-  EXPECT_NE(json.value().find("\"shadowMeshletReadbackStaleFrameCount\": 3"),
-            std::string::npos);
-  EXPECT_NE(json.value().find("\"shadowMeshletReadbackErrorCount\": 4"),
-            std::string::npos);
   EXPECT_NE(
       json.value().find("\"transparentTransmissionFeedbackRefreshCount\": 1"),
       std::string::npos);
@@ -956,8 +977,7 @@ TEST(NuriSnapshotTestingTest, HtmlEscapesCaptureTextAndShowsMissingState) {
   EXPECT_NE(html.value().find("<!doctype html>"), std::string::npos);
   EXPECT_NE(html.value().find("<html lang=\"en\">"), std::string::npos);
   EXPECT_NE(html.value().find("class=\"skip-link\""), std::string::npos);
-  EXPECT_NE(html.value().find("<main id=\"main-content\""),
-            std::string::npos);
+  EXPECT_NE(html.value().find("<main id=\"main-content\""), std::string::npos);
   EXPECT_NE(html.value().find("id=\"capture-search\""), std::string::npos);
   EXPECT_NE(html.value().find("aria-live=\"polite\""), std::string::npos);
   EXPECT_NE(html.value().find("<caption>Image comparison and semantic error"),
