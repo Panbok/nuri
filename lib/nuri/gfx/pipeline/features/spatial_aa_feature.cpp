@@ -797,7 +797,7 @@ Result<bool, std::string> SpatialAAPass::build(FrameBuildContext &ctx) {
   };
 
   AntiAliasingFrameMetrics &aaMetrics = ctx.frame.metrics.antiAliasing;
-  const GpuTimingReport timingReport = gpu_.getLatestCompletedGpuTimingReport();
+  const GpuTimingReport &timingReport = ctx.frame.gpuTiming;
   if (hasGpuTimingScope(timingReport, GpuTimingScope::SpatialAA)) {
     aaMetrics.spatialAAGpuTimeMs = timingReport.spatialAATimeMs;
     aaMetrics.spatialAAGpuTimingSourceFrameIndex =

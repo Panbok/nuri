@@ -16,15 +16,15 @@ constexpr std::string_view kSkinPaletteShaderName =
 constexpr std::string_view kSkinShaderName = "animation_pose_skin.comp";
 
 Result<bool, std::string>
-createComputePipeline(Pipeline &pipeline, ShaderHandle shader,
+createComputePipeline(GPUDevice &gpu, ShaderHandle shader,
                       std::string_view debugName,
-                      ComputePipelineHandle &outHandle) {
-  auto result = pipeline.createComputePipeline(
+                      OwnedComputePipelineHandle &outPipeline) {
+  auto result = gpu.createComputePipeline(
       ComputePipelineDesc{.computeShader = shader}, debugName);
   if (result.hasError()) {
     return Result<bool, std::string>::makeError(result.error());
   }
-  outHandle = result.value();
+  outPipeline.reset(gpu, result.value());
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -60,136 +60,99 @@ Result<void, std::string> AnimationGpuServices::ensureInitialized() {
 
 Result<bool, std::string> AnimationGpuServices::createShaders() {
   destroyShaders();
-  shader_ = Shader::create("animation_pose", gpu_);
-  if (!shader_) {
+  std::unique_ptr<Shader> shader = Shader::create("animation_pose", gpu_);
+  if (!shader) {
     return Result<bool, std::string>::makeError(
         "AnimationGpuServices::createShaders: failed to create shader wrapper");
   }
 
-  const std::array specs = {
-      std::pair{kSampleShaderName, &sampleShaderHandle_},
-      std::pair{kBlendShaderName, &blendShaderHandle_},
-      std::pair{kWorldShaderName, &worldShaderHandle_},
-      std::pair{kScatterShaderName, &scatterShaderHandle_},
-      std::pair{kMorphShaderName, &morphShaderHandle_},
-      std::pair{kSkinPaletteShaderName, &skinPaletteShaderHandle_},
-      std::pair{kSkinShaderName, &skinShaderHandle_},
+  const std::array shaderNames = {
+      kSampleShaderName,  kBlendShaderName, kWorldShaderName,
+      kScatterShaderName, kMorphShaderName, kSkinPaletteShaderName,
+      kSkinShaderName,
   };
-  for (const auto &[fileName, outHandle] : specs) {
+  std::array<OwnedShaderHandle, 7u> compiledShaders{};
+  for (size_t shaderIndex = 0u; shaderIndex < shaderNames.size();
+       ++shaderIndex) {
+    const std::string_view fileName = shaderNames[shaderIndex];
     const std::filesystem::path path = shaderRoot_ / std::string(fileName);
-    auto result = shader_->compileFromFile(path.string(), ShaderStage::Compute);
+    auto result = shader->compileFromFile(path.string(), ShaderStage::Compute);
     if (result.hasError()) {
       return Result<bool, std::string>::makeError(result.error());
     }
-    *outHandle = result.value();
+    compiledShaders[shaderIndex].reset(gpu_, result.value());
   }
+
+  shader_ = std::move(shader);
+  sampleShaderHandle_ = std::move(compiledShaders[0u]);
+  blendShaderHandle_ = std::move(compiledShaders[1u]);
+  worldShaderHandle_ = std::move(compiledShaders[2u]);
+  scatterShaderHandle_ = std::move(compiledShaders[3u]);
+  morphShaderHandle_ = std::move(compiledShaders[4u]);
+  skinPaletteShaderHandle_ = std::move(compiledShaders[5u]);
+  skinShaderHandle_ = std::move(compiledShaders[6u]);
   return Result<bool, std::string>::makeResult(true);
 }
 
 Result<bool, std::string> AnimationGpuServices::createPipelines() {
   destroyPipelines();
-  samplePipeline_ = Pipeline::create(gpu_);
-  blendPipeline_ = Pipeline::create(gpu_);
-  worldPipeline_ = Pipeline::create(gpu_);
-  scatterPipeline_ = Pipeline::create(gpu_);
-  morphPipeline_ = Pipeline::create(gpu_);
-  skinPalettePipeline_ = Pipeline::create(gpu_);
-  skinPipeline_ = Pipeline::create(gpu_);
-  if (!samplePipeline_ || !blendPipeline_ || !worldPipeline_ ||
-      !scatterPipeline_ || !morphPipeline_ || !skinPalettePipeline_ ||
-      !skinPipeline_) {
-    return Result<bool, std::string>::makeError(
-        "AnimationGpuServices::createPipelines: failed to allocate pipeline "
-        "wrappers");
+  std::array<OwnedComputePipelineHandle, 7u> pipelines{};
+
+  const std::array pipelineSpecs = {
+      std::pair{sampleShaderHandle_.get(),
+                std::string_view{"animation_pose_sample"}},
+      std::pair{blendShaderHandle_.get(),
+                std::string_view{"animation_pose_blend"}},
+      std::pair{worldShaderHandle_.get(),
+                std::string_view{"animation_pose_world"}},
+      std::pair{scatterShaderHandle_.get(),
+                std::string_view{"animation_pose_scatter"}},
+      std::pair{morphShaderHandle_.get(),
+                std::string_view{"animation_pose_morph"}},
+      std::pair{skinPaletteShaderHandle_.get(),
+                std::string_view{"animation_pose_skin_palette"}},
+      std::pair{skinShaderHandle_.get(),
+                std::string_view{"animation_pose_skin"}},
+  };
+  for (size_t pipelineIndex = 0u; pipelineIndex < pipelineSpecs.size();
+       ++pipelineIndex) {
+    const auto &[shader, debugName] = pipelineSpecs[pipelineIndex];
+    auto result = createComputePipeline(gpu_, shader, debugName,
+                                        pipelines[pipelineIndex]);
+    if (result.hasError()) {
+      return result;
+    }
   }
 
-  auto sampleResult =
-      createComputePipeline(*samplePipeline_, sampleShaderHandle_,
-                            "animation_pose_sample", samplePipelineHandle_);
-  if (sampleResult.hasError()) {
-    return sampleResult;
-  }
-  auto blendResult =
-      createComputePipeline(*blendPipeline_, blendShaderHandle_,
-                            "animation_pose_blend", blendPipelineHandle_);
-  if (blendResult.hasError()) {
-    return blendResult;
-  }
-  auto worldResult =
-      createComputePipeline(*worldPipeline_, worldShaderHandle_,
-                            "animation_pose_world", worldPipelineHandle_);
-  if (worldResult.hasError()) {
-    return worldResult;
-  }
-  auto scatterResult =
-      createComputePipeline(*scatterPipeline_, scatterShaderHandle_,
-                            "animation_pose_scatter", scatterPipelineHandle_);
-  if (scatterResult.hasError()) {
-    return scatterResult;
-  }
-  auto morphResult =
-      createComputePipeline(*morphPipeline_, morphShaderHandle_,
-                            "animation_pose_morph", morphPipelineHandle_);
-  if (morphResult.hasError()) {
-    return morphResult;
-  }
-  auto skinPaletteResult = createComputePipeline(
-      *skinPalettePipeline_, skinPaletteShaderHandle_,
-      "animation_pose_skin_palette", skinPalettePipelineHandle_);
-  if (skinPaletteResult.hasError()) {
-    return skinPaletteResult;
-  }
-  return createComputePipeline(*skinPipeline_, skinShaderHandle_,
-                               "animation_pose_skin", skinPipelineHandle_);
+  samplePipelineHandle_ = std::move(pipelines[0u]);
+  blendPipelineHandle_ = std::move(pipelines[1u]);
+  worldPipelineHandle_ = std::move(pipelines[2u]);
+  scatterPipelineHandle_ = std::move(pipelines[3u]);
+  morphPipelineHandle_ = std::move(pipelines[4u]);
+  skinPalettePipelineHandle_ = std::move(pipelines[5u]);
+  skinPipelineHandle_ = std::move(pipelines[6u]);
+  return Result<bool, std::string>::makeResult(true);
 }
 
 void AnimationGpuServices::destroyPipelines() noexcept {
-  skinPipeline_.reset();
-  skinPalettePipeline_.reset();
-  morphPipeline_.reset();
-  scatterPipeline_.reset();
-  worldPipeline_.reset();
-  blendPipeline_.reset();
-  samplePipeline_.reset();
-  skinPipelineHandle_ = {};
-  skinPalettePipelineHandle_ = {};
-  morphPipelineHandle_ = {};
-  scatterPipelineHandle_ = {};
-  worldPipelineHandle_ = {};
-  blendPipelineHandle_ = {};
-  samplePipelineHandle_ = {};
+  skinPipelineHandle_.reset();
+  skinPalettePipelineHandle_.reset();
+  morphPipelineHandle_.reset();
+  scatterPipelineHandle_.reset();
+  worldPipelineHandle_.reset();
+  blendPipelineHandle_.reset();
+  samplePipelineHandle_.reset();
   initialized_ = false;
 }
 
 void AnimationGpuServices::destroyShaders() noexcept {
-  if (nuri::isValid(sampleShaderHandle_)) {
-    gpu_.destroyShaderModule(sampleShaderHandle_);
-  }
-  if (nuri::isValid(blendShaderHandle_)) {
-    gpu_.destroyShaderModule(blendShaderHandle_);
-  }
-  if (nuri::isValid(worldShaderHandle_)) {
-    gpu_.destroyShaderModule(worldShaderHandle_);
-  }
-  if (nuri::isValid(scatterShaderHandle_)) {
-    gpu_.destroyShaderModule(scatterShaderHandle_);
-  }
-  if (nuri::isValid(morphShaderHandle_)) {
-    gpu_.destroyShaderModule(morphShaderHandle_);
-  }
-  if (nuri::isValid(skinPaletteShaderHandle_)) {
-    gpu_.destroyShaderModule(skinPaletteShaderHandle_);
-  }
-  if (nuri::isValid(skinShaderHandle_)) {
-    gpu_.destroyShaderModule(skinShaderHandle_);
-  }
-  sampleShaderHandle_ = {};
-  blendShaderHandle_ = {};
-  worldShaderHandle_ = {};
-  scatterShaderHandle_ = {};
-  morphShaderHandle_ = {};
-  skinPaletteShaderHandle_ = {};
-  skinShaderHandle_ = {};
+  sampleShaderHandle_.reset();
+  blendShaderHandle_.reset();
+  worldShaderHandle_.reset();
+  scatterShaderHandle_.reset();
+  morphShaderHandle_.reset();
+  skinPaletteShaderHandle_.reset();
+  skinShaderHandle_.reset();
   shader_.reset();
 }
 

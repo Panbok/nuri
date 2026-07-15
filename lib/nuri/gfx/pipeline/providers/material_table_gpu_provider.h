@@ -1,6 +1,7 @@
 #pragma once
 
 #include "nuri/defines.h"
+#include "nuri/gfx/dynamic_buffer.h"
 #include "nuri/gfx/frame/render_frame_context.h"
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/gfx/pipeline/frame_data_provider.h"
@@ -31,10 +32,7 @@ public:
   prepare(FrameBuildContext &ctx) override;
 
 private:
-  struct ManagedBuffer {
-    std::unique_ptr<Buffer> buffer{};
-    size_t capacityBytes = 0u;
-  };
+  using ManagedBuffer = DynamicBufferSlot;
 
   static constexpr uint64_t kNoVersionUploaded =
       std::numeric_limits<uint64_t>::max();

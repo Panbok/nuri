@@ -64,6 +64,7 @@ Result<bool, std::string> Renderer::render() {
 Result<bool, std::string> Renderer::render(RenderPipeline &pipeline,
                                            RenderFrameContext &frameContext) {
   NURI_PROFILER_FUNCTION();
+  resolveRenderSettingsForFrame(frameContext);
   resetFrameSharedResources(frameContext);
   Result<bool, std::string> frameResult =
       beginFrameSequence(frameContext.frameIndex);
@@ -73,6 +74,8 @@ Result<bool, std::string> Renderer::render(RenderPipeline &pipeline,
     }
     return frameResult;
   }
+
+  frameContext.gpuTiming = gpu_.getLatestCompletedGpuTimingReport();
 
   renderGraphBeginFrame(frameContext.frameIndex);
   auto pipelineResult =
@@ -178,13 +181,16 @@ Renderer::compileAndExecuteRenderGraph(uint64_t frameIndex) {
     }
   }
 
+  const RenderGraphTelemetryLevel telemetryLevel =
+      renderGraphTelemetry_.requestedCaptureLevel();
   const auto executeResult =
       [&]() -> Result<RenderGraphExecutionMetadata, std::string> {
     std::optional<Result<RenderGraphExecutionMetadata, std::string>> result;
     NURI_PROFILER_ZONE("Renderer.render_graph_execute",
                        NURI_PROFILER_COLOR_SUBMIT);
-    result.emplace(renderGraphExecutor_.execute(renderGraphRuntime_, gpu_,
-                                                *cachedCompileResult_));
+    result.emplace(renderGraphExecutor_.execute(
+        renderGraphRuntime_, gpu_, *cachedCompileResult_,
+        RenderGraphExecutionOptions{.telemetry = telemetryLevel}));
     NURI_PROFILER_ZONE_END();
     return std::move(*result);
   }();
@@ -193,7 +199,7 @@ Renderer::compileAndExecuteRenderGraph(uint64_t frameIndex) {
     return Result<bool, std::string>::makeError(executeResult.error());
   }
 
-  {
+  if (telemetryLevel != RenderGraphTelemetryLevel::None) {
     NURI_PROFILER_ZONE("Renderer.render_graph_telemetry",
                        NURI_PROFILER_COLOR_CMD_COPY);
     renderGraphTelemetry_.capture(*cachedCompileResult_, executeResult.value());

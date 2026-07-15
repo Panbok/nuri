@@ -73,7 +73,7 @@ const glm::vec4 kVisibilityConservativeColor(0.88f, 0.42f, 1.0f, 1.0f);
     const BoundingBox &bounds,
     const visibility_detail::FrustumPlanes &frustum) noexcept {
   if (frame.settings == nullptr ||
-      !frame.settings->visibility.debug.visualizeCullReason) {
+      !renderSettingsOrDefault(frame).visibility.debug.visualizeCullReason) {
     return kVisibilityBoundsColor;
   }
 
@@ -100,7 +100,7 @@ const glm::vec4 kVisibilityConservativeColor(0.88f, 0.42f, 1.0f, 1.0f);
     const glm::vec4 &boundsSphere,
     const visibility_detail::FrustumPlanes &frustum) noexcept {
   if (frame.settings == nullptr ||
-      !frame.settings->visibility.debug.visualizeCullReason) {
+      !renderSettingsOrDefault(frame).visibility.debug.visualizeCullReason) {
     return kVisibilityMeshletBoundsColor;
   }
 
@@ -194,18 +194,20 @@ void drawSpotLightIcon(DebugDraw3D &debugDraw, const glm::vec3 &position,
 }
 
 [[nodiscard]] bool shadowOverlayEnabled(const RenderFrameContext &frame) {
-  if (frame.settings == nullptr || !frame.settings->shadow.enabled) {
+  if (frame.settings == nullptr ||
+      !renderSettingsOrDefault(frame).shadow.enabled) {
     return false;
   }
   const RenderSettings::ShadowDebugSettings &debug =
-      frame.settings->shadow.debug;
+      renderSettingsOrDefault(frame).shadow.debug;
   return debug.showCascadeFrusta || debug.showLightViewBounds ||
          debug.showTexelGridSnap;
 }
 
 [[nodiscard]] bool shadowTexelGridSnapEnabled(const RenderFrameContext &frame) {
-  return frame.settings != nullptr && frame.settings->shadow.enabled &&
-         frame.settings->shadow.debug.showTexelGridSnap;
+  return frame.settings != nullptr &&
+         renderSettingsOrDefault(frame).shadow.enabled &&
+         renderSettingsOrDefault(frame).shadow.debug.showTexelGridSnap;
 }
 
 void accumulateSortDepth(float &sortDepth, const glm::mat4 &view,
@@ -460,7 +462,7 @@ bool drawShadowDebugOverlay(DebugDraw3D &debugDraw,
   }
 
   const RenderSettings::ShadowDebugSettings &debug =
-      frame.settings->shadow.debug;
+      renderSettingsOrDefault(frame).shadow.debug;
   const uint32_t cascadeCount =
       std::min(debugData.cascadeCount, kMaxShadowCascades);
   const uint32_t selectedCascade =
@@ -608,6 +610,11 @@ DebugRenderer::ensureGridPipeline(Format colorFormat, Format depthFormat) {
       .polygonMode = PolygonMode::Fill,
       .topology = Topology::Triangle,
       .blendEnabled = true,
+      .rasterState = depthFormat != Format::Count
+                         ? makeRasterPipelineState(
+                               DepthState{.compareOp = CompareOp::LessEqual,
+                                          .isDepthWriteEnabled = false})
+                         : RasterPipelineState{},
   };
 
   auto pipelineResult =
@@ -752,9 +759,9 @@ bool DebugRenderer::hasDebugWork(const RenderFrameContext &frame) const {
   if (frame.settings == nullptr) {
     return false;
   }
-  const RenderSettings::DebugSettings &debug = frame.settings->debug;
-  const VisibilityDebugSettings &visibilityDebug =
-      frame.settings->visibility.debug;
+  const RenderSettings &settings = renderSettingsOrDefault(frame);
+  const RenderSettings::DebugSettings &debug = settings.debug;
+  const VisibilityDebugSettings &visibilityDebug = settings.visibility.debug;
   return debug.enabled || debug.modelBounds || debug.grid || debug.lightIcons ||
          visibilityDebug.showObjectBounds ||
          visibilityDebug.showMeshletBounds || shadowOverlayEnabled(frame);
@@ -785,17 +792,17 @@ DebugRenderer::buildSceneDebugLines(const RenderFrameContext &frame,
   const LightId selectedLightId = resolveSelectedLightId(frame);
   bool hasLines = false;
   const glm::mat4 view = frame.camera.view;
+  const RenderSettings &settings = renderSettingsOrDefault(frame);
 
   if (frame.scene != nullptr && frame.settings != nullptr &&
       frame.resources != nullptr &&
-      (frame.settings->debug.modelBounds ||
-       frame.settings->visibility.debug.showObjectBounds ||
-       frame.settings->visibility.debug.showMeshletBounds)) {
+      (settings.debug.modelBounds ||
+       settings.visibility.debug.showObjectBounds ||
+       settings.visibility.debug.showMeshletBounds)) {
     const std::span<const Renderable> renderables = frame.scene->renderables();
     const bool drawVisibilityBounds =
-        frame.settings->visibility.debug.showObjectBounds;
-    const bool drawMeshletBounds =
-        frame.settings->visibility.debug.showMeshletBounds;
+        settings.visibility.debug.showObjectBounds;
+    const bool drawMeshletBounds = settings.visibility.debug.showMeshletBounds;
     const visibility_detail::FrustumPlanes frustum =
         visibility_detail::buildCameraFrustumPlanes(frame.camera);
     for (const Renderable &renderable : renderables) {
@@ -805,7 +812,7 @@ DebugRenderer::buildSceneDebugLines(const RenderFrameContext &frame,
         continue;
       }
       const BoundingBox &bounds = modelRecord->model->bounds();
-      if (frame.settings->debug.modelBounds || drawVisibilityBounds) {
+      if (settings.debug.modelBounds || drawVisibilityBounds) {
         const glm::vec4 color =
             drawVisibilityBounds
                 ? visibilityBoundsColor(frame, renderable, bounds, frustum)
@@ -843,7 +850,7 @@ DebugRenderer::buildSceneDebugLines(const RenderFrameContext &frame,
   }
 
   if (frame.scene != nullptr && frame.settings != nullptr &&
-      frame.settings->debug.lightIcons) {
+      settings.debug.lightIcons) {
     frame.scene->forEachLightId([&](LightId lightId) {
       LightDesc light{};
       if (!frame.scene->graph().getCachedLightWorldDesc(lightId, light)) {
@@ -912,7 +919,7 @@ DebugRenderer::prepareDebugPasses(RenderFrameContext &frame) {
   preparedFrameColorTexture_ = frameColorTexture;
   preparedHasPriorColorPass_ = nuri::isValid(frameColorTexture);
 
-  if (frame.settings->debug.grid) {
+  if (renderSettingsOrDefault(frame).debug.grid) {
     auto gridResult = prepareGridDraw(frame, sceneDepthTexture);
     if (gridResult.hasError()) {
       return gridResult;
@@ -1153,7 +1160,7 @@ Result<bool, std::string> DebugRenderer::buildTransparentStageContribution(
     }
   }
 
-  if (frame.settings->debug.grid) {
+  if (renderSettingsOrDefault(frame).debug.grid) {
     auto gridResult = prepareGridDraw(frame, depthTexture);
     if (gridResult.hasError()) {
       return gridResult;

@@ -105,7 +105,7 @@ Result<bool, std::string> MsaaResolvePass::build(FrameBuildContext &ctx) {
   metrics.msaaDepthResolveTargetBound = true;
   metrics.msaaResolveBandwidthEstimateBytes =
       metrics.msaaColorTextureBytes + metrics.msaaDepthTextureBytes;
-  const GpuTimingReport timingReport = gpu_.getLatestCompletedGpuTimingReport();
+  const GpuTimingReport &timingReport = ctx.frame.gpuTiming;
   if (hasGpuTimingScope(timingReport, GpuTimingScope::MsaaResolve)) {
     metrics.msaaResolveGpuTimeMs = timingReport.msaaResolveTimeMs;
     metrics.msaaResolveGpuTimingSourceFrameIndex =

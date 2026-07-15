@@ -3,7 +3,6 @@
 #include "nuri/gfx/frame/temporal_frame_service.h"
 
 #include <cmath>
-#include <optional>
 
 namespace nuri {
 namespace {
@@ -56,26 +55,6 @@ resetFlags(TemporalHistoryResetReason reason) noexcept {
 
 } // namespace
 
-struct TemporalFrameService::Impl {
-  struct Pending {
-    TemporalCameraHistoryState cameraHistory{};
-    TemporalFrameFacts facts{};
-    PresentationAAPlan plan{};
-  };
-
-  TemporalCameraHistoryState committedCameraHistory{};
-  TemporalFrameFacts committedFacts{};
-  PresentationAAPlan committedPlan{};
-  std::optional<Pending> pending{};
-  TemporalResetReasonFlags deferredResetReasons =
-      TemporalResetReasonFlags::None;
-};
-
-TemporalFrameService::TemporalFrameService()
-    : impl_(std::make_unique<Impl>()) {}
-
-TemporalFrameService::~TemporalFrameService() = default;
-
 Result<CameraFrameState, std::string> TemporalFrameService::prepareFrame(
     const Camera &camera, float aspectRatio,
     const RenderSettings::AntiAliasingSettings &antiAliasing,
@@ -85,32 +64,30 @@ Result<CameraFrameState, std::string> TemporalFrameService::prepareFrame(
     return Result<CameraFrameState, std::string>::makeError(
         "TemporalFrameService::prepareFrame: presentation AA plan is invalid");
   }
-  if (impl_->pending.has_value()) {
+  if (pending_.has_value()) {
     return Result<CameraFrameState, std::string>::makeError(
         "TemporalFrameService::prepareFrame: prior frame is still pending");
   }
 
-  Impl::Pending pending{};
+  Pending pending{};
   pending.plan = plan;
-  const TemporalCameraHistoryState &committedHistory =
-      impl_->committedCameraHistory;
-  pending.cameraHistory = impl_->committedCameraHistory;
+  const TemporalCameraHistoryState &committedHistory = committedCameraHistory_;
+  pending.cameraHistory = committedCameraHistory_;
   CameraFrameState cameraState = makeTemporalCameraFrameState(
       camera, aspectRatio, antiAliasing, desc, pending.cameraHistory);
 
   TemporalResetReasonFlags reasons =
-      resetFlags(cameraState.historyResetReason) | impl_->deferredResetReasons;
-  if (impl_->committedPlan.valid && impl_->committedPlan != plan) {
+      resetFlags(cameraState.historyResetReason) | deferredResetReasons_;
+  if (committedPlan_.valid && committedPlan_ != plan) {
     reasons |= TemporalResetReasonFlags::ProviderChange;
   }
-  pending.facts = impl_->committedFacts;
+  pending.facts = committedFacts_;
   pending.facts.resetReasons = reasons;
   pending.facts.sourceFrameIndex = frameIndex;
   pending.facts.timeSeconds = std::isfinite(timeSeconds) ? timeSeconds : 0.0;
   pending.facts.deltaFromCommittedSeconds =
-      impl_->committedFacts.renderedFrameSerial > 0u &&
-              std::isfinite(timeSeconds)
-          ? std::max(0.0, timeSeconds - impl_->committedFacts.timeSeconds)
+      committedFacts_.renderedFrameSerial > 0u && std::isfinite(timeSeconds)
+          ? std::max(0.0, timeSeconds - committedFacts_.timeSeconds)
           : (std::isfinite(deltaSeconds) ? std::max(0.0, deltaSeconds) : 0.0);
   pending.facts.cameraContinuityValid = committedHistory.initialized &&
                                         !invalidatesView(reasons) &&
@@ -156,52 +133,55 @@ Result<CameraFrameState, std::string> TemporalFrameService::prepareFrame(
         committedHistory.previousJitterPixelOffset;
     cameraState.previousCameraPos = committedHistory.previousCameraPos;
   }
-  impl_->pending.emplace(std::move(pending));
+  pending_.emplace(std::move(pending));
   return Result<CameraFrameState, std::string>::makeResult(cameraState);
 }
 
 bool TemporalFrameService::commitFrame(uint64_t frameIndex) noexcept {
-  if (!impl_->pending.has_value() ||
-      impl_->pending->facts.sourceFrameIndex != frameIndex) {
+  if (!pending_.has_value() || pending_->facts.sourceFrameIndex != frameIndex) {
     return false;
   }
-  impl_->committedCameraHistory = impl_->pending->cameraHistory;
-  impl_->committedFacts = impl_->pending->facts;
-  impl_->committedPlan = impl_->pending->plan;
-  ++impl_->committedFacts.renderedFrameSerial;
-  impl_->committedFacts.pendingCommit = false;
-  impl_->pending.reset();
-  impl_->deferredResetReasons = TemporalResetReasonFlags::None;
+  committedCameraHistory_ = pending_->cameraHistory;
+  committedFacts_ = pending_->facts;
+  committedPlan_ = pending_->plan;
+  ++committedFacts_.renderedFrameSerial;
+  committedFacts_.pendingCommit = false;
+  pending_.reset();
+  deferredResetReasons_ = TemporalResetReasonFlags::None;
   return true;
 }
 
 void TemporalFrameService::abandonFrame(uint64_t frameIndex) noexcept {
-  if (!impl_->pending.has_value() ||
-      impl_->pending->facts.sourceFrameIndex != frameIndex) {
+  if (!pending_.has_value() || pending_->facts.sourceFrameIndex != frameIndex) {
     return;
   }
-  impl_->pending.reset();
-  impl_->deferredResetReasons |= TemporalResetReasonFlags::SkippedHistoryWrite;
+  pending_.reset();
+  deferredResetReasons_ |= TemporalResetReasonFlags::SkippedHistoryWrite;
 }
 
 void TemporalFrameService::invalidateResources() noexcept {
-  impl_->deferredResetReasons |= TemporalResetReasonFlags::ResourceRecreation;
+  deferredResetReasons_ |= TemporalResetReasonFlags::ResourceRecreation;
 }
 
 void TemporalFrameService::invalidateBackend() noexcept {
-  impl_->deferredResetReasons |= TemporalResetReasonFlags::BackendRecreation;
+  deferredResetReasons_ |= TemporalResetReasonFlags::BackendRecreation;
 }
 
-void TemporalFrameService::reset() noexcept { *impl_ = Impl{}; }
+void TemporalFrameService::reset() noexcept {
+  committedCameraHistory_ = {};
+  committedFacts_ = {};
+  committedPlan_ = {};
+  pending_.reset();
+  deferredResetReasons_ = TemporalResetReasonFlags::None;
+}
 
 const TemporalFrameFacts &TemporalFrameService::facts() const noexcept {
-  return impl_->pending.has_value() ? impl_->pending->facts
-                                    : impl_->committedFacts;
+  return pending_.has_value() ? pending_->facts : committedFacts_;
 }
 
 const TemporalCameraHistoryState &
 TemporalFrameService::cameraHistory() const noexcept {
-  return impl_->committedCameraHistory;
+  return committedCameraHistory_;
 }
 
 } // namespace nuri

@@ -544,7 +544,6 @@ void RenderGraphBuilder::beginFrame(uint64_t frameIndex) {
   sideEffectPassMarks_.clear();
   allPassesBorrowPayload_ = true;
   transientResourceDescriptorsHash_ = 0xcbf29ce484222325ull;
-  dynamicPayloadVersion_ = 0u;
 }
 
 PersistentBufferId
@@ -698,12 +697,7 @@ RenderGraphBuilder::computeGraphFingerprint() const noexcept {
       .payloadLayoutHash = payloadLayoutHash,
       .transientResourceDescriptorsHash = transientResourceDescriptorsHash_,
       .persistentHandlesVersion = persistentHandlesVersion_,
-      .dynamicPayloadVersion = dynamicPayloadVersion_,
   };
-}
-
-void RenderGraphBuilder::mixDynamicPayloadVersion(uint64_t version) noexcept {
-  dynamicPayloadVersion_ = mixFingerprintSeed(dynamicPayloadVersion_, version);
 }
 
 void RenderGraphBuilder::refreshHandlesInCompileResult(
@@ -6479,9 +6473,10 @@ void RenderGraphExecutor::collectRetiredResources(GPUDevice &gpu) {
 
 Result<RenderGraphExecutionMetadata, std::string>
 RenderGraphExecutor::execute(RenderGraphRuntime &runtime, GPUDevice &gpu,
-                             const RenderGraphCompileResult &compiled) {
+                             const RenderGraphCompileResult &compiled,
+                             RenderGraphExecutionOptions options) {
   RenderGraphExecutionMetadata metadata(memory_);
-  auto result = executeInternal(&runtime, gpu, compiled, &metadata);
+  auto result = executeInternal(&runtime, gpu, compiled, metadata, options);
   if (result.hasError()) {
     return Result<RenderGraphExecutionMetadata, std::string>::makeError(
         result.error());
@@ -6494,8 +6489,14 @@ Result<bool, std::string>
 RenderGraphExecutor::executeInternal(RenderGraphRuntime *runtime,
                                      GPUDevice &gpu,
                                      const RenderGraphCompileResult &compiled,
-                                     RenderGraphExecutionMetadata *metadata) {
+                                     RenderGraphExecutionMetadata &metadata,
+                                     RenderGraphExecutionOptions options) {
   NURI_PROFILER_FUNCTION();
+
+  const bool captureTelemetry =
+      options.telemetry != RenderGraphTelemetryLevel::None;
+  const bool capturePassTimings =
+      options.telemetry == RenderGraphTelemetryLevel::PassTimings;
 
   const auto fail = [](RenderGraphExecutionFailureStage stage,
                        std::string_view message) {
@@ -7613,13 +7614,13 @@ RenderGraphExecutor::executeInternal(RenderGraphRuntime *runtime,
   {
     NURI_PROFILER_ZONE("RenderGraph.execute.submit_frame",
                        NURI_PROFILER_COLOR_SUBMIT);
-    if (metadata != nullptr) {
-      metadata->usedParallelCompile = compiled.usedParallelCompile;
-      metadata->usedParallelRecording = false;
-      metadata->recordedCommandBuffers.clear();
-      metadata->submitBatches.clear();
-      metadata->passRanges.clear();
-      metadata->passTimings.clear();
+    if (captureTelemetry) {
+      metadata.usedParallelCompile = compiled.usedParallelCompile;
+      metadata.usedParallelRecording = false;
+      metadata.recordedCommandBuffers.clear();
+      metadata.submitBatches.clear();
+      metadata.passRanges.clear();
+      metadata.passTimings.clear();
     }
     if (!executablePasses.empty()) {
       {
@@ -7662,20 +7663,22 @@ RenderGraphExecutor::executeInternal(RenderGraphRuntime *runtime,
         NURI_PROFILER_ZONE_END();
       }
 
-      if (metadata != nullptr) {
-        metadata->usedParallelRecording =
+      if (captureTelemetry) {
+        metadata.usedParallelRecording =
             supportsParallelRecording && ranges.size() > 1u;
-        metadata->passRanges.reserve(ranges.size());
-        metadata->passTimings.resize(executablePasses.size());
-        for (uint32_t orderedPassIndex = 0u;
-             orderedPassIndex < metadata->passTimings.size();
-             ++orderedPassIndex) {
-          metadata->passTimings[orderedPassIndex].orderedPassIndex =
-              orderedPassIndex;
+        metadata.passRanges.reserve(ranges.size());
+        if (capturePassTimings) {
+          metadata.passTimings.resize(executablePasses.size());
+          for (uint32_t orderedPassIndex = 0u;
+               orderedPassIndex < metadata.passTimings.size();
+               ++orderedPassIndex) {
+            metadata.passTimings[orderedPassIndex].orderedPassIndex =
+                orderedPassIndex;
+          }
         }
         for (uint32_t workerIndex = 0u; workerIndex < ranges.size();
              ++workerIndex) {
-          metadata->passRanges.push_back(RenderGraphPassRange{
+          metadata.passRanges.push_back(RenderGraphPassRange{
               .workerIndex = workerIndex,
               .firstOrderedPassIndex = ranges[workerIndex].count > 0u
                                            ? ranges[workerIndex].offset
@@ -7748,14 +7751,17 @@ RenderGraphExecutor::executeInternal(RenderGraphRuntime *runtime,
               return;
             }
           }
-          const auto passRecordStart = std::chrono::steady_clock::now();
+          std::chrono::steady_clock::time_point passRecordStart{};
+          if (capturePassTimings) {
+            passRecordStart = std::chrono::steady_clock::now();
+          }
           auto recordResult =
               gpu.recordGraphicsPass(recordingContexts[workerIndex],
                                      executablePasses[orderedPassIndex]);
-          const auto passRecordEnd = std::chrono::steady_clock::now();
-          if (metadata != nullptr &&
-              orderedPassIndex < metadata->passTimings.size()) {
-            metadata->passTimings[orderedPassIndex].cpuTimeMs =
+          if (capturePassTimings &&
+              orderedPassIndex < metadata.passTimings.size()) {
+            const auto passRecordEnd = std::chrono::steady_clock::now();
+            metadata.passTimings[orderedPassIndex].cpuTimeMs =
                 std::chrono::duration<float, std::milli>(passRecordEnd -
                                                          passRecordStart)
                     .count();
@@ -7857,12 +7863,11 @@ RenderGraphExecutor::executeInternal(RenderGraphRuntime *runtime,
 
           recordingContexts[workerIndex] = {};
           recordedCommandBuffers.push_back(finishResult.value());
-          if (metadata != nullptr) {
-            metadata->recordedCommandBuffers.push_back(
-                RecordedCommandBufferMeta{
-                    .firstOrderedPassIndex = range.offset,
-                    .passCount = range.count,
-                });
+          if (captureTelemetry) {
+            metadata.recordedCommandBuffers.push_back(RecordedCommandBufferMeta{
+                .firstOrderedPassIndex = range.offset,
+                .passCount = range.count,
+            });
           }
         }
         NURI_PROFILER_ZONE_END();
@@ -7878,8 +7883,8 @@ RenderGraphExecutor::executeInternal(RenderGraphRuntime *runtime,
                 static_cast<uint32_t>(recordedCommandBuffers.size()),
             .presentsFrameOutput = true,
         });
-        if (metadata != nullptr) {
-          metadata->submitBatches.assign(batches.begin(), batches.end());
+        if (captureTelemetry) {
+          metadata.submitBatches.assign(batches.begin(), batches.end());
         }
         NURI_PROFILER_ZONE_END();
       }
@@ -7900,6 +7905,7 @@ RenderGraphExecutor::executeInternal(RenderGraphRuntime *runtime,
                   submitFrameResult.error());
         } else {
           frameSubmission = submitFrameResult.value();
+          metadata.submission = frameSubmission;
         }
         NURI_PROFILER_ZONE_END();
       }

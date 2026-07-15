@@ -641,7 +641,7 @@ SceneColorDownsamplePass::build(FrameBuildContext &ctx) {
   }
 
   AntiAliasingFrameMetrics &aaMetrics = ctx.frame.metrics.antiAliasing;
-  const GpuTimingReport timingReport = gpu_.getLatestCompletedGpuTimingReport();
+  const GpuTimingReport &timingReport = ctx.frame.gpuTiming;
   if (hasGpuTimingScope(timingReport, GpuTimingScope::SceneColorDownsample)) {
     aaMetrics.taaSceneColorDownsampleGpuTimeMs =
         timingReport.sceneColorDownsampleTimeMs;
@@ -1706,7 +1706,7 @@ Result<bool, std::string> HDRBloomCompositePass::build(FrameBuildContext &ctx) {
           std::log2(std::max(*adaptedLuminance, 1.0e-4f));
     }
   }
-  const GpuTimingReport timingReport = gpu_.getLatestCompletedGpuTimingReport();
+  const GpuTimingReport &timingReport = ctx.frame.gpuTiming;
   if (hasGpuTimingScope(timingReport, GpuTimingScope::HDRPostProcess)) {
     metrics.gpuTimeMs = timingReport.hdrPostProcessTimeMs;
     metrics.gpuTimingSourceFrameIndex =
@@ -2055,12 +2055,6 @@ PresentToneMapPass::ensureToneMapLutLoaded(ToneMapLutResource &resource,
 }
 
 void PresentToneMapPass::destroyToneMapAssets() {
-  if (aces2SdrLut_.texture != nullptr && aces2SdrLut_.texture->valid()) {
-    gpu_.destroyTexture(aces2SdrLut_.texture->handle());
-  }
-  if (agxLut_.texture != nullptr && agxLut_.texture->valid()) {
-    gpu_.destroyTexture(agxLut_.texture->handle());
-  }
   aces2SdrLut_.texture.reset();
   agxLut_.texture.reset();
   if (nuri::isValid(lutSampler_)) {

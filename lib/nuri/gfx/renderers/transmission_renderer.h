@@ -13,6 +13,7 @@
 
 #include "nuri/core/runtime_config.h"
 #include "nuri/defines.h"
+#include "nuri/gfx/dynamic_buffer.h"
 #include "nuri/gfx/frame/render_frame_context.h"
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/gfx/render_graph/render_graph.h"
@@ -144,15 +145,11 @@ private:
     bool sortedFeedback = false;
   };
 
-  struct DynamicBufferSlot {
-    std::unique_ptr<Buffer> buffer;
-    size_t capacityBytes = 0;
-  };
-
   Result<bool, std::string> ensureInitialized();
   Result<bool, std::string> createShaders();
   Result<bool, std::string> ensurePipelines(Format colorFormat,
-                                            Format depthFormat);
+                                            Format depthFormat,
+                                            RasterPipelineState rasterState);
   Result<bool, std::string> ensureRingBufferCount(uint32_t requiredCount);
   Result<bool, std::string>
   ensureInstanceMatricesRingCapacity(size_t requiredBytes);
@@ -197,6 +194,7 @@ private:
 
   Format meshPipelineColorFormat_ = Format::Count;
   Format meshPipelineDepthFormat_ = Format::Count;
+  RasterPipelineState meshPipelineRasterState_{};
 
   bool initialized_ = false;
   bool loggedMaterialFallbackWarning_ = false;

@@ -285,6 +285,7 @@ private:
   struct TextureSlot {
     uint32_t refCount = 0;
     uint64_t retireAfterFrame = kRetireFrameUnset;
+    OwnedTextureHandle owner;
     TextureRecord record;
 
     explicit TextureSlot(

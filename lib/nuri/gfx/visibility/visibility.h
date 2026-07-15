@@ -39,12 +39,17 @@ enum VisibilityGpuFlags : uint32_t {
   kVisibilityGpuFlagVisibleOnUncertain = 1u << 2u,
 };
 
+enum class VisibilityExecutionMode : uint8_t {
+  Disabled = 0,
+  Cpu = 1,
+  Gpu = 2,
+  GpuWithValidation = 3,
+};
+
 struct VisibilityResolvedSettings {
-  VisibilityCullingMode mainViewMode = VisibilityCullingMode::GpuDriven;
+  VisibilityExecutionMode mainViewMode = VisibilityExecutionMode::Gpu;
   VisibilityCullingMode shadowMode = VisibilityCullingMode::Hybrid;
   VisibilityOcclusionMode occlusionMode = VisibilityOcclusionMode::Disabled;
-  bool enableCpuMainFrustumCulling = true;
-  bool enableGpuInstanceCulling = true;
   bool enableMeshletFrustumCulling = true;
   bool enableMeshletConeCulling = true;
   bool enableIndirectMeshDispatch = true;
@@ -54,6 +59,28 @@ struct VisibilityResolvedSettings {
   bool visibleOnUncertain = true;
   uint32_t forcedVisibleListCapacity = std::numeric_limits<uint32_t>::max();
 };
+
+[[nodiscard]] constexpr bool
+usesCpuMainVisibility(VisibilityExecutionMode mode) noexcept {
+  return mode == VisibilityExecutionMode::Cpu;
+}
+
+[[nodiscard]] constexpr bool
+usesGpuMainVisibility(VisibilityExecutionMode mode) noexcept {
+  return mode == VisibilityExecutionMode::Gpu ||
+         mode == VisibilityExecutionMode::GpuWithValidation;
+}
+
+[[nodiscard]] constexpr bool
+runsCpuVisibilityEvaluation(VisibilityExecutionMode mode) noexcept {
+  return mode == VisibilityExecutionMode::Cpu ||
+         mode == VisibilityExecutionMode::GpuWithValidation;
+}
+
+[[nodiscard]] constexpr bool
+validatesGpuMainVisibility(VisibilityExecutionMode mode) noexcept {
+  return mode == VisibilityExecutionMode::GpuWithValidation;
+}
 
 struct VisibilityPassSignature {
   VisibilityPassKind kind = VisibilityPassKind::OpaqueMain;

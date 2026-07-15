@@ -130,6 +130,8 @@ public:
   Result<bool, std::string> updateBuffer(BufferHandle buffer,
                                          std::span<const std::byte> data,
                                          size_t offset = 0) override;
+  Result<bool, std::string>
+  updateBuffers(std::span<const BufferUpdate> updates) override;
   Result<bool, std::string> readBuffer(BufferHandle buffer, size_t offset,
                                        std::span<std::byte> outBytes) override;
   std::byte *getMappedBufferPtr(BufferHandle buffer) override;

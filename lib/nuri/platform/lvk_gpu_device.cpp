@@ -6,9 +6,12 @@
 #include "nuri/core/log.h"
 #include "nuri/core/profiling.h"
 #include "nuri/core/window.h"
+#include "nuri/gfx/gpu_retirement_queue.h"
 #include "nuri/resources/gpu/geometry_pool.h"
 #include "nuri/resources/gpu/material.h"
 #include "nuri/utils/env_utils.h"
+
+#include <variant>
 
 #include <lvk/LVK.h>
 #if __has_include(<lvk/vulkan/VulkanClasses.h>)
@@ -541,33 +544,6 @@ template <typename HandleType>
   return a.index == b.index && a.generation == b.generation;
 }
 
-[[nodiscard]] Result<uint32_t, std::string>
-allocateMonotonicHandleIndex(uint32_t &nextIndex, std::string_view context) {
-  if (nextIndex == std::numeric_limits<uint32_t>::max()) {
-    std::string message;
-    message.reserve(context.size() + 24u);
-    message.append(context);
-    message.append(": handle index overflow");
-    return Result<uint32_t, std::string>::makeError(std::move(message));
-  }
-
-  return Result<uint32_t, std::string>::makeResult(nextIndex++);
-}
-
-[[nodiscard]] uint32_t nextHandleGeneration(std::vector<uint32_t> &generations,
-                                            uint32_t index) {
-  if (index >= generations.size()) {
-    generations.resize(static_cast<size_t>(index) + 1u, 0u);
-  }
-
-  uint32_t &generation = generations[index];
-  ++generation;
-  if (generation == 0u) {
-    ++generation;
-  }
-  return generation;
-}
-
 [[nodiscard]] Result<bool, std::string>
 makeLvkBarrierApiError(std::string_view context) {
   std::string message;
@@ -775,6 +751,16 @@ public:
     slotsMeta_.release(h.index);
   }
 
+  [[nodiscard]] std::optional<ResourceSlot<LvkHandle>> take(NuriHandle h) {
+    if (!isValid(h)) {
+      return std::nullopt;
+    }
+    ResourceSlot<LvkHandle> resource = std::move(slots_[h.index]);
+    slots_[h.index] = ResourceSlot<LvkHandle>{};
+    slotsMeta_.release(h.index);
+    return resource;
+  }
+
   bool isValid(NuriHandle h) const {
     return h.index < slots_.size() && slotsMeta_.isValid(h.index, h.generation);
   }
@@ -919,16 +905,20 @@ struct LvkGPUDevice::Impl {
   ResourceTable<ComputePipelineHandle, lvk::ComputePipelineHandle>
       computePipelines;
   std::vector<FramebufferTexture> framebufferTextures;
+  using RetiredResource = std::variant<
+      ResourceSlot<lvk::BufferHandle>, ResourceSlot<lvk::TextureHandle>,
+      ResourceSlot<lvk::SamplerHandle>, ResourceSlot<lvk::ShaderModuleHandle>,
+      ResourceSlot<lvk::RenderPipelineHandle>,
+      ResourceSlot<lvk::ComputePipelineHandle>>;
+  GpuRetirementQueue<RetiredResource, SubmissionHandle> retiredResources;
+  SubmissionHandle latestSubmission{};
   mutable std::mutex contextImmediateMutex;
   std::mutex graphicsContextMutex;
   std::vector<ActiveGraphicsRecordingContext> activeGraphicsContexts;
-  std::vector<uint8_t> activeGraphicsContextOccupied;
   std::vector<RecordedGraphicsCommandBuffer> recordedGraphicsCommandBuffers;
   lvk::TextureHandle currentFrameSwapchainTexture{};
-  std::vector<uint32_t> recordingContextGenerations;
-  std::vector<uint32_t> recordedCommandBufferGenerations;
-  uint32_t nextRecordingContextIndex = 1u;
-  uint32_t nextRecordedCommandBufferIndex = 1u;
+  SlotPool<UnmaskedNonZeroGenerationPolicy> recordingContextSlots;
+  SlotPool<UnmaskedNonZeroGenerationPolicy> recordedCommandBufferSlots;
   std::unique_ptr<GeometryPool> geometryPool;
   std::vector<TimingQueryPoolSlot> availableTimingQueryPools;
   std::optional<CurrentFrameTimingCapture> currentFrameTimingCapture;
@@ -945,6 +935,16 @@ struct LvkGPUDevice::Impl {
   bool loggedShadowSdsmTimingSubmissionWarning = false;
   bool loggedShadowSdsmTimingCollectionWarning = false;
 };
+
+template <typename ImplType, typename Resource>
+void retireNativeResource(ImplType &impl, Resource resource) {
+  if (!impl.context || !isValid(impl.latestSubmission)) {
+    return;
+  }
+  impl.retiredResources.retire(
+      typename ImplType::RetiredResource{std::move(resource)},
+      impl.latestSubmission);
+}
 
 struct PassTimingReservation {
   GpuTimingScope scope = GpuTimingScope::None;
@@ -967,8 +967,7 @@ template <typename Impl>
 [[nodiscard]] ActiveGraphicsContextSlotPtr<Impl>
 findActiveGraphicsContextSlot(Impl &impl, RecordingContextHandle handle) {
   if (handle.index >= impl.activeGraphicsContexts.size() ||
-      handle.index >= impl.activeGraphicsContextOccupied.size() ||
-      impl.activeGraphicsContextOccupied[handle.index] == 0u) {
+      !impl.recordingContextSlots.isValid(handle.index, handle.generation)) {
     return nullptr;
   }
   auto &entry = impl.activeGraphicsContexts[handle.index];
@@ -1243,7 +1242,12 @@ template <typename Impl> void collectCompletedGpuTimingSubmissions(Impl &impl) {
 
 } // namespace
 
-LvkGPUDevice::LvkGPUDevice() : impl_(std::make_unique<Impl>()) {}
+LvkGPUDevice::LvkGPUDevice() : impl_(std::make_unique<Impl>()) {
+  impl_->recordingContextSlots.reserve(kMaxGraphicsRecordingContexts);
+  impl_->recordedCommandBufferSlots.reserve(kMaxGraphicsRecordingContexts);
+  impl_->activeGraphicsContexts.reserve(kMaxGraphicsRecordingContexts);
+  impl_->recordedGraphicsCommandBuffers.reserve(kMaxGraphicsRecordingContexts);
+}
 
 LvkGPUDevice::~LvkGPUDevice() {
   if (!impl_) {
@@ -1252,6 +1256,7 @@ LvkGPUDevice::~LvkGPUDevice() {
 
   if (impl_->context) {
     impl_->context->wait(lvk::SubmitHandle{});
+    impl_->retiredResources.releaseAllAfterIdle();
   }
 
   impl_.reset();
@@ -1574,6 +1579,9 @@ Result<bool, std::string> LvkGPUDevice::beginFrame(uint64_t frameIndex) {
                              std::move(impl_->currentFrameTimingCapture->pool));
       impl_->currentFrameTimingCapture.reset();
     }
+    impl_->retiredResources.collectIf([this](SubmissionHandle submission) {
+      return impl_->context->isReady(toLvkSubmitHandle(submission));
+    });
     collectCompletedGpuTimingSubmissions(*impl_);
     if (impl_->gpuTimingQueriesEnabled) {
       auto timingPoolResult = acquireTimingQueryPool(*impl_);
@@ -2259,17 +2267,19 @@ LvkGPUDevice::createMeshletPipeline(const MeshletPipelineDesc &desc,
 }
 
 void LvkGPUDevice::destroyRenderPipeline(RenderPipelineHandle pipeline) {
-  if (!impl_) {
-    return;
+  if (impl_ != nullptr) {
+    if (auto resource = impl_->renderPipelines.take(pipeline)) {
+      retireNativeResource(*impl_, std::move(*resource));
+    }
   }
-  impl_->renderPipelines.deallocate(pipeline);
 }
 
 void LvkGPUDevice::destroyComputePipeline(ComputePipelineHandle pipeline) {
-  if (!impl_) {
-    return;
+  if (impl_ != nullptr) {
+    if (auto resource = impl_->computePipelines.take(pipeline)) {
+      retireNativeResource(*impl_, std::move(*resource));
+    }
   }
-  impl_->computePipelines.deallocate(pipeline);
 }
 
 void LvkGPUDevice::destroyMeshletPipeline(MeshletPipelineHandle pipeline) {
@@ -2277,10 +2287,11 @@ void LvkGPUDevice::destroyMeshletPipeline(MeshletPipelineHandle pipeline) {
 }
 
 void LvkGPUDevice::destroyBuffer(BufferHandle buffer) {
-  if (!impl_) {
-    return;
+  if (impl_ != nullptr) {
+    if (auto resource = impl_->buffers.take(buffer)) {
+      retireNativeResource(*impl_, std::move(*resource));
+    }
   }
-  impl_->buffers.deallocate(buffer);
 }
 
 void LvkGPUDevice::destroyTexture(TextureHandle texture) {
@@ -2294,21 +2305,25 @@ void LvkGPUDevice::destroyTexture(TextureHandle texture) {
                        return areSameHandle(entry.handle, texture);
                      }),
       impl_->framebufferTextures.end());
-  impl_->textures.deallocate(texture);
+  if (auto resource = impl_->textures.take(texture)) {
+    retireNativeResource(*impl_, std::move(*resource));
+  }
 }
 
 void LvkGPUDevice::destroySampler(SamplerHandle sampler) {
-  if (!impl_) {
-    return;
+  if (impl_ != nullptr) {
+    if (auto resource = impl_->samplers.take(sampler)) {
+      retireNativeResource(*impl_, std::move(*resource));
+    }
   }
-  impl_->samplers.deallocate(sampler);
 }
 
 void LvkGPUDevice::destroyShaderModule(ShaderHandle shader) {
-  if (!impl_) {
-    return;
+  if (impl_ != nullptr) {
+    if (auto resource = impl_->shaders.take(shader)) {
+      retireNativeResource(*impl_, std::move(*resource));
+    }
   }
-  impl_->shaders.deallocate(shader);
 }
 
 bool LvkGPUDevice::isValid(BufferHandle h) const {
@@ -3190,25 +3205,12 @@ LvkGPUDevice::acquireGraphicsRecordingContext(uint32_t workerIndex) {
   std::scoped_lock lock(impl_->contextImmediateMutex,
                         impl_->graphicsContextMutex);
   lvk::ICommandBuffer &commandBuffer = impl_->context->acquireCommandBuffer();
-  auto indexResult = allocateMonotonicHandleIndex(
-      impl_->nextRecordingContextIndex,
-      "LvkGPUDevice::acquireGraphicsRecordingContext");
-  if (indexResult.hasError()) {
-    return Result<RecordingContextHandle, std::string>::makeError(
-        indexResult.error());
-  }
-
-  const uint32_t index = indexResult.value();
-  const RecordingContextHandle handle{
-      .index = index,
-      .generation =
-          nextHandleGeneration(impl_->recordingContextGenerations, index)};
+  const SlotReservation slot = impl_->recordingContextSlots.acquire();
+  const uint32_t index = slot.index;
+  const RecordingContextHandle handle{.index = index,
+                                      .generation = slot.generation};
   if (impl_->activeGraphicsContexts.size() <= index) {
     impl_->activeGraphicsContexts.resize(static_cast<size_t>(index) + 1u);
-  }
-  if (impl_->activeGraphicsContextOccupied.size() <= index) {
-    impl_->activeGraphicsContextOccupied.resize(static_cast<size_t>(index) + 1u,
-                                                0u);
   }
   const bool wholeFrameTimingStarted =
       workerIndex == 0u && impl_->currentFrameTimingCapture.has_value() &&
@@ -3232,7 +3234,6 @@ LvkGPUDevice::acquireGraphicsRecordingContext(uint32_t workerIndex) {
       .timingQuerySliceReset = wholeFrameTimingStarted,
       .wholeFrameTimingStarted = wholeFrameTimingStarted,
   };
-  impl_->activeGraphicsContextOccupied[index] = 1u;
   return Result<RecordingContextHandle, std::string>::makeResult(handle);
 }
 
@@ -3432,19 +3433,10 @@ LvkGPUDevice::finishGraphicsRecordingContext(RecordingContextHandle ctx) {
         "context");
   }
 
-  auto indexResult = allocateMonotonicHandleIndex(
-      impl_->nextRecordedCommandBufferIndex,
-      "LvkGPUDevice::finishGraphicsRecordingContext");
-  if (indexResult.hasError()) {
-    return Result<RecordedCommandBufferHandle, std::string>::makeError(
-        indexResult.error());
-  }
-
-  const uint32_t index = indexResult.value();
-  const RecordedCommandBufferHandle handle{
-      .index = index,
-      .generation =
-          nextHandleGeneration(impl_->recordedCommandBufferGenerations, index)};
+  const SlotReservation slot = impl_->recordedCommandBufferSlots.acquire();
+  const uint32_t index = slot.index;
+  const RecordedCommandBufferHandle handle{.index = index,
+                                           .generation = slot.generation};
   impl_->recordedGraphicsCommandBuffers.push_back(RecordedGraphicsCommandBuffer{
       .handle = handle,
       .commandBuffer = activeContext->commandBuffer,
@@ -3453,7 +3445,7 @@ LvkGPUDevice::finishGraphicsRecordingContext(RecordingContextHandle ctx) {
       .wholeFrameTimingStarted = activeContext->wholeFrameTimingStarted,
   });
   impl_->activeGraphicsContexts[ctx.index] = ActiveGraphicsRecordingContext{};
-  impl_->activeGraphicsContextOccupied[ctx.index] = 0u;
+  impl_->recordingContextSlots.release(ctx.index);
   return Result<RecordedCommandBufferHandle, std::string>::makeResult(handle);
 }
 
@@ -3471,7 +3463,7 @@ LvkGPUDevice::discardGraphicsRecordingContext(RecordingContextHandle ctx) {
 
   impl_->context->discard(*activeContext->commandBuffer);
   impl_->activeGraphicsContexts[ctx.index] = ActiveGraphicsRecordingContext{};
-  impl_->activeGraphicsContextOccupied[ctx.index] = 0u;
+  impl_->recordingContextSlots.release(ctx.index);
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -3491,6 +3483,7 @@ Result<bool, std::string> LvkGPUDevice::discardRecordedGraphicsCommandBuffer(
       impl_->recordedGraphicsCommandBuffers[i] =
           std::move(impl_->recordedGraphicsCommandBuffers.back());
     }
+    impl_->recordedCommandBufferSlots.release(commandBuffer.index);
     impl_->recordedGraphicsCommandBuffers.pop_back();
     return Result<bool, std::string>::makeResult(true);
   }
@@ -3673,6 +3666,8 @@ Result<SubmissionHandle, std::string> LvkGPUDevice::submitRecordedGraphicsFrame(
   for (size_t readIndex = 0u;
        readIndex < impl_->recordedGraphicsCommandBuffers.size(); ++readIndex) {
     if (consumedRecordedFlags[readIndex] != 0u) {
+      impl_->recordedCommandBufferSlots.release(
+          impl_->recordedGraphicsCommandBuffers[readIndex].handle.index);
       continue;
     }
     if (writeIndex != readIndex) {
@@ -3701,6 +3696,7 @@ Result<SubmissionHandle, std::string> LvkGPUDevice::submitRecordedGraphicsFrame(
     }
     impl_->currentFrameTimingCapture.reset();
   }
+  impl_->latestSubmission = toNuriSubmissionHandle(lastSubmitHandle);
   ++impl_->submittedFrameCount;
 
   return Result<SubmissionHandle, std::string>::makeResult(
@@ -4075,6 +4071,7 @@ LvkGPUDevice::submitBackgroundBufferCopies(
   }
 
   const lvk::SubmitHandle submitHandle = impl_->context->submit(commandBuffer);
+  impl_->latestSubmission = toNuriSubmissionHandle(submitHandle);
   return Result<SubmissionHandle, std::string>::makeResult(
       toNuriSubmissionHandle(submitHandle));
 }
@@ -4085,6 +4082,7 @@ void LvkGPUDevice::waitIdle() {
     // Empty SubmitHandle results in vkDeviceWaitIdle
     impl_->context->wait(lvk::SubmitHandle{});
     std::lock_guard immediateLock(impl_->contextImmediateMutex);
+    impl_->retiredResources.releaseAllAfterIdle();
     collectCompletedGpuTimingSubmissions(*impl_);
   }
 }

@@ -1,11 +1,16 @@
 {
   "target": "scene_depth",
+  "capturePointVersion": 1,
+  "kind": "depth",
   "format": 6,
   "width": 640,
   "height": 360,
+  "mip": 0,
+  "layer": 0,
   "rowStride": 2560,
   "origin": "top_left",
   "colorSpace": "linear_depth",
+  "profile": "depth",
   "payload": "scene_depth.exr",
-  "hash": "fnv1a64:1efc5f3d7e20104c"
+  "hash": "sha256:bbef96e3668146d238794a2da68e606f984a47cd09c2e9922df0934a57fc310c"
 }

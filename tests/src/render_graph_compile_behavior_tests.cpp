@@ -254,7 +254,7 @@ TEST(RenderGraphCompileBehaviorTest,
 }
 
 TEST(RenderGraphCompileBehaviorTest,
-     GraphFingerprintTracksPreDispatchPayloadLayout) {
+     GraphFingerprintTracksPreDispatchLayoutButNotContent) {
   RenderGraphBuilder builder;
 
   auto recordFrame = [&](uint64_t frameIndex,
@@ -311,10 +311,15 @@ TEST(RenderGraphCompileBehaviorTest,
   const auto fingerprintA =
       recordFrame(240u, std::span<const ComputeDispatchItem>(
                             oneDispatch.data(), oneDispatch.size()));
-  const auto fingerprintB =
+  const std::array<ComputeDispatchItem, 1u> changedContent = {dispatchB};
+  const auto sameLayoutFingerprint =
       recordFrame(241u, std::span<const ComputeDispatchItem>(
+                            changedContent.data(), changedContent.size()));
+  const auto fingerprintB =
+      recordFrame(242u, std::span<const ComputeDispatchItem>(
                             twoDispatches.data(), twoDispatches.size()));
 
+  EXPECT_TRUE(fingerprintA == sameLayoutFingerprint);
   EXPECT_FALSE(fingerprintA == fingerprintB);
 }
 

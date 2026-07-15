@@ -6,6 +6,7 @@
 #include "nuri/core/log.h"
 #include "nuri/core/profiling.h"
 #include "nuri/core/window.h"
+#include "nuri/gfx/gpu_retirement_queue.h"
 #include "nuri/resources/gpu/geometry_pool.h"
 #include "nuri/resources/gpu/material.h"
 #include "nuri/utils/env_utils.h"
@@ -38,6 +39,7 @@
 #include <set>
 #include <unordered_map>
 #include <unordered_set>
+#include <variant>
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -132,28 +134,6 @@ constexpr size_t kSpvHeaderWordCount = 5u;
 template <typename HandleType>
 [[nodiscard]] constexpr bool areSameHandle(HandleType a, HandleType b) {
   return a.index == b.index && a.generation == b.generation;
-}
-
-[[nodiscard]] uint32_t nextHandleGeneration(std::vector<uint32_t> &generations,
-                                            uint32_t index) {
-  if (index >= generations.size()) {
-    generations.resize(static_cast<size_t>(index) + 1u, 0u);
-  }
-  uint32_t &generation = generations[index];
-  ++generation;
-  if (generation == 0u) {
-    ++generation;
-  }
-  return generation;
-}
-
-[[nodiscard]] Result<uint32_t, std::string>
-allocateMonotonicHandleIndex(uint32_t &nextIndex, std::string_view context) {
-  if (nextIndex == std::numeric_limits<uint32_t>::max()) {
-    return Result<uint32_t, std::string>::makeError(std::string(context) +
-                                                    ": handle index overflow");
-  }
-  return Result<uint32_t, std::string>::makeResult(nextIndex++);
 }
 
 [[nodiscard]] bool isRenderDocAttached() {
@@ -1182,36 +1162,22 @@ struct ShaderResource {
   ShaderStage stage = ShaderStage::Vertex;
 };
 
-struct PipelineVariantKey {
-  CompareOp compareOp = CompareOp::Less;
-  bool depthWrite = true;
-  bool depthBiasEnable = false;
-  int depthBiasConstant = 0;
-  float depthBiasSlope = 0.0f;
-  float depthBiasClamp = 0.0f;
-
-  [[nodiscard]] bool operator==(const PipelineVariantKey &rhs) const noexcept {
-    return compareOp == rhs.compareOp && depthWrite == rhs.depthWrite &&
-           depthBiasEnable == rhs.depthBiasEnable &&
-           depthBiasConstant == rhs.depthBiasConstant &&
-           depthBiasSlope == rhs.depthBiasSlope &&
-           depthBiasClamp == rhs.depthBiasClamp;
-  }
-};
+using PipelineVariantKey = RasterPipelineState;
 
 struct PipelineVariantKeyHasher {
   [[nodiscard]] size_t
   operator()(const PipelineVariantKey &key) const noexcept {
-    size_t hash = static_cast<size_t>(key.compareOp);
+    const PipelineVariantKey canonical = canonicalRasterPipelineState(key);
+    size_t hash = static_cast<size_t>(canonical.compareOp);
     auto mix = [&hash](uint64_t value) {
       hash ^= static_cast<size_t>(value) + 0x9e3779b97f4a7c15ull +
               (hash << 6u) + (hash >> 2u);
     };
-    mix(key.depthWrite ? 1u : 0u);
-    mix(key.depthBiasEnable ? 1u : 0u);
-    mix(static_cast<uint32_t>(key.depthBiasConstant));
-    mix(std::bit_cast<uint32_t>(key.depthBiasSlope));
-    mix(std::bit_cast<uint32_t>(key.depthBiasClamp));
+    mix(canonical.depthWrite ? 1u : 0u);
+    mix(canonical.depthBiasEnable ? 1u : 0u);
+    mix(static_cast<uint32_t>(canonical.depthBiasConstant));
+    mix(std::bit_cast<uint32_t>(canonical.depthBiasSlope));
+    mix(std::bit_cast<uint32_t>(canonical.depthBiasClamp));
     return hash;
   }
 };
@@ -1285,6 +1251,16 @@ public:
     slotsMeta_.release(handle.index);
   }
 
+  [[nodiscard]] std::optional<Resource> take(NuriHandle handle) {
+    if (!isValid(handle)) {
+      return std::nullopt;
+    }
+    Resource resource = std::move(slots_[handle.index]);
+    slots_[handle.index] = Resource{};
+    slotsMeta_.release(handle.index);
+    return resource;
+  }
+
   [[nodiscard]] bool replace(NuriHandle handle, Resource resource) {
     if (!isValid(handle)) {
       return false;
@@ -1344,6 +1320,34 @@ struct Swapchain {
   std::vector<SwapchainImage> images;
 };
 
+struct FramebufferCacheKey {
+  TextureHandle colorTexture{};
+  TextureHandle colorResolveTexture{};
+  TextureHandle depthTexture{};
+  TextureHandle depthResolveTexture{};
+  uint64_t swapchainGeneration = 0u;
+  uint32_t swapchainImageIndex = 0u;
+  ResolveMode colorResolveMode = ResolveMode::None;
+  ResolveMode depthResolveMode = ResolveMode::None;
+  bool hasColorAttachment = false;
+  bool colorIsSwapchain = false;
+  bool colorResolve = false;
+  bool depthResolve = false;
+
+  [[nodiscard]] bool references(TextureHandle texture) const noexcept {
+    return colorTexture == texture || colorResolveTexture == texture ||
+           depthTexture == texture || depthResolveTexture == texture;
+  }
+
+  constexpr bool
+  operator==(const FramebufferCacheKey &) const noexcept = default;
+};
+
+struct CachedFramebuffer {
+  FramebufferCacheKey key{};
+  nvrhi::FramebufferHandle framebuffer{};
+};
+
 struct NvrhiTimingQuery {
   GpuTimingScope scope = GpuTimingScope::None;
   std::string debugLabel;
@@ -1370,6 +1374,12 @@ struct RecordedGraphicsCommandBuffer {
   std::vector<NvrhiTimingQuery> timingQueries;
 };
 
+struct PendingGraphicsCommandList {
+  uint64_t submissionInstance = 0u;
+  nvrhi::CommandListHandle commandList{};
+  std::vector<nvrhi::FramebufferHandle> framebuffers;
+};
+
 struct PendingGpuTimingSubmission {
   uint64_t frameIndex = 0u;
   uint64_t submissionInstance = 0u;
@@ -1377,7 +1387,7 @@ struct PendingGpuTimingSubmission {
   NvrhiWholeFrameTimingSlot wholeFrameTiming{};
 };
 
-struct PendingBackgroundCopySubmission {
+struct PendingAsyncUploadSubmission {
   uint64_t submissionInstance = 0u;
   nvrhi::CommandListHandle commandList{};
 };
@@ -1504,25 +1514,36 @@ struct NvrhiGPUDeviceImpl {
   ResourceTable<MeshletPipelineHandle, MeshletPipelineResource>
       meshletPipelines;
   std::vector<FramebufferTexture> framebufferTextures;
+  std::vector<CachedFramebuffer> cachedFramebuffers;
+  uint64_t swapchainGeneration = 1u;
+  using RetiredResource =
+      std::variant<BufferResource, TextureResource,
+                   ResourceSlot<nvrhi::SamplerHandle>, ShaderResource,
+                   RenderPipelineResource, ComputePipelineResource,
+                   MeshletPipelineResource>;
+  GpuRetirementQueue<RetiredResource, uint64_t> retiredResources;
+  uint64_t latestSubmittedInstance = 0u;
 
   mutable std::mutex immediateMutex;
   std::mutex graphicsContextMutex;
   std::vector<ActiveGraphicsRecordingContext> activeGraphicsContexts;
-  std::vector<uint8_t> activeGraphicsContextOccupied;
   std::vector<RecordedGraphicsCommandBuffer> recordedGraphicsCommandBuffers;
+  std::vector<PendingGraphicsCommandList> pendingGraphicsCommandLists;
+  std::vector<nvrhi::CommandListHandle> availableGraphicsCommandLists;
   std::vector<PendingGpuTimingSubmission> pendingGpuTimingSubmissions;
   std::vector<NvrhiWholeFrameTimingSlot> availableWholeFrameTimingSlots;
-  std::vector<PendingBackgroundCopySubmission> pendingBackgroundCopySubmissions;
+  nvrhi::CommandListHandle pendingAsyncUploadCommandList{};
+  std::vector<PendingAsyncUploadSubmission> pendingAsyncUploadSubmissions;
+  std::vector<nvrhi::CommandListHandle> availableAsyncUploadCommandLists;
+  uint64_t undeclaredGraphicsPipelineVariantMisses = 0u;
+  uint64_t undeclaredMeshletPipelineVariantMisses = 0u;
   std::deque<GpuTimingReport> completedGpuTimingReports;
   GpuTimingReport latestCompletedGpuTimingReport{};
   uint64_t droppedGpuTimingReports = 0u;
-  std::vector<uint32_t> recordingContextGenerations;
-  std::vector<uint32_t> recordedCommandBufferGenerations;
-  std::vector<uint32_t> submissionGenerations;
+  SlotPool<UnmaskedNonZeroGenerationPolicy> recordingContextSlots;
+  SlotPool<UnmaskedNonZeroGenerationPolicy> recordedCommandBufferSlots;
+  SlotPool<UnmaskedNonZeroGenerationPolicy> submissionSlots;
   std::vector<SubmissionRecord> submissions;
-  uint32_t nextRecordingContextIndex = 1u;
-  uint32_t nextRecordedCommandBufferIndex = 1u;
-  uint32_t nextSubmissionIndex = 1u;
   std::unique_ptr<GeometryPool> geometryPool;
   bool loggedGpuTimingQueryWarning = false;
   bool loggedWholeFrameTimingQueryWarning = false;
@@ -1532,6 +1553,35 @@ struct NvrhiGPUDeviceImpl {
 namespace {
 
 using Impl = NvrhiGPUDeviceImpl;
+
+template <typename Resource>
+void retireNativeResource(Impl &impl, Resource resource) {
+  if (!impl.nvrhiDevice || impl.latestSubmittedInstance == 0u) {
+    return;
+  }
+  impl.retiredResources.retire(Impl::RetiredResource{std::move(resource)},
+                               impl.latestSubmittedInstance);
+}
+
+void invalidateCachedFramebuffers(Impl &impl, TextureHandle texture) {
+  if (!nuri::isValid(texture)) {
+    return;
+  }
+  std::erase_if(impl.cachedFramebuffers,
+                [texture](const CachedFramebuffer &entry) {
+                  return entry.key.references(texture);
+                });
+}
+
+void invalidateSwapchainFramebuffers(Impl &impl) {
+  std::erase_if(impl.cachedFramebuffers, [](const CachedFramebuffer &entry) {
+    return entry.key.colorIsSwapchain;
+  });
+  ++impl.swapchainGeneration;
+  if (impl.swapchainGeneration == 0u) {
+    impl.swapchainGeneration = 1u;
+  }
+}
 
 void flushMappedBufferRange(Impl &impl, BufferResource &buffer, size_t offset,
                             size_t size) {
@@ -1872,8 +1922,8 @@ waitForGraphicsQueueInstance(Impl &impl, uint64_t instance,
   return Result<bool, std::string>::makeResult(true);
 }
 
-void collectCompletedBackgroundCopySubmissions(Impl &impl) {
-  if (!impl.nvrhiDevice || impl.pendingBackgroundCopySubmissions.empty()) {
+void collectCompletedAsyncUploadSubmissions(Impl &impl) {
+  if (!impl.nvrhiDevice || impl.pendingAsyncUploadSubmissions.empty()) {
     return;
   }
 
@@ -1882,17 +1932,73 @@ void collectCompletedBackgroundCopySubmissions(Impl &impl) {
           nvrhi::CommandQueue::Graphics);
   size_t writeIndex = 0u;
   for (size_t readIndex = 0u;
-       readIndex < impl.pendingBackgroundCopySubmissions.size(); ++readIndex) {
-    PendingBackgroundCopySubmission &pending =
-        impl.pendingBackgroundCopySubmissions[readIndex];
+       readIndex < impl.pendingAsyncUploadSubmissions.size(); ++readIndex) {
+    PendingAsyncUploadSubmission &pending =
+        impl.pendingAsyncUploadSubmissions[readIndex];
+    if (pending.submissionInstance <= completedInstance) {
+      impl.availableAsyncUploadCommandLists.push_back(
+          std::move(pending.commandList));
+      continue;
+    }
     if (pending.submissionInstance > completedInstance) {
       if (writeIndex != readIndex) {
-        impl.pendingBackgroundCopySubmissions[writeIndex] = std::move(pending);
+        impl.pendingAsyncUploadSubmissions[writeIndex] = std::move(pending);
       }
       ++writeIndex;
     }
   }
-  impl.pendingBackgroundCopySubmissions.resize(writeIndex);
+  impl.pendingAsyncUploadSubmissions.resize(writeIndex);
+}
+
+[[nodiscard]] nvrhi::CommandListHandle
+acquireAsyncUploadCommandList(Impl &impl) {
+  if (!impl.availableAsyncUploadCommandLists.empty()) {
+    nvrhi::CommandListHandle commandList =
+        std::move(impl.availableAsyncUploadCommandLists.back());
+    impl.availableAsyncUploadCommandLists.pop_back();
+    return commandList;
+  }
+  return impl.nvrhiDevice->createCommandList();
+}
+
+[[nodiscard]] nvrhi::CommandListHandle &
+ensurePendingAsyncUploadCommandList(Impl &impl) {
+  if (!impl.pendingAsyncUploadCommandList) {
+    impl.pendingAsyncUploadCommandList = acquireAsyncUploadCommandList(impl);
+    if (impl.pendingAsyncUploadCommandList) {
+      impl.pendingAsyncUploadCommandList->open();
+    }
+  }
+  return impl.pendingAsyncUploadCommandList;
+}
+
+[[nodiscard]] nvrhi::CommandListHandle
+takePendingAsyncUploadCommandList(Impl &impl) {
+  if (!impl.pendingAsyncUploadCommandList) {
+    return {};
+  }
+  impl.pendingAsyncUploadCommandList->close();
+  return std::exchange(impl.pendingAsyncUploadCommandList, {});
+}
+
+uint64_t
+submitAsyncUploadCommandList(Impl &impl,
+                             const nvrhi::CommandListHandle &commandList) {
+  nvrhi::ICommandList *raw = commandList.Get();
+  const uint64_t instance = impl.nvrhiDevice->executeCommandLists(
+      &raw, 1u, nvrhi::CommandQueue::Graphics);
+  impl.latestSubmittedInstance = instance;
+  impl.pendingAsyncUploadSubmissions.push_back(PendingAsyncUploadSubmission{
+      .submissionInstance = instance, .commandList = commandList});
+  return instance;
+}
+
+void flushPendingAsyncUploadCommandList(Impl &impl) {
+  nvrhi::CommandListHandle commandList =
+      takePendingAsyncUploadCommandList(impl);
+  if (commandList) {
+    submitAsyncUploadCommandList(impl, commandList);
+  }
 }
 
 [[nodiscard]] bool hasInstanceLayer(const char *layerName) {
@@ -2713,6 +2819,7 @@ void destroySwapchain(Impl &impl) {
   if (impl.nvrhiDevice) {
     impl.nvrhiDevice->waitForIdle();
   }
+  invalidateSwapchainFramebuffers(impl);
   impl.swapchain.images.clear();
   if (impl.swapchain.handle != VK_NULL_HANDLE) {
     vkDestroySwapchainKHR(impl.device, impl.swapchain.handle, nullptr);
@@ -2768,7 +2875,8 @@ void destroySwapchain(Impl &impl) {
   const VkSwapchainKHR oldSwapchain = impl.swapchain.handle;
   if (oldSwapchain != VK_NULL_HANDLE && impl.nvrhiDevice) {
     impl.nvrhiDevice->waitForIdle();
-    collectCompletedBackgroundCopySubmissions(impl);
+    collectCompletedAsyncUploadSubmissions(impl);
+    impl.retiredResources.releaseAllAfterIdle();
     impl.nvrhiDevice->runGarbageCollection();
     collectCompletedGpuTimingSubmissions(impl);
   }
@@ -2798,6 +2906,7 @@ void destroySwapchain(Impl &impl) {
         vkError("NvrhiGPUDevice::createSwapchain", result));
   }
   if (oldSwapchain != VK_NULL_HANDLE) {
+    invalidateSwapchainFramebuffers(impl);
     impl.swapchain.images.clear();
     vkDestroySwapchainKHR(impl.device, oldSwapchain, nullptr);
   }
@@ -2896,8 +3005,10 @@ void destroySwapchain(Impl &impl) {
 
 void destroyVulkan(Impl &impl) {
   if (impl.nvrhiDevice) {
+    flushPendingAsyncUploadCommandList(impl);
     impl.nvrhiDevice->waitForIdle();
-    collectCompletedBackgroundCopySubmissions(impl);
+    collectCompletedAsyncUploadSubmissions(impl);
+    impl.retiredResources.releaseAllAfterIdle();
     impl.nvrhiDevice->runGarbageCollection();
     collectCompletedGpuTimingSubmissions(impl);
   }
@@ -2909,16 +3020,27 @@ void destroyVulkan(Impl &impl) {
   }
   impl.availableWholeFrameTimingSlots.clear();
   impl.pendingGpuTimingSubmissions.clear();
-  impl.pendingBackgroundCopySubmissions.clear();
+  impl.pendingAsyncUploadCommandList = nullptr;
+  impl.pendingAsyncUploadSubmissions.clear();
+  impl.availableAsyncUploadCommandLists.clear();
   impl.activeGraphicsContexts.clear();
-  impl.activeGraphicsContextOccupied.clear();
   impl.recordedGraphicsCommandBuffers.clear();
+  impl.pendingGraphicsCommandLists.clear();
+  impl.availableGraphicsCommandLists.clear();
+  impl.submissions.clear();
+  impl.recordingContextSlots.clear();
+  impl.recordedCommandBufferSlots.clear();
+  impl.submissionSlots.clear();
+  // Cached framebuffer handles retain their attachment textures. Release them
+  // before either the texture table or swapchain image wrappers are torn down.
+  impl.cachedFramebuffers.clear();
   impl.samplers.clear();
   impl.buffers.clear();
   impl.textures.clear();
   impl.shaders.clear();
   impl.renderPipelines.clear();
   impl.computePipelines.clear();
+  impl.meshletPipelines.clear();
   impl.framebufferTextures.clear();
   destroySwapchain(impl);
   impl.immediateCommandList = nullptr;
@@ -2978,8 +3100,7 @@ template <typename ImplType>
 [[nodiscard]] ActiveContextPtr<ImplType>
 findActiveGraphicsContextSlot(ImplType &impl, RecordingContextHandle handle) {
   if (handle.index >= impl.activeGraphicsContexts.size() ||
-      handle.index >= impl.activeGraphicsContextOccupied.size() ||
-      impl.activeGraphicsContextOccupied[handle.index] == 0u) {
+      !impl.recordingContextSlots.isValid(handle.index, handle.generation)) {
     return nullptr;
   }
   auto &entry = impl.activeGraphicsContexts[handle.index];
@@ -2991,20 +3112,54 @@ findActiveGraphicsContextSlot(ImplType &impl, RecordingContextHandle handle) {
 
 [[nodiscard]] Result<SubmissionHandle, std::string>
 allocateSubmissionHandle(Impl &impl, uint64_t instance) {
-  auto indexResult = allocateMonotonicHandleIndex(
-      impl.nextSubmissionIndex, "NvrhiGPUDevice::allocateSubmissionHandle");
-  if (indexResult.hasError()) {
-    return Result<SubmissionHandle, std::string>::makeError(
-        indexResult.error());
-  }
-  const uint32_t index = indexResult.value();
+  const SlotReservation slot = impl.submissionSlots.acquire();
   SubmissionHandle handle{
-      .index = index,
-      .generation = nextHandleGeneration(impl.submissionGenerations, index),
+      .index = slot.index,
+      .generation = slot.generation,
   };
   impl.submissions.push_back(
       SubmissionRecord{.handle = handle, .instance = instance});
   return Result<SubmissionHandle, std::string>::makeResult(handle);
+}
+
+void collectCompletedSubmissionRecords(Impl &impl, uint64_t completed) {
+  if (impl.submissions.empty()) {
+    return;
+  }
+  size_t writeIndex = 0u;
+  for (size_t readIndex = 0u; readIndex < impl.submissions.size();
+       ++readIndex) {
+    SubmissionRecord &record = impl.submissions[readIndex];
+    if (record.instance <= completed) {
+      impl.submissionSlots.release(record.handle.index);
+      continue;
+    }
+    if (writeIndex != readIndex) {
+      impl.submissions[writeIndex] = std::move(record);
+    }
+    ++writeIndex;
+  }
+  impl.submissions.resize(writeIndex);
+}
+
+void collectCompletedGraphicsCommandLists(Impl &impl, uint64_t completed) {
+  size_t writeIndex = 0u;
+  for (size_t readIndex = 0u;
+       readIndex < impl.pendingGraphicsCommandLists.size(); ++readIndex) {
+    PendingGraphicsCommandList &pending =
+        impl.pendingGraphicsCommandLists[readIndex];
+    if (pending.submissionInstance <= completed) {
+      pending.framebuffers.clear();
+      impl.availableGraphicsCommandLists.push_back(
+          std::move(pending.commandList));
+      continue;
+    }
+    if (writeIndex != readIndex) {
+      impl.pendingGraphicsCommandLists[writeIndex] = std::move(pending);
+    }
+    ++writeIndex;
+  }
+  impl.pendingGraphicsCommandLists.resize(writeIndex);
 }
 
 [[nodiscard]] bool textureUsageIsUAV(TextureUsage usage) {
@@ -3524,45 +3679,29 @@ void bindGlobalSets(nvrhi::MeshletState &state, Impl &impl) {
 }
 
 [[nodiscard]] PipelineVariantKey makePipelineVariantKey(const DrawItem &draw) {
-  PipelineVariantKey key{};
-  if (draw.useDepthState) {
-    key.compareOp = draw.depthState.compareOp;
-    key.depthWrite = draw.depthState.isDepthWriteEnabled;
-  }
-  key.depthBiasEnable = draw.depthBiasEnable;
-  key.depthBiasConstant =
-      draw.depthBiasEnable
-          ? static_cast<int>(std::lround(draw.depthBiasConstant))
-          : 0;
-  key.depthBiasSlope = draw.depthBiasEnable ? draw.depthBiasSlope : 0.0f;
-  key.depthBiasClamp = draw.depthBiasEnable ? draw.depthBiasClamp : 0.0f;
-  return key;
+  return makeRasterPipelineState(
+      draw.useDepthState ? draw.depthState : DepthState{}, draw.depthBiasEnable,
+      draw.depthBiasConstant, draw.depthBiasSlope, draw.depthBiasClamp);
+}
+
+[[nodiscard]] PipelineVariantKey
+makePipelineVariantKey(RasterPipelineState rasterState) {
+  return canonicalRasterPipelineState(rasterState);
 }
 
 [[nodiscard]] PipelineVariantKey
 makePipelineVariantKey(const MeshDispatchItem &dispatch) {
-  PipelineVariantKey key{};
-  if (dispatch.useDepthState) {
-    key.compareOp = dispatch.depthState.compareOp;
-    key.depthWrite = dispatch.depthState.isDepthWriteEnabled;
-  }
-  key.depthBiasEnable = dispatch.depthBiasEnable;
-  key.depthBiasConstant =
-      dispatch.depthBiasEnable
-          ? static_cast<int>(std::lround(dispatch.depthBiasConstant))
-          : 0;
-  key.depthBiasSlope =
-      dispatch.depthBiasEnable ? dispatch.depthBiasSlope : 0.0f;
-  key.depthBiasClamp =
-      dispatch.depthBiasEnable ? dispatch.depthBiasClamp : 0.0f;
-  return key;
+  return makeRasterPipelineState(
+      dispatch.useDepthState ? dispatch.depthState : DepthState{},
+      dispatch.depthBiasEnable, dispatch.depthBiasConstant,
+      dispatch.depthBiasSlope, dispatch.depthBiasClamp);
 }
 
 [[nodiscard]] std::optional<std::string>
-graphicsPipelineVariant(Impl &impl, RenderPipelineResource &pipeline,
-                        const DrawItem &draw,
-                        nvrhi::IGraphicsPipeline *&outPipeline) {
-  const PipelineVariantKey key = makePipelineVariantKey(draw);
+createGraphicsPipelineVariant(Impl &impl, RenderPipelineResource &pipeline,
+                              PipelineVariantKey key,
+                              nvrhi::IGraphicsPipeline *&outPipeline) {
+  key = canonicalRasterPipelineState(key);
   if (auto found = pipeline.variants.find(key);
       found != pipeline.variants.end()) {
     outPipeline = found->second.Get();
@@ -3589,10 +3728,26 @@ graphicsPipelineVariant(Impl &impl, RenderPipelineResource &pipeline,
 }
 
 [[nodiscard]] std::optional<std::string>
-meshletPipelineVariant(Impl &impl, MeshletPipelineResource &pipeline,
-                       const MeshDispatchItem &dispatch,
-                       nvrhi::IMeshletPipeline *&outPipeline) {
-  const PipelineVariantKey key = makePipelineVariantKey(dispatch);
+findGraphicsPipelineVariant(Impl &impl, RenderPipelineResource &pipeline,
+                            const DrawItem &draw,
+                            nvrhi::IGraphicsPipeline *&outPipeline) {
+  const PipelineVariantKey key = makePipelineVariantKey(draw);
+  if (auto found = pipeline.variants.find(key);
+      found != pipeline.variants.end()) {
+    outPipeline = found->second.Get();
+    return std::nullopt;
+  }
+  ++impl.undeclaredGraphicsPipelineVariantMisses;
+  return std::string("Graphics pipeline raster variant was not declared during "
+                     "pipeline preparation: ") +
+         pipeline.debugName;
+}
+
+[[nodiscard]] std::optional<std::string>
+createMeshletPipelineVariant(Impl &impl, MeshletPipelineResource &pipeline,
+                             PipelineVariantKey key,
+                             nvrhi::IMeshletPipeline *&outPipeline) {
+  key = canonicalRasterPipelineState(key);
   if (auto found = pipeline.variants.find(key);
       found != pipeline.variants.end()) {
     outPipeline = found->second.Get();
@@ -3616,6 +3771,22 @@ meshletPipelineVariant(Impl &impl, MeshletPipelineResource &pipeline,
   auto [it, _] = pipeline.variants.emplace(key, std::move(handle));
   outPipeline = it->second.Get();
   return std::nullopt;
+}
+
+[[nodiscard]] std::optional<std::string>
+findMeshletPipelineVariant(Impl &impl, MeshletPipelineResource &pipeline,
+                           const MeshDispatchItem &dispatch,
+                           nvrhi::IMeshletPipeline *&outPipeline) {
+  const PipelineVariantKey key = makePipelineVariantKey(dispatch);
+  if (auto found = pipeline.variants.find(key);
+      found != pipeline.variants.end()) {
+    outPipeline = found->second.Get();
+    return std::nullopt;
+  }
+  ++impl.undeclaredMeshletPipelineVariantMisses;
+  return std::string("Meshlet pipeline raster variant was not declared during "
+                     "pipeline preparation: ") +
+         pipeline.debugName;
 }
 
 [[nodiscard]] nvrhi::FramebufferInfo
@@ -3869,7 +4040,7 @@ recordMeshDispatches(Impl &impl, nvrhi::ICommandList &commandList,
 
     nvrhi::IMeshletPipeline *variant = nullptr;
     auto variantError =
-        meshletPipelineVariant(impl, *pipeline, dispatch, variant);
+        findMeshletPipelineVariant(impl, *pipeline, dispatch, variant);
     if (variantError) {
       return Result<bool, std::string>::makeError(*variantError);
     }
@@ -4145,14 +4316,48 @@ recordRenderPass(Impl &impl,
     }
     framebufferDesc.setDepthAttachment(depthAttachment);
   }
-  nvrhi::FramebufferHandle framebuffer = [&]() {
-    nvrhi::FramebufferHandle created{};
+
+  const FramebufferCacheKey framebufferKey{
+      .colorTexture = pass.hasColorAttachment && !colorIsSwapchain
+                          ? pass.colorTexture
+                          : TextureHandle{},
+      .colorResolveTexture =
+          colorFramebufferResolve ? pass.colorResolveTexture : TextureHandle{},
+      .depthTexture = pass.depthTexture,
+      .depthResolveTexture =
+          depthFramebufferResolve ? pass.depthResolveTexture : TextureHandle{},
+      .swapchainGeneration = colorIsSwapchain ? impl.swapchainGeneration : 0u,
+      .swapchainImageIndex =
+          colorIsSwapchain ? impl.preparedSwapchainImageIndex : 0u,
+      .colorResolveMode =
+          colorFramebufferResolve ? pass.color.resolveMode : ResolveMode::None,
+      .depthResolveMode =
+          depthFramebufferResolve ? pass.depth.resolveMode : ResolveMode::None,
+      .hasColorAttachment = pass.hasColorAttachment,
+      .colorIsSwapchain = colorIsSwapchain,
+      .colorResolve = colorFramebufferResolve,
+      .depthResolve = depthFramebufferResolve,
+  };
+  auto cachedFramebuffer = std::find_if(
+      impl.cachedFramebuffers.begin(), impl.cachedFramebuffers.end(),
+      [&framebufferKey](const CachedFramebuffer &entry) {
+        return entry.key == framebufferKey;
+      });
+  nvrhi::FramebufferHandle framebuffer{};
+  if (cachedFramebuffer != impl.cachedFramebuffers.end()) {
+    framebuffer = cachedFramebuffer->framebuffer;
+  } else {
     NURI_PROFILER_ZONE("NvrhiGPUDevice.create_framebuffer",
                        NURI_PROFILER_COLOR_CREATE);
-    created = impl.nvrhiDevice->createFramebuffer(framebufferDesc);
+    framebuffer = impl.nvrhiDevice->createFramebuffer(framebufferDesc);
     NURI_PROFILER_ZONE_END();
-    return created;
-  }();
+    if (framebuffer) {
+      impl.cachedFramebuffers.push_back(CachedFramebuffer{
+          .key = framebufferKey,
+          .framebuffer = framebuffer,
+      });
+    }
+  }
   if (!framebuffer) {
     return Result<bool, std::string>::makeError(
         "NvrhiGPUDevice::recordRenderPass: failed to create framebuffer");
@@ -4226,7 +4431,7 @@ recordRenderPass(Impl &impl,
       }
       nvrhi::IGraphicsPipeline *variant = nullptr;
       auto variantError =
-          graphicsPipelineVariant(impl, *pipeline, draw, variant);
+          findGraphicsPipelineVariant(impl, *pipeline, draw, variant);
       if (variantError) {
         return Result<bool, std::string>::makeError(*variantError);
       }
@@ -4452,6 +4657,15 @@ NvrhiGPUDevice::create(Window &window, const GPUDeviceCreateDesc &desc) {
   auto device = std::unique_ptr<NvrhiGPUDevice>(new NvrhiGPUDevice());
   device->impl_ = std::make_unique<Impl>();
   Impl &impl = *device->impl_;
+  impl.recordingContextSlots.reserve(kMaxGraphicsRecordingContexts);
+  impl.recordedCommandBufferSlots.reserve(kMaxGraphicsRecordingContexts);
+  impl.submissionSlots.reserve(kSwapchainFramesInFlight + 1u);
+  impl.activeGraphicsContexts.reserve(kMaxGraphicsRecordingContexts);
+  impl.recordedGraphicsCommandBuffers.reserve(kMaxGraphicsRecordingContexts);
+  impl.pendingGraphicsCommandLists.reserve(kSwapchainFramesInFlight + 1u);
+  impl.availableGraphicsCommandLists.reserve(kSwapchainFramesInFlight + 1u);
+  impl.pendingAsyncUploadSubmissions.reserve(kSwapchainFramesInFlight + 1u);
+  impl.availableAsyncUploadCommandLists.reserve(kSwapchainFramesInFlight + 1u);
   impl.window = &window;
   impl.glfwWindow = static_cast<GLFWwindow *>(window.nativeHandle());
   impl.requestedPresentMode = requestedPresentModeFromEnvironment();
@@ -5011,13 +5225,21 @@ NvrhiGPUDevice::createRenderPipeline(const RenderPipelineDesc &desc,
         shaderName(desc.fragmentShader));
   }
 
-  DrawItem defaultDraw{};
   nvrhi::IGraphicsPipeline *pipeline = nullptr;
-  auto pipelineError =
-      graphicsPipelineVariant(*impl_, resource, defaultDraw, pipeline);
+  auto pipelineError = createGraphicsPipelineVariant(
+      *impl_, resource, makePipelineVariantKey(desc.rasterState), pipeline);
   if (pipelineError) {
     impl_->renderPipelines.deallocate(reserved.handle);
     return Result<RenderPipelineHandle, std::string>::makeError(*pipelineError);
+  }
+  for (const RasterPipelineState rasterState : desc.prewarmRasterStates) {
+    pipelineError = createGraphicsPipelineVariant(
+        *impl_, resource, makePipelineVariantKey(rasterState), pipeline);
+    if (pipelineError) {
+      impl_->renderPipelines.deallocate(reserved.handle);
+      return Result<RenderPipelineHandle, std::string>::makeError(
+          *pipelineError);
+    }
   }
   return Result<RenderPipelineHandle, std::string>::makeResult(reserved.handle);
 }
@@ -5175,53 +5397,72 @@ NvrhiGPUDevice::createMeshletPipeline(const MeshletPipelineDesc &desc,
       .setRenderState(renderState);
   resource.baseDesc.bindingLayouts = globalBindingLayouts(*impl_);
 
-  MeshDispatchItem defaultDispatch{};
   nvrhi::IMeshletPipeline *pipeline = nullptr;
-  auto pipelineError =
-      meshletPipelineVariant(*impl_, resource, defaultDispatch, pipeline);
+  auto pipelineError = createMeshletPipelineVariant(
+      *impl_, resource, makePipelineVariantKey(desc.rasterState), pipeline);
   if (pipelineError) {
     impl_->meshletPipelines.deallocate(reserved.handle);
     return Result<MeshletPipelineHandle, std::string>::makeError(
         *pipelineError);
+  }
+  for (const RasterPipelineState rasterState : desc.prewarmRasterStates) {
+    pipelineError = createMeshletPipelineVariant(
+        *impl_, resource, makePipelineVariantKey(rasterState), pipeline);
+    if (pipelineError) {
+      impl_->meshletPipelines.deallocate(reserved.handle);
+      return Result<MeshletPipelineHandle, std::string>::makeError(
+          *pipelineError);
+    }
   }
   return Result<MeshletPipelineHandle, std::string>::makeResult(
       reserved.handle);
 }
 
 void NvrhiGPUDevice::destroyRenderPipeline(RenderPipelineHandle pipeline) {
-  if (impl_) {
-    impl_->renderPipelines.deallocate(pipeline);
+  if (impl_ != nullptr) {
+    if (auto resource = impl_->renderPipelines.take(pipeline)) {
+      retireNativeResource(*impl_, std::move(*resource));
+    }
   }
 }
 
 void NvrhiGPUDevice::destroyComputePipeline(ComputePipelineHandle pipeline) {
-  if (impl_) {
-    impl_->computePipelines.deallocate(pipeline);
+  if (impl_ != nullptr) {
+    if (auto resource = impl_->computePipelines.take(pipeline)) {
+      retireNativeResource(*impl_, std::move(*resource));
+    }
   }
 }
 
 void NvrhiGPUDevice::destroyMeshletPipeline(MeshletPipelineHandle pipeline) {
-  if (impl_) {
-    impl_->meshletPipelines.deallocate(pipeline);
+  if (impl_ != nullptr) {
+    if (auto resource = impl_->meshletPipelines.take(pipeline)) {
+      retireNativeResource(*impl_, std::move(*resource));
+    }
   }
 }
 
 void NvrhiGPUDevice::destroyBuffer(BufferHandle buffer) {
-  if (impl_) {
-    if (BufferResource *resource = impl_->buffers.get(buffer);
-        resource != nullptr && resource->mapped != nullptr) {
-      impl_->nvrhiDevice->unmapBuffer(resource->buffer.Get());
-      resource->mapped = nullptr;
-      resource->mappedMemory = VK_NULL_HANDLE;
-    }
-    impl_->buffers.deallocate(buffer);
+  if (impl_ == nullptr) {
+    return;
   }
+  auto resource = impl_->buffers.take(buffer);
+  if (!resource) {
+    return;
+  }
+  if (resource->mapped != nullptr) {
+    impl_->nvrhiDevice->unmapBuffer(resource->buffer.Get());
+    resource->mapped = nullptr;
+    resource->mappedMemory = VK_NULL_HANDLE;
+  }
+  retireNativeResource(*impl_, std::move(*resource));
 }
 
 void NvrhiGPUDevice::destroyTexture(TextureHandle texture) {
   if (!impl_) {
     return;
   }
+  invalidateCachedFramebuffers(*impl_, texture);
   impl_->framebufferTextures.erase(
       std::remove_if(impl_->framebufferTextures.begin(),
                      impl_->framebufferTextures.end(),
@@ -5229,18 +5470,24 @@ void NvrhiGPUDevice::destroyTexture(TextureHandle texture) {
                        return areSameHandle(entry.handle, texture);
                      }),
       impl_->framebufferTextures.end());
-  impl_->textures.deallocate(texture);
+  if (auto resource = impl_->textures.take(texture)) {
+    retireNativeResource(*impl_, std::move(*resource));
+  }
 }
 
 void NvrhiGPUDevice::destroySampler(SamplerHandle sampler) {
-  if (impl_) {
-    impl_->samplers.deallocate(sampler);
+  if (impl_ != nullptr) {
+    if (auto resource = impl_->samplers.take(sampler)) {
+      retireNativeResource(*impl_, std::move(*resource));
+    }
   }
 }
 
 void NvrhiGPUDevice::destroyShaderModule(ShaderHandle shader) {
-  if (impl_) {
-    impl_->shaders.deallocate(shader);
+  if (impl_ != nullptr) {
+    if (auto resource = impl_->shaders.take(shader)) {
+      retireNativeResource(*impl_, std::move(*resource));
+    }
   }
 }
 
@@ -5435,7 +5682,7 @@ Result<bool, std::string> NvrhiGPUDevice::beginFrame(uint64_t frameIndex) {
   uint64_t frameResourceWaitInstance = 0u;
   size_t frameResourceSlot = std::numeric_limits<size_t>::max();
   {
-    std::lock_guard lock(impl_->immediateMutex);
+    std::scoped_lock lock(impl_->immediateMutex, impl_->graphicsContextMutex);
     impl_->currentFrameIndex = frameIndex;
     impl_->hasPreparedSwapchainImage = false;
     impl_->preparedSwapchainImageWaitInstance = 0u;
@@ -5458,7 +5705,7 @@ Result<bool, std::string> NvrhiGPUDevice::beginFrame(uint64_t frameIndex) {
     return waitResult;
   }
   {
-    std::lock_guard lock(impl_->immediateMutex);
+    std::scoped_lock lock(impl_->immediateMutex, impl_->graphicsContextMutex);
     if (frameResourceSlot < impl_->frameResourceReuseWaitInstances.size() &&
         impl_->frameResourceReuseWaitInstances[frameResourceSlot] ==
             frameResourceWaitInstance) {
@@ -5466,10 +5713,15 @@ Result<bool, std::string> NvrhiGPUDevice::beginFrame(uint64_t frameIndex) {
     }
     NURI_PROFILER_ZONE("NvrhiGPUDevice.collect_background_copy_submissions",
                        NURI_PROFILER_COLOR_CMD_COPY);
-    collectCompletedBackgroundCopySubmissions(*impl_);
+    collectCompletedAsyncUploadSubmissions(*impl_);
     NURI_PROFILER_ZONE_END();
-    NURI_PROFILER_ZONE("NvrhiGPUDevice.run_garbage_collection",
+    const uint64_t completed = impl_->nvrhiDevice->queueGetCompletedInstance(
+        nvrhi::CommandQueue::Graphics);
+    NURI_PROFILER_ZONE("NvrhiGPUDevice.collect_retired_resources",
                        NURI_PROFILER_COLOR_DESTROY);
+    impl_->retiredResources.collectThrough(completed);
+    collectCompletedSubmissionRecords(*impl_, completed);
+    collectCompletedGraphicsCommandLists(*impl_, completed);
     impl_->nvrhiDevice->runGarbageCollection();
     NURI_PROFILER_ZONE_END();
     NURI_PROFILER_ZONE("NvrhiGPUDevice.collect_gpu_timing_submissions",
@@ -5568,36 +5820,28 @@ NvrhiGPUDevice::acquireGraphicsRecordingContext(uint32_t workerIndex) {
         "NVRHI device is null");
   }
   std::lock_guard lock(impl_->graphicsContextMutex);
-  auto indexResult = allocateMonotonicHandleIndex(
-      impl_->nextRecordingContextIndex,
-      "NvrhiGPUDevice::acquireGraphicsRecordingContext");
-  if (indexResult.hasError()) {
-    return Result<RecordingContextHandle, std::string>::makeError(
-        indexResult.error());
-  }
-
-  const uint32_t index = indexResult.value();
+  const SlotReservation slot = impl_->recordingContextSlots.acquire();
+  const uint32_t index = slot.index;
   RecordingContextHandle handle{
       .index = index,
-      .generation =
-          nextHandleGeneration(impl_->recordingContextGenerations, index),
+      .generation = slot.generation,
   };
   if (impl_->activeGraphicsContexts.size() <= index) {
     impl_->activeGraphicsContexts.resize(static_cast<size_t>(index) + 1u);
   }
-  if (impl_->activeGraphicsContextOccupied.size() <= index) {
-    impl_->activeGraphicsContextOccupied.resize(static_cast<size_t>(index) + 1u,
-                                                0u);
-  }
 
   nvrhi::CommandListHandle commandList{};
-  {
+  if (!impl_->availableGraphicsCommandLists.empty()) {
+    commandList = std::move(impl_->availableGraphicsCommandLists.back());
+    impl_->availableGraphicsCommandLists.pop_back();
+  } else {
     NURI_PROFILER_ZONE("NvrhiGPUDevice.create_command_list",
                        NURI_PROFILER_COLOR_CREATE);
     commandList = impl_->nvrhiDevice->createCommandList();
     NURI_PROFILER_ZONE_END();
   }
   if (!commandList) {
+    impl_->recordingContextSlots.release(index);
     return Result<RecordingContextHandle, std::string>::makeError(
         "Failed to create command list");
   }
@@ -5614,7 +5858,6 @@ NvrhiGPUDevice::acquireGraphicsRecordingContext(uint32_t workerIndex) {
       .timingQueries = {},
       .workerIndex = workerIndex,
   };
-  impl_->activeGraphicsContextOccupied[index] = 1u;
   return Result<RecordingContextHandle, std::string>::makeResult(handle);
 }
 
@@ -5707,18 +5950,11 @@ NvrhiGPUDevice::finishGraphicsRecordingContext(RecordingContextHandle ctx) {
     active->commandList->close();
     NURI_PROFILER_ZONE_END();
   }
-  auto indexResult = allocateMonotonicHandleIndex(
-      impl_->nextRecordedCommandBufferIndex,
-      "NvrhiGPUDevice::finishGraphicsRecordingContext");
-  if (indexResult.hasError()) {
-    return Result<RecordedCommandBufferHandle, std::string>::makeError(
-        indexResult.error());
-  }
-  const uint32_t index = indexResult.value();
+  const SlotReservation slot = impl_->recordedCommandBufferSlots.acquire();
+  const uint32_t index = slot.index;
   RecordedCommandBufferHandle handle{
       .index = index,
-      .generation =
-          nextHandleGeneration(impl_->recordedCommandBufferGenerations, index),
+      .generation = slot.generation,
   };
   impl_->recordedGraphicsCommandBuffers.push_back(RecordedGraphicsCommandBuffer{
       .handle = handle,
@@ -5726,7 +5962,7 @@ NvrhiGPUDevice::finishGraphicsRecordingContext(RecordingContextHandle ctx) {
       .framebuffers = std::move(active->framebuffers),
       .timingQueries = std::move(active->timingQueries)});
   impl_->activeGraphicsContexts[ctx.index] = ActiveGraphicsRecordingContext{};
-  impl_->activeGraphicsContextOccupied[ctx.index] = 0u;
+  impl_->recordingContextSlots.release(ctx.index);
   return Result<RecordedCommandBufferHandle, std::string>::makeResult(handle);
 }
 
@@ -5741,7 +5977,7 @@ NvrhiGPUDevice::discardGraphicsRecordingContext(RecordingContextHandle ctx) {
         "context");
   }
   impl_->activeGraphicsContexts[ctx.index] = ActiveGraphicsRecordingContext{};
-  impl_->activeGraphicsContextOccupied[ctx.index] = 0u;
+  impl_->recordingContextSlots.release(ctx.index);
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -5753,10 +5989,15 @@ Result<bool, std::string> NvrhiGPUDevice::discardRecordedGraphicsCommandBuffer(
                        commandBuffer)) {
       continue;
     }
+    nvrhi::CommandListHandle reusableCommandList =
+        std::move(impl_->recordedGraphicsCommandBuffers[i].commandList);
     if (i + 1u != impl_->recordedGraphicsCommandBuffers.size()) {
       impl_->recordedGraphicsCommandBuffers[i] =
           std::move(impl_->recordedGraphicsCommandBuffers.back());
     }
+    impl_->availableGraphicsCommandLists.push_back(
+        std::move(reusableCommandList));
+    impl_->recordedCommandBufferSlots.release(commandBuffer.index);
     impl_->recordedGraphicsCommandBuffers.pop_back();
     return Result<bool, std::string>::makeResult(true);
   }
@@ -5810,7 +6051,7 @@ NvrhiGPUDevice::submitRecordedGraphicsFrame(
 
   std::vector<size_t> matchedIndices(commandBuffers.size());
   std::vector<nvrhi::ICommandList *> nvrhiCommandLists;
-  nvrhiCommandLists.reserve(commandBuffers.size() + 2u);
+  nvrhiCommandLists.reserve(commandBuffers.size() + 3u);
   for (size_t i = 0u; i < commandBuffers.size(); ++i) {
     const auto found =
         recordedIndexByHandle.find(foldHandle(commandBuffers[i]));
@@ -5871,6 +6112,14 @@ NvrhiGPUDevice::submitRecordedGraphicsFrame(
         nvrhi::CommandQueue::Graphics,
         impl_->renderFinishedSemaphores[impl_->semaphoreFrameIndex], 0u);
   }
+  nvrhi::CommandListHandle frameUploadCommandList =
+      takePendingAsyncUploadCommandList(*impl_);
+  if (frameUploadCommandList) {
+    const size_t insertIndex =
+        wholeFrameTiming.queryPool != VK_NULL_HANDLE ? 1u : 0u;
+    nvrhiCommandLists.insert(nvrhiCommandLists.begin() + insertIndex,
+                             frameUploadCommandList.Get());
+  }
   uint64_t instance = 0u;
   {
     NURI_PROFILER_ZONE("NvrhiGPUDevice.execute_command_lists",
@@ -5879,6 +6128,13 @@ NvrhiGPUDevice::submitRecordedGraphicsFrame(
         nvrhiCommandLists.data(), nvrhiCommandLists.size(),
         nvrhi::CommandQueue::Graphics);
     NURI_PROFILER_ZONE_END();
+  }
+  impl_->latestSubmittedInstance = instance;
+  if (frameUploadCommandList) {
+    impl_->pendingAsyncUploadSubmissions.push_back(PendingAsyncUploadSubmission{
+        .submissionInstance = instance,
+        .commandList = std::move(frameUploadCommandList),
+    });
   }
   ++impl_->submittedFrameCount;
   if (!impl_->frameResourceReuseWaitInstances.empty()) {
@@ -5943,11 +6199,20 @@ NvrhiGPUDevice::submitRecordedGraphicsFrame(
     if (index >= impl_->recordedGraphicsCommandBuffers.size()) {
       continue;
     }
+    RecordedGraphicsCommandBuffer &recorded =
+        impl_->recordedGraphicsCommandBuffers[index];
+    const uint32_t handleIndex = recorded.handle.index;
+    impl_->pendingGraphicsCommandLists.push_back(PendingGraphicsCommandList{
+        .submissionInstance = instance,
+        .commandList = std::move(recorded.commandList),
+        .framebuffers = std::move(recorded.framebuffers),
+    });
     if (index + 1u != impl_->recordedGraphicsCommandBuffers.size()) {
       impl_->recordedGraphicsCommandBuffers[index] =
           std::move(impl_->recordedGraphicsCommandBuffers.back());
     }
     impl_->recordedGraphicsCommandBuffers.pop_back();
+    impl_->recordedCommandBufferSlots.release(handleIndex);
   }
 
   return allocateSubmissionHandle(*impl_, instance);
@@ -5972,6 +6237,7 @@ Result<bool, std::string> NvrhiGPUDevice::submitComputeDispatches(
     return Result<bool, std::string>::makeResult(true);
   }
   std::lock_guard lock(impl_->immediateMutex);
+  flushPendingAsyncUploadCommandList(*impl_);
   impl_->immediateCommandList->open();
   auto result =
       recordComputeDispatches(*impl_, *impl_->immediateCommandList, dispatches,
@@ -6048,10 +6314,10 @@ NvrhiGPUDevice::submitBackgroundBufferCopies(
   }
 
   std::lock_guard lock(impl_->immediateMutex);
-  collectCompletedBackgroundCopySubmissions(*impl_);
+  collectCompletedAsyncUploadSubmissions(*impl_);
+  flushPendingAsyncUploadCommandList(*impl_);
   impl_->nvrhiDevice->runGarbageCollection();
-  nvrhi::CommandListHandle commandList =
-      impl_->nvrhiDevice->createCommandList();
+  nvrhi::CommandListHandle commandList = acquireAsyncUploadCommandList(*impl_);
   if (!commandList) {
     return Result<SubmissionHandle, std::string>::makeError(
         "NvrhiGPUDevice::submitBackgroundBufferCopies: failed to create "
@@ -6072,42 +6338,84 @@ NvrhiGPUDevice::submitBackgroundBufferCopies(
                             src->buffer.Get(), region.srcOffset, region.size);
   }
   commandList->close();
-  nvrhi::ICommandList *raw = commandList.Get();
-  const uint64_t instance = impl_->nvrhiDevice->executeCommandLists(
-      &raw, 1u, nvrhi::CommandQueue::Graphics);
-  impl_->pendingBackgroundCopySubmissions.push_back(
-      PendingBackgroundCopySubmission{.submissionInstance = instance,
-                                      .commandList = commandList});
+  const uint64_t instance = submitAsyncUploadCommandList(*impl_, commandList);
   return allocateSubmissionHandle(*impl_, instance);
 }
 
 Result<bool, std::string>
 NvrhiGPUDevice::updateBuffer(BufferHandle bufferHandle,
                              std::span<const std::byte> data, size_t offset) {
-  if (data.empty()) {
-    return Result<bool, std::string>::makeResult(true);
+  const BufferUpdate update{
+      .buffer = bufferHandle,
+      .data = data,
+      .offset = offset,
+  };
+  return updateBuffers(std::span<const BufferUpdate>(&update, 1u));
+}
+
+Result<bool, std::string>
+NvrhiGPUDevice::updateBuffers(std::span<const BufferUpdate> updates) {
+  size_t deviceLocalUpdateCount = 0u;
+  for (const BufferUpdate &update : updates) {
+    if (update.data.empty()) {
+      continue;
+    }
+    BufferResource *buffer = impl_->buffers.get(update.buffer);
+    if (buffer == nullptr || update.offset > buffer->byteSize ||
+        update.data.size() > buffer->byteSize - update.offset) {
+      return Result<bool, std::string>::makeError(
+          "NvrhiGPUDevice::updateBuffers: invalid buffer range");
+    }
+    if (buffer->immutable) {
+      return Result<bool, std::string>::makeError(
+          "NvrhiGPUDevice::updateBuffers: buffer is immutable");
+    }
+    deviceLocalUpdateCount += buffer->mapped == nullptr ? 1u : 0u;
   }
-  BufferResource *buffer = impl_->buffers.get(bufferHandle);
-  if (buffer == nullptr || offset + data.size() > buffer->byteSize) {
-    return Result<bool, std::string>::makeError(
-        "NvrhiGPUDevice::updateBuffer: invalid buffer range");
-  }
-  if (buffer->immutable) {
-    return Result<bool, std::string>::makeError(
-        "NvrhiGPUDevice::updateBuffer: buffer is immutable");
-  }
-  if (buffer->mapped != nullptr) {
-    std::memcpy(buffer->mapped + offset, data.data(), data.size());
-    flushMappedBufferRange(*impl_, *buffer, offset, data.size());
+
+  if (deviceLocalUpdateCount == 0u) {
+    for (const BufferUpdate &update : updates) {
+      if (update.data.empty()) {
+        continue;
+      }
+      BufferResource *buffer = impl_->buffers.get(update.buffer);
+      NURI_ASSERT(
+          buffer != nullptr && buffer->mapped != nullptr,
+          "NvrhiGPUDevice::updateBuffers: validated buffer disappeared");
+      std::memcpy(buffer->mapped + update.offset, update.data.data(),
+                  update.data.size());
+      flushMappedBufferRange(*impl_, *buffer, update.offset,
+                             update.data.size());
+    }
     return Result<bool, std::string>::makeResult(true);
   }
 
   std::lock_guard lock(impl_->immediateMutex);
-  impl_->immediateCommandList->open();
-  impl_->immediateCommandList->writeBuffer(buffer->buffer.Get(), data.data(),
-                                           data.size(), offset);
-  impl_->immediateCommandList->close();
-  executeCommandListAndWait(*impl_, impl_->immediateCommandList);
+  collectCompletedAsyncUploadSubmissions(*impl_);
+  nvrhi::CommandListHandle &commandList =
+      ensurePendingAsyncUploadCommandList(*impl_);
+  if (!commandList) {
+    return Result<bool, std::string>::makeError(
+        "NvrhiGPUDevice::updateBuffers: failed to create command list");
+  }
+
+  for (const BufferUpdate &update : updates) {
+    if (update.data.empty()) {
+      continue;
+    }
+    BufferResource *buffer = impl_->buffers.get(update.buffer);
+    NURI_ASSERT(buffer != nullptr,
+                "NvrhiGPUDevice::updateBuffers: validated buffer disappeared");
+    if (buffer->mapped != nullptr) {
+      std::memcpy(buffer->mapped + update.offset, update.data.data(),
+                  update.data.size());
+      flushMappedBufferRange(*impl_, *buffer, update.offset,
+                             update.data.size());
+      continue;
+    }
+    commandList->writeBuffer(buffer->buffer.Get(), update.data.data(),
+                             update.data.size(), update.offset);
+  }
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -6138,6 +6446,7 @@ NvrhiGPUDevice::readBuffer(BufferHandle bufferHandle, size_t offset,
   }
 
   std::lock_guard lock(impl_->immediateMutex);
+  flushPendingAsyncUploadCommandList(*impl_);
   impl_->immediateCommandList->open();
   impl_->immediateCommandList->copyBuffer(
       readback.Get(), 0u, buffer->buffer.Get(), offset, outBytes.size());
@@ -6250,6 +6559,7 @@ NvrhiGPUDevice::readTexture(TextureHandle textureHandle,
   dstSlice.setSize(region.width, region.height, 1u);
 
   std::lock_guard lock(impl_->immediateMutex);
+  flushPendingAsyncUploadCommandList(*impl_);
   impl_->immediateCommandList->open();
   impl_->immediateCommandList->copyTexture(staging.Get(), dstSlice,
                                            texture->texture.Get(), srcSlice);
@@ -6274,9 +6584,15 @@ NvrhiGPUDevice::readTexture(TextureHandle textureHandle,
 
 void NvrhiGPUDevice::waitIdle() {
   if (impl_ != nullptr && impl_->nvrhiDevice) {
-    std::lock_guard lock(impl_->immediateMutex);
+    std::scoped_lock lock(impl_->immediateMutex, impl_->graphicsContextMutex);
+    flushPendingAsyncUploadCommandList(*impl_);
     impl_->nvrhiDevice->waitForIdle();
-    collectCompletedBackgroundCopySubmissions(*impl_);
+    collectCompletedAsyncUploadSubmissions(*impl_);
+    impl_->retiredResources.releaseAllAfterIdle();
+    const uint64_t completed = impl_->nvrhiDevice->queueGetCompletedInstance(
+        nvrhi::CommandQueue::Graphics);
+    collectCompletedSubmissionRecords(*impl_, completed);
+    collectCompletedGraphicsCommandLists(*impl_, completed);
     impl_->nvrhiDevice->runGarbageCollection();
     collectCompletedGpuTimingSubmissions(*impl_);
   }

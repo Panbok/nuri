@@ -1,11 +1,16 @@
 {
   "target": "material_normals",
+  "capturePointVersion": 1,
+  "kind": "normal",
   "format": 4,
   "width": 640,
   "height": 360,
+  "mip": 0,
+  "layer": 0,
   "rowStride": 5120,
   "origin": "top_left",
   "colorSpace": "world_normal",
+  "profile": "normal",
   "payload": "material_normals.exr",
-  "hash": "fnv1a64:5ae1c2d527457504"
+  "hash": "sha256:bcff595d6a115c2c1748616c959103b7ebb91b96b57e35f7e4f2e498655fc7b3"
 }

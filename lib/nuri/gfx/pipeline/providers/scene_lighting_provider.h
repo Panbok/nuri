@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "nuri/defines.h"
+#include "nuri/gfx/dynamic_buffer.h"
 #include "nuri/gfx/frame/render_frame_context.h"
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/gfx/pipeline/frame_data_provider.h"
@@ -57,12 +58,11 @@ private:
   [[nodiscard]] Buffer *currentBuffer(uint64_t frameIndex) const noexcept;
 
   GPUDevice &gpu_;
-  std::vector<std::unique_ptr<Buffer>> sceneDataBuffers_;
+  std::vector<DynamicBufferSlot> sceneDataBuffers_;
   std::vector<SlotUploadState> slotUploadStates_;
   std::unique_ptr<Buffer> disabledShadowFrameBuffer_;
   SamplerHandle taaMaterialMipBiasSampler_{};
   std::optional<SamplerDesc> taaMaterialMipBiasSamplerDesc_{};
-  size_t sceneDataBufferCapacityBytes_ = 0;
   uint64_t loggedAddressProbeTopologyVersion_ =
       std::numeric_limits<uint64_t>::max();
   uint64_t loggedLightStateSignature_ = std::numeric_limits<uint64_t>::max();

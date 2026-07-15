@@ -2,6 +2,7 @@
 
 #include "nuri/core/runtime_config.h"
 #include "nuri/defines.h"
+#include "nuri/gfx/dynamic_buffer.h"
 #include "nuri/gfx/frame/render_frame_context.h"
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/gfx/pipeline.h"
@@ -287,11 +288,6 @@ private:
     }
   };
 
-  struct DynamicBufferSlot {
-    std::unique_ptr<Buffer> buffer;
-    size_t capacityBytes = 0;
-  };
-
   struct alignas(16) VelocityFrameGpuData {
     glm::mat4 currentViewProjNoJitter{1.0f};
     glm::mat4 previousViewProjNoJitter{1.0f};
@@ -469,6 +465,7 @@ private:
   };
 
   Result<bool, std::string> ensureInitialized();
+  [[nodiscard]] bool meshletPipelinesConfigured() const noexcept;
   Result<bool, std::string> recreatePickTexture();
   Result<bool, std::string>
   ensureCentersPhaseBufferCapacity(size_t requiredBytes);
@@ -553,8 +550,7 @@ private:
       std::span<const VisibilityCandidateGpu> candidateGpuData,
       std::span<const uint32_t> candidateIndices,
       const VisibilityPassRequest &request,
-      const VisibilityResolvedSettings &settings,
-      bool candidateIndicesPreculledByCpu,
+      const VisibilityResolvedSettings &settings, bool validateVisibleList,
       std::pmr::vector<PreparedGraphPass> &out);
   Result<bool, std::string>
   buildOpaquePasses(RenderFrameContext &frame,
@@ -912,6 +908,7 @@ private:
   std::pmr::vector<uint64_t> visibilityCounterRingPublishedFrames_;
   std::pmr::vector<uint32_t> visibilityExpectedVisibleIndexCounts_;
   std::pmr::vector<uint64_t> visibilityExpectedVisibleIndexHashes_;
+  std::pmr::vector<uint8_t> visibilityExpectedVisibleListsValid_;
   std::pmr::vector<uint32_t> visibilityVisibleIndexReadback_;
   std::pmr::vector<VisibilityCandidate> visibilityCandidates_;
   std::pmr::vector<VisibilityCandidateGpu> visibilityCandidateGpuData_;

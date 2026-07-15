@@ -1,7 +1,9 @@
 #pragma once
 
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <span>
 #include <type_traits>
 
@@ -14,87 +16,54 @@ enum class SwapchainPresentMode : uint8_t {
   Fifo,
 };
 
-// Handle types with index + generation for safety
-struct BufferHandle {
+// Cheap typed generational handles for GPU packets and resource tables.
+template <typename Tag> struct Handle {
   uint32_t index = 0;
   uint32_t generation = 0;
+  constexpr bool operator==(const Handle &) const noexcept = default;
 };
 
-struct TextureHandle {
-  uint32_t index = 0;
-  uint32_t generation = 0;
-};
+struct BufferHandleTag;
+struct TextureHandleTag;
+struct SamplerHandleTag;
+struct ShaderHandleTag;
+struct RenderPipelineHandleTag;
+struct ComputePipelineHandleTag;
+struct MeshletPipelineHandleTag;
+struct RecordingContextHandleTag;
+struct RecordedCommandBufferHandleTag;
+struct SubmissionHandleTag;
+struct GeometryAllocationHandleTag;
 
-struct SamplerHandle {
-  uint32_t index = 0;
-  uint32_t generation = 0;
-};
+using BufferHandle = Handle<BufferHandleTag>;
+using TextureHandle = Handle<TextureHandleTag>;
+using SamplerHandle = Handle<SamplerHandleTag>;
+using ShaderHandle = Handle<ShaderHandleTag>;
+using RenderPipelineHandle = Handle<RenderPipelineHandleTag>;
+using ComputePipelineHandle = Handle<ComputePipelineHandleTag>;
+using MeshletPipelineHandle = Handle<MeshletPipelineHandleTag>;
+using RecordingContextHandle = Handle<RecordingContextHandleTag>;
+using RecordedCommandBufferHandle = Handle<RecordedCommandBufferHandleTag>;
+using SubmissionHandle = Handle<SubmissionHandleTag>;
+using GeometryAllocationHandle = Handle<GeometryAllocationHandleTag>;
 
-struct ShaderHandle {
-  uint32_t index = 0;
-  uint32_t generation = 0;
-};
-
-struct RenderPipelineHandle {
-  uint32_t index = 0;
-  uint32_t generation = 0;
-};
-
-struct ComputePipelineHandle {
-  uint32_t index = 0;
-  uint32_t generation = 0;
-};
-
-struct MeshletPipelineHandle {
-  uint32_t index = 0;
-  uint32_t generation = 0;
-};
-
-struct RecordingContextHandle {
-  uint32_t index = 0;
-  uint32_t generation = 0;
-};
-
-struct RecordedCommandBufferHandle {
-  uint32_t index = 0;
-  uint32_t generation = 0;
-};
-
-struct SubmissionHandle {
-  uint32_t index = 0;
-  uint32_t generation = 0;
-};
-
-struct GeometryAllocationHandle {
-  uint32_t index = 0;
-  uint32_t generation = 0;
-};
-
-constexpr bool isValid(BufferHandle h) { return h.generation != 0; }
-constexpr bool isValid(TextureHandle h) { return h.generation != 0; }
-constexpr bool isValid(SamplerHandle h) { return h.generation != 0; }
-constexpr bool isValid(ShaderHandle h) { return h.generation != 0; }
-constexpr bool isValid(RenderPipelineHandle h) { return h.generation != 0; }
-constexpr bool isValid(ComputePipelineHandle h) { return h.generation != 0; }
-constexpr bool isValid(MeshletPipelineHandle h) { return h.generation != 0; }
-constexpr bool isValid(RecordingContextHandle h) { return h.generation != 0; }
-constexpr bool isValid(RecordedCommandBufferHandle h) {
-  return h.generation != 0;
+template <typename Tag> constexpr bool isValid(Handle<Tag> handle) noexcept {
+  return handle.generation != 0;
 }
-constexpr bool isValid(SubmissionHandle h) { return h.generation != 0; }
-constexpr bool isValid(GeometryAllocationHandle h) { return h.generation != 0; }
 
+static_assert(std::is_aggregate_v<BufferHandle>);
+static_assert(std::is_standard_layout_v<BufferHandle>);
+static_assert(std::is_trivially_copyable_v<BufferHandle>);
 static_assert(std::is_trivially_destructible_v<BufferHandle>);
-static_assert(std::is_trivially_destructible_v<TextureHandle>);
-static_assert(std::is_trivially_destructible_v<SamplerHandle>);
-static_assert(std::is_trivially_destructible_v<ShaderHandle>);
-static_assert(std::is_trivially_destructible_v<RenderPipelineHandle>);
-static_assert(std::is_trivially_destructible_v<ComputePipelineHandle>);
-static_assert(std::is_trivially_destructible_v<MeshletPipelineHandle>);
-static_assert(std::is_trivially_destructible_v<RecordingContextHandle>);
-static_assert(std::is_trivially_destructible_v<RecordedCommandBufferHandle>);
-static_assert(std::is_trivially_destructible_v<SubmissionHandle>);
-static_assert(std::is_trivially_destructible_v<GeometryAllocationHandle>);
+static_assert(sizeof(BufferHandle) == sizeof(uint32_t) * 2u);
+static_assert(alignof(BufferHandle) == alignof(uint32_t));
+static_assert(!std::is_same_v<BufferHandle, TextureHandle>);
+static_assert(BufferHandle{.index = 7u, .generation = 3u} ==
+              BufferHandle{7u, 3u});
+static_assert(BufferHandle{.index = 7u, .generation = 3u} !=
+              BufferHandle{7u, 4u});
+static_assert(isValid(BufferHandle{.index = 7u, .generation = 3u}));
+static_assert(!isValid(BufferHandle{}));
 
 // GPU enums (LVK-free)
 enum class Format : uint8_t {
@@ -382,6 +351,14 @@ struct BufferCopyRegion {
   uint64_t size = 0;
 };
 
+// Non-owning source data for an immediate upload batch. Implementations must
+// consume the bytes before returning; no caller span may escape the call.
+struct BufferUpdate {
+  BufferHandle buffer{};
+  std::span<const std::byte> data{};
+  size_t offset = 0u;
+};
+
 struct VertexAttribute {
   uint32_t location = 0;
   uint32_t binding = 0;
@@ -402,6 +379,76 @@ struct DepthState {
   CompareOp compareOp = CompareOp::Less;
   bool isDepthWriteEnabled = true;
 };
+
+// Canonical immutable raster facts for backends that bake depth state into a
+// pipeline. Depth-bias constant is integral because that is the state exposed
+// by NVRHI; callers use makeRasterPipelineState() to lower float draw settings
+// once, outside command encoding.
+struct RasterPipelineState {
+  CompareOp compareOp = CompareOp::Less;
+  bool depthWrite = true;
+  bool depthBiasEnable = false;
+  int32_t depthBiasConstant = 0;
+  float depthBiasSlope = 0.0f;
+  float depthBiasClamp = 0.0f;
+
+  constexpr bool
+  operator==(const RasterPipelineState &) const noexcept = default;
+};
+
+[[nodiscard]] inline float canonicalRasterPipelineFloat(float value) noexcept {
+  return value == 0.0f || !std::isfinite(value) ? 0.0f : value;
+}
+
+[[nodiscard]] inline int32_t
+canonicalRasterPipelineDepthBiasConstant(float value) noexcept {
+  if (!std::isfinite(value)) {
+    return 0;
+  }
+  const double rounded = std::round(static_cast<double>(value));
+  constexpr double kMin =
+      static_cast<double>(std::numeric_limits<int32_t>::min());
+  constexpr double kMax =
+      static_cast<double>(std::numeric_limits<int32_t>::max());
+  if (rounded <= kMin) {
+    return std::numeric_limits<int32_t>::min();
+  }
+  if (rounded >= kMax) {
+    return std::numeric_limits<int32_t>::max();
+  }
+  return static_cast<int32_t>(rounded);
+}
+
+[[nodiscard]] inline RasterPipelineState
+canonicalRasterPipelineState(RasterPipelineState state) noexcept {
+  if (!state.depthBiasEnable) {
+    state.depthBiasConstant = 0;
+    state.depthBiasSlope = 0.0f;
+    state.depthBiasClamp = 0.0f;
+    return state;
+  }
+  state.depthBiasSlope = canonicalRasterPipelineFloat(state.depthBiasSlope);
+  state.depthBiasClamp = canonicalRasterPipelineFloat(state.depthBiasClamp);
+  return state;
+}
+
+[[nodiscard]] inline RasterPipelineState
+makeRasterPipelineState(DepthState depthState, bool depthBiasEnable = false,
+                        float depthBiasConstant = 0.0f,
+                        float depthBiasSlope = 0.0f,
+                        float depthBiasClamp = 0.0f) noexcept {
+  return canonicalRasterPipelineState(RasterPipelineState{
+      .compareOp = depthState.compareOp,
+      .depthWrite = depthState.isDepthWriteEnabled,
+      .depthBiasEnable = depthBiasEnable,
+      .depthBiasConstant =
+          depthBiasEnable
+              ? canonicalRasterPipelineDepthBiasConstant(depthBiasConstant)
+              : 0,
+      .depthBiasSlope = depthBiasSlope,
+      .depthBiasClamp = depthBiasClamp,
+  });
+}
 
 struct SpecializationEntry {
   uint32_t constantId = 0;

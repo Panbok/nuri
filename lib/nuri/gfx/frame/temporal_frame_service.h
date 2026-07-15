@@ -5,7 +5,7 @@
 #include "nuri/gfx/frame/presentation_aa_plan.h"
 
 #include <cstdint>
-#include <memory>
+#include <optional>
 #include <string>
 
 namespace nuri {
@@ -65,8 +65,8 @@ struct TemporalFrameFacts {
 
 class NURI_API TemporalFrameService final {
 public:
-  TemporalFrameService();
-  ~TemporalFrameService();
+  TemporalFrameService() = default;
+  ~TemporalFrameService() = default;
 
   TemporalFrameService(const TemporalFrameService &) = delete;
   TemporalFrameService &operator=(const TemporalFrameService &) = delete;
@@ -91,8 +91,18 @@ public:
   cameraHistory() const noexcept;
 
 private:
-  struct Impl;
-  std::unique_ptr<Impl> impl_;
+  struct Pending {
+    TemporalCameraHistoryState cameraHistory{};
+    TemporalFrameFacts facts{};
+    PresentationAAPlan plan{};
+  };
+
+  TemporalCameraHistoryState committedCameraHistory_{};
+  TemporalFrameFacts committedFacts_{};
+  PresentationAAPlan committedPlan_{};
+  std::optional<Pending> pending_{};
+  TemporalResetReasonFlags deferredResetReasons_ =
+      TemporalResetReasonFlags::None;
 };
 
 } // namespace nuri

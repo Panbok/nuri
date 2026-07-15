@@ -307,6 +307,29 @@ private:
   std::vector<Allocation> allocations_{};
 };
 
+class FakeMeshletPipelineGpuDevice final : public FakeFullscreenGpuDevice {
+public:
+  bool supportsFeature(GPUFeature feature) const override {
+    return feature == GPUFeature::Meshlets;
+  }
+
+  Result<MeshletPipelineHandle, std::string>
+  createMeshletPipeline(const MeshletPipelineDesc &desc,
+                        std::string_view debugName) override {
+    createdMeshletPipelineDescs.push_back(desc);
+    createdMeshletPipelineNames.emplace_back(debugName);
+    return Result<MeshletPipelineHandle, std::string>::makeResult(
+        MeshletPipelineHandle{.index = nextMeshletPipelineIndex_++,
+                              .generation = 1u});
+  }
+
+  std::vector<MeshletPipelineDesc> createdMeshletPipelineDescs{};
+  std::vector<std::string> createdMeshletPipelineNames{};
+
+private:
+  uint32_t nextMeshletPipelineIndex_ = 1u;
+};
+
 class FakeNoComputeFullscreenGpuDevice final : public FakeFullscreenGpuDevice {
 public:
   Result<ComputePipelineHandle, std::string>
@@ -726,6 +749,97 @@ TEST(RenderGraphRendererTest,
               hasPassLabel(gpu, "Layer Explicit Output Pass"))
       << "submitted frame should contain both base implicit and layer output "
          "passes";
+}
+
+TEST(RenderGraphRendererTest, RendererCapturesGraphTelemetryOnlyOnRequest) {
+  EnvVarGuard dumpEnv("NURI_RENDER_GRAPH_DUMP", "0");
+  EnvVarGuard suppressionEnv("NURI_RENDER_GRAPH_SUPPRESS_INFERRED_SIDE_EFFECTS",
+                             "0");
+  std::pmr::unsynchronized_pool_resource memory;
+  FakeRendererGPUDevice gpu;
+  Renderer renderer(gpu, memory);
+  RenderPipeline pipeline(&memory);
+  ASSERT_NE(pipeline.addFeature(std::make_unique<BaseImplicitOutputFeature>()),
+            nullptr);
+
+  RenderFrameContext frameContext{};
+  frameContext.frameIndex = 1u;
+  frameContext.resources = &renderer.resources();
+  auto renderResult = renderer.render(pipeline, frameContext);
+  ASSERT_FALSE(renderResult.hasError());
+  EXPECT_EQ(renderer.renderGraphTelemetry().latestSnapshot(), nullptr);
+
+  renderer.renderGraphTelemetry().requestCapture(
+      RenderGraphTelemetryLevel::PassTimings);
+  frameContext.frameIndex = 2u;
+  renderResult = renderer.render(pipeline, frameContext);
+  ASSERT_FALSE(renderResult.hasError());
+  const RenderGraphTelemetrySnapshot *snapshot =
+      renderer.renderGraphTelemetry().latestSnapshot();
+  ASSERT_NE(snapshot, nullptr);
+  EXPECT_EQ(snapshot->summary.frameIndex, 2u);
+  EXPECT_EQ(snapshot->summary.passCount, 1u);
+  EXPECT_EQ(snapshot->summary.passTimingCount, 1u);
+}
+
+TEST(RenderGraphRendererTest, RendererPublishesOneGpuTimingSnapshotPerFrame) {
+  EnvVarGuard dumpEnv("NURI_RENDER_GRAPH_DUMP", "0");
+  std::pmr::unsynchronized_pool_resource memory;
+  FakeRendererGPUDevice gpu;
+  gpu.latestCompletedGpuTimingReport.opaqueSourceFrameIndex = 41u;
+  gpu.latestCompletedGpuTimingReport.opaqueTimeMs = 3.25f;
+  gpu.latestCompletedGpuTimingReport.availableScopeMask =
+      gpuTimingScopeToBit(GpuTimingScope::Opaque);
+  Renderer renderer(gpu, memory);
+  RenderPipeline pipeline(&memory);
+  ASSERT_NE(pipeline.addFeature(std::make_unique<BaseImplicitOutputFeature>()),
+            nullptr);
+
+  RenderFrameContext frameContext{};
+  frameContext.frameIndex = 42u;
+  frameContext.resources = &renderer.resources();
+  auto renderResult = renderer.render(pipeline, frameContext);
+
+  ASSERT_FALSE(renderResult.hasError());
+  EXPECT_EQ(gpu.latestGpuTimingReportFetchCount, 1u);
+  EXPECT_FLOAT_EQ(frameContext.gpuTiming.opaqueTimeMs, 3.25f);
+  EXPECT_EQ(frameContext.gpuTiming.opaqueSourceFrameIndex, 41u);
+  EXPECT_TRUE(
+      hasGpuTimingScope(frameContext.gpuTiming, GpuTimingScope::Opaque));
+}
+
+TEST(RenderGraphRendererTest,
+     RendererResolvesOneImmutableSettingsSnapshotPerFrame) {
+  EnvVarGuard dumpEnv("NURI_RENDER_GRAPH_DUMP", "0");
+  std::pmr::unsynchronized_pool_resource memory;
+  FakeRendererGPUDevice gpu;
+  Renderer renderer(gpu, memory);
+  RenderPipeline pipeline(&memory);
+  ASSERT_NE(pipeline.addFeature(std::make_unique<BaseImplicitOutputFeature>()),
+            nullptr);
+
+  RenderSettings authored{};
+  authored.hdrPostProcess.bloomStrength =
+      std::numeric_limits<float>::quiet_NaN();
+  authored.transmission.taaJitterPrefilterMaxLod = 99.0f;
+  authored.antiAliasing.temporalProvider =
+      static_cast<TemporalReconstructionProvider>(0xffu);
+
+  RenderFrameContext frameContext{};
+  frameContext.settings = &authored;
+  frameContext.resources = &renderer.resources();
+  auto renderResult = renderer.render(pipeline, frameContext);
+
+  ASSERT_FALSE(renderResult.hasError());
+  ASSERT_TRUE(frameContext.settingsResolved);
+  const RenderSettings &resolved = renderSettingsOrDefault(frameContext);
+  EXPECT_FLOAT_EQ(resolved.hdrPostProcess.bloomStrength,
+                  kDefaultHDRBloomStrength);
+  EXPECT_FLOAT_EQ(resolved.transmission.taaJitterPrefilterMaxLod, 2.0f);
+  EXPECT_EQ(resolved.antiAliasing.temporalProvider,
+            TemporalReconstructionProvider::Legacy);
+  EXPECT_TRUE(std::isnan(authored.hdrPostProcess.bloomStrength));
+  EXPECT_FLOAT_EQ(authored.transmission.taaJitterPrefilterMaxLod, 99.0f);
 }
 
 TEST(RenderGraphRendererTest, SanitizeHDRPostProcessSettingsClampsInputs) {
@@ -1643,6 +1757,62 @@ TEST(RenderGraphRendererTest,
   EXPECT_LT(skyboxIndex, resolveIndex);
 }
 
+TEST(RenderGraphRendererTest, SkyboxFrameDataUsesOneBufferPerLogicalFrameSlot) {
+  std::array<std::byte, 32 * 1024> scratchBytes{};
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeFullscreenGpuDevice gpu;
+  gpu.swapchainImageCount = 2u;
+  Renderer renderer(gpu, memory);
+  RenderGraphBuilder graph(&memory);
+  RenderScene scene(&memory);
+  scene.bindResources(&renderer.resources());
+
+  RenderFrameContext frameContext{};
+  frameContext.scene = &scene;
+  frameContext.resources = &renderer.resources();
+  FrameBuildContext ctx{
+      .frame = frameContext,
+      .graph = graph,
+      .resources = renderer.resources(),
+      .shared = frameContext.sharedResources,
+  };
+
+  const std::filesystem::path shaderRoot =
+      std::filesystem::path(PROJECT_SOURCE_DIR) / "assets" / "shaders";
+  const SkyboxFeatureConfig config{
+      .vertex = shaderRoot / "skybox.vert",
+      .fragment = shaderRoot / "skybox.frag",
+  };
+  const uint32_t initialCreatedBuffers = gpu.createdBufferCount;
+  const uint32_t initialDestroyedBuffers = gpu.destroyedBufferCount;
+
+  {
+    SkyboxPass pass(gpu, config);
+
+    for (uint64_t frameIndex = 0u; frameIndex < 3u; ++frameIndex) {
+      graph.beginFrame(frameIndex);
+      frameContext.frameIndex = frameIndex;
+      auto prepareResult = pass.prepare(ctx);
+      ASSERT_FALSE(prepareResult.hasError()) << prepareResult.error();
+
+      const uint32_t expectedBuffers = frameIndex == 0u ? 1u : 2u;
+      EXPECT_EQ(gpu.createdBufferCount - initialCreatedBuffers,
+                expectedBuffers);
+    }
+
+    gpu.swapchainImageCount = 3u;
+    graph.beginFrame(3u);
+    frameContext.frameIndex = 3u;
+    auto prepareResult = pass.prepare(ctx);
+    ASSERT_FALSE(prepareResult.hasError()) << prepareResult.error();
+    EXPECT_EQ(gpu.createdBufferCount - initialCreatedBuffers, 3u);
+    EXPECT_EQ(gpu.destroyedBufferCount - initialDestroyedBuffers, 2u);
+  }
+
+  EXPECT_EQ(gpu.destroyedBufferCount - initialDestroyedBuffers, 3u);
+}
+
 TEST(RenderGraphRendererTest,
      TemporalAAFeatureRegistersBetweenOpaqueAndFrameComposition) {
   std::array<std::byte, 32 * 1024> scratchBytes{};
@@ -1701,6 +1871,46 @@ TEST(RenderGraphRendererTest,
   EXPECT_EQ(spatial->featureName, "SpatialAAFeature");
   EXPECT_EQ(spatial->passName, "SpatialAAPass");
   EXPECT_EQ(composition->featureName, "FrameCompositionFeature");
+}
+
+TEST(RenderGraphRendererTest,
+     OpaqueFeaturePrewarmsConfiguredRasterStateVariantsOnAttach) {
+  std::pmr::unsynchronized_pool_resource memory;
+  FakeMeshletPipelineGpuDevice gpu;
+
+  OpaqueFeature feature(
+      gpu, makeOpaqueConfig(std::filesystem::path(PROJECT_SOURCE_DIR)),
+      &memory);
+
+  const auto meshletIt =
+      std::find(gpu.createdMeshletPipelineNames.begin(),
+                gpu.createdMeshletPipelineNames.end(), "opaque_meshlet");
+  ASSERT_NE(meshletIt, gpu.createdMeshletPipelineNames.end());
+  const size_t meshletIndex = static_cast<size_t>(
+      std::distance(gpu.createdMeshletPipelineNames.begin(), meshletIt));
+  ASSERT_LT(meshletIndex, gpu.createdMeshletPipelineDescs.size());
+  const auto hasDepthState = [](std::span<const RasterPipelineState> states,
+                                CompareOp compareOp, bool depthWrite) {
+    return std::any_of(
+        states.begin(), states.end(),
+        [compareOp, depthWrite](const RasterPipelineState &state) {
+          return state.compareOp == compareOp && state.depthWrite == depthWrite;
+        });
+  };
+  EXPECT_TRUE(hasDepthState(
+      gpu.createdMeshletPipelineDescs[meshletIndex].prewarmRasterStates,
+      CompareOp::Equal, false));
+
+  const auto classicIt =
+      std::find(gpu.createdRenderPipelineNames.begin(),
+                gpu.createdRenderPipelineNames.end(), "opaque_mesh");
+  ASSERT_NE(classicIt, gpu.createdRenderPipelineNames.end());
+  const size_t classicIndex = static_cast<size_t>(
+      std::distance(gpu.createdRenderPipelineNames.begin(), classicIt));
+  ASSERT_LT(classicIndex, gpu.createdRenderPipelineDescs.size());
+  EXPECT_TRUE(hasDepthState(
+      gpu.createdRenderPipelineDescs[classicIndex].prewarmRasterStates,
+      CompareOp::Equal, false));
 }
 
 TEST(RenderGraphRendererTest, ShadowFeatureBuildsNoGraphPassesWhenDisabled) {
@@ -2602,6 +2812,39 @@ TEST(RenderGraphRendererTest, OpaqueMainPassReadsShadowDepthAfterShadowPass) {
   EXPECT_EQ(frameContext.sharedResources.forwardSceneGpuData->shadowFlags &
                 kShadowFrameFlagEnabled,
             kShadowFrameFlagEnabled);
+}
+
+TEST(RenderGraphRendererTest,
+     MaterialTableProviderUploadsFiveTablesAsOneOrderedBatch) {
+  std::array<std::byte, 16 * 1024> scratchBytes{};
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeRendererGPUDevice gpu;
+  Renderer renderer(gpu, memory);
+  MaterialTableGpuProvider provider(gpu);
+  RenderGraphBuilder graph(&memory);
+  RenderFrameContext frame{};
+  frame.resources = &renderer.resources();
+  FrameBuildContext ctx{
+      .frame = frame,
+      .graph = graph,
+      .resources = renderer.resources(),
+      .shared = frame.sharedResources,
+  };
+
+  auto prepareResult = provider.prepare(ctx);
+  ASSERT_TRUE(prepareResult.hasValue());
+  EXPECT_TRUE(prepareResult.value());
+  ASSERT_EQ(gpu.updateBufferBatchCallCount, 1u);
+  ASSERT_EQ(gpu.updateBufferBatchSizes.size(), 1u);
+  EXPECT_EQ(gpu.updateBufferBatchSizes.front(), 5u);
+  EXPECT_EQ(gpu.updateBufferCallCount, 5u);
+
+  prepareResult = provider.prepare(ctx);
+  ASSERT_TRUE(prepareResult.hasValue());
+  EXPECT_TRUE(prepareResult.value());
+  EXPECT_EQ(gpu.updateBufferBatchCallCount, 1u);
+  EXPECT_EQ(gpu.updateBufferCallCount, 5u);
 }
 
 TEST(RenderGraphRendererTest,

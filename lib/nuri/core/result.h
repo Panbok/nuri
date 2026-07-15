@@ -1,10 +1,14 @@
 #pragma once
 
-#include <stdexcept>
+#include <exception>
 #include <type_traits>
 #include <utility>
 
 namespace nuri {
+
+namespace detail {
+[[noreturn]] inline void resultAccessViolation() noexcept { std::terminate(); }
+} // namespace detail
 
 struct ValueTag {};
 struct ErrorTag {};
@@ -74,44 +78,44 @@ public:
   [[nodiscard]] bool hasError() const noexcept { return !hasValue_; }
   [[nodiscard]] explicit operator bool() const noexcept { return hasValue_; }
 
-  [[nodiscard]] R &value() & {
+  [[nodiscard]] R &value() & noexcept {
     if (!hasValue_) {
-      throw std::runtime_error("Result does not contain a value");
+      detail::resultAccessViolation();
     }
     return storage_.value;
   }
 
-  [[nodiscard]] const R &value() const & {
+  [[nodiscard]] const R &value() const & noexcept {
     if (!hasValue_) {
-      throw std::runtime_error("Result does not contain a value");
+      detail::resultAccessViolation();
     }
     return storage_.value;
   }
 
-  [[nodiscard]] R &&value() && {
+  [[nodiscard]] R &&value() && noexcept {
     if (!hasValue_) {
-      throw std::runtime_error("Result does not contain a value");
+      detail::resultAccessViolation();
     }
     return std::move(storage_.value);
   }
 
-  [[nodiscard]] E &error() & {
+  [[nodiscard]] E &error() & noexcept {
     if (hasValue_) {
-      throw std::runtime_error("Result does not contain an error");
+      detail::resultAccessViolation();
     }
     return storage_.error;
   }
 
-  [[nodiscard]] const E &error() const & {
+  [[nodiscard]] const E &error() const & noexcept {
     if (hasValue_) {
-      throw std::runtime_error("Result does not contain an error");
+      detail::resultAccessViolation();
     }
     return storage_.error;
   }
 
-  [[nodiscard]] E &&error() && {
+  [[nodiscard]] E &&error() && noexcept {
     if (hasValue_) {
-      throw std::runtime_error("Result does not contain an error");
+      detail::resultAccessViolation();
     }
     return std::move(storage_.error);
   }
@@ -138,7 +142,10 @@ public:
     return Result<R, E>(ErrorTag{}, std::forward<E>(error));
   }
 
-  void swap(Result &rhs) noexcept {
+  void swap(Result &rhs) noexcept(std::is_nothrow_move_constructible_v<R> &&
+                                  std::is_nothrow_move_constructible_v<E> &&
+                                  std::is_nothrow_destructible_v<R> &&
+                                  std::is_nothrow_destructible_v<E>) {
     if (hasValue_ == rhs.hasValue_) {
       if (hasValue_) {
         R tmpValue(std::move(storage_.value));
@@ -243,29 +250,29 @@ public:
   [[nodiscard]] bool hasError() const noexcept { return !hasValue_; }
   [[nodiscard]] explicit operator bool() const noexcept { return hasValue_; }
 
-  void value() const {
+  void value() const noexcept {
     if (!hasValue_) {
-      throw std::runtime_error("Result does not contain a value");
+      detail::resultAccessViolation();
     }
   }
 
-  [[nodiscard]] E &error() & {
+  [[nodiscard]] E &error() & noexcept {
     if (hasValue_) {
-      throw std::runtime_error("Result does not contain an error");
-    }
-    return storage_.error;
-  }
-
-  [[nodiscard]] const E &error() const & {
-    if (hasValue_) {
-      throw std::runtime_error("Result does not contain an error");
+      detail::resultAccessViolation();
     }
     return storage_.error;
   }
 
-  [[nodiscard]] E &&error() && {
+  [[nodiscard]] const E &error() const & noexcept {
     if (hasValue_) {
-      throw std::runtime_error("Result does not contain an error");
+      detail::resultAccessViolation();
+    }
+    return storage_.error;
+  }
+
+  [[nodiscard]] E &&error() && noexcept {
+    if (hasValue_) {
+      detail::resultAccessViolation();
     }
     return std::move(storage_.error);
   }
@@ -282,7 +289,8 @@ public:
     return Result<void, E>(ErrorTag{}, std::forward<E>(error));
   }
 
-  void swap(Result &rhs) noexcept {
+  void swap(Result &rhs) noexcept(std::is_nothrow_move_constructible_v<E> &&
+                                  std::is_nothrow_destructible_v<E>) {
     if (hasValue_ == rhs.hasValue_) {
       if (!hasValue_) {
         E tmpError(std::move(storage_.error));

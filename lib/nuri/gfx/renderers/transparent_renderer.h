@@ -12,6 +12,7 @@
 
 #include "nuri/core/runtime_config.h"
 #include "nuri/defines.h"
+#include "nuri/gfx/dynamic_buffer.h"
 #include "nuri/gfx/frame/render_frame_context.h"
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/gfx/render_graph/render_graph.h"
@@ -123,11 +124,6 @@ private:
     uint32_t materialIndex = kInvalidMaterialIndex;
     uint32_t instanceIndex = 0;
     bool doubleSided = false;
-  };
-
-  struct DynamicBufferSlot {
-    std::unique_ptr<Buffer> buffer;
-    size_t capacityBytes = 0;
   };
 
   struct FixedDrawEntry {

@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "id": "shadows.niagara_bistro.outer_shadow_540p",
+  "suite": "shadows",
+  "description": "Outer Bistro route vantage for Ultra shadow factor and far-cascade coverage",
+  "scene": {
+    "kind": "prefab",
+    "pathBase": "modelsRoot",
+    "path": "NiagaraBistro/bistrox.gltf",
+    "importOptions": {"mesh": {"generateMeshlets": true, "meshletMaxVertices": 64, "meshletMaxPrimitives": 124, "meshletConeWeight": 0.0}}
+  },
+  "backend": "nvrhi",
+  "resolution": [960, 540],
+  "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 12,
+  "captureFrame": 16,
+  "authoritative": false,
+  "presentMode": "immediate",
+  "windowMode": "visible",
+  "camera": {"position": [22.0, 7.0, 31.0], "target": [-20.0, 3.0, 5.0], "verticalFovDegrees": 60.0, "nearPlane": 0.05, "farPlane": 500.0},
+  "settings": {
+    "antiAliasing": {"mode": "TAA", "temporalProvider": "Reference", "qualityPreset": "Ultra"},
+    "ambientOcclusion": {"mode": "GTAO", "preset": "Ultra"},
+    "shadow": {
+      "enabled": true,
+      "qualityPreset": "Ultra",
+      "debug": {"visualizeShadowFactor": true}
+    }
+  },
+  "requirements": {"assets": ["modelsRoot:NiagaraBistro/bistrox.gltf"], "backends": ["nvrhi"], "allowVisibleWindow": true},
+  "captures": [
+    {"target": "shadow_factor", "profile": "scalar", "required": true},
+    {"target": "shadow_cascade_2", "profile": "shadow_depth", "required": true},
+    {"target": "shadow_cascade_3", "profile": "shadow_depth", "required": true}
+  ]
+}

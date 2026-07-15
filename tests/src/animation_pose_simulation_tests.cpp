@@ -41,6 +41,12 @@ class FakeAnimationGpuDevice final : public FakeGPUDeviceBase {
 public:
   nuri::Result<nuri::ShaderHandle, std::string>
   createShaderModule(const nuri::ShaderDesc &) override {
+    ++shaderCreateCalls;
+    if (failShaderCreateAtCall != 0u &&
+        shaderCreateCalls == failShaderCreateAtCall) {
+      return nuri::Result<nuri::ShaderHandle, std::string>::makeError(
+          "injected shader creation failure");
+    }
     return nuri::Result<nuri::ShaderHandle, std::string>::makeResult(
         nuri::ShaderHandle{.index = nextShaderIndex_++, .generation = 1u});
   }
@@ -48,9 +54,23 @@ public:
   nuri::Result<nuri::ComputePipelineHandle, std::string>
   createComputePipeline(const nuri::ComputePipelineDesc &,
                         std::string_view) override {
+    ++computePipelineCreateCalls;
+    if (failComputePipelineCreateAtCall != 0u &&
+        computePipelineCreateCalls == failComputePipelineCreateAtCall) {
+      return nuri::Result<nuri::ComputePipelineHandle, std::string>::makeError(
+          "injected compute pipeline creation failure");
+    }
     return nuri::Result<nuri::ComputePipelineHandle, std::string>::makeResult(
         nuri::ComputePipelineHandle{.index = nextComputePipelineIndex_++,
                                     .generation = 1u});
+  }
+
+  void destroyShaderModule(nuri::ShaderHandle) override {
+    ++destroyedShaderCount;
+  }
+
+  void destroyComputePipeline(nuri::ComputePipelineHandle) override {
+    ++destroyedComputePipelineCount;
   }
 
   uint64_t getBufferDeviceAddress(nuri::BufferHandle h,
@@ -125,6 +145,13 @@ public:
     return geometryMutationVersion_;
   }
 
+  uint32_t shaderCreateCalls = 0u;
+  uint32_t computePipelineCreateCalls = 0u;
+  uint32_t failShaderCreateAtCall = 0u;
+  uint32_t failComputePipelineCreateAtCall = 0u;
+  uint32_t destroyedShaderCount = 0u;
+  uint32_t destroyedComputePipelineCount = 0u;
+
 private:
   struct GeometryEntry {
     uint32_t generation = 0u;
@@ -181,6 +208,40 @@ collectDependencyBuffers(const nuri::AnimationSceneFrameData &frameData) {
     }
   }
   return std::numeric_limits<uint32_t>::max();
+}
+
+TEST(AnimationGpuServicesTests,
+     PartialCreationFailuresRetireResourcesAndAllowCleanRetry) {
+  FakeAnimationGpuDevice gpu;
+  {
+    nuri::AnimationGpuServices services(gpu, shaderRootPath());
+
+    gpu.failShaderCreateAtCall = 4u;
+    auto shaderFailure = services.ensureInitialized();
+    ASSERT_TRUE(shaderFailure.hasError());
+    EXPECT_EQ(gpu.destroyedShaderCount, 3u);
+    EXPECT_EQ(gpu.computePipelineCreateCalls, 0u);
+    EXPECT_EQ(gpu.destroyedComputePipelineCount, 0u);
+
+    gpu.failShaderCreateAtCall = 0u;
+    gpu.failComputePipelineCreateAtCall = 3u;
+    auto pipelineFailure = services.ensureInitialized();
+    ASSERT_TRUE(pipelineFailure.hasError());
+    EXPECT_EQ(gpu.destroyedShaderCount, 10u);
+    EXPECT_EQ(gpu.computePipelineCreateCalls, 3u);
+    EXPECT_EQ(gpu.destroyedComputePipelineCount, 2u);
+
+    gpu.failComputePipelineCreateAtCall = 0u;
+    auto retry = services.ensureInitialized();
+    ASSERT_FALSE(retry.hasError()) << retry.error();
+    EXPECT_TRUE(nuri::isValid(services.samplePipeline()));
+    EXPECT_TRUE(nuri::isValid(services.skinPipeline()));
+    EXPECT_EQ(gpu.destroyedShaderCount, 10u);
+    EXPECT_EQ(gpu.destroyedComputePipelineCount, 2u);
+  }
+
+  EXPECT_EQ(gpu.destroyedShaderCount, 17u);
+  EXPECT_EQ(gpu.destroyedComputePipelineCount, 9u);
 }
 
 TEST(AnimationPoseSimulationTests, MakeDescRejectsInvalidInputs) {
@@ -505,8 +566,23 @@ TEST(AnimationPoseSimulationTests,
       frameData->instanceMatricesBuffer,
       frameData->previousInstanceMatricesBuffer));
 
+  const nuri::BufferHandle finalInstanceMatricesBuffer =
+      frameData->instanceMatricesBuffer;
+  const auto finalOverrideIt = std::find_if(
+      frameData->geometryOverridesByRenderable.begin(),
+      frameData->geometryOverridesByRenderable.end(),
+      [](const nuri::AnimatedRenderableGeometryOverride &overrideEntry) {
+        return overrideEntry.enabled &&
+               nuri::isValid(overrideEntry.vertexBuffer);
+      });
+  ASSERT_NE(finalOverrideIt, frameData->geometryOverridesByRenderable.end());
+  const nuri::BufferHandle finalOverrideBuffer = finalOverrideIt->vertexBuffer;
+  const uint32_t destroyedBefore = gpu.destroyedBufferCount;
   EXPECT_TRUE(runtime.destroyAnimationPoseSimulation(createResult.value()));
   EXPECT_EQ(runtime.animationSceneFrameData(), nullptr);
+  EXPECT_GT(gpu.destroyedBufferCount, destroyedBefore);
+  EXPECT_FALSE(gpu.isValid(finalInstanceMatricesBuffer));
+  EXPECT_FALSE(gpu.isValid(finalOverrideBuffer));
 }
 
 TEST(AnimationPoseSimulationTests,

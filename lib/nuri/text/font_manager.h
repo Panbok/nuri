@@ -60,7 +60,6 @@ public:
   virtual Result<bool, std::string>
   setFallbackChain(FontHandle font, std::span<const FontHandle> chain) = 0;
 
-  virtual void collectGarbage(uint64_t completedTimelineValue) = 0;
   virtual PoolStats poolStats() const = 0;
 };
 

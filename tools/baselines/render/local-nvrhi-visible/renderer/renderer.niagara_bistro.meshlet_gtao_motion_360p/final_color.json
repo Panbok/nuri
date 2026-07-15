@@ -1,11 +1,16 @@
 {
   "target": "final_color",
+  "capturePointVersion": 1,
+  "kind": "color",
   "format": 1,
   "width": 640,
   "height": 360,
+  "mip": 0,
+  "layer": 0,
   "rowStride": 2560,
   "origin": "top_left",
   "colorSpace": "display_sdr",
+  "profile": "ldr_color",
   "payload": "final_color.png",
-  "hash": "fnv1a64:02a30d6f0d7572d3"
+  "hash": "sha256:ddd0dede45ec14a868c1f967ab3d062fcb0626a0e92f554ed27e5f2e44de7f6a"
 }

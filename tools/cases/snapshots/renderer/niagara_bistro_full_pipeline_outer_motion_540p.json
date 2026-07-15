@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "id": "renderer.niagara_bistro.full_pipeline_outer_motion_540p",
+  "suite": "renderer",
+  "description": "Outer Bistro route vantage with deterministic motion and the complete Ultra reference pipeline",
+  "scene": {
+    "kind": "prefab",
+    "pathBase": "modelsRoot",
+    "path": "NiagaraBistro/bistrox.gltf",
+    "importOptions": {"mesh": {"generateMeshlets": true, "meshletMaxVertices": 64, "meshletMaxPrimitives": 124, "meshletConeWeight": 0.0}}
+  },
+  "backend": "nvrhi",
+  "resolution": [960, 540],
+  "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 12,
+  "captureFrame": 16,
+  "authoritative": false,
+  "presentMode": "immediate",
+  "windowMode": "visible",
+  "renderGraph": {"workerCount": 1, "parallelCompile": false, "parallelRecording": false},
+  "camera": {
+    "position": [22.0, 7.0, 31.0],
+    "target": [2.8, 4.1, 26.3],
+    "positionDeltaPerFrame": [-0.04, 0.0, -0.02],
+    "verticalFovDegrees": 60.0,
+    "nearPlane": 0.05,
+    "farPlane": 500.0
+  },
+  "settings": {
+    "opaque": {"enabled": true, "meshletMode": "Required", "enableMeshletFrustumCulling": true, "enableMeshletConeCulling": true, "enableDepthPrepass": false, "enableInstanceCompute": false, "enableInstanceAnimation": false, "enableMeshLod": false, "enableTessellation": false, "forcedMeshLod": 0},
+    "antiAliasing": {"mode": "TAA", "temporalProvider": "Reference", "qualityPreset": "Ultra"},
+    "ambientOcclusion": {"mode": "GTAO", "preset": "Ultra"},
+    "shadow": {"enabled": true, "qualityPreset": "Ultra"},
+    "hdrPostProcess": {"bloomEnabled": false, "adaptationEnabled": false},
+    "transmission": {"enabled": false},
+    "transparent": {"enabled": false},
+    "textureFiltering": {"mode": "Anisotropic", "anisotropy": 8}
+  },
+  "requirements": {"assets": ["modelsRoot:NiagaraBistro/bistrox.gltf"], "backends": ["nvrhi"], "allowVisibleWindow": true},
+  "captures": [
+    {"target": "final_color", "profile": "ldr_color", "required": true},
+    {"target": "scene_depth", "profile": "depth", "required": true},
+    {"target": "material_normals", "profile": "normal", "required": true},
+    {"target": "ambient_occlusion", "profile": "scalar", "required": true},
+    {"target": "motion_vectors", "profile": "velocity", "required": true}
+  ]
+}

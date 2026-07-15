@@ -8,7 +8,7 @@ namespace {
 
 [[nodiscard]] bool isTransparentEnabled(const FrameBuildContext &ctx) {
   return ctx.frame.settings == nullptr ||
-         ctx.frame.settings->transparent.enabled;
+         renderSettingsOrDefault(ctx.frame).transparent.enabled;
 }
 
 } // namespace

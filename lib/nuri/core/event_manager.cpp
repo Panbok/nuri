@@ -75,7 +75,7 @@ void EventManager::dispatch(EventChannel channel) {
       (void)slot.list->dispatch(event.data, stopOnConsume);
     }
   } catch (...) {
-    if (nextEventIndex + 1 < localQueue.size()) {
+    if (nextEventIndex < localQueue.size()) {
       state.queue.insert(state.queue.begin(),
                          localQueue.begin() +
                              static_cast<std::ptrdiff_t>(nextEventIndex),

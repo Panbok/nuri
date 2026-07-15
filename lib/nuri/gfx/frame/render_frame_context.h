@@ -450,6 +450,19 @@ sanitizeAntiAliasingMode(AntiAliasingMode mode) noexcept {
   }
 }
 
+[[nodiscard]] constexpr TemporalReconstructionProvider
+sanitizeTemporalReconstructionProvider(
+    TemporalReconstructionProvider provider) noexcept {
+  switch (provider) {
+  case TemporalReconstructionProvider::Legacy:
+  case TemporalReconstructionProvider::Reference:
+  case TemporalReconstructionProvider::External:
+    return provider;
+  default:
+    return TemporalReconstructionProvider::Legacy;
+  }
+}
+
 [[nodiscard]] constexpr AmbientOcclusionMode
 sanitizeAmbientOcclusionMode(AmbientOcclusionMode mode) noexcept {
   switch (mode) {
@@ -2944,8 +2957,16 @@ struct RenderFrameContext {
   const RenderScene *scene = nullptr;
   CameraFrameState camera{};
   PresentationAAPlan presentationAA{};
+  // Immutable snapshot fetched once after GPU beginFrame collects completed
+  // submissions. Features read this view instead of repeatedly crossing the
+  // backend interface and copying the same report.
+  GpuTimingReport gpuTiming{};
   TemporalFrameService *temporalFrameService = nullptr;
-  RenderSettings *settings = nullptr;
+  // Authored settings are borrowed input. Renderer::render resolves them once
+  // into the immutable frame snapshot below; passes never mutate caller state.
+  const RenderSettings *settings = nullptr;
+  RenderSettings resolvedSettings{};
+  bool settingsResolved = false;
   RenderFrameMetrics metrics{};
   // Frame-scoped one-shot opaque pick request/result channel.
   std::optional<OpaquePickRequest> opaquePickRequest{};
@@ -2964,6 +2985,31 @@ struct RenderFrameContext {
   uint64_t frameIndex = 0;
 };
 
+[[nodiscard]] inline RenderSettings
+resolveRenderSettings(const RenderSettings &source) {
+  RenderSettings resolved = source;
+  sanitizeVisibilitySettings(resolved.visibility);
+  resolved.antiAliasing.temporalProvider =
+      sanitizeTemporalReconstructionProvider(
+          resolved.antiAliasing.temporalProvider);
+  sanitizeAntiAliasingSettings(resolved.antiAliasing);
+  sanitizeAmbientOcclusionSettings(resolved.ambientOcclusion, resolved.opaque,
+                                   resolved.antiAliasing);
+  sanitizeTextureFilteringSettings(resolved.textureFiltering);
+  sanitizeToneMapSettings(resolved.toneMap);
+  sanitizeHDRPostProcessSettings(resolved.hdrPostProcess);
+  sanitizeTransmissionSettings(resolved.transmission);
+  sanitizeShadowSettings(resolved.shadow);
+  return resolved;
+}
+
+inline void resolveRenderSettingsForFrame(RenderFrameContext &frame) {
+  static const RenderSettings kDefaultSettings{};
+  frame.resolvedSettings = resolveRenderSettings(
+      frame.settings ? *frame.settings : kDefaultSettings);
+  frame.settingsResolved = true;
+}
+
 [[nodiscard]] inline bool
 isRenderCaptureRequested(const RenderFrameContext &frame,
                          std::string_view name) noexcept {
@@ -2973,6 +3019,9 @@ isRenderCaptureRequested(const RenderFrameContext &frame,
 [[nodiscard]] inline const RenderSettings &
 renderSettingsOrDefault(const RenderFrameContext &frame) {
   static const RenderSettings kDefaultSettings{};
+  if (frame.settingsResolved) {
+    return frame.resolvedSettings;
+  }
   return frame.settings ? *frame.settings : kDefaultSettings;
 }
 

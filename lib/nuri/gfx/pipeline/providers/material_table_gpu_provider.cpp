@@ -9,16 +9,6 @@
 namespace nuri {
 namespace {
 
-size_t grownBufferCapacity(size_t currentCapacity, size_t requiredBytes) {
-  if (currentCapacity == 0u) {
-    return requiredBytes;
-  }
-  const size_t maxCapacity = std::numeric_limits<size_t>::max();
-  const size_t grownCapacity =
-      currentCapacity > (maxCapacity / 2u) ? maxCapacity : currentCapacity * 2u;
-  return std::max(requiredBytes, grownCapacity);
-}
-
 // The returned span must be consumed immediately by call sites such as
 // gpu_.updateBuffer(). Non-empty values point at the caller-owned table and are
 // safe while that span outlives the call; the fallback branch creates a
@@ -47,27 +37,11 @@ Result<bool, std::string>
 MaterialTableGpuProvider::ensureBufferCapacity(ManagedBuffer &managedBuffer,
                                                size_t requiredBytes,
                                                std::string_view debugName) {
-  if (managedBuffer.buffer && managedBuffer.buffer->valid() &&
-      managedBuffer.capacityBytes >= requiredBytes) {
-    return Result<bool, std::string>::makeResult(true);
-  }
-  const size_t newCapacity =
-      grownBufferCapacity(managedBuffer.capacityBytes, requiredBytes);
-  if (managedBuffer.buffer && managedBuffer.buffer->valid()) {
-    gpu_.destroyBuffer(managedBuffer.buffer->handle());
-  }
-  managedBuffer.buffer.reset();
-  auto createResult = Buffer::create(gpu_,
+  return ensureDynamicBufferCapacity(gpu_, managedBuffer,
                                      BufferDesc{.usage = BufferUsage::Storage,
                                                 .storage = Storage::Device,
-                                                .size = newCapacity},
+                                                .size = requiredBytes},
                                      debugName);
-  if (createResult.hasError()) {
-    return Result<bool, std::string>::makeError(createResult.error());
-  }
-  managedBuffer.buffer = std::move(createResult.value());
-  managedBuffer.capacityBytes = newCapacity;
-  return Result<bool, std::string>::makeResult(true);
 }
 
 Result<bool, std::string>
@@ -123,26 +97,14 @@ MaterialTableGpuProvider::prepare(FrameBuildContext &ctx) {
           std::to_string(snapshot.specular.size()) + ")");
     }
   }
-  const auto bufferNeedsResize = [](const ManagedBuffer &managedBuffer,
-                                    size_t requiredBytes) {
-    return managedBuffer.buffer && managedBuffer.buffer->valid() &&
-           managedBuffer.capacityBytes < requiredBytes;
-  };
-  if (bufferNeedsResize(headerBuffer_, requiredTableBytes(snapshot.headers)) ||
-      bufferNeedsResize(clearcoatBuffer_,
-                        requiredTableBytes(snapshot.clearcoat)) ||
-      bufferNeedsResize(sheenBuffer_, requiredTableBytes(snapshot.sheen)) ||
-      bufferNeedsResize(transmissionBuffer_,
-                        requiredTableBytes(snapshot.transmission)) ||
-      bufferNeedsResize(specularBuffer_,
-                        requiredTableBytes(snapshot.specular))) {
-    gpu_.waitIdle();
-  }
   auto ensureHeaderResult =
       ensureBufferCapacity(headerBuffer_, requiredTableBytes(snapshot.headers),
                            "material_header_table");
   if (ensureHeaderResult.hasError()) {
     return ensureHeaderResult;
+  }
+  if (ensureHeaderResult.value()) {
+    uploadedVersion_ = kNoVersionUploaded;
   }
   auto ensureClearcoatResult = ensureBufferCapacity(
       clearcoatBuffer_, requiredTableBytes(snapshot.clearcoat),
@@ -150,10 +112,16 @@ MaterialTableGpuProvider::prepare(FrameBuildContext &ctx) {
   if (ensureClearcoatResult.hasError()) {
     return ensureClearcoatResult;
   }
+  if (ensureClearcoatResult.value()) {
+    uploadedVersion_ = kNoVersionUploaded;
+  }
   auto ensureSheenResult = ensureBufferCapacity(
       sheenBuffer_, requiredTableBytes(snapshot.sheen), "material_sheen_table");
   if (ensureSheenResult.hasError()) {
     return ensureSheenResult;
+  }
+  if (ensureSheenResult.value()) {
+    uploadedVersion_ = kNoVersionUploaded;
   }
   auto ensureTransmissionResult = ensureBufferCapacity(
       transmissionBuffer_, requiredTableBytes(snapshot.transmission),
@@ -161,11 +129,17 @@ MaterialTableGpuProvider::prepare(FrameBuildContext &ctx) {
   if (ensureTransmissionResult.hasError()) {
     return ensureTransmissionResult;
   }
+  if (ensureTransmissionResult.value()) {
+    uploadedVersion_ = kNoVersionUploaded;
+  }
   auto ensureSpecularResult = ensureBufferCapacity(
       specularBuffer_, requiredTableBytes(snapshot.specular),
       "material_specular_table");
   if (ensureSpecularResult.hasError()) {
     return ensureSpecularResult;
+  }
+  if (ensureSpecularResult.value()) {
+    uploadedVersion_ = kNoVersionUploaded;
   }
 
   if (uploadedVersion_ != snapshot.version) {
@@ -175,35 +149,22 @@ MaterialTableGpuProvider::prepare(FrameBuildContext &ctx) {
     const MaterialTransmissionGpuData defaultTransmission{};
     const MaterialSpecularGpuData defaultSpecular{};
 
-    auto updateHeaderResult =
-        gpu_.updateBuffer(headerBuffer_.buffer->handle(),
-                          tableBytes(snapshot.headers, defaultHeader), 0u);
-    if (updateHeaderResult.hasError()) {
-      return updateHeaderResult;
-    }
-    auto updateClearcoatResult =
-        gpu_.updateBuffer(clearcoatBuffer_.buffer->handle(),
-                          tableBytes(snapshot.clearcoat, defaultClearcoat), 0u);
-    if (updateClearcoatResult.hasError()) {
-      return updateClearcoatResult;
-    }
-    auto updateSheenResult =
-        gpu_.updateBuffer(sheenBuffer_.buffer->handle(),
-                          tableBytes(snapshot.sheen, defaultSheen), 0u);
-    if (updateSheenResult.hasError()) {
-      return updateSheenResult;
-    }
-    auto updateTransmissionResult = gpu_.updateBuffer(
-        transmissionBuffer_.buffer->handle(),
-        tableBytes(snapshot.transmission, defaultTransmission), 0u);
-    if (updateTransmissionResult.hasError()) {
-      return updateTransmissionResult;
-    }
-    auto updateSpecularResult =
-        gpu_.updateBuffer(specularBuffer_.buffer->handle(),
-                          tableBytes(snapshot.specular, defaultSpecular), 0u);
-    if (updateSpecularResult.hasError()) {
-      return updateSpecularResult;
+    const std::array updates{
+        BufferUpdate{.buffer = headerBuffer_.buffer->handle(),
+                     .data = tableBytes(snapshot.headers, defaultHeader)},
+        BufferUpdate{.buffer = clearcoatBuffer_.buffer->handle(),
+                     .data = tableBytes(snapshot.clearcoat, defaultClearcoat)},
+        BufferUpdate{.buffer = sheenBuffer_.buffer->handle(),
+                     .data = tableBytes(snapshot.sheen, defaultSheen)},
+        BufferUpdate{
+            .buffer = transmissionBuffer_.buffer->handle(),
+            .data = tableBytes(snapshot.transmission, defaultTransmission)},
+        BufferUpdate{.buffer = specularBuffer_.buffer->handle(),
+                     .data = tableBytes(snapshot.specular, defaultSpecular)},
+    };
+    auto updateResult = gpu_.updateBuffers(updates);
+    if (updateResult.hasError()) {
+      return updateResult;
     }
     uploadedVersion_ = snapshot.version;
   }
@@ -240,18 +201,11 @@ MaterialTableGpuProvider::prepare(FrameBuildContext &ctx) {
 }
 
 void MaterialTableGpuProvider::destroyBuffers() {
-  const auto destroy = [this](ManagedBuffer &managedBuffer) {
-    if (managedBuffer.buffer && managedBuffer.buffer->valid()) {
-      gpu_.destroyBuffer(managedBuffer.buffer->handle());
-    }
-    managedBuffer.buffer.reset();
-    managedBuffer.capacityBytes = 0u;
-  };
-  destroy(headerBuffer_);
-  destroy(clearcoatBuffer_);
-  destroy(sheenBuffer_);
-  destroy(transmissionBuffer_);
-  destroy(specularBuffer_);
+  retireDynamicBuffer(gpu_, headerBuffer_);
+  retireDynamicBuffer(gpu_, clearcoatBuffer_);
+  retireDynamicBuffer(gpu_, sheenBuffer_);
+  retireDynamicBuffer(gpu_, transmissionBuffer_);
+  retireDynamicBuffer(gpu_, specularBuffer_);
   uploadedVersion_ = kNoVersionUploaded;
 }
 

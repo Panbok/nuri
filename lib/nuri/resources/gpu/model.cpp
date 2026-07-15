@@ -107,10 +107,7 @@ copyMeshletBoundsSpheres(std::span<const MeshletDescriptor> meshlets,
   return bounds;
 }
 
-void destroyBuffer(GPUDevice &gpu, std::unique_ptr<Buffer> &buffer) {
-  if (buffer && buffer->valid()) {
-    gpu.destroyBuffer(buffer->handle());
-  }
+void destroyBuffer(GPUDevice &, std::unique_ptr<Buffer> &buffer) {
   buffer.reset();
 }
 

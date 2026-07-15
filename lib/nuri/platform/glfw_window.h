@@ -2,6 +2,8 @@
 
 #include "nuri/core/window.h"
 
+struct GLFWwindow;
+
 namespace nuri {
 
 class GlfwWindow final : public Window {
@@ -28,9 +30,9 @@ public:
   void bindEventManager(EventManager *events) override;
 
 private:
-  GlfwWindow();
-  struct Impl;
-  std::unique_ptr<Impl> impl_;
+  GlfwWindow() = default;
+  GLFWwindow *window_ = nullptr;
+  CursorMode cursorMode_ = CursorMode::Normal;
 };
 
 } // namespace nuri

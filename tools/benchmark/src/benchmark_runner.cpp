@@ -3543,6 +3543,10 @@ BenchmarkRunResult runBenchmarkCase(BenchmarkCase benchmarkCase,
           frameContext, scene, *renderer, settings, temporalFrameService,
           camera, frameIndex, timeSeconds, benchmarkCase.fixedDeltaSeconds,
           benchmarkCase.resolution[0], benchmarkCase.resolution[1]);
+      if (measured) {
+        renderer->renderGraphTelemetry().requestCapture(
+            RenderGraphTelemetryLevel::PassTimings);
+      }
       const auto renderBegin = std::chrono::steady_clock::now();
       auto renderResult = renderer->render(pipeline, frameContext);
       const double renderSubmitMs = elapsedMs(renderBegin);

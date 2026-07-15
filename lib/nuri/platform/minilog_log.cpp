@@ -28,13 +28,7 @@ minilog::eLogLevel toMinilogLevel(LogLevel level) {
 
 } // namespace
 
-struct MinilogLog::Impl {
-  bool initialized = false;
-  std::string filePath;
-};
-
-MinilogLog::MinilogLog(const LogConfig &userConfig)
-    : impl_(std::make_unique<Impl>()) {
+MinilogLog::MinilogLog(const LogConfig &userConfig) {
   minilog::LogConfig config{};
   config.logLevel = toMinilogLevel(userConfig.logLevel);
   config.logLevelPrintToConsole = toMinilogLevel(userConfig.consoleLevel);
@@ -50,22 +44,22 @@ MinilogLog::MinilogLog(const LogConfig &userConfig)
 
   const char *fileName = nullptr;
   if (!userConfig.filePath.empty()) {
-    impl_->filePath = userConfig.filePath;
-    fileName = impl_->filePath.c_str();
+    filePath_ = userConfig.filePath;
+    fileName = filePath_.c_str();
   }
 
-  impl_->initialized = minilog::initialize(fileName, config);
+  initialized_ = minilog::initialize(fileName, config);
 }
 
 MinilogLog::~MinilogLog() {
-  if (impl_ && impl_->initialized) {
+  if (initialized_) {
     minilog::deinitialize();
   }
 }
 
 std::unique_ptr<MinilogLog> MinilogLog::create(const LogConfig &config) {
   auto log = std::unique_ptr<MinilogLog>(new MinilogLog(config));
-  if (!log->impl_ || !log->impl_->initialized) {
+  if (!log->initialized_) {
     return nullptr;
   }
   return log;

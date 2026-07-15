@@ -18,8 +18,8 @@ public:
 
 private:
   explicit MinilogLog(const LogConfig &config);
-  struct Impl;
-  std::unique_ptr<Impl> impl_;
+  bool initialized_ = false;
+  std::string filePath_;
 };
 
 } // namespace nuri

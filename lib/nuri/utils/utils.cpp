@@ -24,12 +24,18 @@ bool alignUpU64(uint64_t value, uint64_t alignment, uint64_t &out) {
     return true;
   }
 
-  const uint64_t mask = alignment - 1u;
-  if (value > (std::numeric_limits<uint64_t>::max() - mask)) {
+  const uint64_t remainder = value % alignment;
+  if (remainder == 0u) {
+    out = value;
+    return true;
+  }
+
+  const uint64_t increment = alignment - remainder;
+  if (value > std::numeric_limits<uint64_t>::max() - increment) {
     return false;
   }
 
-  out = (value + mask) & ~mask;
+  out = value + increment;
   return true;
 }
 

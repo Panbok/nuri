@@ -966,7 +966,7 @@ Texture::create(GPUDevice &gpu, const TextureDesc &desc,
 
   return Result<std::unique_ptr<Texture>, std::string>::makeResult(
       std::unique_ptr<Texture>(
-          new Texture(result.value(), desc, std::string(debugName))));
+          new Texture(gpu, result.value(), desc, std::string(debugName))));
 }
 
 Result<std::unique_ptr<Texture>, std::string>
@@ -1059,7 +1059,7 @@ Texture::loadTexture(GPUDevice &gpu, std::string_view filePath,
 
   return Result<std::unique_ptr<Texture>, std::string>::makeResult(
       std::unique_ptr<Texture>(
-          new Texture(result.value(), desc, std::string(debugName))));
+          new Texture(gpu, result.value(), desc, std::string(debugName))));
 }
 
 Result<std::unique_ptr<Texture>, std::string>
@@ -1140,7 +1140,7 @@ Texture::loadCubemapFromEquirectangularHDR(GPUDevice &gpu,
 
   return Result<std::unique_ptr<Texture>, std::string>::makeResult(
       std::unique_ptr<Texture>(
-          new Texture(result.value(), desc, resolvedDebugName)));
+          new Texture(gpu, result.value(), desc, resolvedDebugName)));
 }
 
 Result<std::unique_ptr<Texture>, std::string>

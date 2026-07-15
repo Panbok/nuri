@@ -151,6 +151,11 @@ RenderPipelineDesc meshPipelineDesc(Format colorFormat, Format depthFormat,
       .polygonMode = PolygonMode::Fill,
       .topology = Topology::Triangle,
       .blendEnabled = blendEnabled,
+      .rasterState = depthFormat != Format::Count
+                         ? makeRasterPipelineState(
+                               DepthState{.compareOp = CompareOp::LessEqual,
+                                          .isDepthWriteEnabled = false})
+                         : RasterPipelineState{},
   };
 }
 
@@ -177,8 +182,7 @@ uint32_t saturateToU32(size_t value) {
 
 [[nodiscard]] const RenderSettings &
 settingsOrDefault(const RenderFrameContext &frame) {
-  static const RenderSettings kDefaultSettings{};
-  return frame.settings ? *frame.settings : kDefaultSettings;
+  return renderSettingsOrDefault(frame);
 }
 
 [[nodiscard]] bool
@@ -483,22 +487,29 @@ TransparentRenderer::prepareTransparentPasses(RenderFrameContext &frame) {
   const bool needsInstanceDataUpload =
       animationSceneData == nullptr &&
       instanceDataRingUploadVersions_[frameSlot] != cachedTransformVersion_;
+  std::array<BufferUpdate, 2u> instanceUpdates{};
+  size_t instanceUpdateCount = 0u;
   if (needsInstanceDataUpload && !instanceMatrices_.empty()) {
     const std::span<const std::byte> matrixBytes{
         reinterpret_cast<const std::byte *>(instanceMatrices_.data()),
         instanceMatrices_.size() * sizeof(InstanceData)};
-    auto updateResult = gpu_.updateBuffer(
-        instanceMatricesRing_[frameSlot].buffer->handle(), matrixBytes, 0);
-    if (updateResult.hasError()) {
-      return updateResult;
-    }
+    instanceUpdates[instanceUpdateCount++] = BufferUpdate{
+        .buffer = instanceMatricesRing_[frameSlot].buffer->handle(),
+        .data = matrixBytes,
+    };
   }
   if (needsInstanceDataUpload && !instanceRemap_.empty()) {
     const std::span<const std::byte> remapBytes{
         reinterpret_cast<const std::byte *>(instanceRemap_.data()),
         instanceRemap_.size() * sizeof(uint32_t)};
-    auto updateResult = gpu_.updateBuffer(
-        instanceRemapRing_[frameSlot].buffer->handle(), remapBytes, 0);
+    instanceUpdates[instanceUpdateCount++] = BufferUpdate{
+        .buffer = instanceRemapRing_[frameSlot].buffer->handle(),
+        .data = remapBytes,
+    };
+  }
+  if (instanceUpdateCount != 0u) {
+    auto updateResult = gpu_.updateBuffers(std::span<const BufferUpdate>(
+        instanceUpdates.data(), instanceUpdateCount));
     if (updateResult.hasError()) {
       return updateResult;
     }
@@ -1041,82 +1052,40 @@ TransparentRenderer::ensureRingBufferCount(uint32_t requiredCount) {
 
 Result<bool, std::string>
 TransparentRenderer::ensureInstanceMatricesRingCapacity(size_t requiredBytes) {
-  bool needsResize = false;
-  bool hasLiveBuffers = false;
-  for (const DynamicBufferSlot &slot : instanceMatricesRing_) {
-    if (slot.buffer && slot.buffer->valid()) {
-      hasLiveBuffers = true;
-      if (slot.capacityBytes < requiredBytes) {
-        needsResize = true;
-        break;
-      }
-    }
-  }
-  if (needsResize && hasLiveBuffers) {
-    gpu_.waitIdle();
-  }
   for (size_t i = 0; i < instanceMatricesRing_.size(); ++i) {
     DynamicBufferSlot &slot = instanceMatricesRing_[i];
-    if (slot.buffer && slot.buffer->valid() &&
-        slot.capacityBytes >= requiredBytes) {
-      continue;
-    }
-    if (slot.buffer && slot.buffer->valid()) {
-      gpu_.destroyBuffer(slot.buffer->handle());
-    }
-    slot.buffer.reset();
-    auto bufferResult = Buffer::create(gpu_,
-                                       BufferDesc{.usage = BufferUsage::Storage,
-                                                  .storage = Storage::Device,
-                                                  .size = requiredBytes},
-                                       "transparent_instance_matrices");
+    auto bufferResult =
+        ensureDynamicBufferCapacity(gpu_, slot,
+                                    BufferDesc{.usage = BufferUsage::Storage,
+                                               .storage = Storage::Device,
+                                               .size = requiredBytes},
+                                    "transparent_instance_matrices");
     if (bufferResult.hasError()) {
       return Result<bool, std::string>::makeError(bufferResult.error());
     }
-    slot.buffer = std::move(bufferResult.value());
-    slot.capacityBytes = requiredBytes;
-    instanceDataRingUploadVersions_[i] = std::numeric_limits<uint64_t>::max();
+    if (bufferResult.value()) {
+      instanceDataRingUploadVersions_[i] = std::numeric_limits<uint64_t>::max();
+    }
   }
   return Result<bool, std::string>::makeResult(true);
 }
 
 Result<bool, std::string>
 TransparentRenderer::ensureInstanceRemapRingCapacity(size_t requiredBytes) {
-  bool needsResize = false;
-  bool hasLiveBuffers = false;
-  for (const DynamicBufferSlot &slot : instanceRemapRing_) {
-    if (slot.buffer && slot.buffer->valid()) {
-      hasLiveBuffers = true;
-      if (slot.capacityBytes < requiredBytes) {
-        needsResize = true;
-        break;
-      }
-    }
-  }
-  if (needsResize && hasLiveBuffers) {
-    gpu_.waitIdle();
-  }
   for (size_t i = 0; i < instanceRemapRing_.size(); ++i) {
     DynamicBufferSlot &slot = instanceRemapRing_[i];
-    if (slot.buffer && slot.buffer->valid() &&
-        slot.capacityBytes >= requiredBytes) {
-      continue;
-    }
-    if (slot.buffer && slot.buffer->valid()) {
-      gpu_.destroyBuffer(slot.buffer->handle());
-    }
-    slot.buffer.reset();
-    auto bufferResult = Buffer::create(gpu_,
-                                       BufferDesc{.usage = BufferUsage::Storage,
-                                                  .storage = Storage::Device,
-                                                  .size = requiredBytes},
-                                       "transparent_instance_remap");
+    auto bufferResult =
+        ensureDynamicBufferCapacity(gpu_, slot,
+                                    BufferDesc{.usage = BufferUsage::Storage,
+                                               .storage = Storage::Device,
+                                               .size = requiredBytes},
+                                    "transparent_instance_remap");
     if (bufferResult.hasError()) {
       return Result<bool, std::string>::makeError(bufferResult.error());
     }
-    slot.buffer = std::move(bufferResult.value());
-    slot.capacityBytes = requiredBytes;
-    instanceDataRingUploadVersions_[i] = std::numeric_limits<uint64_t>::max();
+    if (bufferResult.value()) {
+      instanceDataRingUploadVersions_[i] = std::numeric_limits<uint64_t>::max();
+    }
   }
   return Result<bool, std::string>::makeResult(true);
 }
@@ -1921,20 +1890,8 @@ void TransparentRenderer::destroyShaders() {
 }
 
 void TransparentRenderer::destroyBuffers() {
-  for (DynamicBufferSlot &slot : instanceMatricesRing_) {
-    if (slot.buffer && slot.buffer->valid()) {
-      gpu_.destroyBuffer(slot.buffer->handle());
-    }
-    slot.buffer.reset();
-    slot.capacityBytes = 0;
-  }
-  for (DynamicBufferSlot &slot : instanceRemapRing_) {
-    if (slot.buffer && slot.buffer->valid()) {
-      gpu_.destroyBuffer(slot.buffer->handle());
-    }
-    slot.buffer.reset();
-    slot.capacityBytes = 0;
-  }
+  retireDynamicBufferRing(gpu_, instanceMatricesRing_);
+  retireDynamicBufferRing(gpu_, instanceRemapRing_);
   instanceMatricesRing_.clear();
   instanceRemapRing_.clear();
   instanceDataRingUploadVersions_.clear();

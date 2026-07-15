@@ -290,10 +290,21 @@ enum class RenderGraphExecutionFailureStage : uint8_t {
   SubmitRecordedFrame,
 };
 
+enum class RenderGraphTelemetryLevel : uint8_t {
+  None = 0,
+  Metadata,
+  PassTimings,
+};
+
+struct NURI_API RenderGraphExecutionOptions {
+  RenderGraphTelemetryLevel telemetry = RenderGraphTelemetryLevel::None;
+};
+
 [[nodiscard]] NURI_API std::string_view
 toString(RenderGraphExecutionFailureStage stage) noexcept;
 
 struct NURI_API RenderGraphExecutionMetadata {
+  SubmissionHandle submission{};
   std::pmr::vector<RecordedCommandBufferMeta> recordedCommandBuffers;
   std::pmr::vector<SubmitBatchMeta> submitBatches;
   std::pmr::vector<RenderGraphPassRange> passRanges;
@@ -688,10 +699,6 @@ public:
     // the import order on the next frame (the new handle gets a fresh index),
     // so the compile result must be discarded.
     uint64_t persistentHandlesVersion = 0;
-    // Optional caller-provided salt for frame-variant payloads that are not
-    // represented by structural graph state alone.
-    uint64_t dynamicPayloadVersion = 0;
-
     [[nodiscard]] bool operator==(const GraphFingerprint &o) const noexcept {
       return passCount == o.passCount &&
              totalTextureCount == o.totalTextureCount &&
@@ -703,13 +710,11 @@ public:
              payloadLayoutHash == o.payloadLayoutHash &&
              transientResourceDescriptorsHash ==
                  o.transientResourceDescriptorsHash &&
-             persistentHandlesVersion == o.persistentHandlesVersion &&
-             dynamicPayloadVersion == o.dynamicPayloadVersion;
+             persistentHandlesVersion == o.persistentHandlesVersion;
     }
   };
 
   [[nodiscard]] GraphFingerprint computeGraphFingerprint() const noexcept;
-  void mixDynamicPayloadVersion(uint64_t version) noexcept;
 
   // Updates textureHandlesByResource and bufferHandlesByResource in a cached
   // compile result to reflect the imported handles recorded in the current
@@ -985,7 +990,6 @@ private:
   // import-table changes always trigger a full recompile.
   uint64_t persistentHandlesVersion_ = 0;
   uint64_t transientResourceDescriptorsHash_ = 0xcbf29ce484222325ull;
-  uint64_t dynamicPayloadVersion_ = 0u;
 };
 
 class NURI_API RenderGraphExecutor {
@@ -994,13 +998,15 @@ public:
       std::pmr::memory_resource *memory = std::pmr::get_default_resource());
   [[nodiscard]] Result<RenderGraphExecutionMetadata, std::string>
   execute(RenderGraphRuntime &runtime, GPUDevice &gpu,
-          const RenderGraphCompileResult &compiled);
+          const RenderGraphCompileResult &compiled,
+          RenderGraphExecutionOptions options = {});
 
 private:
   [[nodiscard]] Result<bool, std::string>
   executeInternal(RenderGraphRuntime *runtime, GPUDevice &gpu,
                   const RenderGraphCompileResult &compiled,
-                  RenderGraphExecutionMetadata *metadata);
+                  RenderGraphExecutionMetadata &metadata,
+                  RenderGraphExecutionOptions options);
 
   struct PendingFrameResources {
     SubmissionHandle submission{};

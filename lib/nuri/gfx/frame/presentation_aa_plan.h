@@ -42,19 +42,6 @@ namespace nuri {
   return "unknown";
 }
 
-[[nodiscard]] inline TemporalReconstructionProvider
-sanitizeTemporalReconstructionProvider(
-    TemporalReconstructionProvider provider) noexcept {
-  switch (provider) {
-  case TemporalReconstructionProvider::Legacy:
-  case TemporalReconstructionProvider::Reference:
-  case TemporalReconstructionProvider::External:
-    return provider;
-  default:
-    return TemporalReconstructionProvider::Legacy;
-  }
-}
-
 [[nodiscard]] inline Result<PresentationAAPlan, std::string>
 buildPresentationAAPlan(
     const RenderSettings &sourceSettings,

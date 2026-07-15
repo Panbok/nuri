@@ -4,7 +4,7 @@
 #include "nuri/core/result.h"
 #include "nuri/defines.h"
 #include "nuri/gfx/gpu_device.h"
-#include "nuri/gfx/pipeline.h"
+#include "nuri/gfx/owned_gpu_resource.h"
 #include "nuri/gfx/shader.h"
 #include "nuri/resources/gpu/buffer.h"
 
@@ -33,32 +33,33 @@ public:
     return shaderRoot_;
   }
   [[nodiscard]] ComputePipelineHandle samplePipeline() const noexcept {
-    assertPipelineHandle(samplePipelineHandle_, "samplePipeline");
-    return samplePipelineHandle_;
+    assertPipelineHandle(samplePipelineHandle_.get(), "samplePipeline");
+    return samplePipelineHandle_.get();
   }
   [[nodiscard]] ComputePipelineHandle blendPipeline() const noexcept {
-    assertPipelineHandle(blendPipelineHandle_, "blendPipeline");
-    return blendPipelineHandle_;
+    assertPipelineHandle(blendPipelineHandle_.get(), "blendPipeline");
+    return blendPipelineHandle_.get();
   }
   [[nodiscard]] ComputePipelineHandle worldPipeline() const noexcept {
-    assertPipelineHandle(worldPipelineHandle_, "worldPipeline");
-    return worldPipelineHandle_;
+    assertPipelineHandle(worldPipelineHandle_.get(), "worldPipeline");
+    return worldPipelineHandle_.get();
   }
   [[nodiscard]] ComputePipelineHandle scatterPipeline() const noexcept {
-    assertPipelineHandle(scatterPipelineHandle_, "scatterPipeline");
-    return scatterPipelineHandle_;
+    assertPipelineHandle(scatterPipelineHandle_.get(), "scatterPipeline");
+    return scatterPipelineHandle_.get();
   }
   [[nodiscard]] ComputePipelineHandle morphPipeline() const noexcept {
-    assertPipelineHandle(morphPipelineHandle_, "morphPipeline");
-    return morphPipelineHandle_;
+    assertPipelineHandle(morphPipelineHandle_.get(), "morphPipeline");
+    return morphPipelineHandle_.get();
   }
   [[nodiscard]] ComputePipelineHandle skinPalettePipeline() const noexcept {
-    assertPipelineHandle(skinPalettePipelineHandle_, "skinPalettePipeline");
-    return skinPalettePipelineHandle_;
+    assertPipelineHandle(skinPalettePipelineHandle_.get(),
+                         "skinPalettePipeline");
+    return skinPalettePipelineHandle_.get();
   }
   [[nodiscard]] ComputePipelineHandle skinPipeline() const noexcept {
-    assertPipelineHandle(skinPipelineHandle_, "skinPipeline");
-    return skinPipelineHandle_;
+    assertPipelineHandle(skinPipelineHandle_.get(), "skinPipeline");
+    return skinPipelineHandle_.get();
   }
 
   [[nodiscard]] Result<std::unique_ptr<Buffer>, std::string>
@@ -87,27 +88,20 @@ private:
   std::filesystem::path shaderRoot_;
   std::pmr::memory_resource *memory_ = std::pmr::get_default_resource();
   std::unique_ptr<Shader> shader_;
-  std::unique_ptr<Pipeline> samplePipeline_;
-  std::unique_ptr<Pipeline> blendPipeline_;
-  std::unique_ptr<Pipeline> worldPipeline_;
-  std::unique_ptr<Pipeline> scatterPipeline_;
-  std::unique_ptr<Pipeline> morphPipeline_;
-  std::unique_ptr<Pipeline> skinPalettePipeline_;
-  std::unique_ptr<Pipeline> skinPipeline_;
-  ShaderHandle sampleShaderHandle_{};
-  ShaderHandle blendShaderHandle_{};
-  ShaderHandle worldShaderHandle_{};
-  ShaderHandle scatterShaderHandle_{};
-  ShaderHandle morphShaderHandle_{};
-  ShaderHandle skinPaletteShaderHandle_{};
-  ShaderHandle skinShaderHandle_{};
-  ComputePipelineHandle samplePipelineHandle_{};
-  ComputePipelineHandle blendPipelineHandle_{};
-  ComputePipelineHandle worldPipelineHandle_{};
-  ComputePipelineHandle scatterPipelineHandle_{};
-  ComputePipelineHandle morphPipelineHandle_{};
-  ComputePipelineHandle skinPalettePipelineHandle_{};
-  ComputePipelineHandle skinPipelineHandle_{};
+  OwnedShaderHandle sampleShaderHandle_{};
+  OwnedShaderHandle blendShaderHandle_{};
+  OwnedShaderHandle worldShaderHandle_{};
+  OwnedShaderHandle scatterShaderHandle_{};
+  OwnedShaderHandle morphShaderHandle_{};
+  OwnedShaderHandle skinPaletteShaderHandle_{};
+  OwnedShaderHandle skinShaderHandle_{};
+  OwnedComputePipelineHandle samplePipelineHandle_{};
+  OwnedComputePipelineHandle blendPipelineHandle_{};
+  OwnedComputePipelineHandle worldPipelineHandle_{};
+  OwnedComputePipelineHandle scatterPipelineHandle_{};
+  OwnedComputePipelineHandle morphPipelineHandle_{};
+  OwnedComputePipelineHandle skinPalettePipelineHandle_{};
+  OwnedComputePipelineHandle skinPipelineHandle_{};
   bool initialized_ = false;
 };
 

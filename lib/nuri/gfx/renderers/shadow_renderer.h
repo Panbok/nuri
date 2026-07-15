@@ -5,6 +5,7 @@
 #include "nuri/core/result.h"
 #include "nuri/core/runtime_config.h"
 #include "nuri/defines.h"
+#include "nuri/gfx/dynamic_buffer.h"
 #include "nuri/gfx/frame/render_frame_context.h"
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/gfx/render_graph/render_graph.h"
@@ -254,11 +255,6 @@ private:
     bool valid = false;
   };
 
-  struct DynamicBufferSlot {
-    std::unique_ptr<Buffer> buffer;
-    size_t capacityBytes = 0;
-  };
-
   struct PreviewPushConstants {
     glm::uvec4 sourceTexIds{
         kInvalidShadowBindlessIndex, kInvalidShadowBindlessIndex,
@@ -353,7 +349,8 @@ private:
   Result<bool, std::string> createShaders();
   Result<bool, std::string> createPreviewShaders();
   Result<bool, std::string> createSdsmReduceShaders();
-  Result<bool, std::string> createPipelines(Format depthFormat);
+  Result<bool, std::string> createPipelines(Format depthFormat,
+                                            RasterPipelineState rasterState);
   Result<bool, std::string> createPreviewPipeline();
   Result<bool, std::string> createSdsmReducePipeline();
   Result<bool, std::string> ensureSdsmReduceResources();
@@ -493,6 +490,7 @@ private:
   RenderPipelineHandle shadowAlphaPipelineHandle_{};
   RenderPipelineHandle shadowAlphaDoubleSidedPipelineHandle_{};
   Format shadowDepthPipelineFormat_ = Format::Count;
+  RasterPipelineState shadowPipelineRasterState_{};
   ComputePipelineHandle sdsmReducePipelineHandle_{};
   RenderPipelineHandle previewPipelineHandle_{};
   std::array<TextureHandle, kMaxShadowCascades> shadowDepthTextures_{};

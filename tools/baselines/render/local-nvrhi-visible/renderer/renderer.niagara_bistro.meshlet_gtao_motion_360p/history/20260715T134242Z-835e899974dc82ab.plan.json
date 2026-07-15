@@ -1,0 +1,92 @@
+{
+    "schemaVersion": 1,
+    "kind": "nuri.snapshot.baseline_plan",
+    "caseId": "renderer.niagara_bistro.meshlet_gtao_motion_360p",
+    "suite": "renderer",
+    "profileId": "local-nvrhi-visible",
+    "reason": "Reviewed renderer refactor migration with Ultra GTAO, TAA, and shadows",
+    "actor": "codex",
+    "sourceCommit": "3d838d1fa5f150d35f802685ddd0d2f84863effb",
+    "sourceReportDigest": "sha256:e9b00c17ed7d42201cfe0156152e9310f7bd369e3ad37fe374df9eb5608edb97",
+    "planDigest": "sha256:835e899974dc82ab7c36e0237609a6f7d65f06935820c3ec21197131debeaf4c",
+    "entries": [
+        {
+            "path": "ambient_occlusion.exr",
+            "operation": "replace",
+            "previousDigest": "sha256:3a458844d20fec081e29d520cc6e5ec68630154cec72c5b6c2e2d5fb05885824",
+            "sourceDigest": "sha256:eb594b6bfd6d7e6777e54e4ae6fb509d534ef19d6072fa7b0899ec4ed2644c7d"
+        },
+        {
+            "path": "ambient_occlusion.json",
+            "operation": "replace",
+            "previousDigest": "sha256:3088d3590d29305db7ecc1dcda57196cf84dfc75c398ad7449af9b54e428a5e0",
+            "sourceDigest": "sha256:d96780ec721e145b3ed818dca3c99130d752356f0c9e4561a3081583d7bf46d3"
+        },
+        {
+            "path": "ambient_occlusion_preview.png",
+            "operation": "replace",
+            "previousDigest": "sha256:dd50cc3444aa338468805c89a80276a63ec6435401cc9027d8ed5218baebec42",
+            "sourceDigest": "sha256:607427f2f3419bd254156b8d5c0a721c50f0318c3b0724012aa147c0547adc35"
+        },
+        {
+            "path": "approval.json",
+            "operation": "replace",
+            "previousDigest": "sha256:3f343b67cd4a2bce57983fb022c08b983c55576c6652963a16c91a7173dca824",
+            "sourceDigest": "sha256:e9b00c17ed7d42201cfe0156152e9310f7bd369e3ad37fe374df9eb5608edb97"
+        },
+        {
+            "path": "final_color.json",
+            "operation": "replace",
+            "previousDigest": "sha256:9bb662688a1264c4766b80bf3c022569662d9b69bf38beb8e50d5929df36a79c",
+            "sourceDigest": "sha256:b8106510608d39d75f48a23dddf859c75f7528757a777226605831bd490364d1"
+        },
+        {
+            "path": "final_color.png",
+            "operation": "replace",
+            "previousDigest": "sha256:712869195bcb8fbc42f35faefbdce1a1e7cb256669844aefa7f492846a042965",
+            "sourceDigest": "sha256:23c47ff591031c1b0ec916fa7ce00343b4f035b174637595f6b78773805849b8"
+        },
+        {
+            "path": "final_color_preview.png",
+            "operation": "replace",
+            "previousDigest": "sha256:cfed69230c440c2de508d1a9810489395f5f4d24778d5795807931a3285e31fc",
+            "sourceDigest": "sha256:9742d2b5199a823f4871c85aea67bb8b9cb6e1c7a2c0d612b0bb6742a00d919f"
+        },
+        {
+            "path": "material_normals.exr",
+            "operation": "replace",
+            "previousDigest": "sha256:d1a25ed24a39afbcef9fa72af29d12dd65c72a48f2ede5eac32501a51952225b",
+            "sourceDigest": "sha256:8117a316fc3b3b71b5a8c115a876c84b7858789ecd3c780f139d26a34d79610f"
+        },
+        {
+            "path": "material_normals.json",
+            "operation": "replace",
+            "previousDigest": "sha256:6b2e55d6af7fe9ac479d73b5d6b34732b0b48caa1cc5657ff4d1348510d3117f",
+            "sourceDigest": "sha256:547d645fcddd9a211e0d93abe6375c8a0d1cde47109d1abd4027bbf1704defff"
+        },
+        {
+            "path": "material_normals_preview.png",
+            "operation": "keep",
+            "previousDigest": "sha256:0b661a48592851b0ea7d162b6ec8f5b15585917e304143edc932fec6a1b95c8a",
+            "sourceDigest": "sha256:0b661a48592851b0ea7d162b6ec8f5b15585917e304143edc932fec6a1b95c8a"
+        },
+        {
+            "path": "scene_depth.exr",
+            "operation": "replace",
+            "previousDigest": "sha256:fa37d55197bed7e87d7cf634fc2a615ef69a441c8a6f09865666804c5d64eefd",
+            "sourceDigest": "sha256:e18949fbd9bd1b91bcec2a741d3b4a48ed33f0a9c1d3639bfad29dd85b48bf72"
+        },
+        {
+            "path": "scene_depth.json",
+            "operation": "replace",
+            "previousDigest": "sha256:e4888cf095f89e3631311f49dcef0486ebf4f2a5a23be10291b38ed04f564c12",
+            "sourceDigest": "sha256:40ddc74a1739d405bd7727444aaa0ed6400687b247c928c0a5de81e4efa0b9f8"
+        },
+        {
+            "path": "scene_depth_preview.png",
+            "operation": "keep",
+            "previousDigest": "sha256:7256dbab5006b482907441e0d1b0e3d60bcb7f3847ed032a59d00bfe44ce2389",
+            "sourceDigest": "sha256:7256dbab5006b482907441e0d1b0e3d60bcb7f3847ed032a59d00bfe44ce2389"
+        }
+    ]
+}

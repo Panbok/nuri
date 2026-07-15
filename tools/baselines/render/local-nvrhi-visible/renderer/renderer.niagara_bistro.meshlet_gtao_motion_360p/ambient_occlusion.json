@@ -1,11 +1,16 @@
 {
   "target": "ambient_occlusion",
+  "capturePointVersion": 1,
+  "kind": "scalar",
   "format": 16,
   "width": 640,
   "height": 360,
+  "mip": 0,
+  "layer": 0,
   "rowStride": 1280,
   "origin": "top_left",
   "colorSpace": "linear_scalar",
+  "profile": "scalar",
   "payload": "ambient_occlusion.exr",
-  "hash": "fnv1a64:a68b5397286b8f8b"
+  "hash": "sha256:6e063c21ef1c2e661f0af9d98e40a5cb2a0780ea27081644ab7c0eb7b72d655d"
 }

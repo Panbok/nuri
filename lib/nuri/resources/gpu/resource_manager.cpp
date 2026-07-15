@@ -572,16 +572,13 @@ void ResourceManager::destroyTextureSlot(uint32_t index) {
     return;
   }
 
-  if (nuri::isValid(slot.record.texture)) {
-    gpu_.destroyTexture(slot.record.texture);
-  }
-
   const TextureKey key{
       .canonicalPath = std::string(slot.record.canonicalPath),
       .optionsHash = hashTextureLoadOptions(slot.record.loadOptions),
       .kind = slot.record.sourceKind,
   };
   textureCache_.erase(key);
+  slot.owner.reset();
 
   slot.refCount = 0;
   slot.retireAfterFrame = kRetireFrameUnset;
@@ -798,8 +795,9 @@ ResourceManager::acquireTexture(const TextureRequest &request) {
 
   slot.record = TextureRecord(memory_);
   slot.record.ref = ref;
-  slot.record.texture = texture->handle();
-  slot.record.bindlessIndex = gpu_.getTextureBindlessIndex(texture->handle());
+  const TextureHandle textureHandle = texture->handle();
+  slot.record.texture = textureHandle;
+  slot.record.bindlessIndex = gpu_.getTextureBindlessIndex(textureHandle);
   slot.record.type = texture->type();
   slot.record.format = texture->format();
   slot.record.usage = texture->usage();
@@ -813,6 +811,7 @@ ResourceManager::acquireTexture(const TextureRequest &request) {
   slot.record.canonicalPath = canonicalPath;
   slot.record.debugName = request.debugName;
 
+  slot.owner.reset(gpu_, texture->release());
   texture.reset();
 
   textureCache_.emplace(std::move(key), ref);

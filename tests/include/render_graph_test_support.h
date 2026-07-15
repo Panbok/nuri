@@ -162,6 +162,8 @@ public:
   Result<bool, std::string> updateBuffer(BufferHandle buffer,
                                          std::span<const std::byte> data,
                                          size_t offset) override;
+  Result<bool, std::string>
+  updateBuffers(std::span<const BufferUpdate> updates) override;
   Result<bool, std::string> readBuffer(BufferHandle buffer, size_t offset,
                                        std::span<std::byte> outBytes) override;
   std::byte *getMappedBufferPtr(BufferHandle buffer) override;
@@ -186,6 +188,8 @@ public:
   uint32_t backgroundCopySubmitCount = 0u;
   uint32_t waitIdleCallCount = 0u;
   uint32_t updateBufferCallCount = 0u;
+  uint32_t updateBufferBatchCallCount = 0u;
+  std::vector<size_t> updateBufferBatchSizes{};
   mutable uint32_t bufferDeviceAddressCallCount = 0u;
   uint32_t discardedRecordingContextCount = 0u;
   uint32_t discardedRecordedCommandBufferCount = 0u;
@@ -213,6 +217,7 @@ public:
   std::vector<std::vector<std::byte>> createdTextureData{};
   std::vector<SamplerDesc> createdSamplerDescs{};
   GpuTimingReport latestCompletedGpuTimingReport{};
+  mutable uint32_t latestGpuTimingReportFetchCount = 0u;
   std::vector<GpuTimingReport> completedGpuTimingReports{};
   uint64_t droppedGpuTimingReports = 0u;
   bool rejectDeviceLocalReadBuffer = false;

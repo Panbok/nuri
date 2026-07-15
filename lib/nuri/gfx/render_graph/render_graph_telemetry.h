@@ -123,6 +123,14 @@ public:
   explicit RenderGraphTelemetryService(
       std::pmr::memory_resource *memory = std::pmr::get_default_resource());
 
+  void requestCapture(RenderGraphTelemetryLevel level =
+                          RenderGraphTelemetryLevel::Metadata) noexcept;
+  [[nodiscard]] RenderGraphTelemetryLevel
+  requestedCaptureLevel() const noexcept;
+  [[nodiscard]] bool captureRequested() const noexcept {
+    return requestedCaptureLevel() != RenderGraphTelemetryLevel::None;
+  }
+
   void capture(const RenderGraphCompileResult &compiled);
   void capture(const RenderGraphCompileResult &compiled,
                const RenderGraphExecutionMetadata &execution);
@@ -138,6 +146,8 @@ public:
 private:
   RenderGraphTelemetrySnapshot snapshot_;
   std::filesystem::path configuredDumpDirectory_;
+  RenderGraphTelemetryLevel pendingCapture_ = RenderGraphTelemetryLevel::None;
+  bool captureEveryFrame_ = false;
   bool hasSnapshot_ = false;
 };
 

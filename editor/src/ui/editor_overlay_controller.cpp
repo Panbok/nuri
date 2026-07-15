@@ -89,6 +89,11 @@ EditorOverlayController::takeSceneSelectionRequest() {
   return editor_ ? editor_->takeSceneSelectionRequest() : std::nullopt;
 }
 
+std::optional<RenderSettings>
+EditorOverlayController::takeRenderSettingsUpdate() {
+  return std::exchange(pendingRenderSettingsUpdate_, std::nullopt);
+}
+
 bool EditorOverlayController::onInput(const InputEvent &event) {
   if (!editor_) {
     return false;
@@ -200,7 +205,7 @@ EditorOverlayController::buildOverlayPass(RenderFrameContext &frame,
   }
 
   if (frame.settings) {
-    *frame.settings = editor_->renderSettings();
+    pendingRenderSettingsUpdate_ = editor_->renderSettings();
   }
 
   auto addResult = graph.addGraphicsPass(passResult.value());

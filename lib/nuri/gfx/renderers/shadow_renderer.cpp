@@ -128,7 +128,7 @@ shadowCascadeCaptureName(uint32_t cascadeIndex) {
 
 void logShadowVisibilityCounters(const RenderFrameContext &frame) {
   if (frame.settings == nullptr ||
-      !frame.settings->visibility.debug.logCounters) {
+      !renderSettingsOrDefault(frame).visibility.debug.logCounters) {
     return;
   }
 
@@ -1434,7 +1434,8 @@ resolveShadowLod(const Submesh &submesh, const RenderSettings &settings) {
 
 [[nodiscard]] RenderPipelineDesc
 shadowDepthPipelineDesc(ShaderHandle vertexShader, ShaderHandle fragmentShader,
-                        CullMode cullMode, Format depthFormat) {
+                        CullMode cullMode, Format depthFormat,
+                        RasterPipelineState rasterState) {
   return RenderPipelineDesc{
       .vertexInput = {},
       .vertexShader = vertexShader,
@@ -1446,6 +1447,7 @@ shadowDepthPipelineDesc(ShaderHandle vertexShader, ShaderHandle fragmentShader,
       .polygonMode = PolygonMode::Fill,
       .topology = Topology::Triangle,
       .blendEnabled = false,
+      .rasterState = canonicalRasterPipelineState(rasterState),
   };
 }
 
@@ -1765,8 +1767,12 @@ Result<bool, std::string> ShadowRenderer::createSdsmReduceShaders() {
   return Result<bool, std::string>::makeResult(true);
 }
 
-Result<bool, std::string> ShadowRenderer::createPipelines(Format depthFormat) {
+Result<bool, std::string>
+ShadowRenderer::createPipelines(Format depthFormat,
+                                RasterPipelineState rasterState) {
   const Format targetDepthFormat = sanitizeShadowDepthFormat(depthFormat);
+  const RasterPipelineState targetRasterState =
+      canonicalRasterPipelineState(rasterState);
   const auto destroyPipelineIfValid = [this](RenderPipelineHandle pipeline) {
     if (nuri::isValid(pipeline)) {
       gpu_.destroyRenderPipeline(pipeline);
@@ -1775,7 +1781,8 @@ Result<bool, std::string> ShadowRenderer::createPipelines(Format depthFormat) {
 
   auto shadowResult = gpu_.createRenderPipeline(
       shadowDepthPipelineDesc(shadowOpaqueVertexShader_, depthFragmentShader_,
-                              CullMode::Back, targetDepthFormat),
+                              CullMode::Back, targetDepthFormat,
+                              targetRasterState),
       "shadow_depth_opaque");
   if (shadowResult.hasError()) {
     return Result<bool, std::string>::makeError(shadowResult.error());
@@ -1784,7 +1791,8 @@ Result<bool, std::string> ShadowRenderer::createPipelines(Format depthFormat) {
 
   auto doubleSidedResult = gpu_.createRenderPipeline(
       shadowDepthPipelineDesc(shadowOpaqueVertexShader_, depthFragmentShader_,
-                              CullMode::None, targetDepthFormat),
+                              CullMode::None, targetDepthFormat,
+                              targetRasterState),
       "shadow_depth_opaque_double_sided");
   if (doubleSidedResult.hasError()) {
     destroyPipelineIfValid(newShadowPipeline);
@@ -1794,7 +1802,8 @@ Result<bool, std::string> ShadowRenderer::createPipelines(Format depthFormat) {
 
   auto alphaResult = gpu_.createRenderPipeline(
       shadowDepthPipelineDesc(shadowVertexShader_, depthAlphaFragmentShader_,
-                              CullMode::Back, targetDepthFormat),
+                              CullMode::Back, targetDepthFormat,
+                              targetRasterState),
       "shadow_depth_alpha");
   if (alphaResult.hasError()) {
     destroyPipelineIfValid(newShadowDoubleSidedPipeline);
@@ -1805,7 +1814,8 @@ Result<bool, std::string> ShadowRenderer::createPipelines(Format depthFormat) {
 
   auto alphaDoubleSidedResult = gpu_.createRenderPipeline(
       shadowDepthPipelineDesc(shadowVertexShader_, depthAlphaFragmentShader_,
-                              CullMode::None, targetDepthFormat),
+                              CullMode::None, targetDepthFormat,
+                              targetRasterState),
       "shadow_depth_alpha_double_sided");
   if (alphaDoubleSidedResult.hasError()) {
     destroyPipelineIfValid(newShadowAlphaPipeline);
@@ -1828,6 +1838,7 @@ Result<bool, std::string> ShadowRenderer::createPipelines(Format depthFormat) {
   shadowAlphaPipelineHandle_ = newShadowAlphaPipeline;
   shadowAlphaDoubleSidedPipelineHandle_ = newShadowAlphaDoubleSidedPipeline;
   shadowDepthPipelineFormat_ = targetDepthFormat;
+  shadowPipelineRasterState_ = targetRasterState;
 
   destroyPipelineIfValid(oldShadowDoubleSidedPipeline);
   destroyPipelineIfValid(oldShadowAlphaDoubleSidedPipeline);
@@ -1897,10 +1908,6 @@ Result<bool, std::string> ShadowRenderer::ensureInitialized() {
   if (shaderResult.hasError()) {
     return shaderResult;
   }
-  auto pipelineResult = createPipelines(kDefaultShadowMapDepthFormat);
-  if (pipelineResult.hasError()) {
-    return pipelineResult;
-  }
   initialized_ = true;
   return Result<bool, std::string>::makeResult(true);
 }
@@ -1938,7 +1945,6 @@ Result<bool, std::string> ShadowRenderer::ensureShadowResources(
 
   if (depthValid) {
     if (previewEnabled && !previewTextureValid) {
-      gpu_.waitIdle();
       const TextureHandle oldPreviewTexture = shadowDebugPreviewTexture_;
       const TextureDimensions previewDimensions =
           shadowPreviewDimensions(settings.shadowMapSize, previewMode);
@@ -1967,22 +1973,10 @@ Result<bool, std::string> ShadowRenderer::ensureShadowResources(
       return Result<bool, std::string>::makeResult(true);
     }
     if (!previewEnabled && nuri::isValid(shadowDebugPreviewTexture_)) {
-      gpu_.waitIdle();
       gpu_.destroyTexture(shadowDebugPreviewTexture_);
       shadowDebugPreviewTexture_ = {};
       return Result<bool, std::string>::makeResult(true);
     }
-  }
-
-  bool hasLiveDepthTextures = false;
-  for (const TextureHandle texture : shadowDepthTextures_) {
-    hasLiveDepthTextures = hasLiveDepthTextures || nuri::isValid(texture);
-  }
-  const bool hasLiveResources =
-      hasLiveDepthTextures || nuri::isValid(shadowDebugPreviewTexture_) ||
-      nuri::isValid(rawDepthSampler_) || nuri::isValid(compareDepthSampler_);
-  if (hasLiveResources) {
-    gpu_.waitIdle();
   }
 
   std::array<TextureHandle, kMaxShadowCascades> newShadowDepthTextures{};
@@ -2154,41 +2148,20 @@ Result<bool, std::string> ShadowRenderer::ensureRingCapacity(
               "ShadowRenderer::ensureRingCapacity: upload version count "
               "must cover ring slot count");
 
-  bool needsResize = false;
-  bool hasLiveBuffers = false;
-  for (const DynamicBufferSlot &slot : ring) {
-    if (slot.buffer && slot.buffer->valid()) {
-      hasLiveBuffers = true;
-      if (slot.capacityBytes < requiredBytes) {
-        needsResize = true;
-        break;
-      }
-    }
-  }
-  if (needsResize && hasLiveBuffers) {
-    gpu_.waitIdle();
-  }
   for (size_t i = 0; i < ring.size(); ++i) {
     DynamicBufferSlot &slot = ring[i];
-    if (slot.buffer && slot.buffer->valid() &&
-        slot.capacityBytes >= requiredBytes) {
-      continue;
-    }
-    if (slot.buffer && slot.buffer->valid()) {
-      gpu_.destroyBuffer(slot.buffer->handle());
-    }
-    slot.buffer.reset();
-    auto bufferResult = Buffer::create(gpu_,
-                                       BufferDesc{.usage = BufferUsage::Storage,
-                                                  .storage = storage,
-                                                  .size = requiredBytes},
-                                       debugName);
+    auto bufferResult =
+        ensureDynamicBufferCapacity(gpu_, slot,
+                                    BufferDesc{.usage = BufferUsage::Storage,
+                                               .storage = storage,
+                                               .size = requiredBytes},
+                                    debugName);
     if (bufferResult.hasError()) {
       return Result<bool, std::string>::makeError(bufferResult.error());
     }
-    slot.buffer = std::move(bufferResult.value());
-    slot.capacityBytes = requiredBytes;
-    uploadVersions[i] = std::numeric_limits<uint64_t>::max();
+    if (bufferResult.value()) {
+      uploadVersions[i] = std::numeric_limits<uint64_t>::max();
+    }
   }
   return Result<bool, std::string>::makeResult(true);
 }
@@ -2228,20 +2201,6 @@ ShadowRenderer::ensureSdsmReduceResultRingCount(uint32_t requiredCount) {
 Result<bool, std::string>
 ShadowRenderer::ensureSdsmReduceResultRingCapacity(size_t requiredBytes) {
   const uint64_t invalidPublishedFrame = std::numeric_limits<uint64_t>::max();
-  bool needsResize = false;
-  bool hasLiveBuffers = false;
-  for (const DynamicBufferSlot &slot : sdsmReduceResultRing_) {
-    if (slot.buffer && slot.buffer->valid()) {
-      hasLiveBuffers = true;
-      if (slot.capacityBytes < requiredBytes) {
-        needsResize = true;
-        break;
-      }
-    }
-  }
-  if (needsResize && hasLiveBuffers) {
-    gpu_.waitIdle();
-  }
   for (size_t slotIndex = 0u; slotIndex < sdsmReduceResultRing_.size();
        ++slotIndex) {
     DynamicBufferSlot &slot = sdsmReduceResultRing_[slotIndex];
@@ -2249,33 +2208,33 @@ ShadowRenderer::ensureSdsmReduceResultRingCapacity(size_t requiredBytes) {
         slot.capacityBytes >= requiredBytes) {
       continue;
     }
-    if (slot.buffer && slot.buffer->valid()) {
-      gpu_.destroyBuffer(slot.buffer->handle());
-    }
-    slot.buffer.reset();
+    const size_t replacementCapacity =
+        nextDynamicBufferCapacity(slot.capacityBytes, requiredBytes);
     auto bufferResult =
         Buffer::create(gpu_,
                        BufferDesc{.usage = BufferUsage::Storage,
                                   .storage = Storage::HostVisible,
-                                  .size = requiredBytes},
+                                  .size = replacementCapacity},
                        "shadow_sdsm_minmax_result");
     if (bufferResult.hasError()) {
       return Result<bool, std::string>::makeError(bufferResult.error());
     }
-    slot.buffer = std::move(bufferResult.value());
-    slot.capacityBytes = requiredBytes;
 
     SdsmGpuMinMaxResult clearedResult{};
     auto clearResult = gpu_.updateBuffer(
-        slot.buffer->handle(),
+        bufferResult.value()->handle(),
         std::as_bytes(std::span<const SdsmGpuMinMaxResult>(&clearedResult, 1u)),
         0u);
     if (clearResult.hasError()) {
       return Result<bool, std::string>::makeError(clearResult.error());
     }
+    std::unique_ptr<Buffer> previous = std::move(slot.buffer);
+    slot.buffer = std::move(bufferResult.value());
+    slot.capacityBytes = replacementCapacity;
     if (slotIndex < sdsmReduceResultRingPublishedFrames_.size()) {
       sdsmReduceResultRingPublishedFrames_[slotIndex] = invalidPublishedFrame;
     }
+    previous.reset();
   }
   return Result<bool, std::string>::makeResult(true);
 }
@@ -3302,7 +3261,8 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
           ? (frame.frameIndex - sourceFrameIndex)
           : 0u;
   const bool opaqueDepthPyramidEnabled =
-      frame.settings != nullptr && frame.settings->opaque.enableDepthPyramid;
+      frame.settings != nullptr &&
+      renderSettingsOrDefault(frame).opaque.enableDepthPyramid;
   const auto logSdsmSnapshot = [&](LogLevel logLevel, const char *label) {
     logMessagef(
         logLevel,
@@ -3719,8 +3679,16 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
   }
   const Format targetDepthFormat =
       sanitizeShadowDepthFormat(shadowSettings.depthFormat);
-  if (shadowDepthPipelineFormat_ != targetDepthFormat) {
-    auto pipelineResult = createPipelines(targetDepthFormat);
+  const RasterPipelineState targetRasterState = makeRasterPipelineState(
+      DepthState{.compareOp = CompareOp::Less, .isDepthWriteEnabled = true},
+      true, shadowSettings.constantBias, shadowSettings.slopeBias);
+  if (shadowDepthPipelineFormat_ != targetDepthFormat ||
+      shadowPipelineRasterState_ != targetRasterState ||
+      !nuri::isValid(shadowPipelineHandle_) ||
+      !nuri::isValid(shadowDoubleSidedPipelineHandle_) ||
+      !nuri::isValid(shadowAlphaPipelineHandle_) ||
+      !nuri::isValid(shadowAlphaDoubleSidedPipelineHandle_)) {
+    auto pipelineResult = createPipelines(targetDepthFormat, targetRasterState);
     if (pipelineResult.hasError()) {
       return pipelineResult;
     }
@@ -5148,8 +5116,8 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
       draw.depthState = {.compareOp = CompareOp::Less,
                          .isDepthWriteEnabled = true};
       draw.depthBiasEnable = true;
-      draw.depthBiasConstant = settings.shadow.constantBias;
-      draw.depthBiasSlope = settings.shadow.slopeBias;
+      draw.depthBiasConstant = shadowSettings.constantBias;
+      draw.depthBiasSlope = shadowSettings.slopeBias;
       draw.depthBiasClamp = 0.0f;
       draw.alphaMasked =
           isSamePipelineHandle(key.pipeline, shadowAlphaPipelineHandle_) ||
@@ -5754,41 +5722,11 @@ void ShadowRenderer::destroyShadowResources() {
 }
 
 void ShadowRenderer::destroyBuffers() {
-  for (DynamicBufferSlot &slot : instanceMatricesRing_) {
-    if (slot.buffer && slot.buffer->valid()) {
-      gpu_.destroyBuffer(slot.buffer->handle());
-    }
-    slot.buffer.reset();
-    slot.capacityBytes = 0u;
-  }
-  for (DynamicBufferSlot &slot : instanceRemapRing_) {
-    if (slot.buffer && slot.buffer->valid()) {
-      gpu_.destroyBuffer(slot.buffer->handle());
-    }
-    slot.buffer.reset();
-    slot.capacityBytes = 0u;
-  }
-  for (DynamicBufferSlot &slot : shadowDrawPacketRing_) {
-    if (slot.buffer && slot.buffer->valid()) {
-      gpu_.destroyBuffer(slot.buffer->handle());
-    }
-    slot.buffer.reset();
-    slot.capacityBytes = 0u;
-  }
-  for (DynamicBufferSlot &slot : shadowFrameRing_) {
-    if (slot.buffer && slot.buffer->valid()) {
-      gpu_.destroyBuffer(slot.buffer->handle());
-    }
-    slot.buffer.reset();
-    slot.capacityBytes = 0u;
-  }
-  for (DynamicBufferSlot &slot : sdsmReduceResultRing_) {
-    if (slot.buffer && slot.buffer->valid()) {
-      gpu_.destroyBuffer(slot.buffer->handle());
-    }
-    slot.buffer.reset();
-    slot.capacityBytes = 0u;
-  }
+  retireDynamicBufferRing(gpu_, instanceMatricesRing_);
+  retireDynamicBufferRing(gpu_, instanceRemapRing_);
+  retireDynamicBufferRing(gpu_, shadowDrawPacketRing_);
+  retireDynamicBufferRing(gpu_, shadowFrameRing_);
+  retireDynamicBufferRing(gpu_, sdsmReduceResultRing_);
   instanceMatricesRing_.clear();
   instanceRemapRing_.clear();
   shadowDrawPacketRing_.clear();
@@ -5856,44 +5794,28 @@ void ShadowRenderer::destroyShadowDepthPipelineState() {
     shadowPipelineHandle_ = {};
   }
   shadowDepthPipelineFormat_ = Format::Count;
+  shadowPipelineRasterState_ = {};
 }
 
 Result<bool, std::string>
 ShadowRenderer::ensureShadowDrawPacketRingCapacity(size_t requiredBytes) {
   const size_t requested = std::max(requiredBytes, sizeof(uint32_t));
-  bool needsGrowth = false;
-  for (const DynamicBufferSlot &slot : shadowDrawPacketRing_) {
-    if (slot.buffer && slot.buffer->valid() && slot.capacityBytes < requested) {
-      needsGrowth = true;
-      break;
-    }
-  }
-  if (needsGrowth) {
-    gpu_.waitIdle();
-  }
   for (size_t i = 0u; i < shadowDrawPacketRing_.size(); ++i) {
     DynamicBufferSlot &slot = shadowDrawPacketRing_[i];
-    if (slot.buffer && slot.buffer->valid() &&
-        slot.capacityBytes >= requested) {
-      continue;
-    }
-    if (slot.buffer && slot.buffer->valid()) {
-      gpu_.destroyBuffer(slot.buffer->handle());
-    }
-    slot.buffer.reset();
     const BufferDesc desc{
         .usage = BufferUsage::Storage | BufferUsage::Indirect,
         .storage = Storage::HostVisible,
         .size = requested,
     };
-    auto bufferResult =
-        Buffer::create(gpu_, desc, "shadow_draw_packet_" + std::to_string(i));
+    auto bufferResult = ensureDynamicBufferCapacity(
+        gpu_, slot, desc, "shadow_draw_packet_" + std::to_string(i));
     if (bufferResult.hasError()) {
       return Result<bool, std::string>::makeError(bufferResult.error());
     }
-    slot.buffer = std::move(bufferResult.value());
-    slot.capacityBytes = requested;
-    shadowDrawPacketUploadSignatures_[i] = std::numeric_limits<uint64_t>::max();
+    if (bufferResult.value()) {
+      shadowDrawPacketUploadSignatures_[i] =
+          std::numeric_limits<uint64_t>::max();
+    }
   }
   return Result<bool, std::string>::makeResult(true);
 }
@@ -6000,8 +5922,7 @@ ShadowRenderer::publishFrameData(RenderFrameContext &frame) {
   if (settings.enabled) {
     frame.metrics.shadow.filterSampleBudget =
         shadowFilterSampleBudget(settings.pcfSampleCount);
-    const GpuTimingReport timingReport =
-        gpu_.getLatestCompletedGpuTimingReport();
+    const GpuTimingReport &timingReport = frame.gpuTiming;
     if (hasGpuTimingScope(timingReport, GpuTimingScope::Shadow)) {
       frame.metrics.shadow.gpuTimeMs = timingReport.shadowTimeMs;
       frame.metrics.shadow.gpuTimingSourceFrameIndex =

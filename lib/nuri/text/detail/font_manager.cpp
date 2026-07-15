@@ -85,14 +85,11 @@ public:
   explicit FontManagerImpl(const CreateDesc &desc)
       : FontManager(), gpu_(desc.gpu), memory_(desc.memory),
         fontRecords_(&memory_), atlasPageRecords_(&memory_),
-        fontSlots_(&memory_), atlasPageSlots_(&memory_),
-        retiredTextures_(&memory_) {
+        fontSlots_(&memory_), atlasPageSlots_(&memory_) {
     fontRecords_.reserve(desc.initialFontCapacity);
     atlasPageRecords_.reserve(desc.initialAtlasPageCapacity);
     fontSlots_.reserve(desc.initialFontCapacity);
     atlasPageSlots_.reserve(desc.initialAtlasPageCapacity);
-    retiredTextures_.reserve(desc.initialAtlasPageCapacity);
-    gcSafetyLag_ = std::max<uint64_t>(1u, gpu_.getSwapchainImageCount());
   }
 
   ~FontManagerImpl() override { destroyAll(); }
@@ -354,38 +351,6 @@ public:
     return Result<bool, std::string>::makeResult(true);
   }
 
-  void collectGarbage(uint64_t completedTimelineValue) override {
-    lastCollectedTimelineValue_ =
-        std::max(lastCollectedTimelineValue_, completedTimelineValue);
-    if (retiredTextures_.empty()) {
-      return;
-    }
-
-    size_t writeIndex = 0;
-    uint32_t destroyed = 0;
-    for (size_t i = 0; i < retiredTextures_.size(); ++i) {
-      RetiredTextureRecord &record = retiredTextures_[i];
-      if (record.retireAfterValue <= lastCollectedTimelineValue_) {
-        if (::nuri::isValid(record.texture)) {
-          gpu_.destroyTexture(record.texture);
-        }
-        ++destroyed;
-        continue;
-      }
-      if (writeIndex != i) {
-        retiredTextures_[writeIndex] = std::move(record);
-      }
-      ++writeIndex;
-    }
-    retiredTextures_.resize(writeIndex);
-
-    if (destroyed > 0) {
-      NURI_LOG_DEBUG("FontManager: garbage-collected %u retired atlas textures "
-                     "(remaining=%zu)",
-                     destroyed, retiredTextures_.size());
-    }
-  }
-
   PoolStats poolStats() const override {
     return PoolStats{
         .liveFonts = fontSlots_.liveCount(),
@@ -421,11 +386,6 @@ private:
 
     explicit AtlasPageRecord(std::pmr::memory_resource *memory)
         : debugName(memory) {}
-  };
-
-  struct RetiredTextureRecord {
-    TextureHandle texture{};
-    uint64_t retireAfterValue = 0;
   };
 
   [[nodiscard]] Result<SlotReservation, std::string> allocateFontSlot() {
@@ -562,7 +522,9 @@ private:
       return;
     }
 
-    retireTexture(record.texture);
+    if (::nuri::isValid(record.texture)) {
+      gpu_.destroyTexture(record.texture);
+    }
     record.texture = TextureHandle{};
     record.bindlessIndex = 0;
     record.width = 0;
@@ -571,25 +533,12 @@ private:
     atlasPageSlots_.release(index);
   }
 
-  void retireTexture(TextureHandle texture) {
-    if (!::nuri::isValid(texture)) {
-      return;
-    }
-    const uint64_t retireAfter =
-        lastCollectedTimelineValue_ + std::max<uint64_t>(1u, gcSafetyLag_);
-    retiredTextures_.push_back(RetiredTextureRecord{
-        .texture = texture,
-        .retireAfterValue = retireAfter,
-    });
-  }
-
   void destroyAll() {
     for (size_t fontIndex = 0; fontIndex < fontRecords_.size(); ++fontIndex) {
       if (fontSlots_.isLive(static_cast<uint32_t>(fontIndex))) {
         releaseFontRecord(static_cast<uint32_t>(fontIndex));
       }
     }
-    collectGarbage(std::numeric_limits<uint64_t>::max());
   }
 
   [[nodiscard]] FontRecord *resolveFont(FontHandle font) {
@@ -670,9 +619,6 @@ private:
   SlotPool<MaskedNonZeroGenerationPolicy<kTextHandleGenerationMask>> fontSlots_;
   SlotPool<MaskedNonZeroGenerationPolicy<kTextHandleGenerationMask>>
       atlasPageSlots_;
-  std::pmr::vector<RetiredTextureRecord> retiredTextures_;
-  uint64_t lastCollectedTimelineValue_ = 0;
-  uint64_t gcSafetyLag_ = 1;
 };
 
 } // namespace

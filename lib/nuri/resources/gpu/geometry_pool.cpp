@@ -1013,22 +1013,20 @@ GeometryPool::allocate(std::span<const std::byte> vertexBytes,
   NURI_ASSERT(vertexChunk != nullptr && indexChunk != nullptr,
               "GeometryPool::allocate: missing chunk after allocation");
 
-  auto uploadVertices = gpu_.updateBuffer(vertexChunk->buffer, vertexBytes,
-                                          vertexAllocation.offset);
-  if (uploadVertices.hasError()) {
+  const std::array uploads{
+      BufferUpdate{.buffer = vertexChunk->buffer,
+                   .data = vertexBytes,
+                   .offset = vertexAllocation.offset},
+      BufferUpdate{.buffer = indexChunk->buffer,
+                   .data = indexBytes,
+                   .offset = indexAllocation.offset},
+  };
+  auto uploadResult = gpu_.updateBuffers(uploads);
+  if (uploadResult.hasError()) {
     freeInPool(vertexChunks_, vertexChunkSlots_, vertexAllocation);
     freeInPool(indexChunks_, indexChunkSlots_, indexAllocation);
     return Result<GeometryAllocationHandle, std::string>::makeError(
-        uploadVertices.error());
-  }
-
-  auto uploadIndices =
-      gpu_.updateBuffer(indexChunk->buffer, indexBytes, indexAllocation.offset);
-  if (uploadIndices.hasError()) {
-    freeInPool(vertexChunks_, vertexChunkSlots_, vertexAllocation);
-    freeInPool(indexChunks_, indexChunkSlots_, indexAllocation);
-    return Result<GeometryAllocationHandle, std::string>::makeError(
-        uploadIndices.error());
+        uploadResult.error());
   }
 
   const SlotReservation slot = allocationSlots_.acquire();

@@ -54,8 +54,8 @@ void SceneRuntimeHost::bindScene(RenderScene *scene) {
   topologyVersion_ = scene_ != nullptr ? scene_->graph().topologyVersion() : 0u;
   transformVersion_ =
       scene_ != nullptr ? scene_->graph().transformVersion() : 0u;
-  const bool bindingsChanged =
-      hadBindings || (scene_ != nullptr && bindings_.rebuild(scene_));
+  const bool rebuilt = scene_ != nullptr && bindings_.rebuild(scene_);
+  const bool bindingsChanged = hadBindings || rebuilt;
   if (bindingsChanged) {
     noteBindingMutation();
   }

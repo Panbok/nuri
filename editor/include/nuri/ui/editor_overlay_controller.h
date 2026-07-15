@@ -45,6 +45,7 @@ public:
                            std::string_view selectedSceneId, uint64_t version,
                            std::string_view hotkeyHint = "Toggle Editor: F6");
   [[nodiscard]] std::optional<std::string> takeSceneSelectionRequest();
+  [[nodiscard]] std::optional<RenderSettings> takeRenderSettingsUpdate();
 
   bool onInput(const InputEvent &event);
   void onUpdate(double deltaTime);
@@ -60,6 +61,7 @@ private:
   std::unique_ptr<ImGuiEditor> editor_;
   std::function<void()> callback_{};
   std::shared_ptr<GizmoController> gizmoController_{};
+  std::optional<RenderSettings> pendingRenderSettingsUpdate_{};
   double frameDeltaSeconds_ = 0.0;
 };
 

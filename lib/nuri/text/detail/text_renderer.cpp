@@ -85,15 +85,6 @@ void growBounds(TextBounds &bounds, bool &hasBounds, float minX, float minY,
   return out;
 }
 
-[[nodiscard]] uint64_t estimateCompletedTimelineValue(const GPUDevice &gpu,
-                                                      uint64_t frameIndex) {
-  const uint64_t lag = std::max<uint64_t>(1u, gpu.getSwapchainImageCount());
-  if (frameIndex <= lag) {
-    return 0;
-  }
-  return frameIndex - lag;
-}
-
 [[nodiscard]] glm::vec2 computeAlignedOffset2D(const TextBounds &localBounds,
                                                const TextLayoutParams &params,
                                                float anchorX, float anchorY) {
@@ -340,7 +331,6 @@ Result<bool, std::string> TextRenderer::beginFrame(uint64_t frameIndex) {
   if (frameIndex_ != std::numeric_limits<uint64_t>::max()) {
     emitPerfValidation(frameIndex_);
   }
-  fonts_.collectGarbage(estimateCompletedTimelineValue(gpu_, frameIndex));
   frameIndex_ = frameIndex;
   clear();
   resetPerfCounters();
@@ -703,6 +693,11 @@ TextRenderer::ensureWorldPipeline(Format colorFormat, Format depthFormat) {
   desc.polygonMode = PolygonMode::Fill;
   desc.topology = Topology::Triangle;
   desc.blendEnabled = true;
+  desc.rasterState = depthFormat != Format::Count
+                         ? makeRasterPipelineState(
+                               DepthState{.compareOp = CompareOp::LessEqual,
+                                          .isDepthWriteEnabled = false})
+                         : RasterPipelineState{};
 
   auto pipeline = gpu_.createRenderPipeline(desc, "Text3D Pipeline");
   if (pipeline.hasError()) {

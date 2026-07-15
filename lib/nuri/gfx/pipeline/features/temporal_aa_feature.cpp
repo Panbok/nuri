@@ -663,6 +663,10 @@ TemporalAABackgroundMotionPass::prepare(FrameBuildContext &ctx) {
   RenderPipelineDesc pipelineDesc = fullscreenPipelineDesc(
       kFrameCompositionMotionVectorFormat, vertexShader_, fragmentShader_);
   pipelineDesc.depthFormat = kFrameCompositionDepthFormat;
+  pipelineDesc.rasterState = makeRasterPipelineState(DepthState{
+      .compareOp = CompareOp::Equal,
+      .isDepthWriteEnabled = false,
+  });
   auto pipelineResult =
       gpu_.createRenderPipeline(pipelineDesc, "taa_background_motion");
   if (pipelineResult.hasError()) {
@@ -1243,7 +1247,7 @@ Result<bool, std::string> TemporalAAResolvePass::build(FrameBuildContext &ctx) {
   }
 
   AntiAliasingFrameMetrics &aaMetrics = ctx.frame.metrics.antiAliasing;
-  const GpuTimingReport timingReport = gpu_.getLatestCompletedGpuTimingReport();
+  const GpuTimingReport &timingReport = ctx.frame.gpuTiming;
   if (hasGpuTimingScope(timingReport, GpuTimingScope::TemporalAAResolve)) {
     aaMetrics.taaResolveGpuTimeMs = timingReport.temporalAAResolveTimeMs;
     aaMetrics.taaResolveGpuTimingSourceFrameIndex =

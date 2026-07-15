@@ -7,6 +7,30 @@
 #include <limits>
 
 namespace nuri {
+namespace {
+
+VisibilityExecutionMode
+resolveMainVisibilityMode(const RenderSettings &settings) noexcept {
+  switch (sanitizeVisibilityCullingMode(settings.visibility.mainViewMode)) {
+  case VisibilityCullingMode::Disabled:
+    return VisibilityExecutionMode::Disabled;
+  case VisibilityCullingMode::CpuCoarse:
+    return VisibilityExecutionMode::Cpu;
+  case VisibilityCullingMode::Hybrid:
+    // Hybrid remains the authored compatibility name for the diagnostic path:
+    // GPU owns rendering while the CPU independently checks the visible list.
+    return settings.visibility.enableGpuInstanceCulling
+               ? VisibilityExecutionMode::GpuWithValidation
+               : VisibilityExecutionMode::Cpu;
+  case VisibilityCullingMode::GpuDriven:
+    return settings.visibility.enableGpuInstanceCulling
+               ? VisibilityExecutionMode::Gpu
+               : VisibilityExecutionMode::Disabled;
+  }
+  return VisibilityExecutionMode::Disabled;
+}
+
+} // namespace
 
 VisibilityPassResult::VisibilityPassResult(std::pmr::memory_resource *memory)
     : visibleCandidateIndices(
@@ -70,8 +94,8 @@ VisibilityPassResult VisibilityFrameState::evaluateCpu(
 
 VisibilityResolvedSettings
 visibilitySettingsFromRenderSettings(const RenderSettings &settings) noexcept {
-  const VisibilityCullingMode mainViewMode =
-      sanitizeVisibilityCullingMode(settings.visibility.mainViewMode);
+  const VisibilityExecutionMode mainViewMode =
+      resolveMainVisibilityMode(settings);
   const VisibilityCullingMode shadowMode =
       sanitizeVisibilityCullingMode(settings.visibility.shadowMode);
   const VisibilityOcclusionMode occlusionMode =
@@ -80,15 +104,6 @@ visibilitySettingsFromRenderSettings(const RenderSettings &settings) noexcept {
       .mainViewMode = mainViewMode,
       .shadowMode = shadowMode,
       .occlusionMode = occlusionMode,
-      .enableCpuMainFrustumCulling =
-          settings.opaque.enableCpuFrustumCulling ||
-          mainViewMode == VisibilityCullingMode::CpuCoarse ||
-          mainViewMode == VisibilityCullingMode::Hybrid ||
-          mainViewMode == VisibilityCullingMode::GpuDriven,
-      .enableGpuInstanceCulling =
-          settings.visibility.enableGpuInstanceCulling ||
-          mainViewMode == VisibilityCullingMode::Hybrid ||
-          mainViewMode == VisibilityCullingMode::GpuDriven,
       .enableMeshletFrustumCulling =
           settings.opaque.enableMeshletFrustumCulling ||
           settings.visibility.enableMeshletFrustumCulling,
@@ -96,11 +111,11 @@ visibilitySettingsFromRenderSettings(const RenderSettings &settings) noexcept {
                                   settings.visibility.enableMeshletConeCulling,
       .enableIndirectMeshDispatch =
           settings.visibility.enableIndirectMeshDispatch ||
-          mainViewMode == VisibilityCullingMode::GpuDriven,
+          usesGpuMainVisibility(mainViewMode),
       .enableMeshletPreTaskCompaction =
           settings.visibility.enableMeshletPreTaskCompaction,
       .enableGpuIndirectDraw = settings.visibility.enableGpuIndirectDraw ||
-                               mainViewMode == VisibilityCullingMode::GpuDriven,
+                               usesGpuMainVisibility(mainViewMode),
       .enableOcclusionCulling =
           occlusionMode == VisibilityOcclusionMode::PreviousFrameHiZ ||
           occlusionMode == VisibilityOcclusionMode::CurrentFrameHiZExperimental,
@@ -117,7 +132,8 @@ VisibilityPassRequest makeMainViewVisibilityPassRequest(
   request.kind = VisibilityPassKind::OpaqueMain;
   request.signature.kind = VisibilityPassKind::OpaqueMain;
   request.frustum = visibility_detail::buildCameraFrustumPlanes(camera);
-  request.enableCpuFrustumCulling = settings.enableCpuMainFrustumCulling;
+  request.enableCpuFrustumCulling =
+      runsCpuVisibilityEvaluation(settings.mainViewMode);
   return request;
 }
 

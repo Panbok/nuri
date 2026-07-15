@@ -61,11 +61,6 @@ private:
     size_t capacityBytes = 0;
   };
 
-  struct PendingBufferDelete {
-    BufferHandle buffer{};
-    uint64_t retireAfterFrame = 0;
-  };
-
   struct PushConstants {
     glm::mat4 mvp{1.0f};
     uint64_t vertexBufferAddress = 0;
@@ -74,18 +69,14 @@ private:
   [[nodiscard]] Result<bool, std::string> ensureShaderModules();
   [[nodiscard]] Result<bool, std::string> ensurePipeline(Format colorFormat,
                                                          Format depthFormat);
-  void syncFrameBufferCount(uint32_t swapchainImageCount, uint64_t frameIndex);
-  void deferBufferDestroy(BufferHandle buffer, uint64_t frameIndex);
-  void processPendingBufferDeletes(uint64_t completedFrameIndex);
+  void syncFrameBufferCount(uint32_t swapchainImageCount);
   [[nodiscard]] Result<bool, std::string>
-  ensureLineBufferCapacity(uint64_t frameSlot, uint64_t frameIndex,
-                           size_t requiredSize);
+  ensureLineBufferCapacity(uint64_t frameSlot, size_t requiredSize);
 
   GPUDevice &gpu_;
   glm::mat4 mvp_ = glm::mat4(1.0f);
   std::pmr::vector<LineData> lines_;
   std::pmr::vector<FrameBufferState> frameBuffers_;
-  std::pmr::vector<PendingBufferDelete> pendingBufferDeletes_;
   ShaderHandle vert_{};
   ShaderHandle frag_{};
   RenderPipelineHandle pipeline_{};

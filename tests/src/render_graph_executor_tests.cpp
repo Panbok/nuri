@@ -46,14 +46,15 @@ executeCompiled(RenderGraphExecutor &executor, GPUDevice &gpu,
 Result<RenderGraphExecutionMetadata, std::string>
 executeCompiledWithConfig(RenderGraphExecutor &executor, GPUDevice &gpu,
                           const RenderGraphCompileResult &compiled,
-                          const RenderGraphRuntimeConfig &config) {
+                          const RenderGraphRuntimeConfig &config,
+                          RenderGraphExecutionOptions options = {}) {
   auto beginResult = gpu.beginFrame(compiled.frameIndex);
   if (beginResult.hasError()) {
     return Result<RenderGraphExecutionMetadata, std::string>::makeError(
         beginResult.error());
   }
   RenderGraphRuntime runtime(config);
-  return executor.execute(runtime, gpu, compiled);
+  return executor.execute(runtime, gpu, compiled, options);
 }
 
 bool hasExecutionFailureStage(const std::string &error,
@@ -862,6 +863,54 @@ TEST_F(RenderGraphExecutorTest, ExecutorTagsBarrierResolutionFailuresByStage) {
                 "buffer barrier resource index is out of range"),
             std::string_view::npos);
   EXPECT_EQ(gpu.submitCount, 0u);
+}
+
+TEST_F(RenderGraphExecutorTest,
+       ExecutorCapturesTelemetryAndPassTimingOnlyWhenRequested) {
+  const RenderGraphRuntimeConfig config{};
+
+  {
+    auto compileResult = buildExecutorCompiledFrame(142u);
+    ASSERT_FALSE(compileResult.hasError());
+    FakeExecutorGPUDevice gpu;
+    RenderGraphExecutor executor;
+    auto executeResult =
+        executeCompiledWithConfig(executor, gpu, compileResult.value(), config);
+    ASSERT_FALSE(executeResult.hasError());
+    EXPECT_TRUE(isValid(executeResult.value().submission));
+    EXPECT_TRUE(executeResult.value().recordedCommandBuffers.empty());
+    EXPECT_TRUE(executeResult.value().submitBatches.empty());
+    EXPECT_TRUE(executeResult.value().passRanges.empty());
+    EXPECT_TRUE(executeResult.value().passTimings.empty());
+  }
+
+  {
+    auto compileResult = buildExecutorCompiledFrame(143u);
+    ASSERT_FALSE(compileResult.hasError());
+    FakeExecutorGPUDevice gpu;
+    RenderGraphExecutor executor;
+    auto executeResult = executeCompiledWithConfig(
+        executor, gpu, compileResult.value(), config,
+        {.telemetry = RenderGraphTelemetryLevel::Metadata});
+    ASSERT_FALSE(executeResult.hasError());
+    EXPECT_EQ(executeResult.value().recordedCommandBuffers.size(), 1u);
+    EXPECT_EQ(executeResult.value().submitBatches.size(), 1u);
+    EXPECT_EQ(executeResult.value().passRanges.size(), 1u);
+    EXPECT_TRUE(executeResult.value().passTimings.empty());
+  }
+
+  {
+    auto compileResult = buildExecutorCompiledFrame(144u);
+    ASSERT_FALSE(compileResult.hasError());
+    FakeExecutorGPUDevice gpu;
+    RenderGraphExecutor executor;
+    auto executeResult = executeCompiledWithConfig(
+        executor, gpu, compileResult.value(), config,
+        {.telemetry = RenderGraphTelemetryLevel::PassTimings});
+    ASSERT_FALSE(executeResult.hasError());
+    ASSERT_EQ(executeResult.value().passTimings.size(), 1u);
+    EXPECT_EQ(executeResult.value().passTimings[0].orderedPassIndex, 0u);
+  }
 }
 
 TEST_F(RenderGraphExecutorTest,

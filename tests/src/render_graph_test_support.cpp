@@ -597,6 +597,7 @@ bool FakeGPUDeviceBase::resolveGeometry(GeometryAllocationHandle,
 }
 
 GpuTimingReport FakeGPUDeviceBase::getLatestCompletedGpuTimingReport() const {
+  ++latestGpuTimingReportFetchCount;
   return latestCompletedGpuTimingReport;
 }
 
@@ -1009,6 +1010,13 @@ Result<bool, std::string> FakeGPUDeviceBase::updateBuffer(
   std::copy(data.begin(), data.end(),
             state.bytes.begin() + static_cast<std::ptrdiff_t>(offset));
   return Result<bool, std::string>::makeResult(true);
+}
+
+Result<bool, std::string>
+FakeGPUDeviceBase::updateBuffers(std::span<const BufferUpdate> updates) {
+  ++updateBufferBatchCallCount;
+  updateBufferBatchSizes.push_back(updates.size());
+  return GPUDevice::updateBuffers(updates);
 }
 
 Result<bool, std::string>

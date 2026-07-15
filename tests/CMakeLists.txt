@@ -222,6 +222,12 @@ if(TARGET LVKLibrary)
 endif()
 
 nuri_add_gtest_suite(
+  nuri_raster_pipeline_state_tests
+  src/raster_pipeline_state_tests.cpp
+  "raster_pipeline_state::"
+)
+
+nuri_add_gtest_suite(
   nuri_render_temporal_frame_service_tests
   src/temporal_frame_service_tests.cpp
   "temporal_service::"
@@ -273,6 +279,18 @@ nuri_add_gtest_suite(
   nuri_slot_pool_tests
   src/slot_pool_tests.cpp
   "slot_pool::"
+)
+
+nuri_add_gtest_suite(
+  nuri_dynamic_buffer_tests
+  src/dynamic_buffer_tests.cpp
+  "dynamic_buffer::"
+)
+
+nuri_add_gtest_suite(
+  nuri_core_primitives_tests
+  src/core_primitives_tests.cpp
+  "core_primitives::"
 )
 
 nuri_add_gtest_suite(

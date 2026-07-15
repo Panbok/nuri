@@ -27,8 +27,7 @@ resolveMemoryResource(std::pmr::memory_resource *memory) {
 
 [[nodiscard]] const RenderSettings &
 settingsOrDefault(const RenderFrameContext &frame) {
-  static const RenderSettings kDefaultSettings{};
-  return frame.settings ? *frame.settings : kDefaultSettings;
+  return renderSettingsOrDefault(frame);
 }
 
 [[nodiscard]] bool
@@ -387,7 +386,8 @@ resolveTransmissionLod(const Submesh &submesh, const RenderSettings &settings) {
 RenderPipelineDesc meshPipelineDesc(Format colorFormat, Format depthFormat,
                                     ShaderHandle vertexShader,
                                     ShaderHandle fragmentShader,
-                                    CullMode cullMode, bool blendEnabled) {
+                                    CullMode cullMode, bool blendEnabled,
+                                    RasterPipelineState rasterState) {
   return RenderPipelineDesc{
       .vertexInput = {},
       .vertexShader = vertexShader,
@@ -398,6 +398,7 @@ RenderPipelineDesc meshPipelineDesc(Format colorFormat, Format depthFormat,
       .polygonMode = PolygonMode::Fill,
       .topology = Topology::Triangle,
       .blendEnabled = blendEnabled,
+      .rasterState = canonicalRasterPipelineState(rasterState),
   };
 }
 
@@ -790,8 +791,16 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
   const Format depthFormat = nuri::isValid(depthTexture)
                                  ? gpu_.getTextureFormat(depthTexture)
                                  : Format::Count;
-  auto pipelineResult =
-      ensurePipelines(gpu_.getTextureFormat(frameColorTexture), depthFormat);
+  const RasterPipelineState targetRasterState =
+      depthFormat != Format::Count
+          ? makeRasterPipelineState(
+                DepthState{.compareOp = CompareOp::LessEqual,
+                           .isDepthWriteEnabled = false},
+                jitteredPostTaaDepthBias && jitterDepthBiasConstant != 0.0f,
+                jitterDepthBiasConstant)
+          : RasterPipelineState{};
+  auto pipelineResult = ensurePipelines(
+      gpu_.getTextureFormat(frameColorTexture), depthFormat, targetRasterState);
   if (pipelineResult.hasError()) {
     return pipelineResult;
   }
@@ -811,22 +820,29 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
     const bool needsInstanceDataUpload =
         animationSceneData == nullptr &&
         instanceDataRingUploadVersions_[frameSlot] != cachedTransformVersion_;
+    std::array<BufferUpdate, 2u> instanceUpdates{};
+    size_t instanceUpdateCount = 0u;
     if (needsInstanceDataUpload && !instanceMatrices_.empty()) {
       const std::span<const std::byte> matrixBytes{
           reinterpret_cast<const std::byte *>(instanceMatrices_.data()),
           instanceMatrices_.size() * sizeof(InstanceData)};
-      auto updateResult = gpu_.updateBuffer(
-          instanceMatricesRing_[frameSlot].buffer->handle(), matrixBytes, 0);
-      if (updateResult.hasError()) {
-        return updateResult;
-      }
+      instanceUpdates[instanceUpdateCount++] = BufferUpdate{
+          .buffer = instanceMatricesRing_[frameSlot].buffer->handle(),
+          .data = matrixBytes,
+      };
     }
     if (needsInstanceDataUpload && !instanceRemap_.empty()) {
       const std::span<const std::byte> remapBytes{
           reinterpret_cast<const std::byte *>(instanceRemap_.data()),
           instanceRemap_.size() * sizeof(uint32_t)};
-      auto updateResult = gpu_.updateBuffer(
-          instanceRemapRing_[frameSlot].buffer->handle(), remapBytes, 0);
+      instanceUpdates[instanceUpdateCount++] = BufferUpdate{
+          .buffer = instanceRemapRing_[frameSlot].buffer->handle(),
+          .data = remapBytes,
+      };
+    }
+    if (instanceUpdateCount != 0u) {
+      auto updateResult = gpu_.updateBuffers(std::span<const BufferUpdate>(
+          instanceUpdates.data(), instanceUpdateCount));
       if (updateResult.hasError()) {
         return updateResult;
       }
@@ -1211,7 +1227,7 @@ TransmissionRenderer::appendTransmissionMainPass(RenderFrameContext &frame,
     aaMetrics.taaTransmissionMipDebugViewRendered = true;
     ++aaMetrics.taaTransmissionMipDebugPassCount;
   }
-  const GpuTimingReport timingReport = gpu_.getLatestCompletedGpuTimingReport();
+  const GpuTimingReport &timingReport = frame.gpuTiming;
   if (hasGpuTimingScope(timingReport, GpuTimingScope::Transmission)) {
     aaMetrics.taaTransmissionGpuTimeMs = timingReport.transmissionTimeMs;
     aaMetrics.taaTransmissionGpuTimingSourceFrameIndex =
@@ -1443,61 +1459,94 @@ Result<bool, std::string> TransmissionRenderer::createShaders() {
 }
 
 Result<bool, std::string>
-TransmissionRenderer::ensurePipelines(Format colorFormat, Format depthFormat) {
+TransmissionRenderer::ensurePipelines(Format colorFormat, Format depthFormat,
+                                      RasterPipelineState rasterState) {
+  const RasterPipelineState targetRasterState =
+      canonicalRasterPipelineState(rasterState);
   const bool meshPipelinesValid =
       nuri::isValid(meshPipelineHandle_) &&
       nuri::isValid(meshDoubleSidedPipelineHandle_) &&
       nuri::isValid(meshBlendPipelineHandle_) &&
       nuri::isValid(meshBlendDoubleSidedPipelineHandle_) &&
       meshPipelineColorFormat_ == colorFormat &&
-      meshPipelineDepthFormat_ == depthFormat;
+      meshPipelineDepthFormat_ == depthFormat &&
+      meshPipelineRasterState_ == targetRasterState;
   if (meshPipelinesValid) {
     return Result<bool, std::string>::makeResult(true);
   }
 
-  destroyPipelineState();
+  const auto destroyPipelineIfValid = [this](RenderPipelineHandle pipeline) {
+    if (nuri::isValid(pipeline)) {
+      gpu_.destroyRenderPipeline(pipeline);
+    }
+  };
 
   auto meshResult = gpu_.createRenderPipeline(
       meshPipelineDesc(colorFormat, depthFormat, meshVertexShader_,
-                       meshFragmentShader_, CullMode::Back, false),
+                       meshFragmentShader_, CullMode::Back, false,
+                       targetRasterState),
       "transmission_mesh");
   if (meshResult.hasError()) {
     return Result<bool, std::string>::makeError(meshResult.error());
   }
-  meshPipelineHandle_ = meshResult.value();
+  RenderPipelineHandle newMeshPipeline = meshResult.value();
 
   auto meshDoubleResult = gpu_.createRenderPipeline(
       meshPipelineDesc(colorFormat, depthFormat, meshVertexShader_,
-                       meshFragmentShader_, CullMode::None, false),
+                       meshFragmentShader_, CullMode::None, false,
+                       targetRasterState),
       "transmission_mesh_double_sided");
   if (meshDoubleResult.hasError()) {
-    destroyPipelineState();
+    destroyPipelineIfValid(newMeshPipeline);
     return Result<bool, std::string>::makeError(meshDoubleResult.error());
   }
-  meshDoubleSidedPipelineHandle_ = meshDoubleResult.value();
+  RenderPipelineHandle newMeshDoubleSidedPipeline = meshDoubleResult.value();
 
   auto blendResult = gpu_.createRenderPipeline(
       meshPipelineDesc(colorFormat, depthFormat, meshVertexShader_,
-                       meshFragmentShader_, CullMode::Back, true),
+                       meshFragmentShader_, CullMode::Back, true,
+                       targetRasterState),
       "transmission_mesh_blend");
   if (blendResult.hasError()) {
-    destroyPipelineState();
+    destroyPipelineIfValid(newMeshDoubleSidedPipeline);
+    destroyPipelineIfValid(newMeshPipeline);
     return Result<bool, std::string>::makeError(blendResult.error());
   }
-  meshBlendPipelineHandle_ = blendResult.value();
+  RenderPipelineHandle newMeshBlendPipeline = blendResult.value();
 
   auto blendDoubleResult = gpu_.createRenderPipeline(
       meshPipelineDesc(colorFormat, depthFormat, meshVertexShader_,
-                       meshFragmentShader_, CullMode::None, true),
+                       meshFragmentShader_, CullMode::None, true,
+                       targetRasterState),
       "transmission_mesh_blend_double_sided");
   if (blendDoubleResult.hasError()) {
-    destroyPipelineState();
+    destroyPipelineIfValid(newMeshBlendPipeline);
+    destroyPipelineIfValid(newMeshDoubleSidedPipeline);
+    destroyPipelineIfValid(newMeshPipeline);
     return Result<bool, std::string>::makeError(blendDoubleResult.error());
   }
-  meshBlendDoubleSidedPipelineHandle_ = blendDoubleResult.value();
+  RenderPipelineHandle newMeshBlendDoubleSidedPipeline =
+      blendDoubleResult.value();
+
+  const RenderPipelineHandle oldMeshPipeline = meshPipelineHandle_;
+  const RenderPipelineHandle oldMeshDoubleSidedPipeline =
+      meshDoubleSidedPipelineHandle_;
+  const RenderPipelineHandle oldMeshBlendPipeline = meshBlendPipelineHandle_;
+  const RenderPipelineHandle oldMeshBlendDoubleSidedPipeline =
+      meshBlendDoubleSidedPipelineHandle_;
+  meshPipelineHandle_ = newMeshPipeline;
+  meshDoubleSidedPipelineHandle_ = newMeshDoubleSidedPipeline;
+  meshBlendPipelineHandle_ = newMeshBlendPipeline;
+  meshBlendDoubleSidedPipelineHandle_ = newMeshBlendDoubleSidedPipeline;
 
   meshPipelineColorFormat_ = colorFormat;
   meshPipelineDepthFormat_ = depthFormat;
+  meshPipelineRasterState_ = targetRasterState;
+
+  destroyPipelineIfValid(oldMeshBlendDoubleSidedPipeline);
+  destroyPipelineIfValid(oldMeshBlendPipeline);
+  destroyPipelineIfValid(oldMeshDoubleSidedPipeline);
+  destroyPipelineIfValid(oldMeshPipeline);
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -1517,82 +1566,40 @@ TransmissionRenderer::ensureRingBufferCount(uint32_t requiredCount) {
 
 Result<bool, std::string>
 TransmissionRenderer::ensureInstanceMatricesRingCapacity(size_t requiredBytes) {
-  bool needsResize = false;
-  bool hasLiveBuffers = false;
-  for (const DynamicBufferSlot &slot : instanceMatricesRing_) {
-    if (slot.buffer && slot.buffer->valid()) {
-      hasLiveBuffers = true;
-      if (slot.capacityBytes < requiredBytes) {
-        needsResize = true;
-        break;
-      }
-    }
-  }
-  if (needsResize && hasLiveBuffers) {
-    gpu_.waitIdle();
-  }
   for (size_t i = 0; i < instanceMatricesRing_.size(); ++i) {
     DynamicBufferSlot &slot = instanceMatricesRing_[i];
-    if (slot.buffer && slot.buffer->valid() &&
-        slot.capacityBytes >= requiredBytes) {
-      continue;
-    }
-    if (slot.buffer && slot.buffer->valid()) {
-      gpu_.destroyBuffer(slot.buffer->handle());
-    }
-    slot.buffer.reset();
-    auto bufferResult = Buffer::create(gpu_,
-                                       BufferDesc{.usage = BufferUsage::Storage,
-                                                  .storage = Storage::Device,
-                                                  .size = requiredBytes},
-                                       "transmission_instance_matrices");
+    auto bufferResult =
+        ensureDynamicBufferCapacity(gpu_, slot,
+                                    BufferDesc{.usage = BufferUsage::Storage,
+                                               .storage = Storage::Device,
+                                               .size = requiredBytes},
+                                    "transmission_instance_matrices");
     if (bufferResult.hasError()) {
       return Result<bool, std::string>::makeError(bufferResult.error());
     }
-    slot.buffer = std::move(bufferResult.value());
-    slot.capacityBytes = requiredBytes;
-    instanceDataRingUploadVersions_[i] = std::numeric_limits<uint64_t>::max();
+    if (bufferResult.value()) {
+      instanceDataRingUploadVersions_[i] = std::numeric_limits<uint64_t>::max();
+    }
   }
   return Result<bool, std::string>::makeResult(true);
 }
 
 Result<bool, std::string>
 TransmissionRenderer::ensureInstanceRemapRingCapacity(size_t requiredBytes) {
-  bool needsResize = false;
-  bool hasLiveBuffers = false;
-  for (const DynamicBufferSlot &slot : instanceRemapRing_) {
-    if (slot.buffer && slot.buffer->valid()) {
-      hasLiveBuffers = true;
-      if (slot.capacityBytes < requiredBytes) {
-        needsResize = true;
-        break;
-      }
-    }
-  }
-  if (needsResize && hasLiveBuffers) {
-    gpu_.waitIdle();
-  }
   for (size_t i = 0; i < instanceRemapRing_.size(); ++i) {
     DynamicBufferSlot &slot = instanceRemapRing_[i];
-    if (slot.buffer && slot.buffer->valid() &&
-        slot.capacityBytes >= requiredBytes) {
-      continue;
-    }
-    if (slot.buffer && slot.buffer->valid()) {
-      gpu_.destroyBuffer(slot.buffer->handle());
-    }
-    slot.buffer.reset();
-    auto bufferResult = Buffer::create(gpu_,
-                                       BufferDesc{.usage = BufferUsage::Storage,
-                                                  .storage = Storage::Device,
-                                                  .size = requiredBytes},
-                                       "transmission_instance_remap");
+    auto bufferResult =
+        ensureDynamicBufferCapacity(gpu_, slot,
+                                    BufferDesc{.usage = BufferUsage::Storage,
+                                               .storage = Storage::Device,
+                                               .size = requiredBytes},
+                                    "transmission_instance_remap");
     if (bufferResult.hasError()) {
       return Result<bool, std::string>::makeError(bufferResult.error());
     }
-    slot.buffer = std::move(bufferResult.value());
-    slot.capacityBytes = requiredBytes;
-    instanceDataRingUploadVersions_[i] = std::numeric_limits<uint64_t>::max();
+    if (bufferResult.value()) {
+      instanceDataRingUploadVersions_[i] = std::numeric_limits<uint64_t>::max();
+    }
   }
   return Result<bool, std::string>::makeResult(true);
 }
@@ -1603,31 +1610,16 @@ TransmissionRenderer::ensureBlendedFrameDataRingCapacity(size_t requiredBytes) {
   while (blendedFrameDataRing_.size() < count) {
     blendedFrameDataRing_.push_back(DynamicBufferSlot{});
   }
-  bool waitedForResize = false;
   for (DynamicBufferSlot &slot : blendedFrameDataRing_) {
-    if (slot.buffer && slot.buffer->valid() &&
-        slot.capacityBytes >= requiredBytes) {
-      continue;
-    }
-    if (slot.buffer && slot.buffer->valid()) {
-      if (slot.capacityBytes < requiredBytes && !waitedForResize) {
-        gpu_.waitIdle();
-        waitedForResize = true;
-      }
-      gpu_.destroyBuffer(slot.buffer->handle());
-    }
-    slot.buffer.reset();
     auto bufferResult =
-        Buffer::create(gpu_,
-                       BufferDesc{.usage = BufferUsage::Storage,
-                                  .storage = Storage::HostVisible,
-                                  .size = requiredBytes},
-                       "transparent_transmission_frame_data");
+        ensureDynamicBufferCapacity(gpu_, slot,
+                                    BufferDesc{.usage = BufferUsage::Storage,
+                                               .storage = Storage::HostVisible,
+                                               .size = requiredBytes},
+                                    "transparent_transmission_frame_data");
     if (bufferResult.hasError()) {
       return Result<bool, std::string>::makeError(bufferResult.error());
     }
-    slot.buffer = std::move(bufferResult.value());
-    slot.capacityBytes = requiredBytes;
   }
   return Result<bool, std::string>::makeResult(true);
 }
@@ -1951,6 +1943,7 @@ void TransmissionRenderer::destroyPipelineState() {
   meshBlendDoubleSidedPipelineHandle_ = {};
   meshPipelineColorFormat_ = Format::Count;
   meshPipelineDepthFormat_ = Format::Count;
+  meshPipelineRasterState_ = {};
 }
 
 void TransmissionRenderer::destroyShaders() {
@@ -1965,27 +1958,9 @@ void TransmissionRenderer::destroyShaders() {
 }
 
 void TransmissionRenderer::destroyBuffers() {
-  for (DynamicBufferSlot &slot : instanceMatricesRing_) {
-    if (slot.buffer && slot.buffer->valid()) {
-      gpu_.destroyBuffer(slot.buffer->handle());
-    }
-    slot.buffer.reset();
-    slot.capacityBytes = 0;
-  }
-  for (DynamicBufferSlot &slot : instanceRemapRing_) {
-    if (slot.buffer && slot.buffer->valid()) {
-      gpu_.destroyBuffer(slot.buffer->handle());
-    }
-    slot.buffer.reset();
-    slot.capacityBytes = 0;
-  }
-  for (DynamicBufferSlot &slot : blendedFrameDataRing_) {
-    if (slot.buffer && slot.buffer->valid()) {
-      gpu_.destroyBuffer(slot.buffer->handle());
-    }
-    slot.buffer.reset();
-    slot.capacityBytes = 0;
-  }
+  retireDynamicBufferRing(gpu_, instanceMatricesRing_);
+  retireDynamicBufferRing(gpu_, instanceRemapRing_);
+  retireDynamicBufferRing(gpu_, blendedFrameDataRing_);
   instanceMatricesRing_.clear();
   instanceRemapRing_.clear();
   blendedFrameDataRing_.clear();

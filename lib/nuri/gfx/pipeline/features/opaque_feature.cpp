@@ -6,7 +6,7 @@ namespace nuri {
 
 bool OpaqueMainPass::isEnabled(const FrameBuildContext &ctx) const {
   return (ctx.frame.settings == nullptr ||
-          ctx.frame.settings->opaque.enabled) &&
+          renderSettingsOrDefault(ctx.frame).opaque.enabled) &&
          renderer_.hasPreparedOpaqueMainPasses();
 }
 
@@ -16,7 +16,7 @@ Result<bool, std::string> OpaqueMainPass::build(FrameBuildContext &ctx) {
 
 bool OpaquePrepassPass::isEnabled(const FrameBuildContext &ctx) const {
   return (ctx.frame.settings == nullptr ||
-          ctx.frame.settings->opaque.enabled) &&
+          renderSettingsOrDefault(ctx.frame).opaque.enabled) &&
          renderer_.hasPreparedOpaquePrepassPasses();
 }
 
@@ -26,7 +26,7 @@ Result<bool, std::string> OpaquePrepassPass::build(FrameBuildContext &ctx) {
 
 bool OpaqueMainLightingPass::isEnabled(const FrameBuildContext &ctx) const {
   return (ctx.frame.settings == nullptr ||
-          ctx.frame.settings->opaque.enabled) &&
+          renderSettingsOrDefault(ctx.frame).opaque.enabled) &&
          renderer_.hasPreparedOpaqueMainLightingPasses();
 }
 
@@ -40,7 +40,7 @@ OpaqueMainLightingPass::build(FrameBuildContext &ctx) {
 
 bool OpaquePickPass::isEnabled(const FrameBuildContext &ctx) const {
   return (ctx.frame.settings == nullptr ||
-          ctx.frame.settings->opaque.enabled) &&
+          renderSettingsOrDefault(ctx.frame).opaque.enabled) &&
          renderer_.hasPreparedOpaquePickPasses();
 }
 

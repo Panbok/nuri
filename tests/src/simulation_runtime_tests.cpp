@@ -59,6 +59,26 @@ TEST(SimulationRuntimeTests, ControllerReusesSlotsWithNewGeneration) {
   EXPECT_EQ(state, nuri::SimulationState::Running);
 }
 
+TEST(SimulationRuntimeTests, RebindingNonEmptySceneRebuildsBindingTable) {
+  nuri::RenderScene firstScene;
+  nuri::RenderScene secondScene;
+
+  nuri::SceneRuntimeHost runtime;
+  runtime.bindScene(&firstScene);
+  auto firstSimulation = runtime.simulations().createSimulation(
+      makeNodeSimulationDesc(firstScene.graph().rootNode()));
+  ASSERT_FALSE(firstSimulation.hasError()) << firstSimulation.error();
+
+  runtime.bindScene(&secondScene);
+  auto secondSimulation = runtime.simulations().createSimulation(
+      makeNodeSimulationDesc(secondScene.graph().rootNode()));
+  ASSERT_FALSE(secondSimulation.hasError()) << secondSimulation.error();
+
+  nuri::SimulationStats stats;
+  ASSERT_TRUE(runtime.simulations().getStats(secondSimulation.value(), stats));
+  EXPECT_FALSE(stats.faulted);
+}
+
 TEST(SimulationRuntimeTests, TickHonorsPauseResumeDisableAndSingleStep) {
   nuri::RenderScene scene;
   nuri::SceneRuntimeHost runtime;

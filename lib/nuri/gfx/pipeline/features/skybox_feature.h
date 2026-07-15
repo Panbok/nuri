@@ -9,13 +9,12 @@
 #include "nuri/gfx/pipeline/render_feature.h"
 #include "nuri/gfx/pipeline/render_feature_pass.h"
 #include "nuri/gfx/shader.h"
-#include "nuri/resources/gpu/buffer.h"
-
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <span>
+#include <vector>
 
 #include <glm/glm.hpp>
 
@@ -41,6 +40,11 @@ public:
   Result<bool, std::string> build(FrameBuildContext &ctx) override;
 
 private:
+  struct FrameBufferSlot {
+    BufferHandle buffer{};
+    size_t capacityBytes = 0u;
+  };
+
   enum FrameDataFlags : uint32_t {
     HasSceneColor = 1u << 5u,
   };
@@ -83,11 +87,13 @@ private:
   static_assert(offsetof(PushConstants, shadowCascadeIndex) == 120u);
 
   Result<bool, std::string> ensureInitialized();
-  Result<bool, std::string> ensureFrameBufferCapacity(size_t requiredBytes);
+  void syncFrameBufferSlots();
+  Result<bool, std::string> ensureFrameBufferCapacity(FrameBufferSlot &slot,
+                                                      size_t requiredBytes);
   Result<bool, std::string> createShaders();
   Result<bool, std::string> createPipeline();
   Result<bool, std::string> prepareSkyboxDraw(FrameBuildContext &ctx);
-  void destroyFrameBuffer();
+  void destroyFrameBuffers();
 
   GPUDevice &gpu_;
   SkyboxFeatureConfig config_{};
@@ -96,7 +102,8 @@ private:
   std::unique_ptr<Pipeline> skyboxMsaaPipeline_;
   std::unique_ptr<Pipeline> skyboxDepthPipeline_;
   std::unique_ptr<Pipeline> skyboxMsaaDepthPipeline_;
-  std::unique_ptr<Buffer> frameBuffer_;
+  std::vector<FrameBufferSlot> frameBufferSlots_;
+  BufferHandle preparedFrameBuffer_{};
 
   ShaderHandle skyboxVertexShader_{};
   ShaderHandle skyboxFragmentShader_{};
@@ -105,7 +112,6 @@ private:
   RenderPipelineHandle skyboxDepthPipelineHandle_{};
   RenderPipelineHandle skyboxMsaaDepthPipelineHandle_{};
 
-  size_t frameBufferCapacityBytes_ = 0;
   bool initialized_ = false;
 
   FrameData frameData_{};

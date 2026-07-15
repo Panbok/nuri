@@ -214,6 +214,19 @@ public:
   virtual Result<bool, std::string>
   updateBuffer(BufferHandle buffer, std::span<const std::byte> data,
                size_t offset = 0) = 0;
+  // Validates and consumes an ordered batch of source spans before returning.
+  // Backends may submit the writes asynchronously on the graphics queue; later
+  // graphics submissions observe them through queue FIFO ordering.
+  virtual Result<bool, std::string>
+  updateBuffers(std::span<const BufferUpdate> updates) {
+    for (const BufferUpdate &update : updates) {
+      auto result = updateBuffer(update.buffer, update.data, update.offset);
+      if (result.hasError()) {
+        return result;
+      }
+    }
+    return Result<bool, std::string>::makeResult(true);
+  }
   virtual Result<bool, std::string>
   readBuffer(BufferHandle buffer, size_t offset,
              std::span<std::byte> outBytes) = 0;

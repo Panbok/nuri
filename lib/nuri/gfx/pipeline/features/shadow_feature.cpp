@@ -7,7 +7,8 @@
 namespace nuri {
 
 bool ShadowDepthPass::isEnabled(const FrameBuildContext &ctx) const {
-  return ctx.frame.settings != nullptr && ctx.frame.settings->shadow.enabled &&
+  return ctx.frame.settings != nullptr &&
+         renderSettingsOrDefault(ctx.frame).shadow.enabled &&
          renderer_.hasPreparedShadowDepthPasses();
 }
 

@@ -68,6 +68,11 @@ struct RenderPipelineDesc {
   bool alphaToCoverageEnabled = false;
   bool blendEnabled = false;
   SpecializationInfo specInfo{};
+  RasterPipelineState rasterState{};
+  // Additional immutable raster variants expected by this pipeline. Backends
+  // that bake raster state create these synchronously; dynamic-state backends
+  // may ignore the declaration.
+  std::span<const RasterPipelineState> prewarmRasterStates{};
 };
 
 struct ComputePipelineDesc {
@@ -89,6 +94,8 @@ struct MeshletPipelineDesc {
   bool alphaToCoverageEnabled = false;
   bool blendEnabled = false;
   SpecializationInfo specInfo{};
+  RasterPipelineState rasterState{};
+  std::span<const RasterPipelineState> prewarmRasterStates{};
 };
 
 } // namespace nuri

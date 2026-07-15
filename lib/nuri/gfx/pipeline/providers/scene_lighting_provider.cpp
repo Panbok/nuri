@@ -60,9 +60,7 @@ makeSceneDataBufferLayout(size_t frameDataBytes, size_t directionalLightBytes,
 
 [[nodiscard]] const RenderSettings::TextureFilteringSettings &
 textureFilteringSettingsOrDefault(const RenderFrameContext &frame) {
-  static const RenderSettings kDefaultSettings{};
-  return frame.settings ? frame.settings->textureFiltering
-                        : kDefaultSettings.textureFiltering;
+  return renderSettingsOrDefault(frame).textureFiltering;
 }
 
 [[nodiscard]] uint32_t resolveDefaultMaterialSamplerId(
@@ -593,42 +591,33 @@ SceneLightingProvider::ensureBufferRingCapacity(size_t requiredBytes,
   const size_t requested =
       std::max(requiredBytes, sizeof(ForwardSceneFrameData));
   const uint32_t safeCount = std::max(requiredCount, 1u);
-  const bool countsMatch = sceneDataBuffers_.size() == safeCount;
-  bool allValid = countsMatch;
-  if (countsMatch) {
-    for (const std::unique_ptr<Buffer> &buffer : sceneDataBuffers_) {
-      if (buffer == nullptr || !buffer->valid()) {
-        allValid = false;
-        break;
-      }
-    }
+  const bool ringCountChanged = sceneDataBuffers_.size() != safeCount;
+  if (sceneDataBuffers_.size() > safeCount) {
+    retireDynamicBufferRing(gpu_, std::span<DynamicBufferSlot>(
+                                      sceneDataBuffers_.data() + safeCount,
+                                      sceneDataBuffers_.size() - safeCount));
   }
-  if (allValid && sceneDataBufferCapacityBytes_ >= requested) {
-    if (slotUploadStates_.size() != safeCount) {
-      slotUploadStates_.assign(safeCount, SlotUploadState{});
-    }
-    return Result<bool, std::string>::makeResult(true);
+  sceneDataBuffers_.resize(safeCount);
+  if (ringCountChanged) {
+    slotUploadStates_.assign(safeCount, SlotUploadState{});
+  } else if (slotUploadStates_.size() != safeCount) {
+    slotUploadStates_.resize(safeCount);
   }
-  if (!sceneDataBuffers_.empty()) {
-    gpu_.waitIdle();
-  }
-  destroyBuffers();
-  sceneDataBuffers_.reserve(safeCount);
-  slotUploadStates_.assign(safeCount, SlotUploadState{});
+
   for (uint32_t i = 0u; i < safeCount; ++i) {
     auto bufferResult =
-        Buffer::create(gpu_,
-                       BufferDesc{.usage = BufferUsage::Storage,
-                                  .storage = Storage::HostVisible,
-                                  .size = requested},
-                       "forward_scene_data");
+        ensureDynamicBufferCapacity(gpu_, sceneDataBuffers_[i],
+                                    BufferDesc{.usage = BufferUsage::Storage,
+                                               .storage = Storage::HostVisible,
+                                               .size = requested},
+                                    "forward_scene_data");
     if (bufferResult.hasError()) {
-      destroyBuffers();
       return Result<bool, std::string>::makeError(bufferResult.error());
     }
-    sceneDataBuffers_.push_back(std::move(bufferResult.value()));
+    if (bufferResult.value()) {
+      slotUploadStates_[i] = {};
+    }
   }
-  sceneDataBufferCapacityBytes_ = requested;
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -654,7 +643,6 @@ SceneLightingProvider::ensureDisabledShadowFrameBuffer() {
     auto updateResult =
         gpu_.updateBuffer(disabledShadowFrameBuffer_->handle(), bytes, 0u);
     if (updateResult.hasError()) {
-      gpu_.destroyBuffer(disabledShadowFrameBuffer_->handle());
       disabledShadowFrameBuffer_.reset();
       return Result<uint64_t, std::string>::makeError(updateResult.error());
     }
@@ -671,19 +659,10 @@ SceneLightingProvider::ensureDisabledShadowFrameBuffer() {
 }
 
 void SceneLightingProvider::destroyBuffers() {
-  for (std::unique_ptr<Buffer> &buffer : sceneDataBuffers_) {
-    if (buffer && buffer->valid()) {
-      gpu_.destroyBuffer(buffer->handle());
-    }
-    buffer.reset();
-  }
+  retireDynamicBufferRing(gpu_, sceneDataBuffers_);
   sceneDataBuffers_.clear();
   slotUploadStates_.clear();
-  if (disabledShadowFrameBuffer_ && disabledShadowFrameBuffer_->valid()) {
-    gpu_.destroyBuffer(disabledShadowFrameBuffer_->handle());
-  }
   disabledShadowFrameBuffer_.reset();
-  sceneDataBufferCapacityBytes_ = 0;
 }
 
 void SceneLightingProvider::destroyCachedSamplers() {
@@ -701,7 +680,7 @@ SceneLightingProvider::currentBuffer(uint64_t frameIndex) const noexcept {
   }
   const size_t slot =
       static_cast<size_t>(frameIndex % sceneDataBuffers_.size());
-  return sceneDataBuffers_[slot].get();
+  return sceneDataBuffers_[slot].buffer.get();
 }
 
 } // namespace nuri

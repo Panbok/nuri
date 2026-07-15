@@ -168,6 +168,26 @@ void populateTelemetryExecutionMetadata(
       {.workerIndex = 1u, .firstOrderedPassIndex = 1u, .passCount = 1u});
 }
 
+TEST(RenderGraphTelemetryTest, CaptureRequestIsExplicitAndConsumed) {
+  EnvVarGuard envGuard("NURI_RENDER_GRAPH_DUMP", "0");
+  RenderGraphTelemetryService telemetry;
+  EXPECT_FALSE(telemetry.captureRequested());
+  EXPECT_EQ(telemetry.requestedCaptureLevel(), RenderGraphTelemetryLevel::None);
+
+  telemetry.requestCapture(RenderGraphTelemetryLevel::Metadata);
+  EXPECT_TRUE(telemetry.captureRequested());
+  EXPECT_EQ(telemetry.requestedCaptureLevel(),
+            RenderGraphTelemetryLevel::Metadata);
+  telemetry.requestCapture(RenderGraphTelemetryLevel::PassTimings);
+  EXPECT_EQ(telemetry.requestedCaptureLevel(),
+            RenderGraphTelemetryLevel::PassTimings);
+
+  RenderGraphCompileResult compiled;
+  telemetry.capture(compiled);
+  EXPECT_FALSE(telemetry.captureRequested());
+  EXPECT_TRUE(telemetry.hasSnapshot());
+}
+
 TEST(RenderGraphTelemetryTest, CaptureDeepCopiesStructuredData) {
   std::array<std::byte, 32 * 1024> serviceBytes{};
   std::pmr::monotonic_buffer_resource serviceMemory(serviceBytes.data(),
@@ -279,6 +299,9 @@ TEST(RenderGraphTelemetryTest, SuggestDumpPathUsesEnvDirectorySeed) {
                        dumpDirectory.generic_string());
 
   RenderGraphTelemetryService telemetry;
+  EXPECT_TRUE(telemetry.captureRequested());
+  EXPECT_EQ(telemetry.requestedCaptureLevel(),
+            RenderGraphTelemetryLevel::PassTimings);
 
   std::array<std::byte, 16 * 1024> compileBytes{};
   std::pmr::monotonic_buffer_resource compileMemory(compileBytes.data(),

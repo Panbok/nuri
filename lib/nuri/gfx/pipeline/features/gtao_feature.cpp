@@ -587,7 +587,7 @@ Result<bool, std::string> GTAOPass::build(FrameBuildContext &ctx) {
                               .z = 1u};
 
   AmbientOcclusionFrameMetrics &metrics = ctx.frame.metrics.ambientOcclusion;
-  const GpuTimingReport timingReport = gpu_.getLatestCompletedGpuTimingReport();
+  const GpuTimingReport &timingReport = ctx.frame.gpuTiming;
   if (hasGpuTimingScope(timingReport, GpuTimingScope::GTAO)) {
     metrics.gpuTimeMs = timingReport.gtaoTimeMs;
     metrics.gpuTimingSourceFrameIndex = timingReport.gtaoSourceFrameIndex;

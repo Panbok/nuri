@@ -10,7 +10,7 @@
   },
   "environment": {
     "os": "any",
-    "backend": "nvrhi-default",
+    "backend": "nvrhi",
     "windowMode": "visible",
     "gpuVendorId": null,
     "gpuDeviceId": null,

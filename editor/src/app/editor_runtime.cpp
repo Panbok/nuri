@@ -1181,6 +1181,11 @@ void EditorRuntime::submitPipelineFrame() {
   NURI_ASSERT(!renderResult.hasError(), "Render failed: %s",
               renderResult.error().c_str());
   logDebugShadowInspectProbeResult();
+  if (editorOverlay_ != nullptr) {
+    if (auto settingsUpdate = editorOverlay_->takeRenderSettingsUpdate()) {
+      frameRenderSettings_ = std::move(*settingsUpdate);
+    }
+  }
   persistFrameRenderSettings(renderSettings_, frameRenderSettings_);
 }
 

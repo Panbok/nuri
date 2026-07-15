@@ -1,8 +1,11 @@
 #pragma once
 
+#include <condition_variable>
 #include <cstddef>
+#include <deque>
 #include <filesystem>
-#include <memory>
+#include <mutex>
+#include <thread>
 #include <vector>
 
 namespace nuri {
@@ -24,10 +27,18 @@ private:
   MeshCacheWriterService();
   void workerLoop();
 
-  struct WriteJob;
+  struct WriteJob {
+    std::filesystem::path destinationPath;
+    std::vector<std::byte> fileBytes;
+  };
 
-  struct Impl;
-  std::unique_ptr<Impl> impl_;
+  std::mutex mutex_;
+  std::condition_variable cv_;
+  std::condition_variable drainedCv_;
+  std::deque<WriteJob> queue_;
+  bool stopRequested_ = false;
+  bool activeWrite_ = false;
+  std::thread worker_;
 };
 
 } // namespace nuri

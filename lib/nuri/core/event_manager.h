@@ -45,6 +45,8 @@ public:
   template <typename T>
   void emit(const T &event, EventChannel channel = EventChannel::Generic);
 
+  // If a handler throws, the current event and every later queued event are
+  // retried by the next dispatch. Handlers before the throw may run again.
   void dispatch(EventChannel channel);
   void clear(EventChannel channel);
   void clear();

@@ -499,11 +499,26 @@ void RenderGraphTelemetrySnapshot::reset() {
 RenderGraphTelemetryService::RenderGraphTelemetryService(
     std::pmr::memory_resource *memory)
     : snapshot_(ensureMemory(memory)),
-      configuredDumpDirectory_(resolveRenderGraphDumpDirectory()) {}
+      configuredDumpDirectory_(resolveRenderGraphDumpDirectory()),
+      captureEveryFrame_(!configuredDumpDirectory_.empty()) {}
+
+void RenderGraphTelemetryService::requestCapture(
+    RenderGraphTelemetryLevel level) noexcept {
+  if (static_cast<uint8_t>(level) > static_cast<uint8_t>(pendingCapture_)) {
+    pendingCapture_ = level;
+  }
+}
+
+RenderGraphTelemetryLevel
+RenderGraphTelemetryService::requestedCaptureLevel() const noexcept {
+  return captureEveryFrame_ ? RenderGraphTelemetryLevel::PassTimings
+                            : pendingCapture_;
+}
 
 void RenderGraphTelemetryService::capture(
     const RenderGraphCompileResult &compiled) {
   snapshot_.captureFrom(compiled);
+  pendingCapture_ = RenderGraphTelemetryLevel::None;
   hasSnapshot_ = true;
 }
 
@@ -511,6 +526,7 @@ void RenderGraphTelemetryService::capture(
     const RenderGraphCompileResult &compiled,
     const RenderGraphExecutionMetadata &execution) {
   snapshot_.captureFrom(compiled, execution);
+  pendingCapture_ = RenderGraphTelemetryLevel::None;
   hasSnapshot_ = true;
 }
 

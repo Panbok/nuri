@@ -2,6 +2,7 @@
 
 #include "nuri/core/result.h"
 #include "nuri/gfx/gpu_device.h"
+#include "nuri/gfx/owned_gpu_resource.h"
 
 #include <cstdint>
 #include <string_view>
@@ -66,7 +67,7 @@ public:
   loadCubemapKtx2(GPUDevice &gpu, std::string_view filePath,
                   std::string_view debugName = {});
 
-  [[nodiscard]] TextureHandle handle() const { return handle_; }
+  [[nodiscard]] TextureHandle handle() const { return resource_.get(); }
   [[nodiscard]] TextureType type() const { return type_; }
   [[nodiscard]] Format format() const { return format_; }
   [[nodiscard]] TextureUsage usage() const { return usage_; }
@@ -79,18 +80,23 @@ public:
   [[nodiscard]] std::string_view debugName() const noexcept {
     return debugName_;
   }
-  [[nodiscard]] bool valid() const noexcept { return nuri::isValid(handle_); }
+  [[nodiscard]] bool valid() const noexcept { return resource_.valid(); }
+
+  // Explicitly transfers native ownership to another move-only owner. The
+  // Texture metadata wrapper is invalid after this call.
+  [[nodiscard]] TextureHandle release() noexcept { return resource_.release(); }
 
 private:
-  Texture(TextureHandle handle, const TextureDesc &desc, std::string debugName)
-      : handle_(handle), type_(desc.type), format_(desc.format),
+  Texture(GPUDevice &gpu, TextureHandle handle, const TextureDesc &desc,
+          std::string debugName)
+      : resource_(gpu, handle), type_(desc.type), format_(desc.format),
         usage_(desc.usage), dimensions_(desc.dimensions),
         storage_(desc.storage), numLayers_(desc.numLayers),
         numSamples_(desc.numSamples), numMipLevels_(desc.numMipLevels),
         generateMipmaps_(desc.generateMipmaps),
         debugName_(std::move(debugName)) {}
 
-  TextureHandle handle_;
+  OwnedTextureHandle resource_;
   TextureType type_ = TextureType::Texture2D;
   Format format_ = Format::RGBA8_UNORM;
   TextureUsage usage_ = TextureUsage::Sampled;

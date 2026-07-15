@@ -7,56 +7,34 @@
 
 namespace nuri {
 
-struct MeshCacheWriterService::WriteJob {
-  std::filesystem::path destinationPath;
-  std::vector<std::byte> fileBytes;
-};
-
-struct MeshCacheWriterService::Impl {
-  std::mutex mutex;
-  std::condition_variable cv;
-  std::condition_variable drainedCv;
-  std::deque<WriteJob> queue;
-  std::thread worker;
-  bool stopRequested = false;
-  bool activeWrite = false;
-};
-
 MeshCacheWriterService &MeshCacheWriterService::instance() {
   static MeshCacheWriterService writer;
   return writer;
 }
 
 MeshCacheWriterService::MeshCacheWriterService()
-    : impl_(std::make_unique<Impl>()) {
-  impl_->worker = std::thread([this]() { workerLoop(); });
-}
+    : worker_([this]() { workerLoop(); }) {}
 
 MeshCacheWriterService::~MeshCacheWriterService() {
-  if (impl_ == nullptr) {
-    return;
-  }
-
   {
-    std::scoped_lock lock(impl_->mutex);
-    impl_->stopRequested = true;
+    std::scoped_lock lock(mutex_);
+    stopRequested_ = true;
   }
-  impl_->cv.notify_one();
+  cv_.notify_one();
 
   const auto deadline =
       std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
   {
-    std::unique_lock<std::mutex> lock(impl_->mutex);
-    const bool drained = impl_->drainedCv.wait_until(lock, deadline, [this]() {
-      return impl_->queue.empty() && !impl_->activeWrite;
-    });
+    std::unique_lock<std::mutex> lock(mutex_);
+    const bool drained = drainedCv_.wait_until(
+        lock, deadline, [this]() { return queue_.empty() && !activeWrite_; });
     if (!drained) {
-      impl_->queue.clear();
+      queue_.clear();
     }
   }
 
-  if (impl_->worker.joinable()) {
-    impl_->worker.join();
+  if (worker_.joinable()) {
+    worker_.join();
   }
 }
 
@@ -68,43 +46,41 @@ void MeshCacheWriterService::enqueue(std::filesystem::path destinationPath,
 
   constexpr size_t kMaxQueueEntries = 32;
   {
-    std::scoped_lock lock(impl_->mutex);
-    if (impl_->stopRequested) {
+    std::scoped_lock lock(mutex_);
+    if (stopRequested_) {
       return;
     }
-    if (impl_->queue.size() >= kMaxQueueEntries) {
+    if (queue_.size() >= kMaxQueueEntries) {
       NURI_LOG_WARNING(
           "MeshCacheWriterService::enqueue: queue full, dropping cache write");
       return;
     }
-    impl_->queue.push_back(WriteJob{
+    queue_.push_back(WriteJob{
         .destinationPath = std::move(destinationPath),
         .fileBytes = std::move(fileBytes),
     });
   }
-  impl_->cv.notify_one();
+  cv_.notify_one();
 }
 
 void MeshCacheWriterService::workerLoop() {
   while (true) {
     WriteJob job{};
     {
-      std::unique_lock<std::mutex> lock(impl_->mutex);
-      impl_->cv.wait(lock, [this]() {
-        return impl_->stopRequested || !impl_->queue.empty();
-      });
+      std::unique_lock<std::mutex> lock(mutex_);
+      cv_.wait(lock, [this]() { return stopRequested_ || !queue_.empty(); });
 
-      if (impl_->queue.empty()) {
-        impl_->drainedCv.notify_all();
-        if (impl_->stopRequested) {
+      if (queue_.empty()) {
+        drainedCv_.notify_all();
+        if (stopRequested_) {
           return;
         }
         continue;
       }
 
-      job = std::move(impl_->queue.front());
-      impl_->queue.pop_front();
-      impl_->activeWrite = true;
+      job = std::move(queue_.front());
+      queue_.pop_front();
+      activeWrite_ = true;
     }
 
     const auto writeResult =
@@ -112,8 +88,8 @@ void MeshCacheWriterService::workerLoop() {
 
     bool logWriteError = false;
     {
-      std::scoped_lock lock(impl_->mutex);
-      logWriteError = !impl_->stopRequested;
+      std::scoped_lock lock(mutex_);
+      logWriteError = !stopRequested_;
     }
     if (logWriteError && writeResult.hasError()) {
       NURI_LOG_WARNING(
@@ -122,10 +98,10 @@ void MeshCacheWriterService::workerLoop() {
     }
 
     {
-      std::scoped_lock lock(impl_->mutex);
-      impl_->activeWrite = false;
-      if (impl_->queue.empty()) {
-        impl_->drainedCv.notify_all();
+      std::scoped_lock lock(mutex_);
+      activeWrite_ = false;
+      if (queue_.empty()) {
+        drainedCv_.notify_all();
       }
     }
   }

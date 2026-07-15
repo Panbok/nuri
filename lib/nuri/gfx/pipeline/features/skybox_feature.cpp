@@ -24,7 +24,7 @@ SkyboxPass::SkyboxPass(GPUDevice &gpu, const SkyboxFeatureConfig &config)
     : gpu_(gpu), config_(config) {}
 
 SkyboxPass::~SkyboxPass() {
-  destroyFrameBuffer();
+  destroyFrameBuffers();
   skyboxShader_.reset();
   skyboxMsaaDepthPipeline_.reset();
   skyboxDepthPipeline_.reset();
@@ -39,7 +39,8 @@ SkyboxPass::~SkyboxPass() {
 }
 
 bool SkyboxPass::isEnabled(const FrameBuildContext &ctx) const {
-  return ctx.frame.settings == nullptr || ctx.frame.settings->skybox.enabled;
+  return ctx.frame.settings == nullptr ||
+         renderSettingsOrDefault(ctx.frame).skybox.enabled;
 }
 
 Result<bool, std::string> SkyboxPass::prepare(FrameBuildContext &ctx) {
@@ -126,8 +127,8 @@ Result<bool, std::string> SkyboxPass::build(FrameBuildContext &ctx) {
     ctx.shared.sceneColorGraphTexture = sceneColorGraphTexture;
   }
 
-  if (frameBuffer_ && frameBuffer_->valid()) {
-    auto frameBufferResult = ctx.graph.importBuffer(frameBuffer_->handle(),
+  if (nuri::isValid(preparedFrameBuffer_)) {
+    auto frameBufferResult = ctx.graph.importBuffer(preparedFrameBuffer_,
                                                     "skybox_frame_data_buffer");
     if (frameBufferResult.hasError()) {
       return Result<bool, std::string>::makeError(frameBufferResult.error());
@@ -174,38 +175,46 @@ Result<bool, std::string> SkyboxPass::ensureInitialized() {
     return pipelineResult;
   }
 
-  auto bufferResult = ensureFrameBufferCapacity(sizeof(FrameData));
-  if (bufferResult.hasError()) {
-    return bufferResult;
-  }
-
   initialized_ = true;
   return Result<bool, std::string>::makeResult(true);
 }
 
+void SkyboxPass::syncFrameBufferSlots() {
+  const size_t requiredSlotCount =
+      static_cast<size_t>(std::max(1u, gpu_.getSwapchainImageCount()));
+  if (frameBufferSlots_.size() == requiredSlotCount) {
+    return;
+  }
+
+  destroyFrameBuffers();
+  frameBufferSlots_.resize(requiredSlotCount);
+}
+
 Result<bool, std::string>
-SkyboxPass::ensureFrameBufferCapacity(size_t requiredBytes) {
+SkyboxPass::ensureFrameBufferCapacity(FrameBufferSlot &slot,
+                                      size_t requiredBytes) {
   const size_t requested = std::max(requiredBytes, sizeof(FrameData));
-  if (frameBuffer_ && frameBuffer_->valid() &&
-      frameBufferCapacityBytes_ >= requested) {
+  if (nuri::isValid(slot.buffer) && slot.capacityBytes >= requested) {
     return Result<bool, std::string>::makeResult(true);
   }
 
-  destroyFrameBuffer();
+  if (nuri::isValid(slot.buffer)) {
+    gpu_.destroyBuffer(slot.buffer);
+    slot = {};
+  }
 
   const BufferDesc frameBufferDesc{
       .usage = BufferUsage::Storage,
       .storage = Storage::HostVisible,
       .size = requested,
   };
-  auto bufferResult =
-      Buffer::create(gpu_, frameBufferDesc, "skybox_frame_buffer");
+  auto bufferResult = gpu_.createBuffer(frameBufferDesc, "skybox_frame_buffer");
   if (bufferResult.hasError()) {
     return Result<bool, std::string>::makeError(bufferResult.error());
   }
 
-  frameBuffer_ = std::move(bufferResult.value());
-  frameBufferCapacityBytes_ = requested;
+  slot.buffer = bufferResult.value();
+  slot.capacityBytes = requested;
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -282,6 +291,10 @@ Result<bool, std::string> SkyboxPass::createPipeline() {
 
   RenderPipelineDesc skyboxDepthDesc = skyboxDesc;
   skyboxDepthDesc.depthFormat = kFrameCompositionDepthFormat;
+  skyboxDepthDesc.rasterState = makeRasterPipelineState(DepthState{
+      .compareOp = CompareOp::LessEqual,
+      .isDepthWriteEnabled = false,
+  });
   auto depthPipelineResult = skyboxDepthPipeline_->createRenderPipeline(
       skyboxDepthDesc, "skybox_depth_tested");
   if (depthPipelineResult.hasError()) {
@@ -307,6 +320,7 @@ Result<bool, std::string>
 SkyboxPass::prepareSkyboxDraw(FrameBuildContext &ctx) {
   RenderFrameContext &frame = ctx.frame;
   hasPreparedDraw_ = false;
+  preparedFrameBuffer_ = {};
   drawItem_ = DrawItem{};
 
   if (frame.scene == nullptr) {
@@ -317,6 +331,17 @@ SkyboxPass::prepareSkyboxDraw(FrameBuildContext &ctx) {
   auto initResult = ensureInitialized();
   if (initResult.hasError()) {
     return Result<bool, std::string>::makeError(initResult.error());
+  }
+
+  syncFrameBufferSlots();
+  NURI_ASSERT(!frameBufferSlots_.empty(),
+              "Skybox frame buffer ring must contain at least one slot");
+  FrameBufferSlot &frameBuffer = frameBufferSlots_[static_cast<size_t>(
+      frame.frameIndex % frameBufferSlots_.size())];
+  auto bufferResult =
+      ensureFrameBufferCapacity(frameBuffer, sizeof(frameData_));
+  if (bufferResult.hasError()) {
+    return Result<bool, std::string>::makeError(bufferResult.error());
   }
 
   const TextureRecord *cubemap =
@@ -370,20 +395,14 @@ SkyboxPass::prepareSkyboxDraw(FrameBuildContext &ctx) {
       .materialDataSamplerId = 0u,
   };
 
-  auto bufferResult = ensureFrameBufferCapacity(sizeof(frameData_));
-  if (bufferResult.hasError()) {
-    return Result<bool, std::string>::makeError(bufferResult.error());
-  }
-
   const std::span<const std::byte> frameBytes{
       reinterpret_cast<const std::byte *>(&frameData_), sizeof(frameData_)};
-  auto updateResult = gpu_.updateBuffer(frameBuffer_->handle(), frameBytes, 0u);
+  auto updateResult = gpu_.updateBuffer(frameBuffer.buffer, frameBytes, 0u);
   if (updateResult.hasError()) {
     return Result<bool, std::string>::makeError(updateResult.error());
   }
 
-  const uint64_t baseAddress =
-      gpu_.getBufferDeviceAddress(frameBuffer_->handle());
+  const uint64_t baseAddress = gpu_.getBufferDeviceAddress(frameBuffer.buffer);
   if (baseAddress == 0) {
     return Result<bool, std::string>::makeError(
         "SkyboxPass::prepareSkyboxDraw: invalid frame buffer address");
@@ -401,17 +420,21 @@ SkyboxPass::prepareSkyboxDraw(FrameBuildContext &ctx) {
       sizeof(pushConstants_));
   drawItem_.debugLabel = "Skybox";
   drawItem_.debugColor = 0xff3366ff;
+  preparedFrameBuffer_ = frameBuffer.buffer;
   hasPreparedDraw_ = true;
 
   return Result<bool, std::string>::makeResult(true);
 }
 
-void SkyboxPass::destroyFrameBuffer() {
-  if (frameBuffer_ && frameBuffer_->valid()) {
-    gpu_.destroyBuffer(frameBuffer_->handle());
+void SkyboxPass::destroyFrameBuffers() {
+  for (FrameBufferSlot &slot : frameBufferSlots_) {
+    if (nuri::isValid(slot.buffer)) {
+      gpu_.destroyBuffer(slot.buffer);
+    }
+    slot = {};
   }
-  frameBuffer_.reset();
-  frameBufferCapacityBytes_ = 0;
+  frameBufferSlots_.clear();
+  preparedFrameBuffer_ = {};
 }
 
 SkyboxFeature::SkyboxFeature(GPUDevice &gpu, SkyboxFeatureConfig config)

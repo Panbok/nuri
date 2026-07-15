@@ -6,7 +6,7 @@ namespace nuri {
 
 bool TransmissionMainPass::isEnabled(const FrameBuildContext &ctx) const {
   return (ctx.frame.settings == nullptr ||
-          ctx.frame.settings->transmission.enabled) &&
+          renderSettingsOrDefault(ctx.frame).transmission.enabled) &&
          renderer_.hasPreparedTransmissionMainPass();
 }
 

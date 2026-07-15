@@ -29,9 +29,6 @@ AnimationSceneFrameProvider::prepare(FrameBuildContext &ctx) {
   if (frameData->instanceMatricesAddress == 0u) {
     return Result<bool, std::string>::makeResult(true);
   }
-  if (!frameData->preDispatches.empty()) {
-    ctx.graph.mixDynamicPayloadVersion(frameData->version);
-  }
   ctx.frame.sharedResources.animationSceneGpuData = *frameData;
   return Result<bool, std::string>::makeResult(true);
 }
