@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.27)
+cmake_minimum_required(VERSION 3.29)
 
 # Decide CRT linkage as early as possible. CMake's Windows-Clang platform
 # module injects /MD-style defaults at language enable time unless told not to.
@@ -38,9 +38,11 @@ option(NURI_WITH_ASSERTS "Enable NURI_ASSERT checks" ON)
 option(NURI_WITH_TRACY "Enable Tracy CPU+GPU profiling" OFF)
 option(NURI_WITH_TRACY_GPU "Enable Tracy GPU profiling in LVK (requires NURI_WITH_TRACY=ON)" OFF)
 option(NURI_WITH_TRACY_GPU_DRAW_ZONES "Enable per-draw Tracy GPU zones in LVK (requires NURI_WITH_TRACY=ON)" OFF)
+option(NURI_WITH_FSR31 "Enable pinned FidelityFX FSR 3.1 integration hooks" OFF)
 option(NURI_BUILD_APP "Build nuri app target" ON)
 option(NURI_BUILD_EDITOR "Build nuri editor target" ON)
 option(NURI_BUILD_TESTS "Build nuri test targets" OFF)
+option(NURI_BUILD_TOOLS "Build nuri automation tools" OFF)
 
 set(SAN_FLAGS "")
 if(NURI_WITH_ASAN AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
@@ -119,6 +121,9 @@ else()
 endif()
 
 add_subdirectory(lib)
+if(NURI_BUILD_TOOLS)
+  add_subdirectory(tools)
+endif()
 if(NURI_BUILD_APP)
   add_subdirectory(app)
 endif()

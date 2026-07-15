@@ -1,5 +1,19 @@
 # CLAUDE
 
+## Agent skills
+
+### Issue tracker
+
+Issues and PRDs are tracked in this repository's GitHub Issues. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Triage uses the standard five-role label vocabulary. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+This is a single-context repository with root domain docs and ADRs. See `docs/agents/domain.md`.
+
 ## Project intent
 - This codebase builds a renderer on top of LVK (LightweightVK). Keep LVK usage behind clean abstractions where it makes sense so higher-level code is not tightly coupled to the backend.
 - Correctness is the top priority, with performance as a critical constraint to be optimized after correctness is ensured. Optimize throughput and frame time only once behavior is correct.
@@ -14,25 +28,10 @@
 - Do not nest `ScopedScratch` over the same `ScratchArena`.
 - Avoid exceptions when possible; use `lib/nuri/result.h` for error handling.
 
-## Performance style
-- Prefer contiguous layouts in hot paths (`std::vector`, SoA when useful) to maximize cache locality.
-- Use polymorphism deliberately: avoid virtual dispatch in tight loops unless profiling shows negligible impact.
-- Avoid blocking mutexes on frame-critical threads; use lock-free/wait-free approaches only when needed and proven correct.
-- Measure before/after performance changes with Tracy, and optimize only verified bottlenecks.
-- Use semantic compression where domain intent is clearer for expert readers; prefer explicit code at public/module boundaries and in high-risk logic (concurrency, lifecycle, error handling).
-
-## Architecture and lifecycle principles (N+1 + ZII)
-- Apply N+1 design at module boundaries: shape APIs/data so one additional backend/feature/state can be added without rewriting call sites.
-- Do not over-generalize hot paths for N+1; keep per-draw/per-dispatch paths direct unless profiling proves abstraction cost is negligible.
-- Use ZII (zero-is-initialization) as a reuse strategy for transient state: reset reusable records/metadata to zero or explicit invalid sentinels before reuse.
-- ZII does not replace destruction for owning GPU resources: always release backend/driver resources explicitly, then invalidate handles/state.
-- Reuse pooled GPU resources only after GPU completion is proven (fence/timeline); never recycle in-flight resources.
-- Avoid virtual methods and opaque pointer indirection where ever possible
-- Never `memset` non-trivial C++ objects; prefer explicit `reset()` logic for correctness.
-
-## Abstractions and deps
-- Use the PIMPL pattern when you need to hide third-party deps or reduce rebuilds.
-- Examples: `GPUDevice` and `Window` use `struct Impl` to hide LVK/GLFW types from public headers.
+## Renderer engineering
+- For renderer architecture, semantic compression, N+1 design, RHI seams,
+  PIMPL decisions, GPU lifetime, and measured performance work, follow
+  `.codex/skills/nuri-renderer-design/SKILL.md` and its focused references.
 
 ## Shaders
 - Shaders are written in GLSL.

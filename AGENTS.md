@@ -1,7 +1,7 @@
 # AGENTS
 
 ## Project intent
-- This codebase builds a renderer on top of LVK (LightweightVK). Keep LVK usage behind clean abstractions where it makes sense so higher-level code is not tightly coupled to the backend.
+- This codebase builds a renderer with LVK (LightweightVK) and NVRHI backends. Keep backend types private and make higher-level code depend on Nuri's typed descriptors, handles, and submission contracts.
 - Correctness is the top priority, with performance as a critical constraint to be optimized after correctness is ensured. Optimize throughput and frame time only once behavior is correct.
 
 ## C++ and memory
@@ -14,27 +14,14 @@
 - Do not nest `ScopedScratch` over the same `ScratchArena`.
 - Avoid exceptions when possible; use `lib/nuri/result.h` for error handling.
 
-## Performance style
-- DO NOT BE overly aggressive with guard clauses and if checks, ONLY perform validations where it is necessary, avoid excessive error checking and overly defensive programming patterns
-- Prefer `NURI_ASSERT` for short circuiting errors
-- Prefer contiguous layouts in hot paths (`std::vector`, SoA when useful) to maximize cache locality.
-- Use polymorphism deliberately: avoid virtual dispatch in tight loops unless profiling shows negligible impact.
-- Avoid blocking mutexes on frame-critical threads; use lock-free/wait-free approaches only when needed and proven correct.
-- Measure before/after performance changes with Tracy, and optimize only verified bottlenecks.
-- Use semantic compression where domain intent is clearer for expert readers; prefer explicit code at public/module boundaries and in high-risk logic (concurrency, lifecycle, error handling).
+## Renderer engineering
+- For renderer architecture, semantic compression, N+1 design, RHI seams,
+  PIMPL decisions, GPU lifetime, and measured performance work, follow
+  `.codex/skills/nuri-renderer-design/SKILL.md` and its focused references.
 
-## Architecture and lifecycle principles (N+1 + ZII)
-- Apply N+1 design at module boundaries: shape APIs/data so one additional backend/feature/state can be added without rewriting call sites.
-- Do not over-generalize hot paths for N+1; keep per-draw/per-dispatch paths direct unless profiling proves abstraction cost is negligible.
-- Use ZII (zero-is-initialization) as a reuse strategy for transient state: reset reusable records/metadata to zero or explicit invalid sentinels before reuse.
-- ZII does not replace destruction for owning GPU resources: always release backend/driver resources explicitly, then invalidate handles/state.
-- Reuse pooled GPU resources only after GPU completion is proven (fence/timeline); never recycle in-flight resources.
-- Avoid virtual methods and opaque pointer indirection where ever possible
-- Never `memset` non-trivial C++ objects; prefer explicit `reset()` logic for correctness.
-
-## Abstractions and deps
-- Use the PIMPL pattern when you need to hide third-party deps or reduce rebuilds.
-- Examples: `GPUDevice` and `Window` use `struct Impl` to hide LVK/GLFW types from public headers.
+## Local documentation and scratch work
+- `docs/` and `.scratch/` are intentionally Git-ignored but remain part of the repository's local agent context. Read and update relevant files there when a task calls for them; ignored does not mean disposable.
+- Ignore-aware discovery may omit these directories. Use `rg --files --no-ignore docs .scratch` when listing their contents.
 
 ## Shaders
 - Shaders are written in GLSL.
@@ -45,7 +32,6 @@
 - Build/run scripts live in `scripts/`.
 
 ## Profiling (Tracy)
-- Prefer measuring before optimizing. Use the built-in Tracy hooks and runtime captures when investigating performance.
 - For renderer performance work, use `.codex/skills/nuri-benchmarks` and route diagnostic Tracy traces through `nuri-bench --tracy-diagnostic` so benchmark reports own both metric JSON and trace artifacts.
 - Enable profiling through the build scripts, not direct CMake: pass `cpu` or `cpu-gpu` to the relevant `scripts/build_*` or `scripts/run_*` wrapper. Debug builds enable Tracy by default; Release builds need an explicit Tracy mode.
 - Instrument code using `lib/nuri/core/profiling.h` macros:

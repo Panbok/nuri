@@ -12,6 +12,8 @@ __pycache__/
 !/assets/textures/tonemap_aces2_sdr_64.ktx2
 !/assets/textures/tonemap_agx_sdr_64.ktx2
 /logs/*.log
+/docs/
+/.scratch/
 /.codex/*
 !/.codex/skills/
 /.codex/skills/*
@@ -21,3 +23,5 @@ __pycache__/
 !/.codex/skills/nuri-snapshots/**
 !/.codex/skills/nuri-autotests/
 !/.codex/skills/nuri-autotests/**
+!/.codex/skills/nuri-renderer-design/
+!/.codex/skills/nuri-renderer-design/**
