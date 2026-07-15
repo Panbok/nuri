@@ -1,0 +1,42 @@
+name: Renderer tool stability
+
+on:
+  schedule:
+    - cron: "41 3 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: renderer-tool-stability
+  cancel-in-progress: false
+
+jobs:
+  soak:
+    runs-on: [self-hosted, windows, gpu, nuri]
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Repeated visual and scenario smoke
+        shell: pwsh
+        run: |
+          1..3 | ForEach-Object {
+            .\scripts\run_snapshots.bat release run --suite smoke --artifact-dir "artifacts\stability\snapshots-$($_)" --baseline-profile local-nvrhi-visible --force
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            .\scripts\run_autotests.bat release run --suite stress --artifact-dir "artifacts\stability\autotest-$($_)"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+      - name: Repeated benchmark evidence
+        shell: pwsh
+        run: .\scripts\run_benchmarks.bat release off run --suite stress --artifact-dir artifacts\stability\benchmark
+      - name: Upload stability evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: renderer-tool-stability-${{ github.run_id }}
+          path: artifacts/stability
+          if-no-files-found: error
+          retention-days: 90

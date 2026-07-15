@@ -1,0 +1,71 @@
+name: Renderer tool contracts
+
+on:
+  pull_request:
+    paths:
+      - "tools/**"
+      - "tests/**"
+      - "scripts/**"
+      - ".codex/skills/nuri-*/**"
+      - "CMakeLists.txt"
+      - "vcpkg.json"
+      - ".github/workflows/renderer-tool-*.yml"
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: renderer-tool-contract-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  repository-contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python scripts/nuri_validate.py check
+      - run: python -m unittest tests/scripts/nuri_validate_tests.py
+
+  tool-core:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, ubuntu-24.04]
+        shard: [0, 1, 2, 3]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: jwlawson/actions-setup-cmake@v2
+        with:
+          cmake-version: "3.29.x"
+      - uses: lukka/run-vcpkg@v11
+      - name: Run contract shard
+        shell: bash
+        run: >-
+          python scripts/nuri_validate.py run contract
+          --shard-index ${{ matrix.shard }} --shard-count 4
+          --junit artifacts/junit/contract-${{ matrix.shard }}.xml
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: renderer-tool-contract-${{ matrix.os }}-${{ matrix.shard }}
+          path: |
+            artifacts/junit/*.xml
+            artifacts/validate/*/run.json
+            artifacts/validate/*/logs/*.log
+          if-no-files-found: warn
+          retention-days: 14

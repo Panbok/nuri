@@ -1,0 +1,73 @@
+name: Renderer tool pinned authority
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: Reviewed pinned baseline profile id
+        required: true
+  schedule:
+    - cron: "23 2 * * 1-5"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: renderer-tool-pinned
+  cancel-in-progress: false
+
+jobs:
+  pinned:
+    runs-on: [self-hosted, windows, gpu, nuri-pinned]
+    timeout-minutes: 120
+    env:
+      NURI_BASELINE_PROFILE: ${{ inputs.profile || vars.NURI_PINNED_PROFILE }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Require a registered authoritative profile
+        shell: pwsh
+        run: |
+          if (-not $env:NURI_BASELINE_PROFILE) { throw "NURI_PINNED_PROFILE is not configured" }
+          $path = "tools/profiles/$($env:NURI_BASELINE_PROFILE).json"
+          if (-not (Test-Path -LiteralPath $path)) { throw "Unknown profile $($env:NURI_BASELINE_PROFILE)" }
+          $profile = Get-Content -Raw -LiteralPath $path | ConvertFrom-Json
+          if (-not $profile.authority.authoritative) { throw "Profile is investigative, not authoritative" }
+          $minimum = [int]$profile.benchmarkPolicy.minimumRepetitions
+          if ($minimum -lt 3) { throw "Authoritative profile requires at least three repetitions" }
+      - name: Run pinned snapshots
+        shell: pwsh
+        run: .\scripts\run_snapshots.bat release run --suite renderer --artifact-dir artifacts\pinned\snapshots --baseline-profile $env:NURI_BASELINE_PROFILE
+      - name: Run pinned autotests
+        shell: pwsh
+        run: .\scripts\run_autotests.bat release run --suite smoke --artifact-dir artifacts\pinned\autotests --baseline-profile $env:NURI_BASELINE_PROFILE
+      - name: Run governed pinned benchmark gate
+        shell: pwsh
+        run: .\scripts\run_benchmarks.bat release off check --suite renderer --artifact-root artifacts\pinned\benchmark --profile $env:NURI_BASELINE_PROFILE
+      - name: Verify authoritative result envelopes
+        shell: pwsh
+        run: |
+          $benchmarkWorkspace = Get-ChildItem -LiteralPath "artifacts\pinned\benchmark" -Directory | Select-Object -First 1
+          if (-not $benchmarkWorkspace) { throw "Missing governed benchmark workspace" }
+          $results = @(
+            "artifacts\pinned\snapshots\run.json",
+            "artifacts\pinned\autotests\run.json",
+            (Join-Path $benchmarkWorkspace.FullName "run.json")
+          )
+          foreach ($path in $results) {
+            if (-not (Test-Path -LiteralPath $path)) { throw "Missing result envelope: $path" }
+            $result = Get-Content -Raw -LiteralPath $path | ConvertFrom-Json
+            if ($result.kind -ne "nuri.tool.result") { throw "Not a v2 result envelope: $path" }
+            if ($result.status -ne "pass" -or -not $result.authoritative) {
+              throw "Pinned result is not authoritative pass: $path status=$($result.status)"
+            }
+          }
+      - name: Upload authoritative evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: renderer-tool-pinned-${{ github.run_id }}
+          path: artifacts/pinned
+          if-no-files-found: error
+          retention-days: 90

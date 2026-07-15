@@ -1,0 +1,59 @@
+name: Renderer tool GPU smoke
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "lib/**"
+      - "app/**"
+      - "shaders/**"
+      - "tools/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: renderer-tool-gpu-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    runs-on: [self-hosted, windows, gpu, nuri]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Snapshot procedural capture smoke
+        shell: pwsh
+        run: .\scripts\run_snapshots.bat release capture --case smoke.procedural.final_color --window-mode hidden --artifact-dir artifacts\gpu-smoke\snapshots
+      - name: Autotest procedural record smoke
+        shell: pwsh
+        run: .\scripts\run_autotests.bat release record --case smoke.procedural.static_multiframe --window-mode hidden --out artifacts\gpu-smoke\autotests
+      - name: Benchmark metric smoke
+        shell: pwsh
+        run: .\scripts\run_benchmarks.bat release off run --suite smoke --artifact-dir artifacts\gpu-smoke\benchmark
+      - name: Metadata startup budgets
+        shell: pwsh
+        run: |
+          python scripts\check_tool_startup.py --tool build\release-snapshot\nuri-snapshot.exe --case smoke.procedural.final_color --budget-ms 200
+          python scripts\check_tool_startup.py --tool build\release-autotest\nuri-autotest.exe --case smoke.procedural.static_multiframe --budget-ms 200
+          python scripts\check_tool_startup.py --tool build\release-bench\nuri-bench.exe --case smoke.procedural.default --budget-ms 200
+      - name: Verify non-empty smoke evidence
+        shell: pwsh
+        run: |
+          $snapshot = Get-ChildItem artifacts\gpu-smoke\snapshots\cases -Recurse -Filter report.json | Select-Object -First 1 | Get-Content -Raw | ConvertFrom-Json
+          if (-not $snapshot.captures -or $snapshot.captures.Count -eq 0) { throw "snapshot smoke produced no captures" }
+          $autotest = Get-ChildItem artifacts\gpu-smoke\autotests\cases -Recurse -Filter report.json | Select-Object -First 1 | Get-Content -Raw | ConvertFrom-Json
+          $autotestPayload = if ($autotest.kind -eq "nuri.tool.result") { $autotest.payload } else { $autotest }
+          if (-not $autotestPayload.checkpoints -or $autotestPayload.checkpoints.Count -eq 0) { throw "autotest smoke produced no checkpoints" }
+          $benchmark = Get-ChildItem artifacts\gpu-smoke\benchmark\cases -Recurse -Filter report.json | Select-Object -First 1 | Get-Content -Raw | ConvertFrom-Json
+          if (-not $benchmark.stats -or $benchmark.stats.PSObject.Properties.Count -eq 0) { throw "benchmark smoke produced no metrics" }
+      - name: Upload smoke bundle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: renderer-tool-gpu-smoke
+          path: artifacts/gpu-smoke
+          if-no-files-found: error
+          retention-days: 14
