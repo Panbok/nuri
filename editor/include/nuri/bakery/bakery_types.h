@@ -11,7 +11,7 @@ namespace nuri::bakery {
 enum class BakeJobKind : uint8_t {
   BrdfLut,
   EnvmapPrefilter,
-  ScenePortableAssets
+  SceneTextureArtifacts
 };
 
 enum class BakeJobState : uint8_t {
@@ -42,17 +42,17 @@ struct EnvmapPrefilterBakeRequest {
   bool forceRebuild = false;
 };
 
-enum class ScenePortableTextureTarget : uint8_t { BC7, ETC2, RGBA8 };
+enum class SceneTextureArtifactTarget : uint8_t { BC7, ETC2, RGBA8 };
 
-struct ScenePortableAssetsBakeRequest {
+struct SceneTextureArtifactsBakeRequest {
   std::filesystem::path scenePath;
   // Empty means "prebuild no native targets"; only listed targets are baked.
-  std::vector<ScenePortableTextureTarget> prebuildNativeTargets{};
+  std::vector<SceneTextureArtifactTarget> prebuildNativeTargets{};
   bool forceRebuild = false;
 };
 
 using BakeRequest = std::variant<BrdfLutBakeRequest, EnvmapPrefilterBakeRequest,
-                                 ScenePortableAssetsBakeRequest>;
+                                 SceneTextureArtifactsBakeRequest>;
 
 struct BakeJobSnapshot {
   BakeJobId id{};

@@ -1390,6 +1390,7 @@ struct PendingGpuTimingSubmission {
 struct PendingAsyncUploadSubmission {
   uint64_t submissionInstance = 0u;
   nvrhi::CommandListHandle commandList{};
+  bool containsTextureData = false;
 };
 
 struct SubmissionRecord {
@@ -1533,6 +1534,14 @@ struct NvrhiGPUDeviceImpl {
   std::vector<PendingGpuTimingSubmission> pendingGpuTimingSubmissions;
   std::vector<NvrhiWholeFrameTimingSlot> availableWholeFrameTimingSlots;
   nvrhi::CommandListHandle pendingAsyncUploadCommandList{};
+  uint64_t pendingAsyncUploadBytes = 0u;
+  uint32_t pendingAsyncUploadTextureCount = 0u;
+  uint64_t textureUploadTexturesRecorded = 0u;
+  uint64_t textureUploadBytesRecorded = 0u;
+  uint64_t textureUploadBatchesSubmitted = 0u;
+  uint64_t textureUploadBoundedBatchFlushes = 0u;
+  uint64_t textureUploadCompletionWaits = 0u;
+  bool trimAsyncUploadCommandListPoolAfterTextureUploads = false;
   std::vector<PendingAsyncUploadSubmission> pendingAsyncUploadSubmissions;
   std::vector<nvrhi::CommandListHandle> availableAsyncUploadCommandLists;
   uint64_t undeclaredGraphicsPipelineVariantMisses = 0u;
@@ -1978,26 +1987,35 @@ takePendingAsyncUploadCommandList(Impl &impl) {
     return {};
   }
   impl.pendingAsyncUploadCommandList->close();
+  if (impl.pendingAsyncUploadTextureCount != 0u) {
+    ++impl.textureUploadBatchesSubmitted;
+  }
+  impl.pendingAsyncUploadBytes = 0u;
+  impl.pendingAsyncUploadTextureCount = 0u;
   return std::exchange(impl.pendingAsyncUploadCommandList, {});
 }
 
 uint64_t
 submitAsyncUploadCommandList(Impl &impl,
-                             const nvrhi::CommandListHandle &commandList) {
+                             const nvrhi::CommandListHandle &commandList,
+                             bool containsTextureData) {
   nvrhi::ICommandList *raw = commandList.Get();
   const uint64_t instance = impl.nvrhiDevice->executeCommandLists(
       &raw, 1u, nvrhi::CommandQueue::Graphics);
   impl.latestSubmittedInstance = instance;
-  impl.pendingAsyncUploadSubmissions.push_back(PendingAsyncUploadSubmission{
-      .submissionInstance = instance, .commandList = commandList});
+  impl.pendingAsyncUploadSubmissions.push_back(
+      PendingAsyncUploadSubmission{.submissionInstance = instance,
+                                   .commandList = commandList,
+                                   .containsTextureData = containsTextureData});
   return instance;
 }
 
 void flushPendingAsyncUploadCommandList(Impl &impl) {
+  const bool containsTextureData = impl.pendingAsyncUploadTextureCount != 0u;
   nvrhi::CommandListHandle commandList =
       takePendingAsyncUploadCommandList(impl);
   if (commandList) {
-    submitAsyncUploadCommandList(impl, commandList);
+    submitAsyncUploadCommandList(impl, commandList, containsTextureData);
   }
 }
 
@@ -3512,6 +3530,10 @@ void executeCommandListAndWait(Impl &impl,
   impl.nvrhiDevice->runGarbageCollection();
 }
 
+constexpr uint64_t kMaxAsyncTextureUploadBatchBytes =
+    256ull * 1024ull * 1024ull;
+constexpr uint32_t kMaxAsyncTextureUploadBatchTextures = 64u;
+
 [[nodiscard]] Result<bool, std::string>
 uploadTextureData(Impl &impl, const TextureDesc &desc,
                   nvrhi::ITexture *texture) {
@@ -3540,10 +3562,53 @@ uploadTextureData(Impl &impl, const TextureDesc &desc,
     uploadData = generatedMipData;
     uploadMipCount = std::max(desc.numMipLevels, 1u);
   }
-  size_t offset = 0u;
+
+  uint64_t requiredUploadBytes = 0u;
+  for (uint32_t mip = 0u; mip < uploadMipCount; ++mip) {
+    const uint32_t width = mipSize(desc.dimensions.width, mip);
+    const uint32_t height = mipSize(desc.dimensions.height, mip);
+    const uint32_t depth = desc.type == TextureType::Texture3D
+                               ? mipSize(desc.dimensions.depth, mip)
+                               : 1u;
+    const size_t mipBytes =
+        textureMipByteSize(desc.format, width, height, depth);
+    if (mipBytes == 0u) {
+      return Result<bool, std::string>::makeError(
+          "NvrhiGPUDevice::uploadTextureData: texture format has no upload "
+          "size");
+    }
+    requiredUploadBytes += static_cast<uint64_t>(mipBytes) *
+                           static_cast<uint64_t>(layers) *
+                           static_cast<uint64_t>(faces);
+  }
+  if (requiredUploadBytes > uploadData.size()) {
+    return Result<bool, std::string>::makeError(
+        "NvrhiGPUDevice::uploadTextureData: texture data is truncated");
+  }
 
   std::lock_guard lock(impl.immediateMutex);
-  impl.immediateCommandList->open();
+  collectCompletedAsyncUploadSubmissions(impl);
+  const bool batchWouldOverflowBytes =
+      impl.pendingAsyncUploadBytes != 0u &&
+      (requiredUploadBytes > kMaxAsyncTextureUploadBatchBytes ||
+       impl.pendingAsyncUploadBytes >
+           kMaxAsyncTextureUploadBatchBytes -
+               std::min(requiredUploadBytes, kMaxAsyncTextureUploadBatchBytes));
+  if (impl.pendingAsyncUploadCommandList &&
+      (batchWouldOverflowBytes || impl.pendingAsyncUploadTextureCount >=
+                                      kMaxAsyncTextureUploadBatchTextures)) {
+    ++impl.textureUploadBoundedBatchFlushes;
+    flushPendingAsyncUploadCommandList(impl);
+  }
+  nvrhi::CommandListHandle &commandList =
+      ensurePendingAsyncUploadCommandList(impl);
+  if (!commandList) {
+    return Result<bool, std::string>::makeError(
+        "NvrhiGPUDevice::uploadTextureData: failed to create upload command "
+        "list");
+  }
+
+  size_t offset = 0u;
   for (uint32_t mip = 0u; mip < uploadMipCount; ++mip) {
     for (uint32_t layer = 0u; layer < layers; ++layer) {
       for (uint32_t face = 0u; face < faces; ++face) {
@@ -3554,13 +3619,8 @@ uploadTextureData(Impl &impl, const TextureDesc &desc,
                                    : 1u;
         const size_t mipBytes =
             textureMipByteSize(desc.format, width, height, depth);
-        if (mipBytes == 0u || offset + mipBytes > uploadData.size()) {
-          impl.immediateCommandList->close();
-          return Result<bool, std::string>::makeError(
-              "NvrhiGPUDevice::uploadTextureData: texture data is truncated");
-        }
         const uint32_t arraySlice = layer * faces + face;
-        impl.immediateCommandList->writeTexture(
+        commandList->writeTexture(
             texture, arraySlice, mip, uploadData.data() + offset,
             textureRowPitch(desc.format, width),
             textureDepthPitch(desc.format, width, height));
@@ -3568,8 +3628,11 @@ uploadTextureData(Impl &impl, const TextureDesc &desc,
       }
     }
   }
-  impl.immediateCommandList->close();
-  executeCommandListAndWait(impl, impl.immediateCommandList);
+  impl.pendingAsyncUploadBytes += requiredUploadBytes;
+  ++impl.pendingAsyncUploadTextureCount;
+  impl.textureUploadBytesRecorded += requiredUploadBytes;
+  ++impl.textureUploadTexturesRecorded;
+  impl.trimAsyncUploadCommandListPoolAfterTextureUploads = true;
 
   if (desc.generateMipmaps && desc.numMipLevels > uploadMipCount) {
     NURI_LOG_WARNING(
@@ -3606,11 +3669,13 @@ createTextureResource(Impl &impl, const TextureDesc &desc,
         uploadResult.error());
   }
 
+  TextureDesc storedDesc = desc;
+  storedDesc.data = {};
   return Result<TextureResource, std::string>::makeResult(TextureResource{
       .texture = texture,
       .debugName = std::string(debugName),
       .format = desc.format,
-      .desc = desc,
+      .desc = storedDesc,
       .dimension = nvrhiDesc.dimension,
   });
 }
@@ -5535,6 +5600,22 @@ TextureCompressionCaps NvrhiGPUDevice::getTextureCompressionCaps() const {
   return impl_ != nullptr ? impl_->compressionCaps : TextureCompressionCaps{};
 }
 
+TextureUploadTelemetry NvrhiGPUDevice::getTextureUploadTelemetry() const {
+  if (impl_ == nullptr) {
+    return {};
+  }
+  std::lock_guard lock(impl_->immediateMutex);
+  return TextureUploadTelemetry{
+      .texturesRecorded = impl_->textureUploadTexturesRecorded,
+      .bytesRecorded = impl_->textureUploadBytesRecorded,
+      .batchesSubmitted = impl_->textureUploadBatchesSubmitted,
+      .boundedBatchFlushes = impl_->textureUploadBoundedBatchFlushes,
+      .completionWaits = impl_->textureUploadCompletionWaits,
+      .pendingBytes = impl_->pendingAsyncUploadBytes,
+      .pendingTextures = impl_->pendingAsyncUploadTextureCount,
+  };
+}
+
 GPUAdapterInfo NvrhiGPUDevice::getAdapterInfo() const {
   return impl_ != nullptr ? impl_->adapterInfo : GPUAdapterInfo{};
 }
@@ -5714,6 +5795,18 @@ Result<bool, std::string> NvrhiGPUDevice::beginFrame(uint64_t frameIndex) {
     NURI_PROFILER_ZONE("NvrhiGPUDevice.collect_background_copy_submissions",
                        NURI_PROFILER_COLOR_CMD_COPY);
     collectCompletedAsyncUploadSubmissions(*impl_);
+    if (impl_->trimAsyncUploadCommandListPoolAfterTextureUploads) {
+      impl_->availableAsyncUploadCommandLists.clear();
+      bool textureUploadPending = impl_->pendingAsyncUploadTextureCount != 0u;
+      for (const PendingAsyncUploadSubmission &pending :
+           impl_->pendingAsyncUploadSubmissions) {
+        textureUploadPending =
+            textureUploadPending || pending.containsTextureData;
+      }
+      if (!textureUploadPending) {
+        impl_->trimAsyncUploadCommandListPoolAfterTextureUploads = false;
+      }
+    }
     NURI_PROFILER_ZONE_END();
     const uint64_t completed = impl_->nvrhiDevice->queueGetCompletedInstance(
         nvrhi::CommandQueue::Graphics);
@@ -6112,6 +6205,8 @@ NvrhiGPUDevice::submitRecordedGraphicsFrame(
         nvrhi::CommandQueue::Graphics,
         impl_->renderFinishedSemaphores[impl_->semaphoreFrameIndex], 0u);
   }
+  const bool frameUploadContainsTextureData =
+      impl_->pendingAsyncUploadTextureCount != 0u;
   nvrhi::CommandListHandle frameUploadCommandList =
       takePendingAsyncUploadCommandList(*impl_);
   if (frameUploadCommandList) {
@@ -6134,6 +6229,7 @@ NvrhiGPUDevice::submitRecordedGraphicsFrame(
     impl_->pendingAsyncUploadSubmissions.push_back(PendingAsyncUploadSubmission{
         .submissionInstance = instance,
         .commandList = std::move(frameUploadCommandList),
+        .containsTextureData = frameUploadContainsTextureData,
     });
   }
   ++impl_->submittedFrameCount;
@@ -6338,7 +6434,8 @@ NvrhiGPUDevice::submitBackgroundBufferCopies(
                             src->buffer.Get(), region.srcOffset, region.size);
   }
   commandList->close();
-  const uint64_t instance = submitAsyncUploadCommandList(*impl_, commandList);
+  const uint64_t instance =
+      submitAsyncUploadCommandList(*impl_, commandList, false);
   return allocateSubmissionHandle(*impl_, instance);
 }
 

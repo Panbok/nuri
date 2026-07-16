@@ -26,7 +26,7 @@ constexpr std::array<SlotPtr, kMaterialTextureSlotCount> kMaterialSlotPtrs{{
 static_assert(kMaterialSlotPtrs.size() == kMaterialTextureSlotCount,
               "kMaterialSlotPtrs must match kMaterialTextureSlotCount");
 
-constexpr uint8_t kSceneMaterialRecordFormatVersion = 2u;
+constexpr uint8_t kSceneMaterialRecordFormatVersion = 1u;
 
 [[nodiscard]] constexpr bool
 isValidMaterialTextureSourceKind(uint32_t value) noexcept {
@@ -179,9 +179,7 @@ void writeSceneMaterialRecord(material_binary_codec::Writer &writer,
 
   for (size_t i = 0; i < kMaterialSlotPtrs.size(); ++i) {
     writeTextureSlot(writer, material.*(kMaterialSlotPtrs[i]));
-    writer.writeString(record.textureCache[i].portablePath);
-    writer.writeU8(record.textureCache[i].srgb ? 1u : 0u);
-    writer.writeU64(record.textureCache[i].sourceIdentityHash);
+    writer.writeU64(record.textureCache[i].artifactIdentityHash);
   }
 }
 
@@ -279,18 +277,13 @@ readSceneMaterialRecord(material_binary_codec::Reader &reader) {
 
   for (size_t i = 0; i < kMaterialSlotPtrs.size(); ++i) {
     auto slot = readTextureSlot(reader);
-    auto portablePath = reader.readString();
-    auto srgb = reader.readU8();
-    auto sourceIdentityHash = reader.readU64();
-    if (slot.hasError() || portablePath.hasError() || srgb.hasError() ||
-        sourceIdentityHash.hasError()) {
+    auto artifactIdentityHash = reader.readU64();
+    if (slot.hasError() || artifactIdentityHash.hasError()) {
       return makeDeserializeError<SceneMaterialRecord>(
           "materialBinaryDeserialize: failed to read material texture entry");
     }
     material.*(kMaterialSlotPtrs[i]) = std::move(slot.value());
-    record.textureCache[i].portablePath = std::move(portablePath.value());
-    record.textureCache[i].srgb = srgb.value() != 0u;
-    record.textureCache[i].sourceIdentityHash = sourceIdentityHash.value();
+    record.textureCache[i].artifactIdentityHash = artifactIdentityHash.value();
   }
 
   record.sourceMaterial = std::move(material);

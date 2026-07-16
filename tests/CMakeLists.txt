@@ -150,6 +150,7 @@ function(nuri_add_gtest_suite target source_file test_prefix)
     PROPERTIES
       LABELS "${_nuri_labels}"
       TIMEOUT "${_nuri_timeout}"
+      ENVIRONMENT "NURI_RENDER_GRAPH_WORKER_COUNT=1"
   )
 endfunction()
 
@@ -191,6 +192,7 @@ function(nuri_add_gtest_suite_with_sources target test_prefix)
     PROPERTIES
       LABELS "${_nuri_labels}"
       TIMEOUT "${_nuri_timeout}"
+      ENVIRONMENT "NURI_RENDER_GRAPH_WORKER_COUNT=1"
   )
 endfunction()
 
@@ -330,6 +332,21 @@ nuri_add_gtest_suite(
   nuri_texture_cache_utils_tests
   src/texture_cache_utils_tests.cpp
   "texture_cache_utils::"
+)
+target_compile_definitions(nuri_texture_cache_utils_tests
+  PRIVATE
+    KHRONOS_STATIC
+    KTX_FEATURE_KTX1
+    KTX_FEATURE_KTX2
+    KTX_FEATURE_WRITE
+)
+if(TARGET KTX::ktx)
+  target_link_libraries(nuri_texture_cache_utils_tests PRIVATE KTX::ktx)
+elseif(TARGET ktx)
+  target_link_libraries(nuri_texture_cache_utils_tests PRIVATE ktx)
+endif()
+set_source_files_properties(src/texture_cache_utils_tests.cpp PROPERTIES
+  SKIP_PRECOMPILE_HEADERS ON
 )
 
 nuri_add_gtest_suite(

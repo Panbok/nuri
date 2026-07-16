@@ -414,7 +414,7 @@ Result<void, std::string> registerBuiltInScenes(EditorSceneCatalog &catalog,
     loadImportedLightsForScene("Rubber Duck", duckAssets->sourcePath.string(),
                                duckAssets->fallbackLights);
     duckAssets->ready = true;
-    queueScenePortableBakeIfNeeded(ctx.runtime, *duckAssets);
+    queueSceneTextureArtifactBakeIfNeeded(ctx.runtime, *duckAssets);
     return Result<void, std::string>::makeResult();
   };
 

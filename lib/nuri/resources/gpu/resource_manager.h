@@ -10,6 +10,7 @@
 #include "nuri/resources/gpu/resource_handles.h"
 #include "nuri/resources/gpu/resource_keys.h"
 #include "nuri/resources/gpu/texture.h"
+#include "nuri/resources/storage/texture/dds_texture_pack.h"
 #include "nuri/scene/scene_prefab.h"
 
 #include <cstdint>
@@ -27,6 +28,7 @@ struct NURI_API TextureRequest {
   TextureLoadOptions loadOptions{};
   TextureRequestKind kind = TextureRequestKind::Texture2D;
   std::string debugName{};
+  DdsTexturePack *ddsPack = nullptr;
 };
 
 struct NURI_API ModelRequest {
@@ -200,6 +202,9 @@ struct NURI_API PoolStats {
   uint64_t staleTextureReleases = 0;
   uint64_t staleMaterialReleases = 0;
   uint64_t staleModelReleases = 0;
+  TextureCacheTelemetry textureCache{};
+  DdsTexturePackTelemetry ddsTexturePacks{};
+  TextureUploadTelemetry textureUploads{};
 };
 
 class NURI_API ResourceManager final {
@@ -264,6 +269,9 @@ public:
   }
   [[nodiscard]] GpuMultisampleCapabilities gpuMultisampleCapabilities() const {
     return gpu_.getMultisampleCapabilities();
+  }
+  [[nodiscard]] TextureCompressionCaps textureCompressionCaps() const {
+    return gpu_.getTextureCompressionCaps();
   }
 
   void beginFrame(uint64_t frameIndex);

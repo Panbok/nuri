@@ -7,7 +7,7 @@ namespace {
 nuri::SceneMaterialRecord makeSceneMaterialRecord() {
   nuri::SceneMaterialRecord record{};
   record.sourceMaterialIndex = 7u;
-  record.sourceMaterial.name = "portable_material";
+  record.sourceMaterial.name = "artifact_material";
   record.sourceMaterial.workflow = nuri::MaterialWorkflow::SpecularGlossiness;
   record.sourceMaterial.baseColorFactor = {0.1f, 0.2f, 0.3f, 0.4f};
   record.sourceMaterial.emissiveFactor = {1.0f, 2.0f, 3.0f};
@@ -61,14 +61,8 @@ nuri::SceneMaterialRecord makeSceneMaterialRecord() {
   specGloss.samplerIndex = 2u;
   specGloss.transform.scale = {6.0f, 7.0f};
 
-  record.textureCache[0].portablePath =
-      "E:/tmp/.nuri_scene_cache/textures/albedo_basis.ktx2";
-  record.textureCache[0].srgb = true;
-  record.textureCache[0].sourceIdentityHash = 0x1122334455667788ull;
-  record.textureCache[2].portablePath =
-      "E:/tmp/.nuri_scene_cache/textures/normal_basis.ktx2";
-  record.textureCache[2].srgb = false;
-  record.textureCache[2].sourceIdentityHash = 0x8877665544332211ull;
+  record.textureCache[0].artifactIdentityHash = 0x1122334455667788ull;
+  record.textureCache[2].artifactIdentityHash = 0x8877665544332211ull;
   return record;
 }
 
@@ -141,16 +135,10 @@ TEST(MaterialBinaryCacheTests, RoundTripPreservesMaterialFields) {
   EXPECT_EQ(output.sourceMaterial.specularColor.uvSet,
             inputRecord.sourceMaterial.specularColor.uvSet);
 
-  EXPECT_EQ(output.textureCache[0].portablePath,
-            inputRecord.textureCache[0].portablePath);
-  EXPECT_TRUE(output.textureCache[0].srgb);
-  EXPECT_EQ(output.textureCache[0].sourceIdentityHash,
-            inputRecord.textureCache[0].sourceIdentityHash);
-  EXPECT_EQ(output.textureCache[2].portablePath,
-            inputRecord.textureCache[2].portablePath);
-  EXPECT_EQ(output.textureCache[2].srgb, inputRecord.textureCache[2].srgb);
-  EXPECT_EQ(output.textureCache[2].sourceIdentityHash,
-            inputRecord.textureCache[2].sourceIdentityHash);
+  EXPECT_EQ(output.textureCache[0].artifactIdentityHash,
+            inputRecord.textureCache[0].artifactIdentityHash);
+  EXPECT_EQ(output.textureCache[2].artifactIdentityHash,
+            inputRecord.textureCache[2].artifactIdentityHash);
 }
 
 TEST(MaterialBinaryCacheTests, DetectsStaleSceneFingerprint) {

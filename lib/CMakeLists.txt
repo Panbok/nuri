@@ -63,6 +63,7 @@ set(NURI_RENDERER_SOURCES
   nuri/resources/mesh_importer_assimp.cpp
   nuri/resources/scene_importer.cpp
   nuri/resources/stb_image.cpp
+  nuri/resources/stb_image_resize.cpp
   nuri/resources/storage/font/nfont_binary_codec.cpp
   nuri/resources/storage/material/material_binary_codec.cpp
   nuri/resources/storage/material/material_binary_schema_codec.cpp
@@ -72,6 +73,8 @@ set(NURI_RENDERER_SOURCES
   nuri/resources/storage/mesh/mesh_binary_serializer.cpp
   nuri/resources/storage/mesh/mesh_cache_utils.cpp
   nuri/resources/storage/mesh/mesh_cache_writer.cpp
+  nuri/resources/storage/texture/dds_texture_pack.cpp
+  nuri/resources/storage/texture/texture_artifact_builder.cpp
   nuri/resources/storage/texture/texture_cache_utils.cpp
   nuri/scene_runtime/scene_runtime_bindings.cpp
   nuri/scene_runtime/scene_runtime_host.cpp
@@ -464,6 +467,7 @@ target_sources(nuri_renderer
 
 set_source_files_properties(
   nuri/resources/stb_image.cpp
+  nuri/resources/stb_image_resize.cpp
   PROPERTIES SKIP_PRECOMPILE_HEADERS ON
 )
 

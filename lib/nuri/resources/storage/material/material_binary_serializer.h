@@ -14,9 +14,7 @@
 namespace nuri {
 
 struct SceneMaterialTextureCacheRecord {
-  std::string portablePath{};
-  bool srgb = false;
-  uint64_t sourceIdentityHash = 0;
+  uint64_t artifactIdentityHash = 0u;
 };
 
 struct SceneMaterialRecord {

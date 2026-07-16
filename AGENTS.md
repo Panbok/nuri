@@ -29,6 +29,13 @@
 - For substantive research, design, diagnosis, performance investigation, or feature implementation with code, shader, build, or manifest changes, follow `.codex/skills/nuri-task-workflow/SKILL.md`.
 - If a simple request grows into multi-step work, switch to the substantive workflow at that point.
 
+## Tests and renderer validation
+- Be exceptionally careful when adding unit tests. Add one only for a critical invariant that the test covers completely and deterministically at the correct seam; partial or incidental coverage is not sufficient.
+- Before adding a unit test, document why an autotest, visual snapshot, or benchmark cannot cover the failure more directly.
+- Prefer renderer autotests for multi-frame behavior and readouts, visual snapshots for pixels and rendering semantics, and benchmarks for performance.
+- Do not add unit tests that merely mirror pass registration, draw layout, implementation structure, visual output, or performance behavior already owned by those renderer tools.
+- Keep the remaining unit-test layer selective: pure algorithms, lifecycle and ownership contracts, render-graph hazards, handles and schemas, cache behavior, and similarly important deterministic invariants.
+
 ## Shaders
 - Shaders are written in GLSL.
 

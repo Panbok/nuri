@@ -39,7 +39,8 @@ ImportedPrefabSceneResources &ImportedPrefabSceneResources::operator=(
   assets = std::move(other.assets);
   fallbackLights = std::move(other.fallbackLights);
   ready = std::exchange(other.ready, false);
-  portableBakeQueued = std::exchange(other.portableBakeQueued, false);
+  textureArtifactBakeQueued =
+      std::exchange(other.textureArtifactBakeQueued, false);
   return *this;
 }
 
@@ -62,7 +63,7 @@ void ImportedPrefabSceneResources::release() noexcept {
   fallbackLights.clear();
   resources = nullptr;
   ready = false;
-  portableBakeQueued = false;
+  textureArtifactBakeQueued = false;
 }
 
 SimpleModelSceneAssets::~SimpleModelSceneAssets() { release(); }
@@ -84,7 +85,8 @@ SimpleModelSceneAssets::operator=(SimpleModelSceneAssets &&other) noexcept {
   material = std::exchange(other.material, kInvalidMaterialRef);
   fallbackLights = std::move(other.fallbackLights);
   ready = std::exchange(other.ready, false);
-  portableBakeQueued = std::exchange(other.portableBakeQueued, false);
+  textureArtifactBakeQueued =
+      std::exchange(other.textureArtifactBakeQueued, false);
   return *this;
 }
 
@@ -95,7 +97,7 @@ void SimpleModelSceneAssets::release() noexcept {
   fallbackLights.clear();
   resources = nullptr;
   ready = false;
-  portableBakeQueued = false;
+  textureArtifactBakeQueued = false;
 }
 
 StreamingSceneState::~StreamingSceneState() { release(); }
@@ -120,7 +122,8 @@ StreamingSceneState::operator=(StreamingSceneState &&other) noexcept {
   baseModel = other.baseModel;
   loadFailed = std::exchange(other.loadFailed, false);
   loadError = std::move(other.loadError);
-  portableBakeQueued = std::exchange(other.portableBakeQueued, false);
+  textureArtifactBakeQueued =
+      std::exchange(other.textureArtifactBakeQueued, false);
   loadStartTimeSeconds = std::exchange(other.loadStartTimeSeconds, 0.0);
   lastProgressLogTimeSeconds =
       std::exchange(other.lastProgressLogTimeSeconds, 0.0);
@@ -139,7 +142,7 @@ void StreamingSceneState::release() noexcept {
   loadFailed = false;
   loadError.clear();
   resources = nullptr;
-  portableBakeQueued = false;
+  textureArtifactBakeQueued = false;
   loadStartTimeSeconds = 0.0;
   lastProgressLogTimeSeconds = 0.0;
 }
@@ -289,48 +292,56 @@ void loadImportedLightsForScene(std::string_view sceneName,
                    loadResult.value().lights.end());
 }
 
-static void queueScenePortableBake(EditorRuntime &runtime,
-                                   const std::filesystem::path &sourcePath,
-                                   bool &queuedFlag) {
+static void
+queueSceneTextureArtifactBake(EditorRuntime &runtime,
+                              const std::filesystem::path &sourcePath,
+                              bool &queuedFlag) {
   if (queuedFlag) {
     return;
   }
   bakery::BakerySystem *bakery = runtime.bakery();
   if (bakery == nullptr) {
     NURI_LOG_WARNING(
-        "queueScenePortableBakeIfNeeded: bakery system is unavailable for '%s'",
+        "queueSceneTextureArtifactBakeIfNeeded: bakery system is unavailable "
+        "for '%s'",
         sourcePath.string().c_str());
     return;
   }
   auto enqueueResult = bakery->enqueue(
-      bakery::BakeRequest{bakery::ScenePortableAssetsBakeRequest{
+      bakery::BakeRequest{bakery::SceneTextureArtifactsBakeRequest{
           .scenePath = sourcePath,
-          .prebuildNativeTargets = {},
+          .prebuildNativeTargets =
+              {
+                  bakery::SceneTextureArtifactTarget::BC7,
+              },
           .forceRebuild = false,
       }});
   if (enqueueResult.hasError()) {
-    NURI_LOG_WARNING("queueScenePortableBakeIfNeeded: failed to queue scene "
-                     "portable asset bake for '%s': %s",
-                     sourcePath.string().c_str(),
-                     enqueueResult.error().c_str());
+    NURI_LOG_WARNING(
+        "queueSceneTextureArtifactBakeIfNeeded: failed to queue scene texture "
+        "artifact bake for '%s': %s",
+        sourcePath.string().c_str(), enqueueResult.error().c_str());
     return;
   }
   queuedFlag = true;
 }
 
-void queueScenePortableBakeIfNeeded(EditorRuntime &runtime,
-                                    ImportedPrefabSceneResources &assets) {
-  queueScenePortableBake(runtime, assets.sourcePath, assets.portableBakeQueued);
+void queueSceneTextureArtifactBakeIfNeeded(
+    EditorRuntime &runtime, ImportedPrefabSceneResources &assets) {
+  queueSceneTextureArtifactBake(runtime, assets.sourcePath,
+                                assets.textureArtifactBakeQueued);
 }
 
-void queueScenePortableBakeIfNeeded(EditorRuntime &runtime,
-                                    SimpleModelSceneAssets &assets) {
-  queueScenePortableBake(runtime, assets.sourcePath, assets.portableBakeQueued);
+void queueSceneTextureArtifactBakeIfNeeded(EditorRuntime &runtime,
+                                           SimpleModelSceneAssets &assets) {
+  queueSceneTextureArtifactBake(runtime, assets.sourcePath,
+                                assets.textureArtifactBakeQueued);
 }
 
-void queueScenePortableBakeIfNeeded(EditorRuntime &runtime,
-                                    StreamingSceneState &assets) {
-  queueScenePortableBake(runtime, assets.sourcePath, assets.portableBakeQueued);
+void queueSceneTextureArtifactBakeIfNeeded(EditorRuntime &runtime,
+                                           StreamingSceneState &assets) {
+  queueSceneTextureArtifactBake(runtime, assets.sourcePath,
+                                assets.textureArtifactBakeQueued);
 }
 
 } // namespace nuri

@@ -29,6 +29,16 @@ struct TextureCompressionCaps {
   bool astc = false;
 };
 
+struct TextureUploadTelemetry {
+  uint64_t texturesRecorded = 0u;
+  uint64_t bytesRecorded = 0u;
+  uint64_t batchesSubmitted = 0u;
+  uint64_t boundedBatchFlushes = 0u;
+  uint64_t completionWaits = 0u;
+  uint64_t pendingBytes = 0u;
+  uint32_t pendingTextures = 0u;
+};
+
 struct GPUAdapterInfo {
   std::string name = "unknown";
   uint32_t vendorId = 0u;
@@ -113,6 +123,10 @@ public:
   virtual Format getTextureFormat(TextureHandle h) const = 0;
   virtual TextureDimensions getTextureDimensions(TextureHandle h) const = 0;
   virtual TextureCompressionCaps getTextureCompressionCaps() const = 0;
+  [[nodiscard]] virtual TextureUploadTelemetry
+  getTextureUploadTelemetry() const {
+    return {};
+  }
   virtual GPUAdapterInfo getAdapterInfo() const { return {}; }
   virtual GpuMultisampleCapabilities getMultisampleCapabilities() const {
     return {};

@@ -8,13 +8,17 @@
 #include "nuri/resources/storage/material/material_binary_serializer.h"
 #include "nuri/resources/storage/material/material_cache_utils.h"
 #include "nuri/resources/storage/mesh/mesh_cache_utils.h"
+#include "nuri/resources/storage/texture/dds_texture_pack.h"
+#include "nuri/resources/storage/texture/material_texture_artifact.h"
+#include "nuri/resources/storage/texture/texture_artifact_builder.h"
+#include "nuri/resources/storage/texture/texture_cache_utils.h"
 #include "nuri/utils/env_utils.h"
+
+#include <unordered_set>
 
 namespace nuri {
 
 namespace {
-
-constexpr bool kEnablePortableSceneTextureRuntime = true;
 
 [[nodiscard]] bool hasTextureExtension(std::string_view path,
                                        std::string_view extension) {
@@ -54,8 +58,7 @@ struct MaterialTextureResolveSpec {
 struct ImportedTextureAcquireSpec {
   const char *logName = nullptr;
   const char *debugSuffix = nullptr;
-  bool srgb = false;
-  TextureMipSemantic mipSemantic = TextureMipSemantic::Generic;
+  size_t artifactSpecIndex = 0u;
   MaterialTextureSlotData MaterialData::*slot = nullptr;
   TextureRef MaterialRequest::TextureRefs::*outRef = nullptr;
 };
@@ -95,40 +98,37 @@ constexpr std::array<MaterialTextureResolveSpec, kMaterialTextureSlotCount>
 
 constexpr std::array<ImportedTextureAcquireSpec, kMaterialTextureSlotCount>
     kImportedTextureAcquireSpecs{{
-        {"baseColor", "_base_color_", true, TextureMipSemantic::Generic,
-         &MaterialData::baseColor, &MaterialRequest::TextureRefs::baseColor},
-        {"metal/rough", "_metal_rough_", false, TextureMipSemantic::RoughnessG,
-         &MaterialData::metallicRoughness,
+        {"baseColor", "_base_color_", 0u, &MaterialData::baseColor,
+         &MaterialRequest::TextureRefs::baseColor},
+        {"metal/rough", "_metal_rough_", 1u, &MaterialData::metallicRoughness,
          &MaterialRequest::TextureRefs::metallicRoughness},
-        {"normal", "_normal_", false, TextureMipSemantic::NormalMap,
-         &MaterialData::normal, &MaterialRequest::TextureRefs::normal},
-        {"occlusion", "_occlusion_", false, TextureMipSemantic::Generic,
-         &MaterialData::occlusion, &MaterialRequest::TextureRefs::occlusion},
-        {"emissive", "_emissive_", true, TextureMipSemantic::Generic,
-         &MaterialData::emissive, &MaterialRequest::TextureRefs::emissive},
-        {"clearcoat", "_clearcoat_", false, TextureMipSemantic::Generic,
-         &MaterialData::clearcoat, &MaterialRequest::TextureRefs::clearcoat},
-        {"clearcoat roughness", "_clearcoat_roughness_", false,
-         TextureMipSemantic::RoughnessG, &MaterialData::clearcoatRoughness,
+        {"normal", "_normal_", 2u, &MaterialData::normal,
+         &MaterialRequest::TextureRefs::normal},
+        {"occlusion", "_occlusion_", 3u, &MaterialData::occlusion,
+         &MaterialRequest::TextureRefs::occlusion},
+        {"emissive", "_emissive_", 4u, &MaterialData::emissive,
+         &MaterialRequest::TextureRefs::emissive},
+        {"clearcoat", "_clearcoat_", 5u, &MaterialData::clearcoat,
+         &MaterialRequest::TextureRefs::clearcoat},
+        {"clearcoat roughness", "_clearcoat_roughness_", 6u,
+         &MaterialData::clearcoatRoughness,
          &MaterialRequest::TextureRefs::clearcoatRoughness},
-        {"clearcoat normal", "_clearcoat_normal_", false,
-         TextureMipSemantic::NormalMap, &MaterialData::clearcoatNormal,
+        {"clearcoat normal", "_clearcoat_normal_", 7u,
+         &MaterialData::clearcoatNormal,
          &MaterialRequest::TextureRefs::clearcoatNormal},
-        {"specular", "_specular_", false, TextureMipSemantic::Generic,
-         &MaterialData::specular, &MaterialRequest::TextureRefs::specular},
-        {"specular color", "_specular_color_", true,
-         TextureMipSemantic::Generic, &MaterialData::specularColor,
+        {"specular", "_specular_", 8u, &MaterialData::specular,
+         &MaterialRequest::TextureRefs::specular},
+        {"specular color", "_specular_color_", 9u, &MaterialData::specularColor,
          &MaterialRequest::TextureRefs::specularColor},
-        {"sheen color", "_sheen_color_", true, TextureMipSemantic::Generic,
-         &MaterialData::sheenColor, &MaterialRequest::TextureRefs::sheenColor},
-        {"sheen roughness", "_sheen_roughness_", false,
-         TextureMipSemantic::RoughnessA, &MaterialData::sheenRoughness,
+        {"sheen color", "_sheen_color_", 10u, &MaterialData::sheenColor,
+         &MaterialRequest::TextureRefs::sheenColor},
+        {"sheen roughness", "_sheen_roughness_", 11u,
+         &MaterialData::sheenRoughness,
          &MaterialRequest::TextureRefs::sheenRoughness},
-        {"transmission", "_transmission_", false, TextureMipSemantic::Generic,
-         &MaterialData::transmission,
+        {"transmission", "_transmission_", 12u, &MaterialData::transmission,
          &MaterialRequest::TextureRefs::transmission},
-        {"thickness", "_thickness_", false, TextureMipSemantic::Generic,
-         &MaterialData::thickness, &MaterialRequest::TextureRefs::thickness},
+        {"thickness", "_thickness_", 13u, &MaterialData::thickness,
+         &MaterialRequest::TextureRefs::thickness},
     }};
 
 [[nodiscard]] ModelKey makeSceneMeshModelKey(std::string_view canonicalPath,
@@ -255,7 +255,7 @@ tryLoadSceneMaterialCache(std::string_view sourcePath) {
 [[nodiscard]] Result<TextureRef, std::string> acquireExternalImportedTexture(
     ResourceManager &resources, const ImportedMaterialTexture &slotData,
     const TextureLoadOptions &options, TextureRequestKind kind,
-    std::string_view debugName) {
+    std::string_view debugName, DdsTexturePack *ddsPack = nullptr) {
   if (slotData.sourceKind != MaterialTextureSourceKind::ExternalFile ||
       slotData.path.empty()) {
     return Result<TextureRef, std::string>::makeResult(kInvalidTextureRef);
@@ -263,27 +263,60 @@ tryLoadSceneMaterialCache(std::string_view sourcePath) {
 
   TextureRequest textureRequest{};
   textureRequest.path = slotData.path;
+  if (ddsPack != nullptr && hasTextureExtension(slotData.path, ".dds")) {
+    const std::string canonicalPath = canonicalizeResourcePath(slotData.path);
+    if (ddsPack->sourceFingerprint(canonicalPath).has_value()) {
+      textureRequest.path = canonicalPath;
+      textureRequest.ddsPack = ddsPack;
+    }
+  }
   textureRequest.loadOptions = options;
-  textureRequest.kind = resolveTextureRequestKindForPath(slotData.path, kind);
+  textureRequest.kind =
+      resolveTextureRequestKindForPath(textureRequest.path, kind);
   textureRequest.debugName = std::string(debugName);
   return resources.acquireTexture(textureRequest);
 }
 
-[[nodiscard]] TextureLoadOptions
-makeImportedTextureLoadOptions(const ImportedMaterialInfo &imported,
-                               const ImportedTextureAcquireSpec &spec,
-                               bool generateMipmaps) {
-  TextureLoadOptions options{
-      .srgb = spec.srgb,
-      .generateMipmaps = generateMipmaps,
-      .mipSemantic = spec.mipSemantic,
-      .alphaCoverageCutoff = imported.alphaCutoff,
-  };
-  if (spec.slot == &MaterialData::baseColor &&
-      imported.alphaMode == MaterialAlphaMode::Mask) {
-    options.mipSemantic = TextureMipSemantic::AlphaCoverage;
+[[nodiscard]] std::vector<DdsTexturePackSource>
+collectDdsTexturePackSources(const ImportedMaterialSet &materialSet) {
+  std::vector<DdsTexturePackSource> sources{};
+  std::unordered_set<std::string> seen{};
+  for (const ImportedMaterialInfo &material : materialSet.materials) {
+    for (const ImportedTextureAcquireSpec &spec :
+         kImportedTextureAcquireSpecs) {
+      const ImportedMaterialTexture &slot = material.*(spec.slot);
+      if (slot.sourceKind != MaterialTextureSourceKind::ExternalFile ||
+          !hasTextureExtension(slot.path, ".dds")) {
+        continue;
+      }
+      const std::string canonicalPath = canonicalizeResourcePath(slot.path);
+      if (!canonicalPath.empty() && seen.emplace(canonicalPath).second) {
+        sources.push_back(DdsTexturePackSource{.path = canonicalPath});
+      }
+    }
   }
-  return options;
+  return sources;
+}
+
+[[nodiscard]] std::unique_ptr<DdsTexturePack>
+tryEnsureDdsTexturePack(std::string_view scenePath,
+                        const ImportedMaterialSet &materialSet,
+                        std::string_view logContext) {
+  std::vector<DdsTexturePackSource> sources =
+      collectDdsTexturePackSources(materialSet);
+  if (sources.size() < kMinAutomaticDdsTexturePackEntries) {
+    return {};
+  }
+  auto packResult = ensureDdsTexturePack(
+      std::filesystem::path(std::string(scenePath)), sources);
+  if (packResult.hasError()) {
+    NURI_LOG_WARNING("%.*s: DDS texture pack unavailable for '%.*s': %s",
+                     static_cast<int>(logContext.size()), logContext.data(),
+                     static_cast<int>(scenePath.size()), scenePath.data(),
+                     packResult.error().c_str());
+    return {};
+  }
+  return std::move(packResult.value().pack);
 }
 
 void releaseMaterialTextureRefs(ResourceManager &resources,
@@ -323,17 +356,58 @@ makeImportedMaterialSourceIdentity(std::string_view canonicalModelPath,
 
 [[nodiscard]] MaterialRequest::TextureRefs acquireRawImportedTextureRefs(
     ResourceManager &resources, const ImportedMaterialInfo &imported,
-    std::string_view logContext, std::string_view debugNamePrefix,
-    uint32_t sourceMaterialIndex) {
+    std::string_view scenePath, std::string_view logContext,
+    std::string_view debugNamePrefix, uint32_t sourceMaterialIndex,
+    DdsTexturePack *ddsPack = nullptr) {
   MaterialRequest::TextureRefs textureRefs{};
+  auto builderResult =
+      SceneTextureArtifactBuilder::create(std::filesystem::path(scenePath));
+  if (builderResult.hasError()) {
+    NURI_LOG_WARNING("%.*s: texture artifact builder unavailable: %s",
+                     static_cast<int>(logContext.size()), logContext.data(),
+                     builderResult.error().c_str());
+    return textureRefs;
+  }
+  SceneTextureArtifactBuilder builder = std::move(builderResult.value());
+  const std::string canonicalScenePath = canonicalizeResourcePath(scenePath);
+  const TextureCompressionCaps caps = resources.textureCompressionCaps();
+
   for (const ImportedTextureAcquireSpec &spec : kImportedTextureAcquireSpecs) {
-    const TextureLoadOptions options =
-        makeImportedTextureLoadOptions(imported, spec, true);
-    auto textureResult = acquireExternalImportedTexture(
-        resources, imported.*(spec.slot), options,
-        TextureRequestKind::Texture2D,
-        makeImportedTextureDebugName(debugNamePrefix, spec.debugSuffix,
-                                     sourceMaterialIndex));
+    const ImportedMaterialTexture &source = imported.*(spec.slot);
+    if (source.sourceKind == MaterialTextureSourceKind::None) {
+      continue;
+    }
+    const TextureArtifactBuildOptions buildOptions =
+        makeMaterialTextureArtifactBuildOptions(imported,
+                                                spec.artifactSpecIndex);
+    const std::string debugName = makeImportedTextureDebugName(
+        debugNamePrefix, spec.debugSuffix, sourceMaterialIndex);
+    Result<TextureRef, std::string> textureResult =
+        Result<TextureRef, std::string>::makeResult(kInvalidTextureRef);
+    if (source.sourceKind == MaterialTextureSourceKind::ExternalFile &&
+        hasTextureExtension(source.path, ".dds")) {
+      textureResult = acquireExternalImportedTexture(
+          resources, source, buildOptions.loadOptions,
+          TextureRequestKind::Texture2D, debugName, ddsPack);
+    } else {
+      const uint64_t identity = hashSceneTextureSourceIdentity(
+          canonicalScenePath, source, buildOptions.loadOptions.srgb,
+          textureArtifactProcessingTag(buildOptions));
+      const Format targetFormat = selectTextureArtifactTargetFormat(
+          caps.bc7, caps.etc2, buildOptions.loadOptions.srgb, 4u);
+      auto artifact =
+          builder.ensure(source, identity, targetFormat, buildOptions);
+      if (artifact.hasError()) {
+        textureResult =
+            Result<TextureRef, std::string>::makeError(artifact.error());
+      } else {
+        textureResult = resources.acquireTexture(TextureRequest{
+            .path = artifact.value().artifactPath.string(),
+            .kind = TextureRequestKind::Ktx2Texture2D,
+            .debugName = debugName,
+        });
+      }
+    }
     if (textureResult.hasError()) {
       NURI_LOG_WARNING("%.*s: %s load failed for material %u: %s",
                        static_cast<int>(logContext.size()), logContext.data(),
@@ -353,9 +427,23 @@ struct CachedTextureRefsAcquireResult {
 
 [[nodiscard]] CachedTextureRefsAcquireResult acquireCachedImportedTextureRefs(
     ResourceManager &resources, const ImportedMaterialInfo &imported,
-    const SceneMaterialRecord &cached, std::string_view logContext,
-    std::string_view debugNamePrefix) {
+    const SceneMaterialRecord &cached, std::string_view scenePath,
+    std::string_view logContext, std::string_view debugNamePrefix,
+    DdsTexturePack *ddsPack = nullptr) {
   CachedTextureRefsAcquireResult result{};
+  auto builderResult =
+      SceneTextureArtifactBuilder::create(std::filesystem::path(scenePath));
+  if (builderResult.hasError()) {
+    result.cacheUsable = false;
+    NURI_LOG_WARNING("%.*s: texture artifact builder unavailable: %s",
+                     static_cast<int>(logContext.size()), logContext.data(),
+                     builderResult.error().c_str());
+    return result;
+  }
+  SceneTextureArtifactBuilder builder = std::move(builderResult.value());
+  const std::string canonicalScenePath = canonicalizeResourcePath(scenePath);
+  const TextureCompressionCaps caps = resources.textureCompressionCaps();
+
   for (size_t slotIndex = 0; slotIndex < kImportedTextureAcquireSpecs.size();
        ++slotIndex) {
     const ImportedTextureAcquireSpec &spec =
@@ -363,59 +451,52 @@ struct CachedTextureRefsAcquireResult {
     const SceneMaterialTextureCacheRecord &cacheRecord =
         cached.textureCache[slotIndex];
     const ImportedMaterialTexture &sourceSlot = imported.*(spec.slot);
-    const bool slotExpected =
-        !cacheRecord.portablePath.empty() ||
-        sourceSlot.sourceKind != MaterialTextureSourceKind::None;
-    auto textureResult =
+    if (sourceSlot.sourceKind == MaterialTextureSourceKind::None) {
+      continue;
+    }
+    const TextureArtifactBuildOptions buildOptions =
+        makeMaterialTextureArtifactBuildOptions(imported,
+                                                spec.artifactSpecIndex);
+    const std::string debugName = makeImportedTextureDebugName(
+        debugNamePrefix, spec.debugSuffix, cached.sourceMaterialIndex);
+    Result<TextureRef, std::string> textureResult =
         Result<TextureRef, std::string>::makeResult(kInvalidTextureRef);
-
-    std::error_code ec;
-    if (kEnablePortableSceneTextureRuntime &&
-        !cacheRecord.portablePath.empty() &&
-        std::filesystem::exists(cacheRecord.portablePath, ec) && !ec) {
-      TextureLoadOptions options =
-          makeImportedTextureLoadOptions(imported, spec, false);
-      options.srgb = cacheRecord.srgb;
+    if (sourceSlot.sourceKind == MaterialTextureSourceKind::ExternalFile &&
+        hasTextureExtension(sourceSlot.path, ".dds")) {
       textureResult = acquireExternalImportedTexture(
-          resources,
-          ImportedMaterialTexture{
-              .path = cacheRecord.portablePath,
-              .sourceKind = MaterialTextureSourceKind::ExternalFile,
-          },
-          options, TextureRequestKind::PortableKtx2Texture2D,
-          makeImportedTextureDebugName(debugNamePrefix, spec.debugSuffix,
-                                       cached.sourceMaterialIndex));
-      if (textureResult.hasError()) {
-        NURI_LOG_WARNING("%.*s: portable %s load failed for material %u: %s",
-                         static_cast<int>(logContext.size()), logContext.data(),
-                         spec.logName, cached.sourceMaterialIndex,
-                         textureResult.error().c_str());
+          resources, sourceSlot, buildOptions.loadOptions,
+          TextureRequestKind::Texture2D, debugName, ddsPack);
+    } else {
+      uint64_t identity = cacheRecord.artifactIdentityHash;
+      if (identity == 0u) {
+        identity = hashSceneTextureSourceIdentity(
+            canonicalScenePath, sourceSlot, buildOptions.loadOptions.srgb,
+            textureArtifactProcessingTag(buildOptions));
+      }
+      const Format targetFormat = selectTextureArtifactTargetFormat(
+          caps.bc7, caps.etc2, buildOptions.loadOptions.srgb, 4u);
+      auto artifact =
+          builder.ensure(sourceSlot, identity, targetFormat, buildOptions);
+      if (artifact.hasError()) {
+        textureResult =
+            Result<TextureRef, std::string>::makeError(artifact.error());
+      } else {
+        textureResult = resources.acquireTexture(TextureRequest{
+            .path = artifact.value().artifactPath.string(),
+            .kind = TextureRequestKind::Ktx2Texture2D,
+            .debugName = debugName,
+        });
       }
     }
 
     if (textureResult.hasError() || !isValid(textureResult.value())) {
-      const TextureLoadOptions options =
-          makeImportedTextureLoadOptions(imported, spec, true);
-      textureResult = acquireExternalImportedTexture(
-          resources, sourceSlot, options, TextureRequestKind::Texture2D,
-          makeImportedTextureDebugName(debugNamePrefix, spec.debugSuffix,
-                                       cached.sourceMaterialIndex));
-      if (textureResult.hasError()) {
-        NURI_LOG_WARNING("%.*s: raw %s load failed for material %u: %s",
-                         static_cast<int>(logContext.size()), logContext.data(),
-                         spec.logName, cached.sourceMaterialIndex,
-                         textureResult.error().c_str());
-        continue;
-      }
-    }
-
-    if (slotExpected && !isValid(textureResult.value())) {
       result.cacheUsable = false;
       NURI_LOG_WARNING(
-          "%.*s: cache miss left required %s unresolved for material %u; "
-          "falling back to raw import path",
+          "%.*s: texture artifact %s load failed for material %u: %s",
           static_cast<int>(logContext.size()), logContext.data(), spec.logName,
-          cached.sourceMaterialIndex);
+          cached.sourceMaterialIndex,
+          textureResult.hasError() ? textureResult.error().c_str()
+                                   : "invalid texture reference");
       break;
     }
     result.refs.*(spec.outRef) = textureResult.value();
@@ -752,16 +833,45 @@ ResourceManager::acquireTexture(const TextureRequest &request) {
 
   switch (request.kind) {
   case TextureRequestKind::Texture2D:
-    textureResult = Texture::loadTexture(
-        gpu_, canonicalPath, request.loadOptions, request.debugName);
+    if (request.ddsPack != nullptr) {
+      if (!hasTextureExtension(canonicalPath, ".dds")) {
+        return Result<TextureRef, std::string>::makeError(
+            "ResourceManager::acquireTexture: texture packs are only "
+            "supported for DDS textures");
+      }
+      auto packedData = request.ddsPack->read(canonicalPath);
+      if (packedData.hasError()) {
+        return Result<TextureRef, std::string>::makeError(packedData.error());
+      }
+      textureResult = Texture::loadDdsTexture(gpu_, packedData.value(),
+                                              canonicalPath, request.debugName);
+    } else {
+      textureResult = Texture::loadTexture(
+          gpu_, canonicalPath, request.loadOptions, request.debugName);
+    }
     break;
   case TextureRequestKind::Ktx2Texture2D:
     textureResult =
         Texture::loadTextureKtx2(gpu_, canonicalPath, request.debugName);
-    break;
-  case TextureRequestKind::PortableKtx2Texture2D:
-    textureResult = Texture::loadPortableTextureKtx2(
-        gpu_, canonicalPath, request.loadOptions, request.debugName);
+    if (textureResult.hasError()) {
+      TextureArtifactBuildOptions buildOptions{
+          .loadOptions = request.loadOptions,
+          .encoding = TextureArtifactEncoding::Uastc,
+      };
+      const uint64_t identity =
+          hashTextureSourceIdentity(canonicalPath, request.loadOptions.srgb,
+                                    textureArtifactProcessingTag(buildOptions));
+      const TextureCompressionCaps caps = gpu_.getTextureCompressionCaps();
+      const Format targetFormat = selectTextureArtifactTargetFormat(
+          caps.bc7, caps.etc2, request.loadOptions.srgb, 4u);
+      auto artifact =
+          ensureTextureArtifactFromFile(std::filesystem::path(canonicalPath),
+                                        identity, targetFormat, buildOptions);
+      if (!artifact.hasError()) {
+        textureResult = Texture::loadTextureKtx2(
+            gpu_, artifact.value().artifactPath.string(), request.debugName);
+      }
+    }
     break;
   case TextureRequestKind::Ktx2Cubemap:
     textureResult =
@@ -1053,16 +1163,24 @@ ResourceManager::acquireMaterialsFromModel(
   ImportedMaterialBatch batch{};
   const std::string canonicalModelPath =
       canonicalizeResourcePath(request.modelPath);
+  std::optional<ImportedMaterialSet> importedMaterialSet{};
+  std::string materialInfoError{};
+  if (auto materialInfoResult =
+          MeshImporter::loadMaterialInfoFromFile(request.modelPath);
+      !materialInfoResult.hasError()) {
+    importedMaterialSet = std::move(materialInfoResult.value());
+  } else {
+    materialInfoError = materialInfoResult.error();
+  }
+  std::unique_ptr<DdsTexturePack> ddsPack =
+      importedMaterialSet.has_value()
+          ? tryEnsureDdsTexturePack(
+                request.modelPath, importedMaterialSet.value(),
+                "ResourceManager::acquireMaterialsFromModel")
+          : nullptr;
 
   if (auto cachedMaterials = tryLoadSceneMaterialCache(request.modelPath);
       cachedMaterials.has_value()) {
-    std::optional<ImportedMaterialSet> importedMaterialSet{};
-    if (auto materialInfoResult =
-            MeshImporter::loadMaterialInfoFromFile(request.modelPath);
-        !materialInfoResult.hasError()) {
-      importedMaterialSet = std::move(materialInfoResult.value());
-    }
-
     struct PendingCachedMaterial {
       uint32_t sourceMaterialIndex = 0u;
       MaterialRef material = kInvalidMaterialRef;
@@ -1081,9 +1199,9 @@ ResourceManager::acquireMaterialsFromModel(
 
       const CachedTextureRefsAcquireResult textureRefsResult =
           acquireCachedImportedTextureRefs(
-              *this, *imported, cached,
+              *this, *imported, cached, request.modelPath,
               "ResourceManager::acquireMaterialsFromModel",
-              request.debugNamePrefix);
+              request.debugNamePrefix, ddsPack.get());
 
       if (!textureRefsResult.cacheUsable) {
         cacheUsable = false;
@@ -1138,16 +1256,14 @@ ResourceManager::acquireMaterialsFromModel(
     }
   }
 
-  auto materialInfoResult =
-      MeshImporter::loadMaterialInfoFromFile(request.modelPath);
-  if (materialInfoResult.hasError()) {
+  if (!importedMaterialSet.has_value()) {
     return Result<ImportedMaterialBatch, std::string>::makeError(
         "ResourceManager::acquireMaterialsFromModel: failed to parse material "
         "metadata: " +
-        materialInfoResult.error());
+        materialInfoError);
   }
 
-  const ImportedMaterialSet &materialSet = materialInfoResult.value();
+  const ImportedMaterialSet &materialSet = importedMaterialSet.value();
   for (uint32_t sourceMaterialIndex = 0;
        sourceMaterialIndex < materialSet.materials.size();
        ++sourceMaterialIndex) {
@@ -1156,8 +1272,9 @@ ResourceManager::acquireMaterialsFromModel(
 
     const MaterialRequest::TextureRefs textureRefs =
         acquireRawImportedTextureRefs(
-            *this, imported, "ResourceManager::acquireMaterialsFromModel",
-            request.debugNamePrefix, sourceMaterialIndex);
+            *this, imported, request.modelPath,
+            "ResourceManager::acquireMaterialsFromModel",
+            request.debugNamePrefix, sourceMaterialIndex, ddsPack.get());
     auto acquireMaterialResult = acquireImportedMaterialInstance(
         *this, imported, textureRefs, canonicalModelPath,
         request.debugNamePrefix, sourceMaterialIndex);
@@ -1242,15 +1359,20 @@ ResourceManager::acquireScenePrefabAssets(const ScenePrefab &prefab) {
         &importedMaterialSet.value());
   };
 
+  const ImportedMaterialSet *importedMaterialSetPtr = nullptr;
+  if (auto importedResult = ensureImportedMaterialSet();
+      !importedResult.hasError()) {
+    importedMaterialSetPtr = importedResult.value();
+  }
+  std::unique_ptr<DdsTexturePack> ddsPack =
+      importedMaterialSetPtr != nullptr
+          ? tryEnsureDdsTexturePack(prefab.sourcePath, *importedMaterialSetPtr,
+                                    "ResourceManager::acquireScenePrefabAssets")
+          : nullptr;
+
   bool loadedFromCache = false;
   if (auto cachedMaterials = tryLoadSceneMaterialCache(prefab.sourcePath);
       cachedMaterials.has_value()) {
-    const ImportedMaterialSet *importedMaterialSetPtr = nullptr;
-    if (auto importedResult = ensureImportedMaterialSet();
-        !importedResult.hasError()) {
-      importedMaterialSetPtr = importedResult.value();
-    }
-
     std::vector<MaterialRef> pendingMaterials(assets.materials.size(),
                                               kInvalidMaterialRef);
     bool cacheUsable = true;
@@ -1270,8 +1392,9 @@ ResourceManager::acquireScenePrefabAssets(const ScenePrefab &prefab) {
       }
       const CachedTextureRefsAcquireResult textureRefsResult =
           acquireCachedImportedTextureRefs(
-              *this, *imported, cached,
-              "ResourceManager::acquireScenePrefabAssets", "scene_prefab");
+              *this, *imported, cached, prefab.sourcePath,
+              "ResourceManager::acquireScenePrefabAssets", "scene_prefab",
+              ddsPack.get());
 
       if (!textureRefsResult.cacheUsable) {
         cacheUsable = false;
@@ -1337,8 +1460,9 @@ ResourceManager::acquireScenePrefabAssets(const ScenePrefab &prefab) {
 
       const MaterialRequest::TextureRefs textureRefs =
           acquireRawImportedTextureRefs(
-              *this, imported, "ResourceManager::acquireScenePrefabAssets",
-              "scene_prefab", sourceMaterialIndex);
+              *this, imported, prefab.sourcePath,
+              "ResourceManager::acquireScenePrefabAssets", "scene_prefab",
+              sourceMaterialIndex, ddsPack.get());
       auto acquireMaterialResult = acquireImportedMaterialInstance(
           *this, imported, textureRefs, canonicalModelPath, "scene_prefab",
           sourceMaterialIndex);
@@ -1807,6 +1931,9 @@ PoolStats ResourceManager::stats() const {
   s.staleTextureReleases = telemetry_.staleTextureReleases;
   s.staleMaterialReleases = telemetry_.staleMaterialReleases;
   s.staleModelReleases = telemetry_.staleModelReleases;
+  s.textureCache = Texture::cacheTelemetry();
+  s.ddsTexturePacks = ddsTexturePackTelemetry();
+  s.textureUploads = gpu_.getTextureUploadTelemetry();
   return s;
 }
 

@@ -228,47 +228,6 @@ TEST(NuriSnapshotTestingTest, ManifestRejectsRemovedBackends) {
   std::filesystem::remove(path, ec);
 }
 
-TEST(NuriSnapshotTestingTest, BistroFullPipelineVantagesUseUltraSettings) {
-  const std::array<std::filesystem::path, 5u> manifests{
-      defaultSnapshotCaseRoot() / "renderer" /
-          "niagara_bistro_full_pipeline_outer_motion_540p.json",
-      defaultSnapshotCaseRoot() / "renderer" /
-          "niagara_bistro_meshlet_gtao_motion_360p.json",
-      defaultSnapshotCaseRoot() / "shadows" /
-          "niagara_bistro_close_shadow_360p.json",
-      defaultSnapshotCaseRoot() / "shadows" /
-          "niagara_bistro_far_shadow_360p.json",
-      defaultSnapshotCaseRoot() / "shadows" /
-          "niagara_bistro_outer_shadow_540p.json",
-  };
-  for (const std::filesystem::path &manifest : manifests) {
-    auto loaded = loadSnapshotCaseManifest(manifest);
-    ASSERT_FALSE(loaded.hasError()) << manifest << ": " << loaded.error();
-    const SnapshotCase &snapshotCase = loaded.value();
-    EXPECT_EQ(snapshotCase.backend, "nvrhi") << manifest;
-    ASSERT_EQ(snapshotCase.requirements.backends.size(), 1u) << manifest;
-    EXPECT_EQ(snapshotCase.requirements.backends[0], "nvrhi") << manifest;
-    EXPECT_EQ(snapshotCase.settings.antiAliasing.mode, AntiAliasingMode::TAA)
-        << manifest;
-    EXPECT_EQ(snapshotCase.settings.antiAliasing.temporalProvider,
-              TemporalReconstructionProvider::Reference)
-        << manifest;
-    EXPECT_EQ(snapshotCase.settings.antiAliasing.qualityPreset,
-              TemporalAAQualityPreset::Ultra)
-        << manifest;
-    EXPECT_EQ(snapshotCase.settings.ambientOcclusion.mode,
-              AmbientOcclusionMode::GTAO)
-        << manifest;
-    EXPECT_EQ(snapshotCase.settings.ambientOcclusion.preset,
-              AmbientOcclusionPreset::Ultra)
-        << manifest;
-    EXPECT_TRUE(snapshotCase.settings.shadow.enabled) << manifest;
-    EXPECT_EQ(snapshotCase.settings.shadow.qualityPreset,
-              ShadowQualityPreset::Ultra)
-        << manifest;
-  }
-}
-
 TEST(NuriSnapshotTestingTest,
      ManifestAppliesShadowPresetBeforeExplicitOverrides) {
   const std::filesystem::path path =

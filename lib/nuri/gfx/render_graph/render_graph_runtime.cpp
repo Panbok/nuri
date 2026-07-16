@@ -86,6 +86,7 @@ RenderGraphRuntime::~RenderGraphRuntime() {
     }
   }
   cvWork_.notify_all();
+  workers_.clear();
 }
 
 void RenderGraphRuntime::clearScheduledWorkLocked() {

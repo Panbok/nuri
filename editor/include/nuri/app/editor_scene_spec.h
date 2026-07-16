@@ -59,7 +59,7 @@ struct ImportedPrefabSceneResources {
   ScenePrefabAssets assets{};
   std::vector<ImportedSceneLight> fallbackLights{};
   bool ready = false;
-  bool portableBakeQueued = false;
+  bool textureArtifactBakeQueued = false;
 
   ImportedPrefabSceneResources() = default;
   ~ImportedPrefabSceneResources();
@@ -81,7 +81,7 @@ struct SimpleModelSceneAssets {
   MaterialRef material = kInvalidMaterialRef;
   std::vector<ImportedSceneLight> fallbackLights{};
   bool ready = false;
-  bool portableBakeQueued = false;
+  bool textureArtifactBakeQueued = false;
 
   SimpleModelSceneAssets() = default;
   ~SimpleModelSceneAssets();
@@ -122,7 +122,7 @@ struct StreamingSceneState {
   glm::mat4 baseModel{1.0f};
   bool loadFailed = false;
   std::string loadError{};
-  bool portableBakeQueued = false;
+  bool textureArtifactBakeQueued = false;
   double loadStartTimeSeconds = 0.0;
   double lastProgressLogTimeSeconds = 0.0;
 

@@ -1531,6 +1531,101 @@ void appendBytesAsMiB(BenchmarkFrameMeasurements &measurements,
   measurements.appendRegistered(index, bytesToMiB(bytes));
 }
 
+void addTextureResourceMetrics(BenchmarkFrameMeasurements &measurements,
+                               const PoolStats &stats) {
+  const TextureCacheTelemetry &cache = stats.textureCache;
+  appendCounter(measurements,
+                NURI_BENCHMARK_METRIC("texture.cache.native_hits"),
+                cache.nativeHits);
+  appendCounter(measurements,
+                NURI_BENCHMARK_METRIC("texture.cache.native_misses"),
+                cache.nativeMisses);
+  appendCounter(measurements,
+                NURI_BENCHMARK_METRIC("texture.cache.native_stale"),
+                cache.nativeStale);
+  appendCounter(measurements,
+                NURI_BENCHMARK_METRIC("texture.cache.native_corrupt"),
+                cache.nativeCorrupt);
+  appendCounter(measurements,
+                NURI_BENCHMARK_METRIC("texture.cache.native_writes"),
+                cache.nativeWrites);
+  appendCounter(measurements,
+                NURI_BENCHMARK_METRIC("texture.cache.native_write_failures"),
+                cache.nativeWriteFailures);
+  appendCounter(measurements,
+                NURI_BENCHMARK_METRIC("texture.cache.artifact_builds"),
+                cache.artifactBuilds);
+  appendBytesAsMiB(measurements,
+                   NURI_BENCHMARK_METRIC("texture.io.authored_source_read_mb"),
+                   cache.authoredSourceBytesRead);
+  appendBytesAsMiB(measurements,
+                   NURI_BENCHMARK_METRIC("texture.io.native_artifact_read_mb"),
+                   cache.nativeArtifactBytesRead);
+  appendBytesAsMiB(measurements,
+                   NURI_BENCHMARK_METRIC("texture.io.dds_source_read_mb"),
+                   cache.ddsSourceBytesRead);
+  measurements.appendRegistered(
+      NURI_BENCHMARK_METRIC("texture.artifact_build_ms"),
+      static_cast<double>(cache.artifactBuildTimeNs) / 1'000'000.0);
+  measurements.appendRegistered(NURI_BENCHMARK_METRIC("texture.dds_read_ms"),
+                                static_cast<double>(cache.ddsReadTimeNs) /
+                                    1'000'000.0);
+
+  const DdsTexturePackTelemetry &pack = stats.ddsTexturePacks;
+  appendCounter(measurements, NURI_BENCHMARK_METRIC("texture.pack.hits"),
+                pack.hits);
+  appendCounter(measurements, NURI_BENCHMARK_METRIC("texture.pack.misses"),
+                pack.misses);
+  appendCounter(measurements, NURI_BENCHMARK_METRIC("texture.pack.stale"),
+                pack.stale);
+  appendCounter(measurements, NURI_BENCHMARK_METRIC("texture.pack.corrupt"),
+                pack.corrupt);
+  appendCounter(measurements, NURI_BENCHMARK_METRIC("texture.pack.builds"),
+                pack.builds);
+  appendCounter(measurements,
+                NURI_BENCHMARK_METRIC("texture.pack.build_failures"),
+                pack.buildFailures);
+  appendCounter(measurements,
+                NURI_BENCHMARK_METRIC("texture.pack.read_failures"),
+                pack.readFailures);
+  appendCounter(measurements,
+                NURI_BENCHMARK_METRIC("texture.pack.entries_served"),
+                pack.entriesServed);
+  appendBytesAsMiB(measurements,
+                   NURI_BENCHMARK_METRIC("texture.io.pack_bytes_served_mb"),
+                   pack.bytesServed);
+  appendBytesAsMiB(
+      measurements,
+      NURI_BENCHMARK_METRIC("texture.io.pack_build_source_read_mb"),
+      pack.buildSourceBytesRead);
+  measurements.appendRegistered(NURI_BENCHMARK_METRIC("texture.pack.build_ms"),
+                                static_cast<double>(pack.buildTimeNs) /
+                                    1'000'000.0);
+  measurements.appendRegistered(NURI_BENCHMARK_METRIC("texture.pack.open_ms"),
+                                static_cast<double>(pack.openTimeNs) /
+                                    1'000'000.0);
+  measurements.appendRegistered(NURI_BENCHMARK_METRIC("texture.pack.read_ms"),
+                                static_cast<double>(pack.readTimeNs) /
+                                    1'000'000.0);
+
+  const TextureUploadTelemetry &uploads = stats.textureUploads;
+  appendCounter(measurements,
+                NURI_BENCHMARK_METRIC("texture.upload.textures_recorded"),
+                uploads.texturesRecorded);
+  appendBytesAsMiB(measurements,
+                   NURI_BENCHMARK_METRIC("texture.upload.recorded_mb"),
+                   uploads.bytesRecorded);
+  appendCounter(measurements,
+                NURI_BENCHMARK_METRIC("texture.upload.batches_submitted"),
+                uploads.batchesSubmitted);
+  appendCounter(measurements,
+                NURI_BENCHMARK_METRIC("texture.upload.bounded_batch_flushes"),
+                uploads.boundedBatchFlushes);
+  appendCounter(measurements,
+                NURI_BENCHMARK_METRIC("texture.upload.completion_waits"),
+                uploads.completionWaits);
+}
+
 #define addIfNonzero(measurements, id, value)                                  \
   appendCounter(measurements, NURI_BENCHMARK_METRIC(id), value)
 #define addBytesAsMiB(measurements, id, value)                                 \
@@ -3464,8 +3559,10 @@ BenchmarkRunResult runBenchmarkCase(BenchmarkCase benchmarkCase,
     RenderScene scene(&sceneMemory);
     std::optional<ScenePrefab> prefab;
     std::optional<ScenePrefabAssets> prefabAssets;
+    const auto sceneResourcePrepareBegin = std::chrono::steady_clock::now();
     auto sceneResult = populateScene(benchmarkCase, *renderer, scene,
                                      &sceneMemory, prefab, prefabAssets);
+    const double sceneResourcePrepareMs = elapsedMs(sceneResourcePrepareBegin);
     if (sceneResult.hasError()) {
       result.exitCode = BenchmarkExitCode::EnvironmentUnavailable;
       result.message = sceneResult.error();
@@ -3560,8 +3657,13 @@ BenchmarkRunResult runBenchmarkCase(BenchmarkCase benchmarkCase,
         frame.measurements.appendRegistered(
             NURI_BENCHMARK_METRIC("benchmark.camera.direction_delta"),
             cameraDirectionDelta);
+        frame.measurements.appendRegistered(
+            NURI_BENCHMARK_METRIC("cpu.scene_resource_prepare_ms"),
+            sceneResourcePrepareMs);
         addRendererFrameMetrics(frame.measurements, frame.metrics);
         addRenderGraphTelemetryMetrics(frame.measurements, *renderer);
+        addTextureResourceMetrics(frame.measurements,
+                                  renderer->resources().stats());
         addProcessMemoryMetrics(frame.measurements);
         addPmrMemoryMetrics(frame.measurements, rendererMemoryTracker,
                             pipelineMemoryTracker, sceneMemoryTracker);

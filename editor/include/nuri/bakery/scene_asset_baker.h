@@ -10,26 +10,28 @@
 
 namespace nuri::bakery::detail {
 
-struct ScenePortableBakePlan {
+struct SceneTextureArtifactBakePlan {
   bool shouldBake = false;
   std::filesystem::path scenePath;
   std::filesystem::path materialCachePath;
-  std::vector<ScenePortableTextureTarget> prebuildNativeTargets{};
+  std::vector<SceneTextureArtifactTarget> prebuildNativeTargets{};
+  bool forceRebuild = false;
 };
 
-struct ScenePortableBakeStats {
+struct SceneTextureArtifactBakeStats {
   bool wroteAnyFiles = false;
-  uint32_t portableTexturesWritten = 0u;
-  uint32_t nativeTexturesWritten = 0u;
-  uint64_t portableBytesWritten = 0u;
-  uint64_t nativeBytesWritten = 0u;
+  uint32_t artifactsWritten = 0u;
+  uint64_t artifactBytesWritten = 0u;
+  uint32_t ddsPackEntries = 0u;
+  uint64_t ddsPackBytes = 0u;
+  bool wroteDdsPack = false;
   bool wroteMaterialCache = false;
 };
 
-[[nodiscard]] Result<ScenePortableBakePlan, std::string>
-planScenePortableAssetsBake(const ScenePortableAssetsBakeRequest &request);
+[[nodiscard]] Result<SceneTextureArtifactBakePlan, std::string>
+planSceneTextureArtifactsBake(const SceneTextureArtifactsBakeRequest &request);
 
-[[nodiscard]] Result<ScenePortableBakeStats, std::string>
-bakeScenePortableAssetsToDisk(const ScenePortableBakePlan &plan);
+[[nodiscard]] Result<SceneTextureArtifactBakeStats, std::string>
+bakeSceneTextureArtifactsToDisk(const SceneTextureArtifactBakePlan &plan);
 
 } // namespace nuri::bakery::detail

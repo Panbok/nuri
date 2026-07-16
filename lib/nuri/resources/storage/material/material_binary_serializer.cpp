@@ -39,9 +39,7 @@ constexpr size_t kSerializedVec4Bytes = 4u * kSerializedF32Bytes;
 }
 
 [[nodiscard]] constexpr size_t minSerializedTextureCacheEntryBytes() noexcept {
-  return kSerializedEmptyStringBytes + // `portablePath`
-         kSerializedU8Bytes +          // `srgb`
-         kSerializedU64Bytes;          // `sourceIdentityHash`
+  return kSerializedU64Bytes; // `artifactIdentityHash`
 }
 
 [[nodiscard]] constexpr size_t
@@ -62,7 +60,7 @@ minSerializedSceneMaterialRecordBytes() noexcept {
                                        minSerializedTextureCacheEntryBytes()));
 }
 
-static_assert(minSerializedSceneMaterialRecordBytes() == 900u);
+static_assert(minSerializedSceneMaterialRecordBytes() == 830u);
 
 } // namespace
 

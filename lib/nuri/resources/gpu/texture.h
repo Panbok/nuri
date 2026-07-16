@@ -3,25 +3,26 @@
 #include "nuri/core/result.h"
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/gfx/owned_gpu_resource.h"
+#include "nuri/resources/storage/texture/texture_processing.h"
 
 #include <cstdint>
 #include <string_view>
 
 namespace nuri {
 
-enum class TextureMipSemantic : uint8_t {
-  Generic = 0,
-  AlphaCoverage = 1,
-  NormalMap = 2,
-  RoughnessG = 3,
-  RoughnessA = 4,
-};
-
-struct TextureLoadOptions {
-  bool srgb = false;
-  bool generateMipmaps = false;
-  TextureMipSemantic mipSemantic = TextureMipSemantic::Generic;
-  float alphaCoverageCutoff = 0.5f;
+struct TextureCacheTelemetry {
+  uint64_t nativeHits = 0u;
+  uint64_t nativeMisses = 0u;
+  uint64_t nativeStale = 0u;
+  uint64_t nativeCorrupt = 0u;
+  uint64_t nativeWrites = 0u;
+  uint64_t nativeWriteFailures = 0u;
+  uint64_t artifactBuilds = 0u;
+  uint64_t authoredSourceBytesRead = 0u;
+  uint64_t nativeArtifactBytesRead = 0u;
+  uint64_t ddsSourceBytesRead = 0u;
+  uint64_t artifactBuildTimeNs = 0u;
+  uint64_t ddsReadTimeNs = 0u;
 };
 
 class NURI_API Texture final {
@@ -44,6 +45,9 @@ public:
   loadTexture(GPUDevice &gpu, std::string_view filePath,
               const TextureLoadOptions &options,
               std::string_view debugName = {});
+  [[nodiscard]] static Result<std::unique_ptr<Texture>, std::string>
+  loadDdsTexture(GPUDevice &gpu, std::span<const std::byte> fileBytes,
+                 std::string_view sourceName, std::string_view debugName = {});
 
   [[nodiscard]] static Result<std::unique_ptr<Texture>, std::string>
   loadCubemapFromEquirectangularHDR(GPUDevice &gpu, std::string_view filePath,
@@ -53,19 +57,11 @@ public:
   loadTextureKtx2(GPUDevice &gpu, std::string_view filePath,
                   std::string_view debugName = {});
 
-  // `loadPortableTextureKtx2` accepts portable KTX2 payloads such as
-  // UASTC/ETC1S with universal supercompression and runtime transcoding
-  // controlled by `TextureLoadOptions`; prefer it over `loadTextureKtx2` for
-  // device-portable assets, and use `loadTextureKtx2` for native KTX2 data
-  // whose sRGB and mipmap behavior is already fixed by the file contents.
-  [[nodiscard]] static Result<std::unique_ptr<Texture>, std::string>
-  loadPortableTextureKtx2(GPUDevice &gpu, std::string_view filePath,
-                          const TextureLoadOptions &options = {},
-                          std::string_view debugName = {});
-
   [[nodiscard]] static Result<std::unique_ptr<Texture>, std::string>
   loadCubemapKtx2(GPUDevice &gpu, std::string_view filePath,
                   std::string_view debugName = {});
+
+  [[nodiscard]] static TextureCacheTelemetry cacheTelemetry() noexcept;
 
   [[nodiscard]] TextureHandle handle() const { return resource_.get(); }
   [[nodiscard]] TextureType type() const { return type_; }

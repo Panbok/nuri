@@ -31,11 +31,11 @@ void loadImportedLightsForScene(std::string_view sceneName,
                                 std::string_view modelPath,
                                 std::vector<ImportedSceneLight> &outLights);
 
-void queueScenePortableBakeIfNeeded(EditorRuntime &runtime,
-                                    ImportedPrefabSceneResources &assets);
-void queueScenePortableBakeIfNeeded(EditorRuntime &runtime,
-                                    SimpleModelSceneAssets &assets);
-void queueScenePortableBakeIfNeeded(EditorRuntime &runtime,
-                                    StreamingSceneState &assets);
+void queueSceneTextureArtifactBakeIfNeeded(
+    EditorRuntime &runtime, ImportedPrefabSceneResources &assets);
+void queueSceneTextureArtifactBakeIfNeeded(EditorRuntime &runtime,
+                                           SimpleModelSceneAssets &assets);
+void queueSceneTextureArtifactBakeIfNeeded(EditorRuntime &runtime,
+                                           StreamingSceneState &assets);
 
 } // namespace nuri

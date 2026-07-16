@@ -81,7 +81,7 @@ EditorSceneSpec makePrefabScene(PrefabSceneFactoryDesc desc) {
             return additionalAssetsResult;
           }
         }
-        queueScenePortableBakeIfNeeded(ctx.runtime, *assets);
+        queueSceneTextureArtifactBakeIfNeeded(ctx.runtime, *assets);
         return Result<void, std::string>::makeResult();
       },
       .activate = [desc, assets](EditorSceneActivateContext &ctx)
@@ -170,7 +170,7 @@ EditorSceneSpec makeAnimatedPrefabScene(AnimatedPrefabSceneFactoryDesc desc) {
         if (prepareResult.hasError()) {
           return prepareResult;
         }
-        queueScenePortableBakeIfNeeded(ctx.runtime, *assets);
+        queueSceneTextureArtifactBakeIfNeeded(ctx.runtime, *assets);
         return Result<void, std::string>::makeResult();
       },
       .activate = [desc, assets, animation](EditorSceneActivateContext &ctx)
@@ -273,7 +273,7 @@ EditorSceneSpec makeStreamingScene(StreamingSceneFactoryDesc desc) {
         if (prefabResult.hasError()) {
           return prefabResult;
         }
-        queueScenePortableBakeIfNeeded(ctx.runtime, state->prefab);
+        queueSceneTextureArtifactBakeIfNeeded(ctx.runtime, state->prefab);
         return Result<void, std::string>::makeResult();
       },
       .activate = [desc, state](EditorSceneActivateContext &ctx)

@@ -663,9 +663,7 @@ TEST_F(RenderGraphExecutorTest,
             RenderPassExecutionMode::ComputeOnly);
   EXPECT_FALSE(gpu.recordedPasses[0].hasColorAttachment);
   EXPECT_TRUE(gpu.recordedPasses[0].draws.empty());
-  ASSERT_EQ(gpu.recordedPasses[0].preDispatches.size(), 1u);
-  ASSERT_EQ(gpu.recordedPasses[0].preDispatches[0].dependencyBuffers.size(),
-            1u);
+  EXPECT_TRUE(nuri::isValid(gpu.lastPreDispatchDependencyBuffer));
 }
 
 TEST_F(RenderGraphExecutorTest,

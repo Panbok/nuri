@@ -6,13 +6,14 @@
 #include "nuri/core/profiling.h"
 #include "nuri/resources/cpu/bitmap.h"
 #include "nuri/resources/storage/mesh/mesh_cache_utils.h"
-#include "nuri/resources/storage/texture/texture_cache_utils.h"
+#include "nuri/resources/storage/texture/texture_artifact_builder.h"
 
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <cmath>
 #include <cstddef>
+#include <cstdio>
 #include <ktx.h>
 #include <stb_image.h>
 
@@ -308,8 +309,39 @@ shouldGenerateSemanticRgba8MipChain(const TextureLoadOptions &options,
 struct KtxLoadPayload {
   TextureDesc desc{};
   std::vector<std::byte> bytes{};
+  std::span<const std::byte> sourceBytes{};
+  size_t dataOffset = 0u;
+  size_t dataSize = 0u;
   std::string debugName{};
+
+  void bindData() noexcept {
+    const std::span<const std::byte> storage =
+        bytes.empty() ? sourceBytes
+                      : std::span<const std::byte>(bytes.data(), bytes.size());
+    if (dataOffset > storage.size()) {
+      desc.data = {};
+      return;
+    }
+    const size_t available = storage.size() - dataOffset;
+    const size_t boundedSize = std::min(dataSize, available);
+    desc.data = storage.subspan(dataOffset, boundedSize);
+  }
 };
+
+struct AtomicTextureCacheTelemetry {
+  std::atomic<uint64_t> ddsSourceBytesRead{0u};
+  std::atomic<uint64_t> ddsReadTimeNs{0u};
+};
+
+AtomicTextureCacheTelemetry gTextureCacheTelemetry{};
+
+[[nodiscard]] uint64_t
+elapsedNanoseconds(std::chrono::steady_clock::time_point start) noexcept {
+  return static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now() - start)
+          .count());
+}
 
 struct KtxTextureDeleter {
   void operator()(ktxTexture *texture) const noexcept {
@@ -326,6 +358,28 @@ struct KtxTextureDeleter {
 };
 
 using KtxTexturePtr = std::unique_ptr<ktxTexture, KtxTextureDeleter>;
+
+struct FileCloser {
+  void operator()(std::FILE *file) const noexcept {
+    if (file != nullptr) {
+      std::fclose(file);
+    }
+  }
+};
+
+using FilePtr = std::unique_ptr<std::FILE, FileCloser>;
+
+[[nodiscard]] FilePtr openFileForRead(const std::filesystem::path &path) {
+  std::FILE *file = nullptr;
+#ifdef _WIN32
+  if (_wfopen_s(&file, path.c_str(), L"rb") != 0) {
+    file = nullptr;
+  }
+#else
+  file = std::fopen(path.string().c_str(), "rb");
+#endif
+  return FilePtr(file);
+}
 
 constexpr ktx_uint32_t kGlRgba8 = 0x8058u;
 constexpr ktx_uint32_t kGlSrgb8Alpha8 = 0x8C43u;
@@ -505,15 +559,23 @@ convertFloatBitmapToHalfBytes(std::span<const uint8_t> srcBytes) {
 }
 
 [[nodiscard]] Result<KtxTexturePtr, std::string>
-loadKtxTextureFromFile(std::string_view filePath) {
+loadKtxTextureFromFile(std::string_view filePath,
+                       ktxTextureCreateFlags createFlags =
+                           KTX_TEXTURE_CREATE_LOAD_IMAGE_DATA_BIT) {
   const std::string filePathStr(filePath);
   if (filePathStr.empty()) {
     return Result<KtxTexturePtr, std::string>::makeError(
         "Texture::loadKtxTextureFromFile: file path is empty");
   }
+  FilePtr file = openFileForRead(std::filesystem::path(filePathStr));
+  if (!file) {
+    return Result<KtxTexturePtr, std::string>::makeError(
+        "Texture::loadKtxTextureFromFile: failed to open KTX file '" +
+        filePathStr + "'");
+  }
   ktxTexture *texture = nullptr;
-  const KTX_error_code createError = ktxTexture_CreateFromNamedFile(
-      filePathStr.c_str(), KTX_TEXTURE_CREATE_LOAD_IMAGE_DATA_BIT, &texture);
+  const KTX_error_code createError =
+      ktxTexture_CreateFromStdioStream(file.get(), createFlags, &texture);
   if (createError != KTX_SUCCESS || texture == nullptr) {
     return Result<KtxTexturePtr, std::string>::makeError(
         "Texture::loadKtxTextureFromFile: failed to read KTX file '" +
@@ -545,7 +607,7 @@ makeKtxPayloadFromTexture(const ktxTexture &texture, std::string_view filePath,
     if (ktxTexture2_NeedsTranscoding(texture2)) {
       return Result<KtxLoadPayload, std::string>::makeError(
           "Texture::makeKtxPayloadFromTexture: Basis-compressed KTX2 file "
-          "requires the portable texture path: '" +
+          "must be resolved through the texture artifact builder: '" +
           std::string(filePath) + "'");
     }
   }
@@ -647,8 +709,9 @@ makeKtxPayloadFromTexture(const ktxTexture &texture, std::string_view filePath,
         std::string(filePath) + "'");
   }
 
-  payload.desc.data =
-      std::span<const std::byte>(payload.bytes.data(), payload.bytes.size());
+  payload.dataOffset = 0u;
+  payload.dataSize = payload.bytes.size();
+  payload.bindData();
   return Result<KtxLoadPayload, std::string>::makeResult(std::move(payload));
 }
 
@@ -665,14 +728,8 @@ loadKtxPayload(std::string_view filePath, std::string_view debugName,
 }
 
 [[nodiscard]] Result<KtxLoadPayload, std::string>
-loadDdsPayload(std::string_view filePath, std::string_view debugName) {
-  auto bytesResult =
-      readBinaryFile(std::filesystem::path(std::string(filePath)));
-  if (bytesResult.hasError()) {
-    return Result<KtxLoadPayload, std::string>::makeError(bytesResult.error());
-  }
-
-  std::vector<std::byte> bytes = std::move(bytesResult.value());
+parseDdsPayload(std::span<const std::byte> bytes, std::string_view sourceName,
+                std::string_view debugName) {
   if (bytes.size() < sizeof(uint32_t) + sizeof(DdsHeader)) {
     return Result<KtxLoadPayload, std::string>::makeError(
         "Texture::loadDdsPayload: DDS file is too small");
@@ -763,193 +820,43 @@ loadDdsPayload(std::string_view filePath, std::string_view debugName) {
   payload.desc.dataNumMipLevels = payload.desc.numMipLevels;
   payload.desc.generateMipmaps = false;
   payload.debugName =
-      debugName.empty() ? std::string(filePath) : std::string(debugName);
-  payload.bytes.assign(bytes.begin() + static_cast<ptrdiff_t>(payloadOffset),
-                       bytes.end());
-  payload.desc.data =
-      std::span<const std::byte>(payload.bytes.data(), payload.bytes.size());
+      debugName.empty() ? std::string(sourceName) : std::string(debugName);
+  payload.sourceBytes = bytes;
+  payload.dataOffset = payloadOffset;
+  payload.dataSize = static_cast<size_t>(expectedPayloadSize);
+  payload.bindData();
+  return Result<KtxLoadPayload, std::string>::makeResult(std::move(payload));
+}
+
+[[nodiscard]] Result<KtxLoadPayload, std::string>
+loadDdsPayload(std::string_view filePath, std::string_view debugName) {
+  const auto readStart = std::chrono::steady_clock::now();
+  auto bytesResult =
+      readBinaryFile(std::filesystem::path(std::string(filePath)));
+  if (bytesResult.hasError()) {
+    return Result<KtxLoadPayload, std::string>::makeError(bytesResult.error());
+  }
+
+  std::vector<std::byte> bytes = std::move(bytesResult.value());
+  gTextureCacheTelemetry.ddsSourceBytesRead.fetch_add(
+      bytes.size(), std::memory_order_relaxed);
+  gTextureCacheTelemetry.ddsReadTimeNs.fetch_add(elapsedNanoseconds(readStart),
+                                                 std::memory_order_relaxed);
+  auto payloadResult = parseDdsPayload(bytes, filePath, debugName);
+  if (payloadResult.hasError()) {
+    return payloadResult;
+  }
+  KtxLoadPayload payload = std::move(payloadResult.value());
+  payload.bytes = std::move(bytes);
+  payload.sourceBytes = {};
+  payload.bindData();
   return Result<KtxLoadPayload, std::string>::makeResult(std::move(payload));
 }
 
 [[nodiscard]] Result<std::unique_ptr<Texture>, std::string>
 createTextureFromPayload(GPUDevice &gpu, KtxLoadPayload payload) {
-  payload.desc.data =
-      std::span<const std::byte>(payload.bytes.data(), payload.bytes.size());
+  payload.bindData();
   return Texture::create(gpu, payload.desc, payload.debugName);
-}
-
-[[nodiscard]] Format
-selectPortableRuntimeFormat(const GPUDevice &gpu, bool srgb,
-                            uint32_t componentCount) noexcept {
-  if (!srgb) {
-    return Format::RGBA8_UNORM;
-  }
-  const TextureCompressionCaps caps = gpu.getTextureCompressionCaps();
-  if (caps.bc7) {
-    return Format::BC7_RGBA_SRGB;
-  }
-  if (caps.etc2 && componentCount <= 3u) {
-    return Format::ETC2_RGB8_SRGB;
-  }
-  if (caps.astc) {
-    // ASTC support is reported separately, but the backend Format enum does not
-    // expose an ASTC target yet, so portable runtime transcoding still falls
-    // back to uncompressed RGBA until ASTC formats are added end-to-end.
-  }
-  return Format::RGBA8_SRGB;
-}
-
-[[nodiscard]] bool shouldPersistPortableNativeCache(Format format) noexcept {
-  return format != Format::RGBA8_UNORM;
-}
-
-[[nodiscard]] std::filesystem::path
-resolvePortableNativeCachePath(std::string_view portablePath,
-                               Format targetFormat, bool persistNativeCache) {
-  if (!persistNativeCache) {
-    return {};
-  }
-  return buildNativeTextureCachePath(std::filesystem::path(portablePath),
-                                     targetFormat);
-}
-
-[[nodiscard]] Result<ktx_uint32_t, std::string>
-resolveKtxVkFormat(Format format) {
-  switch (format) {
-  case Format::RGBA8_UNORM:
-    return Result<ktx_uint32_t, std::string>::makeResult(
-        kKtxVkFormatR8G8B8A8Unorm);
-  case Format::RGBA8_SRGB:
-    return Result<ktx_uint32_t, std::string>::makeResult(
-        kKtxVkFormatR8G8B8A8Srgb);
-  case Format::BC7_RGBA_UNORM:
-    return Result<ktx_uint32_t, std::string>::makeResult(kKtxVkFormatBc7Unorm);
-  case Format::BC7_RGBA_SRGB:
-    return Result<ktx_uint32_t, std::string>::makeResult(kKtxVkFormatBc7Srgb);
-  case Format::ETC2_RGB8_UNORM:
-    return Result<ktx_uint32_t, std::string>::makeResult(
-        kKtxVkFormatEtc2Rgb8Unorm);
-  case Format::ETC2_RGB8_SRGB:
-    return Result<ktx_uint32_t, std::string>::makeResult(
-        kKtxVkFormatEtc2Rgb8Srgb);
-  default:
-    return Result<ktx_uint32_t, std::string>::makeError(
-        "Texture::resolveKtxVkFormat: unsupported target format");
-  }
-}
-
-[[nodiscard]] Result<ktx_transcode_fmt_e, std::string>
-resolveBasisTranscodeFormat(Format format) {
-  switch (format) {
-  case Format::BC7_RGBA_UNORM:
-  case Format::BC7_RGBA_SRGB:
-    return Result<ktx_transcode_fmt_e, std::string>::makeResult(
-        KTX_TTF_BC7_RGBA);
-  case Format::ETC2_RGB8_UNORM:
-  case Format::ETC2_RGB8_SRGB:
-    return Result<ktx_transcode_fmt_e, std::string>::makeResult(
-        KTX_TTF_ETC1_RGB);
-  case Format::RGBA8_UNORM:
-  case Format::RGBA8_SRGB:
-    return Result<ktx_transcode_fmt_e, std::string>::makeResult(KTX_TTF_RGBA32);
-  default:
-    return Result<ktx_transcode_fmt_e, std::string>::makeError(
-        "Texture::resolveBasisTranscodeFormat: unsupported target format");
-  }
-}
-
-[[nodiscard]] Result<std::unique_ptr<ktxTexture2, KtxTextureDeleter>,
-                     std::string>
-createNativeKtx2Copy(const ktxTexture &source, Format targetFormat) {
-  auto vkFormatResult = resolveKtxVkFormat(targetFormat);
-  if (vkFormatResult.hasError()) {
-    return Result<std::unique_ptr<ktxTexture2, KtxTextureDeleter>,
-                  std::string>::makeError(vkFormatResult.error());
-  }
-
-  const ktxTextureCreateInfo createInfo{
-      .glInternalformat = 0u,
-      .vkFormat = vkFormatResult.value(),
-      .pDfd = nullptr,
-      .baseWidth = source.baseWidth,
-      .baseHeight = source.baseHeight,
-      .baseDepth = source.baseDepth,
-      .numDimensions = source.numDimensions,
-      .numLevels = source.numLevels,
-      .numLayers = source.numLayers,
-      .numFaces = source.numFaces,
-      .isArray = source.isArray,
-      .generateMipmaps = KTX_FALSE,
-  };
-
-  ktxTexture2 *outTexture = nullptr;
-  const KTX_error_code createError = ktxTexture2_Create(
-      &createInfo, KTX_TEXTURE_CREATE_ALLOC_STORAGE, &outTexture);
-  if (createError != KTX_SUCCESS || outTexture == nullptr) {
-    return Result<
-        std::unique_ptr<ktxTexture2, KtxTextureDeleter>,
-        std::string>::makeError("Texture::createNativeKtx2Copy: "
-                                "ktxTexture2_Create failed with code " +
-                                std::to_string(static_cast<int>(createError)));
-  }
-
-  std::unique_ptr<ktxTexture2, KtxTextureDeleter> out(outTexture);
-  ktxTexture *outBase = ktxTexture(out.get());
-  ktxTexture *srcBase = const_cast<ktxTexture *>(&source);
-  const uint8_t *srcData = ktxTexture_GetData(srcBase);
-  if (srcData == nullptr) {
-    return Result<std::unique_ptr<ktxTexture2, KtxTextureDeleter>,
-                  std::string>::
-        makeError("Texture::createNativeKtx2Copy: source texture data is null");
-  }
-
-  for (uint32_t level = 0u; level < source.numLevels; ++level) {
-    const ktx_size_t imageSize = ktxTexture_GetImageSize(srcBase, level);
-    for (uint32_t layer = 0u; layer < std::max(1u, source.numLayers); ++layer) {
-      for (uint32_t face = 0u; face < std::max(1u, source.numFaces); ++face) {
-        ktx_size_t srcOffset = 0u;
-        const KTX_error_code offsetError =
-            ktxTexture_GetImageOffset(srcBase, level, layer, face, &srcOffset);
-        if (offsetError != KTX_SUCCESS) {
-          return Result<
-              std::unique_ptr<ktxTexture2, KtxTextureDeleter>,
-              std::string>::makeError("Texture::createNativeKtx2Copy: failed "
-                                      "to query image offset");
-        }
-        const KTX_error_code setError = ktxTexture_SetImageFromMemory(
-            outBase, level, layer, face, srcData + srcOffset, imageSize);
-        if (setError != KTX_SUCCESS) {
-          return Result<
-              std::unique_ptr<ktxTexture2, KtxTextureDeleter>,
-              std::string>::makeError("Texture::createNativeKtx2Copy: failed "
-                                      "to copy image payload");
-        }
-      }
-    }
-  }
-
-  return Result<std::unique_ptr<ktxTexture2, KtxTextureDeleter>,
-                std::string>::makeResult(std::move(out));
-}
-
-[[nodiscard]] Result<std::vector<std::byte>, std::string>
-serializeKtxTextureToBytes(ktxTexture2 &texture) {
-  ktx_uint8_t *bytes = nullptr;
-  ktx_size_t sizeBytes = 0u;
-  const KTX_error_code writeError =
-      ktxTexture2_WriteToMemory(&texture, &bytes, &sizeBytes);
-  if (writeError != KTX_SUCCESS || bytes == nullptr || sizeBytes == 0u) {
-    return Result<std::vector<std::byte>, std::string>::makeError(
-        "Texture::serializeKtxTextureToBytes: ktxTexture2_WriteToMemory "
-        "failed with code " +
-        std::to_string(static_cast<int>(writeError)));
-  }
-
-  std::vector<std::byte> out(reinterpret_cast<std::byte *>(bytes),
-                             reinterpret_cast<std::byte *>(bytes) + sizeBytes);
-  std::free(bytes);
-  return Result<std::vector<std::byte>, std::string>::makeResult(
-      std::move(out));
 }
 
 } // namespace
@@ -1063,6 +970,19 @@ Texture::loadTexture(GPUDevice &gpu, std::string_view filePath,
 }
 
 Result<std::unique_ptr<Texture>, std::string>
+Texture::loadDdsTexture(GPUDevice &gpu, std::span<const std::byte> fileBytes,
+                        std::string_view sourceName,
+                        std::string_view debugName) {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
+  auto payloadResult = parseDdsPayload(fileBytes, sourceName, debugName);
+  if (payloadResult.hasError()) {
+    return Result<std::unique_ptr<Texture>, std::string>::makeError(
+        payloadResult.error());
+  }
+  return createTextureFromPayload(gpu, std::move(payloadResult.value()));
+}
+
+Result<std::unique_ptr<Texture>, std::string>
 Texture::loadCubemapFromEquirectangularHDR(GPUDevice &gpu,
                                            std::string_view filePath,
                                            std::string_view debugName) {
@@ -1157,129 +1077,6 @@ Texture::loadTextureKtx2(GPUDevice &gpu, std::string_view filePath,
 }
 
 Result<std::unique_ptr<Texture>, std::string>
-Texture::loadPortableTextureKtx2(GPUDevice &gpu, std::string_view filePath,
-                                 const TextureLoadOptions &options,
-                                 std::string_view debugName) {
-  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
-  auto portableTextureResult = loadKtxTextureFromFile(filePath);
-  if (portableTextureResult.hasError()) {
-    return Result<std::unique_ptr<Texture>, std::string>::makeError(
-        portableTextureResult.error());
-  }
-
-  ktxTexture &portableTexture = *portableTextureResult.value();
-  if (portableTexture.classId != ktxTexture2_c) {
-    return Result<std::unique_ptr<Texture>, std::string>::makeError(
-        "Texture::loadPortableTextureKtx2: portable source must be a KTX2 "
-        "texture");
-  }
-  auto *portableTexture2 =
-      reinterpret_cast<ktxTexture2 *>(portableTextureResult.value().get());
-  if (isCubeTexture(portableTexture)) {
-    return Result<std::unique_ptr<Texture>, std::string>::makeError(
-        "Texture::loadPortableTextureKtx2: portable scene textures must be 2D");
-  }
-
-  const uint32_t componentCount =
-      ktxTexture2_GetNumComponents(portableTexture2);
-  if (!ktxTexture2_NeedsTranscoding(portableTexture2)) {
-    auto payloadResult = makeKtxPayloadFromTexture(
-        portableTexture, filePath, debugName, TextureType::Texture2D);
-    if (payloadResult.hasError()) {
-      return Result<std::unique_ptr<Texture>, std::string>::makeError(
-          payloadResult.error());
-    }
-    return createTextureFromPayload(gpu, std::move(payloadResult.value()));
-  }
-  const Format targetFormat =
-      selectPortableRuntimeFormat(gpu, options.srgb, componentCount);
-  const bool persistNativeCache =
-      shouldPersistPortableNativeCache(targetFormat);
-  const std::filesystem::path nativeCachePath = resolvePortableNativeCachePath(
-      filePath, targetFormat, persistNativeCache);
-  if (persistNativeCache &&
-      isTextureCacheUpToDate(nativeCachePath,
-                             std::filesystem::path(filePath))) {
-    auto nativePayload = loadKtxPayload(nativeCachePath.string(), debugName,
-                                        TextureType::Texture2D);
-    if (!nativePayload.hasError()) {
-      NURI_LOG_DEBUG("Texture::loadPortableTextureKtx2: native cache hit '%s'",
-                     nativeCachePath.string().c_str());
-      return createTextureFromPayload(gpu, std::move(nativePayload.value()));
-    }
-    NURI_LOG_WARNING(
-        "Texture::loadPortableTextureKtx2: failed to load native cache '%s': "
-        "%s",
-        nativeCachePath.string().c_str(), nativePayload.error().c_str());
-  }
-
-  auto transcodeFmtResult = resolveBasisTranscodeFormat(targetFormat);
-  if (transcodeFmtResult.hasError()) {
-    return Result<std::unique_ptr<Texture>, std::string>::makeError(
-        transcodeFmtResult.error());
-  }
-  const ktx_transcode_flags flags = (targetFormat == Format::ETC2_RGB8_UNORM ||
-                                     targetFormat == Format::ETC2_RGB8_SRGB)
-                                        ? KTX_TF_HIGH_QUALITY
-                                        : 0u;
-  const KTX_error_code transcodeError = ktxTexture2_TranscodeBasis(
-      portableTexture2, transcodeFmtResult.value(), flags);
-  if (transcodeError != KTX_SUCCESS) {
-    return Result<std::unique_ptr<Texture>, std::string>::makeError(
-        "Texture::loadPortableTextureKtx2: failed to transcode Basis payload "
-        "'" +
-        std::string(filePath) + "' (error " +
-        std::to_string(static_cast<int>(transcodeError)) + ")");
-  }
-
-  auto nativeTextureResult =
-      createNativeKtx2Copy(portableTexture, targetFormat);
-  if (nativeTextureResult.hasError()) {
-    return Result<std::unique_ptr<Texture>, std::string>::makeError(
-        nativeTextureResult.error());
-  }
-
-  if (persistNativeCache) {
-    auto nativeFileBytesResult =
-        serializeKtxTextureToBytes(*nativeTextureResult.value());
-    if (!nativeFileBytesResult.hasError()) {
-      auto writeResult =
-          writeBinaryFileAtomic(nativeCachePath, nativeFileBytesResult.value());
-      if (writeResult.hasError()) {
-        NURI_LOG_WARNING(
-            "Texture::loadPortableTextureKtx2: failed to write native cache "
-            "'%s': %s",
-            nativeCachePath.string().c_str(), writeResult.error().c_str());
-      } else {
-        NURI_LOG_DEBUG(
-            "Texture::loadPortableTextureKtx2: native cache built '%s'",
-            nativeCachePath.string().c_str());
-      }
-    } else {
-      NURI_LOG_WARNING(
-          "Texture::loadPortableTextureKtx2: failed to serialize native cache "
-          "'%s': %s",
-          nativeCachePath.string().c_str(),
-          nativeFileBytesResult.error().c_str());
-    }
-  }
-
-  const std::string payloadSourcePath =
-      (persistNativeCache && !nativeCachePath.empty())
-          ? nativeCachePath.string()
-          : (debugName.empty() ? std::string(filePath)
-                               : std::string(debugName));
-  auto payloadResult = makeKtxPayloadFromTexture(
-      *ktxTexture(nativeTextureResult.value().get()), payloadSourcePath,
-      debugName, TextureType::Texture2D);
-  if (payloadResult.hasError()) {
-    return Result<std::unique_ptr<Texture>, std::string>::makeError(
-        payloadResult.error());
-  }
-  return createTextureFromPayload(gpu, std::move(payloadResult.value()));
-}
-
-Result<std::unique_ptr<Texture>, std::string>
 Texture::loadCubemapKtx2(GPUDevice &gpu, std::string_view filePath,
                          std::string_view debugName) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
@@ -1290,6 +1087,27 @@ Texture::loadCubemapKtx2(GPUDevice &gpu, std::string_view filePath,
         payloadResult.error());
   }
   return createTextureFromPayload(gpu, std::move(payloadResult.value()));
+}
+
+TextureCacheTelemetry Texture::cacheTelemetry() noexcept {
+  const TextureArtifactCacheTelemetry artifact =
+      textureArtifactCacheTelemetry();
+  return TextureCacheTelemetry{
+      .nativeHits = artifact.nativeHits,
+      .nativeMisses = artifact.nativeMisses,
+      .nativeStale = artifact.nativeStale,
+      .nativeCorrupt = artifact.nativeCorrupt,
+      .nativeWrites = artifact.nativeWrites,
+      .nativeWriteFailures = artifact.nativeWriteFailures,
+      .artifactBuilds = artifact.artifactBuilds,
+      .authoredSourceBytesRead = artifact.authoredSourceBytesRead,
+      .nativeArtifactBytesRead = artifact.nativeArtifactBytesRead,
+      .ddsSourceBytesRead = gTextureCacheTelemetry.ddsSourceBytesRead.load(
+          std::memory_order_relaxed),
+      .artifactBuildTimeNs = artifact.artifactBuildTimeNs,
+      .ddsReadTimeNs =
+          gTextureCacheTelemetry.ddsReadTimeNs.load(std::memory_order_relaxed),
+  };
 }
 
 } // namespace nuri

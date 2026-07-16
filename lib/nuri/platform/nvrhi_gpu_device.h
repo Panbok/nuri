@@ -75,6 +75,7 @@ public:
   Format getTextureFormat(TextureHandle h) const override;
   TextureDimensions getTextureDimensions(TextureHandle h) const override;
   TextureCompressionCaps getTextureCompressionCaps() const override;
+  TextureUploadTelemetry getTextureUploadTelemetry() const override;
   GPUAdapterInfo getAdapterInfo() const override;
   GpuMultisampleCapabilities getMultisampleCapabilities() const override;
   bool supportsFeature(GPUFeature feature) const override;

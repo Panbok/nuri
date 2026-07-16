@@ -131,67 +131,74 @@ TEST(VisibilityMathTests, CpuEvaluationKeepsSubmeshCandidatesIndependent) {
   EXPECT_EQ(result.cpuRejected, 1u);
 }
 
-TEST(VisibilityModeTests, GpuDrivenSkipsCpuEvaluation) {
-  RenderSettings settings{};
-  settings.visibility.mainViewMode = VisibilityCullingMode::GpuDriven;
-  settings.visibility.enableGpuInstanceCulling = true;
-  settings.opaque.enableCpuFrustumCulling = true;
+TEST(VisibilityModeTests, ResolvesExecutionPolicyForConfiguredModes) {
+  {
+    SCOPED_TRACE("GPU-driven visibility");
+    RenderSettings settings{};
+    settings.visibility.mainViewMode = VisibilityCullingMode::GpuDriven;
+    settings.visibility.enableGpuInstanceCulling = true;
+    settings.opaque.enableCpuFrustumCulling = true;
 
-  const VisibilityResolvedSettings resolved =
-      visibilitySettingsFromRenderSettings(settings);
+    const VisibilityResolvedSettings resolved =
+        visibilitySettingsFromRenderSettings(settings);
 
-  EXPECT_EQ(resolved.mainViewMode, VisibilityExecutionMode::Gpu);
-  EXPECT_FALSE(usesCpuMainVisibility(resolved.mainViewMode));
-  EXPECT_TRUE(usesGpuMainVisibility(resolved.mainViewMode));
-  EXPECT_FALSE(runsCpuVisibilityEvaluation(resolved.mainViewMode));
-  EXPECT_FALSE(validatesGpuMainVisibility(resolved.mainViewMode));
-  EXPECT_FALSE(makeMainViewVisibilityPassRequest(
-                   makeCameraFrameState(makeTestCamera(), 1.0f), resolved)
-                   .enableCpuFrustumCulling);
-}
+    EXPECT_EQ(resolved.mainViewMode, VisibilityExecutionMode::Gpu);
+    EXPECT_FALSE(usesCpuMainVisibility(resolved.mainViewMode));
+    EXPECT_TRUE(usesGpuMainVisibility(resolved.mainViewMode));
+    EXPECT_FALSE(runsCpuVisibilityEvaluation(resolved.mainViewMode));
+    EXPECT_FALSE(validatesGpuMainVisibility(resolved.mainViewMode));
+    EXPECT_FALSE(makeMainViewVisibilityPassRequest(
+                     makeCameraFrameState(makeTestCamera(), 1.0f), resolved)
+                     .enableCpuFrustumCulling);
+  }
 
-TEST(VisibilityModeTests, CpuCoarseRunsOnlyCpuVisibility) {
-  RenderSettings settings{};
-  settings.visibility.mainViewMode = VisibilityCullingMode::CpuCoarse;
+  {
+    SCOPED_TRACE("CPU-coarse visibility");
+    RenderSettings settings{};
+    settings.visibility.mainViewMode = VisibilityCullingMode::CpuCoarse;
 
-  const VisibilityResolvedSettings resolved =
-      visibilitySettingsFromRenderSettings(settings);
+    const VisibilityResolvedSettings resolved =
+        visibilitySettingsFromRenderSettings(settings);
 
-  EXPECT_EQ(resolved.mainViewMode, VisibilityExecutionMode::Cpu);
-  EXPECT_TRUE(usesCpuMainVisibility(resolved.mainViewMode));
-  EXPECT_FALSE(usesGpuMainVisibility(resolved.mainViewMode));
-  EXPECT_TRUE(runsCpuVisibilityEvaluation(resolved.mainViewMode));
-  EXPECT_FALSE(validatesGpuMainVisibility(resolved.mainViewMode));
-}
+    EXPECT_EQ(resolved.mainViewMode, VisibilityExecutionMode::Cpu);
+    EXPECT_TRUE(usesCpuMainVisibility(resolved.mainViewMode));
+    EXPECT_FALSE(usesGpuMainVisibility(resolved.mainViewMode));
+    EXPECT_TRUE(runsCpuVisibilityEvaluation(resolved.mainViewMode));
+    EXPECT_FALSE(validatesGpuMainVisibility(resolved.mainViewMode));
+  }
 
-TEST(VisibilityModeTests, ValidationModeRunsIndependentCpuOracle) {
-  RenderSettings settings{};
-  settings.visibility.mainViewMode = VisibilityCullingMode::Hybrid;
-  settings.visibility.enableGpuInstanceCulling = true;
+  {
+    SCOPED_TRACE("GPU visibility with CPU validation");
+    RenderSettings settings{};
+    settings.visibility.mainViewMode = VisibilityCullingMode::Hybrid;
+    settings.visibility.enableGpuInstanceCulling = true;
 
-  const VisibilityResolvedSettings resolved =
-      visibilitySettingsFromRenderSettings(settings);
+    const VisibilityResolvedSettings resolved =
+        visibilitySettingsFromRenderSettings(settings);
 
-  EXPECT_EQ(resolved.mainViewMode, VisibilityExecutionMode::GpuWithValidation);
-  EXPECT_FALSE(usesCpuMainVisibility(resolved.mainViewMode));
-  EXPECT_TRUE(usesGpuMainVisibility(resolved.mainViewMode));
-  EXPECT_TRUE(runsCpuVisibilityEvaluation(resolved.mainViewMode));
-  EXPECT_TRUE(validatesGpuMainVisibility(resolved.mainViewMode));
-  EXPECT_TRUE(makeMainViewVisibilityPassRequest(
-                  makeCameraFrameState(makeTestCamera(), 1.0f), resolved)
-                  .enableCpuFrustumCulling);
-}
+    EXPECT_EQ(resolved.mainViewMode,
+              VisibilityExecutionMode::GpuWithValidation);
+    EXPECT_FALSE(usesCpuMainVisibility(resolved.mainViewMode));
+    EXPECT_TRUE(usesGpuMainVisibility(resolved.mainViewMode));
+    EXPECT_TRUE(runsCpuVisibilityEvaluation(resolved.mainViewMode));
+    EXPECT_TRUE(validatesGpuMainVisibility(resolved.mainViewMode));
+    EXPECT_TRUE(makeMainViewVisibilityPassRequest(
+                    makeCameraFrameState(makeTestCamera(), 1.0f), resolved)
+                    .enableCpuFrustumCulling);
+  }
 
-TEST(VisibilityModeTests, DisabledGpuGateHasDeterministicFallbacks) {
-  RenderSettings settings{};
-  settings.visibility.mainViewMode = VisibilityCullingMode::GpuDriven;
-  settings.visibility.enableGpuInstanceCulling = false;
-  EXPECT_EQ(visibilitySettingsFromRenderSettings(settings).mainViewMode,
-            VisibilityExecutionMode::Disabled);
+  {
+    SCOPED_TRACE("disabled GPU gate fallbacks");
+    RenderSettings settings{};
+    settings.visibility.mainViewMode = VisibilityCullingMode::GpuDriven;
+    settings.visibility.enableGpuInstanceCulling = false;
+    EXPECT_EQ(visibilitySettingsFromRenderSettings(settings).mainViewMode,
+              VisibilityExecutionMode::Disabled);
 
-  settings.visibility.mainViewMode = VisibilityCullingMode::Hybrid;
-  EXPECT_EQ(visibilitySettingsFromRenderSettings(settings).mainViewMode,
-            VisibilityExecutionMode::Cpu);
+    settings.visibility.mainViewMode = VisibilityCullingMode::Hybrid;
+    EXPECT_EQ(visibilitySettingsFromRenderSettings(settings).mainViewMode,
+              VisibilityExecutionMode::Cpu);
+  }
 }
 
 } // namespace nuri

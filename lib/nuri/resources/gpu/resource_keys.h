@@ -25,9 +25,8 @@ pathToUtf8String(const std::filesystem::path &path) {
 enum class TextureRequestKind : uint8_t {
   Texture2D = 0,
   Ktx2Texture2D = 1,
-  PortableKtx2Texture2D = 2,
-  Ktx2Cubemap = 3,
-  EquirectHdrCubemap = 4,
+  Ktx2Cubemap = 2,
+  EquirectHdrCubemap = 3,
 };
 
 struct TextureKey {

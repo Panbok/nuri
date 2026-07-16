@@ -12,6 +12,11 @@ The governing renderer rules live in
 in `docs/renderer_refactor_plan.md` and
 `docs/adr/0001-renderer-rhi-and-lifetime-architecture.md`.
 
+The current code map and future-agent routing live in
+`docs/renderer_architecture.md`, `docs/agents/renderer.md`, and
+`docs/agents/renderer-change-map.md`. Those documents distinguish current
+implementation from accepted target architecture.
+
 ## Domain vocabulary
 
 - **Render settings**: authored/user-facing choices before capability resolution.
@@ -21,6 +26,10 @@ in `docs/renderer_refactor_plan.md` and
   transparent, transmission, picking, and visibility preparation.
 - **Frame resources**: named current-frame and history resources shared by stages.
 - **Render stage**: one prepared contribution to a compiled frame plan.
+- **Frame transaction**: prepare/build/submit lifecycle in which pending renderer
+  state commits only after successful submission and otherwise abandons.
+- **Frame data provider**: pipeline module that owns persistent shared GPU/frame
+  data and participates in prepare, submit, and abandon lifecycle.
 - **Render graph plan**: structural pass order, resource use, barriers, lifetimes,
   queues, and submission dependencies. It excludes changing frame payload values.
 - **Frame command arena**: current-frame draw, dispatch, copy, push-constant, and
@@ -34,6 +43,9 @@ in `docs/renderer_refactor_plan.md` and
 - **Logical destruction**: immediate invalidation of a public generational handle.
 - **Physical retirement**: native destruction/reuse after the last referencing
   submission is proven complete.
+- **Physical descriptor identity**: GPU-visible descriptor index plus the
+  resource-table/native record it addresses; it cannot be reused at logical
+  destruction.
 - **Persistent resource**: application-owned resource spanning graph executions.
 - **Transient resource**: graph-owned resource whose lifetime is derived from a
   compiled plan and may alias compatible allocations.
@@ -88,6 +100,8 @@ through extra ownership or allocation for each draw.
 - No owning GPU resource is destroyed or reused based on guessed frame lag.
 - Logical handles become invalid immediately; native resources retire by proven
   submission completion.
+- Descriptor indices, resource slots, and GPU-visible addresses remain unavailable
+  for reuse until every recorded/submitted use is resolved and complete.
 - A graph fingerprint changes only for structural changes.
 - Cached plans refresh all current-frame payload and imported handles.
 - Invalid pass/command combinations are represented by distinct typed records or

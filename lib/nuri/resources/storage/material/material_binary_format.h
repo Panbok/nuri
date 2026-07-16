@@ -6,7 +6,7 @@
 
 namespace nuri {
 
-constexpr uint16_t kMaterialBinaryFormatMajorVersion = 4;
+constexpr uint16_t kMaterialBinaryFormatMajorVersion = 5;
 constexpr uint16_t kMaterialBinaryFormatMinorVersion = 0;
 
 constexpr std::array<char, 8> kMaterialBinaryMagic = {'N', 'U', 'R', 'I',

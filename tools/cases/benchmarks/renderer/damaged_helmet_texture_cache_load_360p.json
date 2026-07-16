@@ -1,0 +1,100 @@
+{
+  "schemaVersion": 1,
+  "id": "renderer.damaged_helmet.texture_cache_load_360p",
+  "suite": "renderer",
+  "description": "Single-frame DamagedHelmet scene-load benchmark for cold authored-UASTC artifact creation and warm target-native cache behavior",
+  "scene": {
+    "kind": "prefab",
+    "pathBase": "modelsRoot",
+    "path": "DamagedHelmet/DamagedHelmet.gltf",
+    "importOptions": {
+      "mesh": {
+        "flipUVs": true
+      }
+    }
+  },
+  "backend": "nvrhi",
+  "resolution": [640, 360],
+  "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 0,
+  "measurementFrames": 1,
+  "cooldownFrames": 2,
+  "maxDrainFrames": 120,
+  "drainTimeoutMs": 5000,
+  "samples": 1,
+  "authoritative": false,
+  "presentMode": "immediate",
+  "renderGraph": {
+    "workerCount": 1,
+    "parallelCompile": false,
+    "parallelRecording": false
+  },
+  "camera": {
+    "position": [0.0, 0.25, 3.2],
+    "target": [0.0, -0.05, 0.0],
+    "verticalFovDegrees": 55.0,
+    "nearPlane": 0.05,
+    "farPlane": 100.0
+  },
+  "settings": {
+    "opaque": {
+      "enabled": true,
+      "meshletMode": "Disabled",
+      "enableDepthPrepass": false,
+      "enableInstanceCompute": false,
+      "enableMeshLod": false,
+      "enableTessellation": false,
+      "forcedMeshLod": 0
+    },
+    "antiAliasing": {
+      "mode": "None"
+    },
+    "ambientOcclusion": {
+      "mode": "Disabled"
+    },
+    "shadow": {
+      "enabled": false
+    },
+    "hdrPostProcess": {
+      "bloomEnabled": false,
+      "adaptationEnabled": false
+    },
+    "transmission": {
+      "enabled": false
+    },
+    "transparent": {
+      "enabled": false
+    }
+  },
+  "requirements": {
+    "assets": [
+      "modelsRoot:DamagedHelmet/DamagedHelmet.gltf"
+    ],
+    "backends": [
+      "nvrhi"
+    ],
+    "allowVisibleWindow": true
+  },
+  "thresholds": {
+    "failPercent": 15.0,
+    "failAbsoluteMs": 1.0,
+    "warnPercent": 8.0,
+    "warnAbsoluteMs": 0.5
+  },
+  "requiredMetrics": [
+    "cpu.scene_resource_prepare_ms",
+    "texture.artifact_build_ms",
+    "texture.cache.native_hits",
+    "texture.cache.native_misses",
+    "texture.cache.native_writes",
+    "texture.cache.native_write_failures",
+    "texture.cache.artifact_builds",
+    "texture.io.authored_source_read_mb",
+    "texture.io.native_artifact_read_mb",
+    "texture.upload.textures_recorded",
+    "texture.upload.recorded_mb",
+    "texture.upload.batches_submitted",
+    "texture.upload.bounded_batch_flushes",
+    "texture.upload.completion_waits"
+  ]
+}

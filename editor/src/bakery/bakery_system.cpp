@@ -50,8 +50,8 @@ maxWriteCompletionsPerTick(BakeryExecutionProfile profile) {
     return "BRDF LUT";
   case BakeJobKind::EnvmapPrefilter:
     return "Envmap Prefilter";
-  case BakeJobKind::ScenePortableAssets:
-    return "Scene Portable Assets";
+  case BakeJobKind::SceneTextureArtifacts:
+    return "Scene Texture Artifacts";
   }
   return "Unknown";
 }
@@ -88,8 +88,9 @@ struct BakerySystem::Impl {
   };
 
   struct SceneJobData {
-    detail::ScenePortableBakePlan plan{};
-    std::shared_future<Result<detail::ScenePortableBakeStats, std::string>>
+    detail::SceneTextureArtifactBakePlan plan{};
+    std::shared_future<
+        Result<detail::SceneTextureArtifactBakeStats, std::string>>
         bakeFuture{};
     bool bakeInFlight = false;
   };
@@ -170,9 +171,9 @@ struct BakerySystem::Impl {
       job.kind = BakeJobKind::BrdfLut;
     } else if (std::holds_alternative<EnvmapPrefilterBakeRequest>(request)) {
       job.kind = BakeJobKind::EnvmapPrefilter;
-    } else if (std::holds_alternative<ScenePortableAssetsBakeRequest>(
+    } else if (std::holds_alternative<SceneTextureArtifactsBakeRequest>(
                    request)) {
-      job.kind = BakeJobKind::ScenePortableAssets;
+      job.kind = BakeJobKind::SceneTextureArtifacts;
     } else {
       return Result<BakeJobId, std::string>::makeError(
           "BakerySystem: unknown bake request variant");
@@ -476,19 +477,19 @@ struct BakerySystem::Impl {
       }
 
       const auto *request =
-          std::get_if<ScenePortableAssetsBakeRequest>(&job.request);
+          std::get_if<SceneTextureArtifactsBakeRequest>(&job.request);
       if (request == nullptr) {
         setFailed(job, "BakerySystem: scene asset request payload mismatch");
         return;
       }
 
-      auto planResult = detail::planScenePortableAssetsBake(*request);
+      auto planResult = detail::planSceneTextureArtifactsBake(*request);
       if (planResult.hasError()) {
         setFailed(job, planResult.error());
         return;
       }
 
-      detail::ScenePortableBakePlan plan = std::move(planResult.value());
+      detail::SceneTextureArtifactBakePlan plan = std::move(planResult.value());
       if (!plan.shouldBake) {
         job.state = BakeJobState::Skipped;
         job.summary = "Up-to-date";
@@ -570,14 +571,14 @@ struct BakerySystem::Impl {
         data->bakeFuture =
             std::async(std::launch::async, [plan = std::move(
                                                 data->plan)]() mutable {
-              return detail::bakeScenePortableAssetsToDisk(plan);
+              return detail::bakeSceneTextureArtifactsToDisk(plan);
             }).share();
         data->bakeInFlight = true;
-        job.summary = "Portable asset bake started";
+        job.summary = "Texture artifact bake started";
         return;
       }
       job.state = BakeJobState::GpuStep;
-      job.summary = "Portable asset bake running";
+      job.summary = "Texture artifact bake running";
     };
     run();
     NURI_PROFILER_ZONE_END();
@@ -646,7 +647,7 @@ struct BakerySystem::Impl {
       }
       if (data->bakeFuture.wait_for(std::chrono::seconds(0)) !=
           std::future_status::ready) {
-        job.summary = "Portable asset bake running";
+        job.summary = "Texture artifact bake running";
         return;
       }
       auto bakeResult = data->bakeFuture.get();
@@ -664,13 +665,14 @@ struct BakerySystem::Impl {
       }
       job.state = BakeJobState::Succeeded;
       job.summary = std::format(
-          "Portable=%u (%llu B), native=%u (%llu B), material cache=%s",
-          bakeResult.value().portableTexturesWritten,
+          "Artifacts=%u (%llu B), DDS pack=%u (%llu B, written=%s), material "
+          "cache=%s",
+          bakeResult.value().artifactsWritten,
           static_cast<unsigned long long>(
-              bakeResult.value().portableBytesWritten),
-          bakeResult.value().nativeTexturesWritten,
-          static_cast<unsigned long long>(
-              bakeResult.value().nativeBytesWritten),
+              bakeResult.value().artifactBytesWritten),
+          bakeResult.value().ddsPackEntries,
+          static_cast<unsigned long long>(bakeResult.value().ddsPackBytes),
+          bakeResult.value().wroteDdsPack ? "yes" : "no",
           bakeResult.value().wroteMaterialCache ? "yes" : "no");
       job.error.clear();
       const std::string_view kindName = jobKindName(job.kind);

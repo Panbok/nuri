@@ -691,8 +691,8 @@ const char *bakeJobKindName(bakery::BakeJobKind kind) {
     return "BRDF LUT";
   case bakery::BakeJobKind::EnvmapPrefilter:
     return "Envmap Prefilter";
-  case bakery::BakeJobKind::ScenePortableAssets:
-    return "Scene Portable Assets";
+  case bakery::BakeJobKind::SceneTextureArtifacts:
+    return "Scene Texture Artifacts";
   }
   return "Unknown";
 }
@@ -4152,7 +4152,7 @@ void drawBakeryWindow(bool &open, BakeryUiState &state,
         FileDialogFilter{"GLB (*.glb)", "*.glb"},
     };
     OpenFileRequest request{};
-    request.title = "Select Scene for Portable Asset Bake";
+    request.title = "Select Scene for Texture Artifact Bake";
     request.filters = kSceneFilters;
     request.defaultExtension = "gltf";
     request.ownerWindowHandle = ownerWindowHandle;
@@ -4167,27 +4167,27 @@ void drawBakeryWindow(bool &open, BakeryUiState &state,
   ImGui::SameLine();
   ImGui::Checkbox("Prebuild RGBA8", &state.prebuildRgba8);
   ImGui::TextUnformatted(
-      "Scene Portable Assets writes mipmapped KTX2 for PNG/KTX sources.");
+      "Scene Texture Artifacts writes target-native KTX2 cache entries.");
   ImGui::TextUnformatted(
       "External DDS textures stay authored and are not rebaked here.");
 
-  if (ImGui::Button("Queue Scene Portable Assets")) {
+  if (ImGui::Button("Queue Scene Texture Artifacts")) {
     state.status.clear();
     state.error.clear();
 
-    std::vector<bakery::ScenePortableTextureTarget> prebuildTargets{};
+    std::vector<bakery::SceneTextureArtifactTarget> prebuildTargets{};
     if (state.prebuildBc7) {
-      prebuildTargets.push_back(bakery::ScenePortableTextureTarget::BC7);
+      prebuildTargets.push_back(bakery::SceneTextureArtifactTarget::BC7);
     }
     if (state.prebuildEtc2) {
-      prebuildTargets.push_back(bakery::ScenePortableTextureTarget::ETC2);
+      prebuildTargets.push_back(bakery::SceneTextureArtifactTarget::ETC2);
     }
     if (state.prebuildRgba8) {
-      prebuildTargets.push_back(bakery::ScenePortableTextureTarget::RGBA8);
+      prebuildTargets.push_back(bakery::SceneTextureArtifactTarget::RGBA8);
     }
 
     auto enqueueResult = bakery->enqueue(
-        bakery::BakeRequest{bakery::ScenePortableAssetsBakeRequest{
+        bakery::BakeRequest{bakery::SceneTextureArtifactsBakeRequest{
             .scenePath =
                 std::filesystem::path(std::string(state.scenePath.data())),
             .prebuildNativeTargets = std::move(prebuildTargets),
@@ -4197,7 +4197,7 @@ void drawBakeryWindow(bool &open, BakeryUiState &state,
       state.error = enqueueResult.error();
     } else {
       std::ostringstream oss;
-      oss << "Queued Scene Portable Assets job #"
+      oss << "Queued Scene Texture Artifacts job #"
           << enqueueResult.value().value;
       state.status = oss.str();
     }
