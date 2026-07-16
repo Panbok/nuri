@@ -48,10 +48,9 @@ public:
   }
 
   size_t collectThrough(const CompletionToken &completed) {
-    return collectIf(
-        [&completed](const CompletionToken &lastUse) {
-          return lastUse <= completed;
-        });
+    return collectIf([&completed](const CompletionToken &lastUse) {
+      return lastUse <= completed;
+    });
   }
 
   // Call only after the adapter has waited for every queue to become idle.

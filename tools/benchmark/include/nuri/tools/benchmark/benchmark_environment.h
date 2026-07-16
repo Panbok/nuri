@@ -43,8 +43,6 @@ struct BenchmarkEnvironment {
   bool loggingEnabled = false;
   bool assertsEnabled = false;
   bool tracyEnabled = false;
-  bool tracyGpuEnabled = false;
-  bool tracyGpuDrawZonesEnabled = false;
   bool tracyDiagnostic = false;
   bool devChecks = false;
 };

@@ -23,7 +23,7 @@
     },
     "execution": {
       "type": "object", "additionalProperties": false, "required": ["presentMode", "profiling", "devChecks"],
-      "properties": { "presentMode": { "type": "string" }, "profiling": { "enum": ["off", "cpu", "cpu-gpu"] }, "devChecks": { "type": "boolean" } }
+      "properties": { "presentMode": { "type": "string" }, "profiling": { "enum": ["off", "cpu"] }, "devChecks": { "type": "boolean" } }
     },
     "benchmarkPolicy": {
       "type": "object", "additionalProperties": false, "required": ["minimumRepetitions", "warmupStability", "warmupWindowFrames", "warmupMaxDriftPercent", "requiredMetrics", "thresholdOwnership"],

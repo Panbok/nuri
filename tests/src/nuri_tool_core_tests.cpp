@@ -256,8 +256,6 @@ TEST(NuriToolCoreTest, EnvironmentProbeUsesInjectedHostAndBuildFacts) {
       .loggingEnabled = true,
       .assertsEnabled = false,
       .tracyEnabled = true,
-      .tracyGpuEnabled = true,
-      .tracyGpuDrawZonesEnabled = false,
       .devChecks = true,
   };
   const EnvironmentProbeSource source{
@@ -296,7 +294,6 @@ TEST(NuriToolCoreTest, EnvironmentProbeUsesInjectedHostAndBuildFacts) {
   EXPECT_TRUE(result.build.buildShared);
   EXPECT_TRUE(result.build.loggingEnabled);
   EXPECT_TRUE(result.build.tracyEnabled);
-  EXPECT_TRUE(result.build.tracyGpuEnabled);
   EXPECT_TRUE(result.build.devChecks);
 }
 

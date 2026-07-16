@@ -11,7 +11,7 @@ if /I "%~1"=="debug" (
   set "MODE=release"
   shift
 ) else if not "%~1"=="" (
-  echo Usage: %~nx0 [debug^|release] [cpu^|cpu-gpu^|off] [devchecks]
+  echo Usage: %~nx0 [debug^|release] [cpu^|off] [devchecks]
   exit /b 1
 )
 
@@ -20,9 +20,6 @@ if "%~1"=="" goto run_build
 if /I "%~1"=="cpu" (
   if not "%TRACY_MODE%"=="" goto usage
   set "TRACY_MODE=cpu"
-) else if /I "%~1"=="cpu-gpu" (
-  if not "%TRACY_MODE%"=="" goto usage
-  set "TRACY_MODE=cpu-gpu"
 ) else if /I "%~1"=="off" (
   if not "%TRACY_MODE%"=="" goto usage
   set "TRACY_MODE=off"
@@ -39,5 +36,5 @@ call "%SCRIPT_DIR%_nuri_build.bat" "%MODE%" editor "%TRACY_MODE%" "%DEVCHECKS%"
 exit /b %errorlevel%
 
 :usage
-echo Usage: %~nx0 [debug^|release] [cpu^|cpu-gpu^|off] [devchecks]
+echo Usage: %~nx0 [debug^|release] [cpu^|off] [devchecks]
 exit /b 1

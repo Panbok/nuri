@@ -62,10 +62,7 @@ void evaluateAutotestBaselineProfile(AutotestReport &report) {
     report.baselineProfileIncompatibilityReasons = {profile.error()};
     return;
   }
-  const std::string profiling =
-      report.environment.tracyGpuEnabled
-          ? "cpu-gpu"
-          : (report.environment.tracyEnabled ? "cpu" : "off");
+  const std::string profiling = report.environment.tracyEnabled ? "cpu" : "off";
   const auto compatibility = nuri::tools::core::evaluateBaselineProfile(
       profile.value(),
       nuri::tools::core::BaselineProfileObservedEnvironment{
@@ -123,14 +120,9 @@ checkpointDirName(const AutotestCheckpoint &checkpoint) {
 
 [[nodiscard]] std::string resolveBackendName(const AutotestCase &testCase,
                                              std::string &source) {
-  const std::string envBackend = readProcessEnvironment("NURI_GPU_BACKEND");
   if (testCase.backend != "default") {
     source = "manifest";
     return testCase.backend;
-  }
-  if (!envBackend.empty()) {
-    source = "NURI_GPU_BACKEND";
-    return envBackend;
   }
   source = "default";
   return "nvrhi";
@@ -254,6 +246,12 @@ resolveOwnedPath(const std::filesystem::path &root,
 checkRequirements(const AutotestCase &testCase, std::string_view backend,
                   std::string_view windowMode,
                   std::vector<std::string> &warnings, std::string &message) {
+  if (backend != "nvrhi") {
+    message = "unsupported backend '" + std::string(backend) +
+              "'; nvrhi is the only available backend";
+    return Result<bool, AutotestExitCode>::makeError(
+        AutotestExitCode::InvalidInput);
+  }
   if (windowMode == "headless") {
     message = "true offscreen/headless mode is unavailable";
     return Result<bool, AutotestExitCode>::makeError(
@@ -267,6 +265,11 @@ checkRequirements(const AutotestCase &testCase, std::string_view backend,
   if (!testCase.requirements.backends.empty()) {
     bool supported = false;
     for (const std::string &allowed : testCase.requirements.backends) {
+      if (allowed != "default" && allowed != "nvrhi") {
+        message = "unsupported backend requirement '" + allowed + "'";
+        return Result<bool, AutotestExitCode>::makeError(
+            AutotestExitCode::InvalidInput);
+      }
       supported = supported || allowed == backend || allowed == "default";
     }
     if (!supported) {
@@ -357,11 +360,10 @@ makeToolEnvironmentDesc(const AutotestEnvironmentConfig &environment) {
 }
 
 [[nodiscard]] nuri::tools::runtime::ToolRuntimeDesc
-makeToolRuntimeDesc(const AutotestCase &testCase, std::string_view backend,
-                    std::string_view presentMode, std::string_view windowMode) {
+makeToolRuntimeDesc(const AutotestCase &testCase, std::string_view presentMode,
+                    std::string_view windowMode) {
   nuri::tools::runtime::ToolRuntimeDesc desc{};
   desc.title = "nuri-autotest " + testCase.id;
-  desc.backend = std::string(backend);
   desc.presentMode = std::string(presentMode);
   desc.windowVisible = windowMode == "visible";
   desc.resolution = testCase.resolution;
@@ -1523,7 +1525,7 @@ AutotestRunResult runAutotestCase(AutotestCase testCase,
   uint64_t nextReadoutRequestId = 1u;
   try {
     auto runtimeResult = nuri::tools::runtime::createToolRendererRuntime(
-        makeToolRuntimeDesc(testCase, backend, presentMode, windowMode.value));
+        makeToolRuntimeDesc(testCase, presentMode, windowMode.value));
     if (runtimeResult.hasError()) {
       result.exitCode = AutotestExitCode::EnvironmentUnavailable;
       result.message = runtimeResult.error();

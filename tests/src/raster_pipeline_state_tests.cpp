@@ -10,14 +10,14 @@ namespace nuri {
 namespace {
 
 TEST(RasterPipelineStateTest, CanonicalizesSignedZeroForStableKeys) {
-  const RasterPipelineState positiveZero = makeRasterPipelineState(
-      DepthState{.compareOp = CompareOp::LessEqual,
-                 .isDepthWriteEnabled = false},
-      true, 0.0f, 0.0f, 0.0f);
-  const RasterPipelineState negativeZero = makeRasterPipelineState(
-      DepthState{.compareOp = CompareOp::LessEqual,
-                 .isDepthWriteEnabled = false},
-      true, -0.0f, -0.0f, -0.0f);
+  const RasterPipelineState positiveZero =
+      makeRasterPipelineState(DepthState{.compareOp = CompareOp::LessEqual,
+                                         .isDepthWriteEnabled = false},
+                              true, 0.0f, 0.0f, 0.0f);
+  const RasterPipelineState negativeZero =
+      makeRasterPipelineState(DepthState{.compareOp = CompareOp::LessEqual,
+                                         .isDepthWriteEnabled = false},
+                              true, -0.0f, -0.0f, -0.0f);
 
   EXPECT_EQ(positiveZero, negativeZero);
   EXPECT_EQ(std::bit_cast<uint32_t>(negativeZero.depthBiasSlope), 0u);
@@ -42,10 +42,10 @@ TEST(RasterPipelineStateTest, DisabledBiasErasesIrrelevantValues) {
 }
 
 TEST(RasterPipelineStateTest, LowersFloatConstantToNvrhiIntegralState) {
-  const RasterPipelineState roundedPositive = makeRasterPipelineState(
-      DepthState{}, true, 1.5f);
-  const RasterPipelineState roundedNegative = makeRasterPipelineState(
-      DepthState{}, true, -1.5f);
+  const RasterPipelineState roundedPositive =
+      makeRasterPipelineState(DepthState{}, true, 1.5f);
+  const RasterPipelineState roundedNegative =
+      makeRasterPipelineState(DepthState{}, true, -1.5f);
   const RasterPipelineState clamped = makeRasterPipelineState(
       DepthState{}, true, std::numeric_limits<float>::max());
 

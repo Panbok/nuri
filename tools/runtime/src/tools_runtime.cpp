@@ -77,16 +77,6 @@ private:
   bool hadOldValue_ = false;
 };
 
-[[nodiscard]] GPUBackendPreference backendPreference(std::string_view backend) {
-  if (backend == "lvk") {
-    return GPUBackendPreference::Lvk;
-  }
-  if (backend == "nvrhi") {
-    return GPUBackendPreference::Nvrhi;
-  }
-  return GPUBackendPreference::Default;
-}
-
 [[nodiscard]] Result<std::filesystem::path, std::string>
 resolveToolPath(const ToolRuntimeDesc &runtime, std::string_view base,
                 const std::filesystem::path &path) {
@@ -746,9 +736,7 @@ createToolRendererRuntime(const ToolRuntimeDesc &desc) {
     return Result<std::unique_ptr<ToolRendererRuntime>, std::string>::makeError(
         "failed to create tool window");
   }
-  GPUDeviceCreateDesc deviceDesc{};
-  deviceDesc.backend = backendPreference(desc.backend);
-  impl->gpu = GPUDevice::create(*impl->window, deviceDesc);
+  impl->gpu = GPUDevice::create(*impl->window);
   if (!impl->gpu) {
     return Result<std::unique_ptr<ToolRendererRuntime>, std::string>::makeError(
         "failed to create GPU device");

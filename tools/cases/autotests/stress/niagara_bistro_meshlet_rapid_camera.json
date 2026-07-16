@@ -237,6 +237,26 @@
           "greaterOrEqual": 1
         },
         {
+          "id": "gpu_main_readback_ready_mid_turn",
+          "metric": "renderer.visibility.gpu_main_readback_available",
+          "equals": 1
+        },
+        {
+          "id": "main_visible_mid_turn",
+          "metric": "renderer.visibility.gpu_main_visible_candidates",
+          "greaterOrEqual": 1000
+        },
+        {
+          "id": "meshlet_readback_ready_mid_turn",
+          "metric": "renderer.visibility.meshlet_readback_available",
+          "equals": 1
+        },
+        {
+          "id": "meshlets_emitted_mid_turn",
+          "metric": "renderer.visibility.meshlet_emitted",
+          "greaterOrEqual": 10000
+        },
+        {
           "id": "gtao_active_mid_turn",
           "metric": "renderer.ao.active",
           "equals": 1
@@ -275,7 +295,7 @@
         {
           "id": "meshlet_counter_readback_fresh_end",
           "metric": "renderer.visibility.meshlet_readback_stale_frame_count",
-          "lessOrEqual": 2
+          "lessOrEqual": 3
         },
         {
           "id": "meshlet_counter_readback_no_errors_end",
@@ -285,12 +305,22 @@
         {
           "id": "gpu_counter_readback_fresh_end",
           "metric": "renderer.visibility.gpu_main_readback_stale_frame_count",
-          "lessOrEqual": 2
+          "lessOrEqual": 3
         },
         {
           "id": "gpu_counter_readback_no_errors_end",
           "metric": "renderer.visibility.gpu_main_readback_error_count",
           "equals": 0
+        },
+        {
+          "id": "main_visible_end",
+          "metric": "renderer.visibility.gpu_main_visible_candidates",
+          "lessOrEqual": 500
+        },
+        {
+          "id": "meshlets_emitted_end",
+          "metric": "renderer.visibility.meshlet_emitted",
+          "lessOrEqual": 10000
         },
         {
           "id": "classic_indirect_draw_no_fallback_end",

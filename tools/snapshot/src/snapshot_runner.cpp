@@ -77,8 +77,6 @@ snapshotEnvironmentFingerprint(const SnapshotEnvironment &environment) {
                        environment.devChecks ? "true" : "false"},
       FingerprintField{"profiling.cpu",
                        environment.tracyEnabled ? "true" : "false"},
-      FingerprintField{"profiling.gpu",
-                       environment.tracyGpuEnabled ? "true" : "false"},
   });
   return fingerprint.hasError()
              ? std::nullopt
@@ -144,10 +142,7 @@ void evaluateSnapshotBaselineProfile(SnapshotReport &report) {
     report.baselineProfileIncompatibilityReasons = {profile.error()};
     return;
   }
-  const std::string profiling =
-      report.environment.tracyGpuEnabled
-          ? "cpu-gpu"
-          : (report.environment.tracyEnabled ? "cpu" : "off");
+  const std::string profiling = report.environment.tracyEnabled ? "cpu" : "off";
   const auto compatibility = nuri::tools::core::evaluateBaselineProfile(
       profile.value(),
       nuri::tools::core::BaselineProfileObservedEnvironment{
@@ -345,7 +340,6 @@ public:
     config.filePath = path.string();
     config.logLevel = LogLevel::Info;
     config.consoleLevel = LogLevel::Warning;
-    config.threadNames = false;
     Log::initialize(config);
   }
   ~SnapshotLogGuard() { Log::shutdown(); }
@@ -353,26 +347,11 @@ public:
   SnapshotLogGuard &operator=(const SnapshotLogGuard &) = delete;
 };
 
-[[nodiscard]] GPUBackendPreference backendPreference(std::string_view backend) {
-  if (backend == "lvk") {
-    return GPUBackendPreference::Lvk;
-  }
-  if (backend == "nvrhi") {
-    return GPUBackendPreference::Nvrhi;
-  }
-  return GPUBackendPreference::Default;
-}
-
 [[nodiscard]] std::string resolveBackendName(const SnapshotCase &snapshotCase,
                                              std::string &source) {
-  const std::string envBackend = readProcessEnvironment("NURI_GPU_BACKEND");
   if (snapshotCase.backend != "default") {
     source = "manifest";
     return snapshotCase.backend;
-  }
-  if (!envBackend.empty()) {
-    source = "NURI_GPU_BACKEND";
-    return envBackend;
   }
   source = "default";
   return "nvrhi";
@@ -397,6 +376,12 @@ public:
 checkRequirements(const SnapshotCase &snapshotCase, std::string_view backend,
                   std::string_view windowMode,
                   std::vector<std::string> &warnings, std::string &message) {
+  if (backend != "nvrhi") {
+    message = "unsupported backend '" + std::string(backend) +
+              "'; nvrhi is the only available backend";
+    return Result<bool, SnapshotExitCode>::makeError(
+        SnapshotExitCode::InvalidInput);
+  }
   if (windowMode == "visible" &&
       !snapshotCase.requirements.allowVisibleWindow) {
     message = "case does not permit visible-window execution";
@@ -406,6 +391,11 @@ checkRequirements(const SnapshotCase &snapshotCase, std::string_view backend,
   if (!snapshotCase.requirements.backends.empty()) {
     bool supported = false;
     for (const std::string &allowed : snapshotCase.requirements.backends) {
+      if (allowed != "default" && allowed != "nvrhi") {
+        message = "unsupported backend requirement '" + allowed + "'";
+        return Result<bool, SnapshotExitCode>::makeError(
+            SnapshotExitCode::InvalidInput);
+      }
       supported = supported || allowed == backend || allowed == "default";
     }
     if (!supported) {
@@ -1321,9 +1311,7 @@ SnapshotRunResult captureSnapshotCase(SnapshotCase snapshotCase,
       result.report = std::move(report);
       return result;
     }
-    GPUDeviceCreateDesc deviceDesc{};
-    deviceDesc.backend = backendPreference(backend);
-    std::unique_ptr<GPUDevice> gpu = GPUDevice::create(*window, deviceDesc);
+    std::unique_ptr<GPUDevice> gpu = GPUDevice::create(*window);
     if (!gpu) {
       result.exitCode = SnapshotExitCode::EnvironmentUnavailable;
       result.message = "failed to create GPU device";

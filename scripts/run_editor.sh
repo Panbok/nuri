@@ -17,7 +17,7 @@ if [[ $# -gt 0 ]]; then
 fi
 if [[ $# -gt 0 ]]; then
   case "$1" in
-    cpu|cpu-gpu|off)
+    cpu|off)
       tracy_mode="$1"
       shift
       ;;

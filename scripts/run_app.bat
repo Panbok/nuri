@@ -15,9 +15,6 @@ if /I "%~1"=="debug" (
 if /I "%~1"=="cpu" (
   set "TRACY_MODE=cpu"
   shift
-) else if /I "%~1"=="cpu-gpu" (
-  set "TRACY_MODE=cpu-gpu"
-  shift
 ) else if /I "%~1"=="off" (
   set "TRACY_MODE=off"
   shift

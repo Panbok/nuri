@@ -1314,6 +1314,10 @@ loadSnapshotCaseManifest(const std::filesystem::path &path) {
     return Result<SnapshotCase, std::string>::makeError(text.error());
   }
   out.backend = std::move(text.value());
+  if (out.backend != "default" && out.backend != "nvrhi") {
+    return Result<SnapshotCase, std::string>::makeError(
+        "$.backend must be default or nvrhi");
+  }
   text = readString(root, "presentMode", "$", false, out.presentMode);
   if (text.hasError()) {
     return Result<SnapshotCase, std::string>::makeError(text.error());
@@ -1426,6 +1430,13 @@ loadSnapshotCaseManifest(const std::filesystem::path &path) {
       return Result<SnapshotCase, std::string>::makeError(array.error());
     }
     out.requirements.backends = std::move(array.value());
+    for (const std::string &backend : out.requirements.backends) {
+      if (backend != "default" && backend != "nvrhi") {
+        return Result<SnapshotCase, std::string>::makeError(
+            "requirements.backends contains unsupported backend '" + backend +
+            "'");
+      }
+    }
     boolean = readBool(requirements, "allowVisibleWindow", "requirements",
                        out.requirements.allowVisibleWindow);
     if (boolean.hasError()) {

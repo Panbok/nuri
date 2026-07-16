@@ -13,10 +13,10 @@ if [[ $# -gt 0 ]]; then
     release)
       shift
       ;;
-    cpu|cpu-gpu|off|devchecks)
+    cpu|off|devchecks)
       ;;
     *)
-      echo "Usage: $(basename "$0") [release|debug] [cpu|cpu-gpu|off] [devchecks]"
+      echo "Usage: $(basename "$0") [release|debug] [cpu|off] [devchecks]"
       exit 1
       ;;
   esac

@@ -171,13 +171,12 @@ TEST(OwnedTextureTest, ScopeExitDestroysExactlyOnce) {
   FailingBufferGPUDevice gpu;
 
   {
-    auto texture = Texture::create(
-        gpu,
-        TextureDesc{.format = Format::RGBA8_UNORM,
-                    .dimensions = {4u, 4u, 1u},
-                    .usage = TextureUsage::Sampled,
-                    .storage = Storage::Device},
-        "owned_texture");
+    auto texture = Texture::create(gpu,
+                                   TextureDesc{.format = Format::RGBA8_UNORM,
+                                               .dimensions = {4u, 4u, 1u},
+                                               .usage = TextureUsage::Sampled,
+                                               .storage = Storage::Device},
+                                   "owned_texture");
     ASSERT_TRUE(texture.hasValue());
     ASSERT_TRUE(texture.value()->valid());
     EXPECT_EQ(gpu.destroyedTextureCount, 0u);
@@ -191,8 +190,7 @@ TEST(OwnedGpuResourceTest, ShaderAndPipelineAliasesDestroyExactlyOnce) {
   OwnedAliasGPUDevice gpu;
 
   {
-    OwnedShaderHandle shader(
-        gpu, ShaderHandle{.index = 1u, .generation = 1u});
+    OwnedShaderHandle shader(gpu, ShaderHandle{.index = 1u, .generation = 1u});
     OwnedRenderPipelineHandle renderPipeline(
         gpu, RenderPipelineHandle{.index = 2u, .generation = 1u});
     OwnedComputePipelineHandle computePipeline(

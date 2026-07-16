@@ -53,7 +53,6 @@ LogConfig Application::makeDefaultLogConfig() {
               .string(),
       .logLevel = LogLevel::Info,
       .consoleLevel = LogLevel::Info,
-      .threadNames = false,
   };
 }
 

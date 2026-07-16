@@ -133,7 +133,7 @@ public:
     (void)format;
     return false;
   }
-  // Bindless index used by LVK shaders (kTextures2D[]).
+  // Descriptor-table index used by shader resource arrays.
   virtual uint32_t getTextureBindlessIndex(TextureHandle h) const = 0;
   virtual uint32_t getSamplerBindlessIndex(SamplerHandle h) const = 0;
   virtual uint8_t getMaxSamplerAnisotropy() const = 0;
@@ -144,7 +144,7 @@ public:
   virtual uint32_t getDefaultSamplerBindlessIndex() const = 0;
   // Bindless index for cubemap/IBL sampling (clamp-to-edge).
   virtual uint32_t getCubemapSamplerBindlessIndex() const = 0;
-  // GPU virtual address used by LVK shaders (GL_EXT_buffer_reference).
+  // GPU virtual address used by shaders.
   virtual uint64_t getBufferDeviceAddress(BufferHandle h,
                                           size_t offset = 0) const = 0;
   virtual bool resolveGeometry(GeometryAllocationHandle h,

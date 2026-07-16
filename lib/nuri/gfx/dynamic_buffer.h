@@ -28,8 +28,7 @@ nextDynamicBufferCapacity(size_t currentCapacity, size_t requiredCapacity) {
 
   const size_t growthBase = std::max(currentCapacity, kMinimumCapacity);
   const size_t geometricCapacity = growthBase + growthBase / 2u;
-  const size_t targetCapacity =
-      std::max(requiredCapacity, geometricCapacity);
+  const size_t targetCapacity = std::max(requiredCapacity, geometricCapacity);
   return ((targetCapacity + kCapacityAlignment - 1u) / kCapacityAlignment) *
          kCapacityAlignment;
 }

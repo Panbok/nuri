@@ -52,14 +52,62 @@
 #include <span>
 #include <vector>
 
-#include <lvk/LVK.h>
-#include <vulkan/VulkanUtils.h>
-#include <vulkan/vulkan_core.h>
-
 namespace {
 
 using namespace nuri;
 using namespace nuri::test_support;
+
+TEST(RenderFrameMetricsTests, ResolvesPostCullGpuWorkWhenReadbackIsAvailable) {
+  RenderFrameMetrics metrics{};
+  metrics.opaque.totalInstances = 2909u;
+  metrics.opaque.visibleInstances = 2567u;
+  metrics.opaque.indirectCommands = 506u;
+  metrics.opaque.meshletTaskGroups = 2382u;
+  metrics.visibility.gpuMainCandidates = 2567u;
+  metrics.visibility.gpuMainVisibleCandidates = 73u;
+  metrics.visibility.gpuMainReadbackAvailable = 1u;
+  metrics.visibility.gpuIndirectDrawUsed = 1u;
+  metrics.visibility.gpuIndirectDrawReadbackCommands = 506u;
+  metrics.visibility.gpuIndirectDrawReadbackVisible = 31u;
+  metrics.visibility.meshletCandidates = 66312u;
+  metrics.visibility.meshletReadbackAvailable = 1u;
+  metrics.visibility.meshletEmitted = 2582u;
+  metrics.visibility.meshletTaskGroupsExecuted = 1697u;
+
+  const ResolvedGeometryWorkMetrics resolved =
+      resolveGeometryWorkMetrics(metrics);
+  EXPECT_EQ(resolved.instanceCandidates, 2567u);
+  EXPECT_EQ(resolved.visibleInstances, 73u);
+  EXPECT_EQ(resolved.indirectCommands, 506u);
+  EXPECT_EQ(resolved.visibleIndirectCommands, 31u);
+  EXPECT_EQ(resolved.meshletCandidates, 66312u);
+  EXPECT_EQ(resolved.emittedMeshlets, 2582u);
+  EXPECT_EQ(resolved.executedMeshletTaskGroups, 1697u);
+  EXPECT_TRUE(resolved.mainReadbackAvailable);
+  EXPECT_TRUE(resolved.indirectReadbackAvailable);
+  EXPECT_TRUE(resolved.meshletReadbackAvailable);
+}
+
+TEST(RenderFrameMetricsTests, FallsBackToSubmittedWorkWhileReadbackIsPending) {
+  RenderFrameMetrics metrics{};
+  metrics.opaque.totalInstances = 2909u;
+  metrics.opaque.visibleInstances = 2567u;
+  metrics.opaque.indirectCommands = 506u;
+  metrics.opaque.meshletTaskGroups = 2382u;
+  metrics.visibility.meshletCandidates = 66312u;
+
+  const ResolvedGeometryWorkMetrics resolved =
+      resolveGeometryWorkMetrics(metrics);
+  EXPECT_EQ(resolved.instanceCandidates, 2909u);
+  EXPECT_EQ(resolved.visibleInstances, 2567u);
+  EXPECT_EQ(resolved.indirectCommands, 506u);
+  EXPECT_EQ(resolved.visibleIndirectCommands, 506u);
+  EXPECT_EQ(resolved.emittedMeshlets, 66312u);
+  EXPECT_EQ(resolved.executedMeshletTaskGroups, 2382u);
+  EXPECT_FALSE(resolved.mainReadbackAvailable);
+  EXPECT_FALSE(resolved.indirectReadbackAvailable);
+  EXPECT_FALSE(resolved.meshletReadbackAvailable);
+}
 
 constexpr uint32_t kShadowPreviewProbeFlagInvert = 1u << 0u;
 constexpr uint32_t kShadowPreviewProbeFlagLog = 1u << 1u;

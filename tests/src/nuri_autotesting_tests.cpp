@@ -327,6 +327,83 @@ TEST(NuriAutotestingTest, ManifestRejectsUnknownKeys) {
   std::filesystem::remove(path, ec);
 }
 
+TEST(NuriAutotestingTest, ManifestRejectsRemovedBackends) {
+  const std::filesystem::path path =
+      makeTempPath("autotest_removed_backend", ".json");
+  writeFile(path,
+            R"json({
+              "schemaVersion": 1,
+              "id": "backend.removed",
+              "suite": "backend",
+              "backend": "unsupported"
+            })json");
+  auto loaded = loadAutotestCaseManifest(path);
+  EXPECT_TRUE(loaded.hasError());
+  EXPECT_NE(loaded.error().find("default or nvrhi"), std::string::npos);
+
+  writeFile(path,
+            R"json({
+              "schemaVersion": 1,
+              "id": "backend.requirement_removed",
+              "suite": "backend",
+              "backend": "nvrhi",
+              "requirements": {"backends": ["unsupported"]}
+            })json");
+  loaded = loadAutotestCaseManifest(path);
+  EXPECT_TRUE(loaded.hasError());
+  EXPECT_NE(loaded.error().find("unsupported backend"), std::string::npos);
+
+  std::error_code ec;
+  std::filesystem::remove(path, ec);
+}
+
+TEST(NuriAutotestingTest, CanonicalBistroStressUsesWideRapidUltraRoute) {
+  auto loaded = loadAutotestCaseManifest(
+      defaultAutotestCaseRoot() / "stress" /
+      "niagara_bistro_full_pipeline_rapid_full_route.json");
+  ASSERT_FALSE(loaded.hasError()) << loaded.error();
+  const AutotestCase &testCase = loaded.value();
+  EXPECT_EQ(testCase.backend, "nvrhi");
+  ASSERT_EQ(testCase.requirements.backends.size(), 1u);
+  EXPECT_EQ(testCase.requirements.backends[0], "nvrhi");
+  EXPECT_EQ(testCase.settings.antiAliasing.mode, AntiAliasingMode::TAA);
+  EXPECT_EQ(testCase.settings.antiAliasing.temporalProvider,
+            TemporalReconstructionProvider::Reference);
+  EXPECT_EQ(testCase.settings.antiAliasing.qualityPreset,
+            TemporalAAQualityPreset::Ultra);
+  EXPECT_EQ(testCase.settings.ambientOcclusion.mode,
+            AmbientOcclusionMode::GTAO);
+  EXPECT_EQ(testCase.settings.ambientOcclusion.preset,
+            AmbientOcclusionPreset::Ultra);
+  EXPECT_TRUE(testCase.settings.shadow.enabled);
+  EXPECT_EQ(testCase.settings.shadow.qualityPreset, ShadowQualityPreset::Ultra);
+
+  ASSERT_EQ(testCase.timeline.cameraPaths.size(), 1u);
+  const auto &keyframes = testCase.timeline.cameraPaths[0].keyframes;
+  ASSERT_EQ(keyframes.size(), 27u);
+  float minX = keyframes[0].position.x;
+  float maxX = minX;
+  float minZ = keyframes[0].position.z;
+  float maxZ = minZ;
+  for (const AutotestCameraKeyframe &keyframe : keyframes) {
+    minX = std::min(minX, keyframe.position.x);
+    maxX = std::max(maxX, keyframe.position.x);
+    minZ = std::min(minZ, keyframe.position.z);
+    maxZ = std::max(maxZ, keyframe.position.z);
+  }
+  EXPECT_LE(minX, -42.0f);
+  EXPECT_GE(maxX, 22.0f);
+  EXPECT_LE(minZ, -10.0f);
+  EXPECT_GE(maxZ, 31.0f);
+  EXPECT_EQ(keyframes[7].frame, 120u);
+  EXPECT_EQ(keyframes[8].frame, 124u);
+  EXPECT_EQ(keyframes[9].frame, 128u);
+  EXPECT_EQ(keyframes[7].position.x, keyframes[8].position.x);
+  EXPECT_EQ(keyframes[8].position.x, keyframes[9].position.x);
+  EXPECT_NE(keyframes[7].target.x, keyframes[8].target.x);
+  EXPECT_NE(keyframes[8].target.x, keyframes[9].target.x);
+}
+
 TEST(NuriAutotestingTest, ManifestAppliesShadowPresetBeforeExplicitOverrides) {
   const std::filesystem::path path =
       makeTempPath("autotest_shadow_overrides", ".json");

@@ -6,18 +6,18 @@ tracy_mode=""
 devchecks=""
 
 if [[ $# -gt 3 ]]; then
-  echo "Usage: $(basename "$0") [debug|release] [cpu|cpu-gpu|off] [devchecks]"
+  echo "Usage: $(basename "$0") [debug|release] [cpu|off] [devchecks]"
   exit 1
 fi
 if [[ "${mode}" != "debug" && "${mode}" != "release" ]]; then
-  echo "Usage: $(basename "$0") [debug|release] [cpu|cpu-gpu|off] [devchecks]"
+  echo "Usage: $(basename "$0") [debug|release] [cpu|off] [devchecks]"
   exit 1
 fi
 for arg in "${@:2}"; do
   case "${arg}" in
-    cpu|cpu-gpu|off)
+    cpu|off)
       if [[ -n "${tracy_mode}" ]]; then
-        echo "Usage: $(basename "$0") [debug|release] [cpu|cpu-gpu|off] [devchecks]"
+        echo "Usage: $(basename "$0") [debug|release] [cpu|off] [devchecks]"
         exit 1
       fi
       tracy_mode="${arg}"
@@ -26,7 +26,7 @@ for arg in "${@:2}"; do
       devchecks="${arg}"
       ;;
     *)
-      echo "Usage: $(basename "$0") [debug|release] [cpu|cpu-gpu|off] [devchecks]"
+      echo "Usage: $(basename "$0") [debug|release] [cpu|off] [devchecks]"
       exit 1
       ;;
   esac

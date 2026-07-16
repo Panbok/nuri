@@ -6,8 +6,7 @@
 
 namespace nuri {
 
-template <typename HandleType,
-          void (GPUDevice::*DestroyResource)(HandleType)>
+template <typename HandleType, void (GPUDevice::*DestroyResource)(HandleType)>
 class OwnedGpuResource final {
 public:
   OwnedGpuResource() = default;
@@ -68,10 +67,8 @@ using OwnedShaderHandle =
 using OwnedRenderPipelineHandle =
     OwnedGpuResource<RenderPipelineHandle, &GPUDevice::destroyRenderPipeline>;
 using OwnedComputePipelineHandle =
-    OwnedGpuResource<ComputePipelineHandle,
-                     &GPUDevice::destroyComputePipeline>;
+    OwnedGpuResource<ComputePipelineHandle, &GPUDevice::destroyComputePipeline>;
 using OwnedMeshletPipelineHandle =
-    OwnedGpuResource<MeshletPipelineHandle,
-                     &GPUDevice::destroyMeshletPipeline>;
+    OwnedGpuResource<MeshletPipelineHandle, &GPUDevice::destroyMeshletPipeline>;
 
 } // namespace nuri

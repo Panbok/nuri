@@ -26,7 +26,7 @@ while [[ $# -gt 0 ]]; do
       no_build=1
       shift
       ;;
-    cpu|cpu-gpu|off|devchecks)
+    cpu|off|devchecks)
       build_args+=("$1")
       shift
       ;;

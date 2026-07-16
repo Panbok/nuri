@@ -3,7 +3,7 @@ set -euo pipefail
 
 profile="${1:-app}"
 if [[ $# -gt 3 ]]; then
-  echo "Usage: $(basename "$0") [lib|app|editor|tests] [cpu|cpu-gpu|off] [devchecks]"
+  echo "Usage: $(basename "$0") [lib|app|editor|tests] [cpu|off] [devchecks]"
   exit 1
 fi
 

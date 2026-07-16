@@ -8,6 +8,7 @@
     "stb",
     "harfbuzz",
     "glfw3",
+    "glslang",
     {
       "name": "tracy",
       "default-features": false
@@ -15,7 +16,8 @@
     "meshoptimizer",
     "yyjson",
     "unordered-dense",
-    "ktx"
+    "ktx",
+    "volk"
   ],
   "features": {
     "editor": {

@@ -217,9 +217,6 @@ nuri_add_gtest_suite(
   src/render_graph_renderer_tests.cpp
   "renderer::"
 )
-if(TARGET LVKLibrary)
-  target_link_libraries(nuri_render_graph_renderer_tests PRIVATE LVKLibrary)
-endif()
 
 nuri_add_gtest_suite(
   nuri_raster_pipeline_state_tests

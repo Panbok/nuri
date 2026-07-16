@@ -370,10 +370,6 @@ compareBenchmarkReports(const BenchmarkReport &current,
   addCompatibilityError(
       out, options.force,
       current.environment.tracyEnabled != baseline.environment.tracyEnabled ||
-          current.environment.tracyGpuEnabled !=
-              baseline.environment.tracyGpuEnabled ||
-          current.environment.tracyGpuDrawZonesEnabled !=
-              baseline.environment.tracyGpuDrawZonesEnabled ||
           current.environment.devChecks != baseline.environment.devChecks,
       "Tracy/dev-check flags mismatch");
   addCompatibilityError(out, options.force, !current.run.validForComparison,

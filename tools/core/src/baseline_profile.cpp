@@ -368,7 +368,7 @@ parseBaselineProfile(std::string_view json, std::string_view expectedId,
     return profileError<BaselineProfile>(
         "$.execution.presentMode has an unsupported value");
   }
-  if (!isOneOf(profiling.value(), {"off", "cpu", "cpu-gpu"})) {
+  if (!isOneOf(profiling.value(), {"off", "cpu"})) {
     return profileError<BaselineProfile>(
         "$.execution.profiling has an unsupported value");
   }

@@ -10,7 +10,7 @@ if /I "%~1"=="debug" (
 ) else if /I "%~1"=="release" (
   shift
 ) else if not "%~1"=="" (
-  if /I not "%~1"=="cpu" if /I not "%~1"=="cpu-gpu" if /I not "%~1"=="off" if /I not "%~1"=="devchecks" goto usage
+  if /I not "%~1"=="cpu" if /I not "%~1"=="off" if /I not "%~1"=="devchecks" goto usage
 )
 
 :collect_args
@@ -24,5 +24,5 @@ call "%SCRIPT_DIR%_nuri_build.bat" "%MODE%" snapshot %BUILD_ARGS%
 exit /b %errorlevel%
 
 :usage
-echo Usage: %~nx0 [release^|debug] [cpu^|cpu-gpu^|off] [devchecks]
+echo Usage: %~nx0 [release^|debug] [cpu^|off] [devchecks]
 exit /b 1

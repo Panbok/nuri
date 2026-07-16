@@ -163,9 +163,6 @@ if "%~1"=="" goto parsed_args
 if /I "%~1"=="cpu" (
   if not "%TRACY_MODE%"=="" goto usage
   set "TRACY_MODE=cpu"
-) else if /I "%~1"=="cpu-gpu" (
-  if not "%TRACY_MODE%"=="" goto usage
-  set "TRACY_MODE=cpu-gpu"
 ) else if /I "%~1"=="off" (
   if not "%TRACY_MODE%"=="" goto usage
   set "TRACY_MODE=off"
@@ -182,16 +179,12 @@ set "NURI_WITH_ASAN=OFF"
 set "NURI_WITH_LOGGING=OFF"
 set "NURI_WITH_ASSERTS=OFF"
 set "NURI_WITH_TRACY=OFF"
-set "NURI_WITH_TRACY_GPU=OFF"
-set "NURI_WITH_TRACY_GPU_DRAW_ZONES=OFF"
 
 if /I "%MODE%"=="debug" (
   set "NURI_WITH_ASAN=ON"
   set "NURI_WITH_LOGGING=ON"
   set "NURI_WITH_ASSERTS=ON"
   set "NURI_WITH_TRACY=ON"
-  set "NURI_WITH_TRACY_GPU=ON"
-  set "NURI_WITH_TRACY_GPU_DRAW_ZONES=OFF"
 )
 
 if /I "%MODE%"=="release" if /I "%DEVCHECKS%"=="ON" (
@@ -201,16 +194,8 @@ if /I "%MODE%"=="release" if /I "%DEVCHECKS%"=="ON" (
 
 if /I "%TRACY_MODE%"=="cpu" (
   set "NURI_WITH_TRACY=ON"
-  set "NURI_WITH_TRACY_GPU=OFF"
-  set "NURI_WITH_TRACY_GPU_DRAW_ZONES=OFF"
-) else if /I "%TRACY_MODE%"=="cpu-gpu" (
-  set "NURI_WITH_TRACY=ON"
-  set "NURI_WITH_TRACY_GPU=ON"
-  set "NURI_WITH_TRACY_GPU_DRAW_ZONES=ON"
 ) else if /I "%TRACY_MODE%"=="off" (
   set "NURI_WITH_TRACY=OFF"
-  set "NURI_WITH_TRACY_GPU=OFF"
-  set "NURI_WITH_TRACY_GPU_DRAW_ZONES=OFF"
 ) else if not "%TRACY_MODE%"=="" (
   goto usage
 )
@@ -288,16 +273,13 @@ for %%i in ("%SCRIPT_DIR%..") do set "REPO_ROOT=%%~fi"
 set "BUILD_DIR=%REPO_ROOT%\build\%BUILD_DIR_SUFFIX%"
 set "CONFIG_STAMP_FILE=%BUILD_DIR%\.nuri_config.txt"
 set "TOOLCHAIN_STAMP_FILE=%BUILD_DIR%\.nuri_toolchain.txt"
-set "DESIRED_CONFIG=mode=%MODE% profile=%PROFILE% target=%BUILD_TARGET% app=%BUILD_APP% editor=%BUILD_EDITOR% tests=%BUILD_TESTS% tools=%BUILD_TOOLS% benchmark_cli=%BUILD_BENCHMARK_CLI% snapshot_cli=%BUILD_SNAPSHOT_CLI% snapshot_testing=%BUILD_SNAPSHOT_TESTING% autotest_cli=%BUILD_AUTOTEST_CLI% autotesting=%BUILD_AUTOTESTING% features=%MANIFEST_FEATURES% tracy=%TRACY_MODE% devchecks=%DEVCHECKS% fsr31=%FSR31_MODE% cc=%C_COMPILER_ARG% cxx=%CXX_COMPILER_ARG% linker=%LINKER_ARG% asan=%NURI_WITH_ASAN% logging=%NURI_WITH_LOGGING% asserts=%NURI_WITH_ASSERTS% tracy_cpu=%NURI_WITH_TRACY% tracy_gpu=%NURI_WITH_TRACY_GPU% tracy_gpu_draw=%NURI_WITH_TRACY_GPU_DRAW_ZONES%"
+set "DESIRED_CONFIG=mode=%MODE% profile=%PROFILE% target=%BUILD_TARGET% app=%BUILD_APP% editor=%BUILD_EDITOR% tests=%BUILD_TESTS% tools=%BUILD_TOOLS% benchmark_cli=%BUILD_BENCHMARK_CLI% snapshot_cli=%BUILD_SNAPSHOT_CLI% snapshot_testing=%BUILD_SNAPSHOT_TESTING% autotest_cli=%BUILD_AUTOTEST_CLI% autotesting=%BUILD_AUTOTESTING% features=%MANIFEST_FEATURES% tracy=%TRACY_MODE% devchecks=%DEVCHECKS% fsr31=%FSR31_MODE% cc=%C_COMPILER_ARG% cxx=%CXX_COMPILER_ARG% linker=%LINKER_ARG% asan=%NURI_WITH_ASAN% logging=%NURI_WITH_LOGGING% asserts=%NURI_WITH_ASSERTS% tracy_cpu=%NURI_WITH_TRACY%"
 set "TOOLCHAIN_SIGNATURE=vs=%VisualStudioVersion% vc=%VCToolsVersion% sdk=%WindowsSDKVersion% cxx=%EXPECTED_CXX_COMPILER% linker=%EXPECTED_LINKER%"
 set "TOOLCHAIN=%VCPKG_ROOT%\scripts\buildsystems\vcpkg.cmake"
 set "MAKE_PROGRAM_ARG=-DCMAKE_MAKE_PROGRAM=%NINJA_EXE%"
 set "VCPKG_EXECUTABLE_ARG=-DVCPKG_EXECUTABLE=%VCPKG_ROOT%\vcpkg.exe"
 set "MANIFEST_FEATURES_ARG="
 if not "%MANIFEST_FEATURES%"=="" set "MANIFEST_FEATURES_ARG=-DVCPKG_MANIFEST_FEATURES=%MANIFEST_FEATURES%"
-
-call "%SCRIPT_DIR%bootstrap_lightweightvk.bat"
-if errorlevel 1 exit /b 1
 
 set "SHOULD_CONFIGURE=1"
 set "SHOULD_CLEAN=0"
@@ -355,9 +337,7 @@ cmake -S "%REPO_ROOT%" -B "%BUILD_DIR%" -G "%GENERATOR%" ^
   -DNURI_WITH_LOGGING="%NURI_WITH_LOGGING%" ^
   -DNURI_WITH_ASSERTS="%NURI_WITH_ASSERTS%" ^
   -DNURI_WITH_FSR31="%FSR31_MODE%" ^
-  -DNURI_WITH_TRACY="%NURI_WITH_TRACY%" ^
-  -DNURI_WITH_TRACY_GPU="%NURI_WITH_TRACY_GPU%" ^
-  -DNURI_WITH_TRACY_GPU_DRAW_ZONES="%NURI_WITH_TRACY_GPU_DRAW_ZONES%"
+  -DNURI_WITH_TRACY="%NURI_WITH_TRACY%"
 if errorlevel 1 exit /b 1
 goto write_config_stamp
 
@@ -389,9 +369,7 @@ cmake -S "%REPO_ROOT%" -B "%BUILD_DIR%" -G "%GENERATOR%" ^
   -DNURI_WITH_LOGGING="%NURI_WITH_LOGGING%" ^
   -DNURI_WITH_ASSERTS="%NURI_WITH_ASSERTS%" ^
   -DNURI_WITH_FSR31="%FSR31_MODE%" ^
-  -DNURI_WITH_TRACY="%NURI_WITH_TRACY%" ^
-  -DNURI_WITH_TRACY_GPU="%NURI_WITH_TRACY_GPU%" ^
-  -DNURI_WITH_TRACY_GPU_DRAW_ZONES="%NURI_WITH_TRACY_GPU_DRAW_ZONES%"
+  -DNURI_WITH_TRACY="%NURI_WITH_TRACY%"
 if errorlevel 1 exit /b 1
 goto write_config_stamp
 
@@ -422,5 +400,5 @@ if "%MANIFEST_FEATURES%"=="" (
 exit /b 0
 
 :usage
-echo Usage: %~nx0 ^<debug^|release^> ^<lib^|app^|editor^|tests^|bench^|bench-tests^|snapshot^|snapshot-tests^|autotest^|autotest-tests^> [cpu^|cpu-gpu^|off] [devchecks]
+echo Usage: %~nx0 ^<debug^|release^> ^<lib^|app^|editor^|tests^|bench^|bench-tests^|snapshot^|snapshot-tests^|autotest^|autotest-tests^> [cpu^|off] [devchecks]
 exit /b 1

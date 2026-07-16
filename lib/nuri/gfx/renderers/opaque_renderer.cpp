@@ -1424,6 +1424,14 @@ void OpaqueRenderer::readLatestVisibilityGpuReadback(
     if (expectedFrame == std::numeric_limits<uint64_t>::max()) {
       return;
     }
+    // A ring slot is CPU-safe only when it has come back around for reuse.
+    // Newer host-visible slots can already contain the frame marker while
+    // later meshlet task shaders are still updating the same counter block.
+    const uint64_t safeReadbackAge = visibilityCounterRing_.size();
+    if (expectedFrame >= frame.frameIndex ||
+        frame.frameIndex - expectedFrame < safeReadbackAge) {
+      return;
+    }
 
     VisibilityCounterGpuData counter{};
     auto readResult =
@@ -1436,8 +1444,7 @@ void OpaqueRenderer::readLatestVisibilityGpuReadback(
     }
     const uint32_t valid = counter.status.w;
     const uint32_t sourceFrame = counter.status.z;
-    if (valid == 0u || static_cast<uint64_t>(sourceFrame) >= frame.frameIndex ||
-        sourceFrame != static_cast<uint32_t>(expectedFrame)) {
+    if (valid == 0u || sourceFrame != static_cast<uint32_t>(expectedFrame)) {
       return;
     }
     if (!selectedCounter.has_value() || sourceFrame > selectedSourceFrame) {
@@ -1447,20 +1454,9 @@ void OpaqueRenderer::readLatestVisibilityGpuReadback(
     }
   };
 
-  const size_t preferredSlotIndex =
-      frame.frameIndex > 0u && !visibilityCounterRing_.empty()
-          ? static_cast<size_t>((frame.frameIndex - 1u) %
-                                visibilityCounterRing_.size())
-          : std::numeric_limits<size_t>::max();
-  readCounterSlot(preferredSlotIndex);
-  if (!selectedCounter.has_value()) {
-    for (size_t slotIndex = 0u; slotIndex < visibilityCounterRing_.size();
-         ++slotIndex) {
-      if (slotIndex == preferredSlotIndex) {
-        continue;
-      }
-      readCounterSlot(slotIndex);
-    }
+  for (size_t slotIndex = 0u; slotIndex < visibilityCounterRing_.size();
+       ++slotIndex) {
+    readCounterSlot(slotIndex);
   }
 
   metrics.gpuMainReadbackErrorCount = counterReadbackErrorCount;
@@ -1753,9 +1749,10 @@ Result<bool, std::string> OpaqueRenderer::appendGpuVisibilityMainPass(
         "OpaqueRenderer::buildOpaquePasses: visibility GPU ring is invalid");
   }
 
-  frame.metrics.visibility.gpuMainCandidates = candidateCount;
-  frame.metrics.visibility.gpuMainVisibleCandidates = candidateCount;
-  readLatestVisibilityGpuReadback(frame);
+  if (frame.metrics.visibility.gpuMainReadbackAvailable == 0u) {
+    frame.metrics.visibility.gpuMainCandidates = candidateCount;
+    frame.metrics.visibility.gpuMainVisibleCandidates = candidateCount;
+  }
 
   uint32_t expectedVisibleCount = 0u;
   uint64_t expectedVisibleHash = kFnvOffsetBasis64;
@@ -2330,6 +2327,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   }
   const uint32_t frameSlot =
       static_cast<uint32_t>(frame.frameIndex % swapchainImageCount);
+  readLatestVisibilityGpuReadback(frame);
   bool visibilityCounterPreparedForFrame = false;
   const AnimationSceneFrameData *animationSceneData =
       resolveAnimationSceneFrameData(frame);
@@ -3122,9 +3120,6 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       runsCpuVisibilityEvaluation(visibilitySettings.mainViewMode);
   const bool validateGpuMainVisibility =
       validatesGpuMainVisibility(visibilitySettings.mainViewMode);
-  if (!gpuMainCullingEnabled) {
-    readLatestVisibilityGpuReadback(frame);
-  }
   std::pmr::vector<uint8_t> visibleMainTemplates(batchScratch.resource());
   std::pmr::vector<uint32_t> visibleMainTemplateIndices(
       batchScratch.resource());

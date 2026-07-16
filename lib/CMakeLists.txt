@@ -51,7 +51,7 @@ set(NURI_RENDERER_SOURCES
   nuri/gfx/shader.cpp
   nuri/platform/gpu_device_factory.cpp
   nuri/platform/glfw_window.cpp
-  nuri/platform/minilog_log.cpp
+  nuri/platform/stdio_log.cpp
   nuri/resources/gpu/geometry_pool.cpp
   nuri/resources/gpu/material.cpp
   nuri/resources/gpu/model.cpp
@@ -139,6 +139,9 @@ else()
 endif()
 
 find_package(Vulkan REQUIRED)
+find_package(glfw3 CONFIG REQUIRED)
+find_package(glslang CONFIG REQUIRED)
+find_package(volk CONFIG REQUIRED)
 
 if(WIN32 AND TARGET Vulkan::Vulkan)
   set_property(TARGET Vulkan::Vulkan PROPERTY MAP_IMPORTED_CONFIG_DEBUG Release)
@@ -217,21 +220,6 @@ if(NURI_WITH_TRACY)
   target_link_libraries(nuri_renderer PUBLIC ${NURI_TRACY_CLIENT_TARGET})
 endif()
 
-if(NURI_WITH_TRACY_GPU AND NOT NURI_WITH_TRACY)
-  message(FATAL_ERROR "NURI_WITH_TRACY_GPU=ON requires NURI_WITH_TRACY=ON")
-endif()
-
-set(LVK_DEPLOY_DEPS OFF CACHE BOOL "" FORCE)
-set(LVK_WITH_GLFW ON CACHE BOOL "" FORCE)
-set(LVK_USE_VCPKG_GLFW ON CACHE BOOL "" FORCE)
-set(LVK_WITH_IMGUI OFF CACHE BOOL "" FORCE)
-set(LVK_WITH_SAMPLES OFF CACHE BOOL "" FORCE)
-set(LVK_WITH_TRACY ${NURI_WITH_TRACY} CACHE BOOL "" FORCE)
-set(LVK_WITH_TRACY_GPU ${NURI_WITH_TRACY_GPU} CACHE BOOL "" FORCE)
-set(LVK_WITH_IMPLOT OFF CACHE BOOL "" FORCE)
-set(LVK_WITH_OPENXR OFF CACHE BOOL "" FORCE)
-set(LVK_WITH_SLANG OFF CACHE BOOL "" FORCE)
-set(MINILOG_RAW_OUTPUT OFF CACHE BOOL "" FORCE)
 set(NVRHI_BUILD_SHARED OFF CACHE BOOL "" FORCE)
 set(NVRHI_INSTALL OFF CACHE BOOL "" FORCE)
 set(NVRHI_WITH_VALIDATION ${NURI_WITH_ASSERTS} CACHE BOOL "" FORCE)
@@ -241,13 +229,6 @@ set(NVRHI_WITH_DX12 OFF CACHE BOOL "" FORCE)
 set(NVRHI_WITH_NVAPI OFF CACHE BOOL "" FORCE)
 set(NVRHI_WITH_AFTERMATH OFF CACHE BOOL "" FORCE)
 set(NVRHI_WITH_RTXMU OFF CACHE BOOL "" FORCE)
-
-set(LVK_SOURCE_DIR "${CMAKE_SOURCE_DIR}/external/lightweightvk")
-if(NOT EXISTS "${LVK_SOURCE_DIR}/CMakeLists.txt")
-  message(FATAL_ERROR "LightweightVK submodule is missing at: ${LVK_SOURCE_DIR}. Run: git submodule update --init --recursive")
-endif()
-
-add_subdirectory("${LVK_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/_deps/lightweightvk-build")
 
 set(NVRHI_SOURCE_DIR "${CMAKE_SOURCE_DIR}/external/nvrhi")
 if(NOT EXISTS "${NVRHI_SOURCE_DIR}/CMakeLists.txt")
@@ -333,31 +314,18 @@ endif()
 
 add_subdirectory("${NVRHI_ACTIVE_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/_deps/nvrhi-build")
 
-if(TARGET nvrhi_vk)
-  target_include_directories(nvrhi_vk PRIVATE
-    "${LVK_SOURCE_DIR}/third-party/deps/src/volk"
-  )
-endif()
-
-if(NURI_WITH_TRACY_GPU_DRAW_ZONES)
-  if(NURI_WITH_TRACY_GPU AND TARGET LVKVulkan)
-    target_compile_definitions(LVKVulkan PUBLIC "LVK_WITH_TRACY_GPU_DRAW_ZONES=1")
-  else()
-    message(WARNING "NURI_WITH_TRACY_GPU_DRAW_ZONES=ON requires NURI_WITH_TRACY_GPU=ON and target LVKVulkan; per-draw Tracy GPU zones remain disabled.")
-  endif()
-endif()
-
 target_link_libraries(nuri_renderer
   PUBLIC
     glm::glm
     assimp::assimp
   PRIVATE
-    LVKLibrary
+    glfw
     nvrhi
     nvrhi_vk
-    glslang
-    SPIRV
-    glslang-default-resource-limits
+    glslang::glslang
+    glslang::SPIRV
+    glslang::glslang-default-resource-limits
+    volk::volk
 )
 
 set(NURI_KTX_TARGET "")
@@ -476,31 +444,21 @@ function(nuri_configure_backend_adapter target_name)
   target_precompile_headers(${target_name} PRIVATE nuri/pch.h)
 endfunction()
 
-add_library(nuri_lvk_backend OBJECT
-  nuri/platform/lvk_gpu_device.cpp
-)
-nuri_configure_backend_adapter(nuri_lvk_backend)
-target_link_libraries(nuri_lvk_backend PRIVATE LVKLibrary)
-
 add_library(nuri_nvrhi_backend OBJECT
   nuri/platform/nvrhi_gpu_device.cpp
 )
 nuri_configure_backend_adapter(nuri_nvrhi_backend)
-target_include_directories(nuri_nvrhi_backend
-  PRIVATE
-    "${LVK_SOURCE_DIR}/third-party/deps/src/volk"
-)
 target_link_libraries(nuri_nvrhi_backend
   PRIVATE
     glfw
-    glslang
+    glslang::glslang
     nvrhi
     nvrhi_vk
+    volk::volk
 )
 
 target_sources(nuri_renderer
   PRIVATE
-    $<TARGET_OBJECTS:nuri_lvk_backend>
     $<TARGET_OBJECTS:nuri_nvrhi_backend>
 )
 

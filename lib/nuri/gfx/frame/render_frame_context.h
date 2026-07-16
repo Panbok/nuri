@@ -2615,6 +2615,56 @@ struct RenderFrameMetrics {
   } transparent{};
 };
 
+struct ResolvedGeometryWorkMetrics {
+  uint32_t instanceCandidates = 0u;
+  uint32_t visibleInstances = 0u;
+  uint32_t indirectCommands = 0u;
+  uint32_t visibleIndirectCommands = 0u;
+  uint32_t meshletCandidates = 0u;
+  uint32_t emittedMeshlets = 0u;
+  uint32_t executedMeshletTaskGroups = 0u;
+  bool mainReadbackAvailable = false;
+  bool indirectReadbackAvailable = false;
+  bool meshletReadbackAvailable = false;
+};
+
+[[nodiscard]] constexpr ResolvedGeometryWorkMetrics
+resolveGeometryWorkMetrics(const RenderFrameMetrics &metrics) noexcept {
+  const bool mainReadbackAvailable =
+      metrics.visibility.gpuMainReadbackAvailable != 0u;
+  const bool indirectReadbackAvailable =
+      mainReadbackAvailable && metrics.visibility.gpuIndirectDrawUsed != 0u;
+  const bool meshletReadbackAvailable =
+      metrics.visibility.meshletReadbackAvailable != 0u;
+  return {
+      .instanceCandidates = mainReadbackAvailable
+                                ? metrics.visibility.gpuMainCandidates
+                                : metrics.opaque.totalInstances,
+      .visibleInstances = mainReadbackAvailable
+                              ? metrics.visibility.gpuMainVisibleCandidates
+                              : metrics.opaque.visibleInstances,
+      .indirectCommands =
+          indirectReadbackAvailable
+              ? metrics.visibility.gpuIndirectDrawReadbackCommands
+              : metrics.opaque.indirectCommands,
+      .visibleIndirectCommands =
+          indirectReadbackAvailable
+              ? metrics.visibility.gpuIndirectDrawReadbackVisible
+              : metrics.opaque.indirectCommands,
+      .meshletCandidates = metrics.visibility.meshletCandidates,
+      .emittedMeshlets = meshletReadbackAvailable
+                             ? metrics.visibility.meshletEmitted
+                             : metrics.visibility.meshletCandidates,
+      .executedMeshletTaskGroups =
+          meshletReadbackAvailable
+              ? metrics.visibility.meshletTaskGroupsExecuted
+              : metrics.opaque.meshletTaskGroups,
+      .mainReadbackAvailable = mainReadbackAvailable,
+      .indirectReadbackAvailable = indirectReadbackAvailable,
+      .meshletReadbackAvailable = meshletReadbackAvailable,
+  };
+}
+
 struct OpaquePickRequest {
   uint32_t x = 0;
   uint32_t y = 0;

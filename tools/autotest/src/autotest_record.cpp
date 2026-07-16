@@ -2103,8 +2103,6 @@ writeAutotestRecordMetadataFile(const AutotestReport &report,
            << jsonEscape(report.environment.vcpkgManifestFeatures) << "\",\n"
            << "    \"NURI_WITH_TRACY\": "
            << (report.environment.tracyEnabled ? "true" : "false") << ",\n"
-           << "    \"NURI_WITH_TRACY_GPU\": "
-           << (report.environment.tracyGpuEnabled ? "true" : "false") << ",\n"
            << "    \"devChecks\": "
            << (report.environment.devChecks ? "true" : "false") << "\n"
            << "  },\n"

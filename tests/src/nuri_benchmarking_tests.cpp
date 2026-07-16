@@ -84,7 +84,7 @@ BenchmarkReport makeComparableReport(double cpuMedian, double cpuP95,
       .warnPercent = 5.0,
       .warnAbsoluteMs = 0.1,
   };
-  report.environment.gpuBackend = "lvk";
+  report.environment.gpuBackend = "nvrhi";
   report.environment.gpuDeviceName = "test GPU";
   report.environment.gpuVendorId = 0x10deu;
   report.environment.gpuDeviceId = 0x2684u;
@@ -101,8 +101,6 @@ BenchmarkReport makeComparableReport(double cpuMedian, double cpuP95,
   report.environment.buildType = "Release";
   report.environment.cmakeToolProfile = "bench";
   report.environment.tracyEnabled = false;
-  report.environment.tracyGpuEnabled = false;
-  report.environment.tracyGpuDrawZonesEnabled = false;
   report.environment.devChecks = false;
   report.run.samples = 1u;
   report.run.warmupFrames = 1u;
@@ -534,6 +532,84 @@ TEST(NuriBenchmarkingTest, ManifestRejectsUnknownKeys) {
 
   std::error_code ec;
   std::filesystem::remove(path, ec);
+}
+
+TEST(NuriBenchmarkingTest, ManifestRejectsRemovedBackends) {
+  const std::filesystem::path path =
+      makeTempPath("benchmark_removed_backend", ".json");
+  writeFile(path,
+            R"json({
+              "schemaVersion": 1,
+              "id": "backend.removed",
+              "suite": "backend",
+              "backend": "unsupported"
+            })json");
+  auto loaded = loadBenchmarkCaseManifest(path);
+  EXPECT_TRUE(loaded.hasError());
+  EXPECT_NE(loaded.error().find("default or nvrhi"), std::string::npos);
+
+  writeFile(path,
+            R"json({
+              "schemaVersion": 1,
+              "id": "backend.requirement_removed",
+              "suite": "backend",
+              "backend": "nvrhi",
+              "requirements": {"backends": ["unsupported"]}
+            })json");
+  loaded = loadBenchmarkCaseManifest(path);
+  EXPECT_TRUE(loaded.hasError());
+  EXPECT_NE(loaded.error().find("unsupported backend"), std::string::npos);
+
+  std::error_code ec;
+  std::filesystem::remove(path, ec);
+}
+
+TEST(NuriBenchmarkingTest, CanonicalBistroStressUsesWideRapidUltraRoute) {
+  auto loaded = loadBenchmarkCaseManifest(
+      defaultBenchmarkCaseRoot() / "stress" /
+      "niagara_bistro_full_pipeline_rapid_full_route_720p.json");
+  ASSERT_FALSE(loaded.hasError()) << loaded.error();
+  const BenchmarkCase &benchmarkCase = loaded.value();
+  EXPECT_EQ(benchmarkCase.backend, "nvrhi");
+  ASSERT_EQ(benchmarkCase.requirements.backends.size(), 1u);
+  EXPECT_EQ(benchmarkCase.requirements.backends[0], "nvrhi");
+  EXPECT_EQ(benchmarkCase.settings.antiAliasing.mode, AntiAliasingMode::TAA);
+  EXPECT_EQ(benchmarkCase.settings.antiAliasing.temporalProvider,
+            TemporalReconstructionProvider::Reference);
+  EXPECT_EQ(benchmarkCase.settings.antiAliasing.qualityPreset,
+            TemporalAAQualityPreset::Ultra);
+  EXPECT_EQ(benchmarkCase.settings.ambientOcclusion.mode,
+            AmbientOcclusionMode::GTAO);
+  EXPECT_EQ(benchmarkCase.settings.ambientOcclusion.preset,
+            AmbientOcclusionPreset::Ultra);
+  EXPECT_TRUE(benchmarkCase.settings.shadow.enabled);
+  EXPECT_EQ(benchmarkCase.settings.shadow.qualityPreset,
+            ShadowQualityPreset::Ultra);
+
+  ASSERT_EQ(benchmarkCase.timeline.cameraPaths.size(), 1u);
+  const auto &keyframes = benchmarkCase.timeline.cameraPaths[0].keyframes;
+  ASSERT_EQ(keyframes.size(), 27u);
+  float minX = keyframes[0].position.x;
+  float maxX = minX;
+  float minZ = keyframes[0].position.z;
+  float maxZ = minZ;
+  for (const BenchmarkCameraKeyframe &keyframe : keyframes) {
+    minX = std::min(minX, keyframe.position.x);
+    maxX = std::max(maxX, keyframe.position.x);
+    minZ = std::min(minZ, keyframe.position.z);
+    maxZ = std::max(maxZ, keyframe.position.z);
+  }
+  EXPECT_LE(minX, -42.0f);
+  EXPECT_GE(maxX, 22.0f);
+  EXPECT_LE(minZ, -10.0f);
+  EXPECT_GE(maxZ, 31.0f);
+  EXPECT_EQ(keyframes[7].frame, 120u);
+  EXPECT_EQ(keyframes[8].frame, 124u);
+  EXPECT_EQ(keyframes[9].frame, 128u);
+  EXPECT_EQ(keyframes[7].position.x, keyframes[8].position.x);
+  EXPECT_EQ(keyframes[8].position.x, keyframes[9].position.x);
+  EXPECT_NE(keyframes[7].target.x, keyframes[8].target.x);
+  EXPECT_NE(keyframes[8].target.x, keyframes[9].target.x);
 }
 
 TEST(NuriBenchmarkingTest, ManifestAppliesShadowPresetBeforeExplicitOverrides) {
@@ -1119,7 +1195,7 @@ TEST(NuriBenchmarkingTest, ReportWritesReadsAndComputesMeasuredStats) {
   BenchmarkReport report{};
   report.generatedAtUtc = "2026-06-26T00:00:00Z";
   report.command = "nuri-bench run --case smoke.procedural.default";
-  report.environment.gpuBackend = "lvk";
+  report.environment.gpuBackend = "nvrhi";
   report.environment.gpuBackendSource = "manifest";
   report.environment.gpuDeviceName = "Test GPU";
   report.environment.gpuVendorId = 0x10deu;
@@ -1131,8 +1207,6 @@ TEST(NuriBenchmarkingTest, ReportWritesReadsAndComputesMeasuredStats) {
   report.environment.buildType = "Release";
   report.environment.cmakeToolProfile = "bench";
   report.environment.tracyEnabled = true;
-  report.environment.tracyGpuEnabled = true;
-  report.environment.tracyGpuDrawZonesEnabled = true;
   report.environment.tracyDiagnostic = true;
   report.benchmarkCase.id = "smoke.procedural.default";
   report.benchmarkCase.suite = "smoke";
@@ -1408,8 +1482,6 @@ TEST(NuriBenchmarkingTest, ReportWritesReadsAndComputesMeasuredStats) {
   EXPECT_EQ(loaded.value().environment.gpuDeviceId, 0x2684u);
   EXPECT_EQ(loaded.value().environment.gpuDriverVersion, "test-driver");
   EXPECT_TRUE(loaded.value().environment.tracyEnabled);
-  EXPECT_TRUE(loaded.value().environment.tracyGpuEnabled);
-  EXPECT_TRUE(loaded.value().environment.tracyGpuDrawZonesEnabled);
   EXPECT_TRUE(loaded.value().environment.tracyDiagnostic);
   EXPECT_FALSE(loaded.value().run.validForComparison);
   EXPECT_EQ(loaded.value().run.warmupFrames, 1u);

@@ -1,14 +1,21 @@
 #include "tests_pch.h"
 
 #include "nuri/core/event_manager.h"
+#include "nuri/core/log.h"
 #include "nuri/core/result.h"
+#include "nuri/utils/frame_time_display.h"
 #include "nuri/utils/utils.h"
 
+#include <chrono>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <initializer_list>
+#include <iterator>
 #include <limits>
 #include <memory_resource>
 #include <stdexcept>
+#include <string>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -25,16 +32,85 @@ using NothrowResult = nuri::Result<int, int>;
 using ThrowingValueResult = nuri::Result<ThrowingMove, int>;
 using ThrowingErrorResult = nuri::Result<void, ThrowingMove>;
 
-static_assert(noexcept(std::declval<NothrowResult &>().swap(
-    std::declval<NothrowResult &>())));
+static_assert(noexcept(
+    std::declval<NothrowResult &>().swap(std::declval<NothrowResult &>())));
 static_assert(!noexcept(std::declval<ThrowingValueResult &>().swap(
     std::declval<ThrowingValueResult &>())));
 static_assert(!noexcept(std::declval<ThrowingErrorResult &>().swap(
     std::declval<ThrowingErrorResult &>())));
 static_assert(noexcept(std::declval<NothrowResult &>().value()));
 static_assert(noexcept(std::declval<NothrowResult &>().error()));
-static_assert(noexcept(
-    std::declval<nuri::Result<void, int> &>().error()));
+static_assert(noexcept(std::declval<nuri::Result<void, int> &>().error()));
+
+TEST(LogTests, WritesConfiguredFileWithoutExternalLoggingDependency) {
+  const auto tick =
+      std::chrono::high_resolution_clock::now().time_since_epoch().count();
+  const std::filesystem::path path =
+      std::filesystem::temp_directory_path() /
+      ("nuri_stdio_log_" + std::to_string(tick) + ".log");
+
+  nuri::Log::shutdown();
+  nuri::Log::initialize({
+      .filePath = path.string(),
+      .logLevel = nuri::LogLevel::Info,
+      .consoleLevel = nuri::LogLevel::Fatal,
+  });
+  nuri::logMessage(nuri::LogLevel::Info, "stdio logger probe");
+  nuri::Log::shutdown();
+
+  std::ifstream input(path, std::ios::binary);
+  const std::string contents((std::istreambuf_iterator<char>(input)),
+                             std::istreambuf_iterator<char>());
+  EXPECT_NE(contents.find("info"), std::string::npos);
+  EXPECT_NE(contents.find("stdio logger probe"), std::string::npos);
+  EXPECT_EQ(contents.find("\x1b["), std::string::npos);
+
+  std::error_code error;
+  std::filesystem::remove(path, error);
+}
+
+TEST(LogTests, EnablesColoredConsoleByDefault) {
+  EXPECT_TRUE(nuri::LogConfig{}.coloredConsole);
+}
+
+TEST(FrameTimeDisplaySamplerTests, PublishesIntervalAveragesAtReadableCadence) {
+  nuri::FrameTimeDisplaySampler sampler(0.25);
+
+  EXPECT_FALSE(sampler.tick(0.10, nuri::GpuFrameTimeSample{1u, 8.0f}));
+  EXPECT_FALSE(sampler.tick(0.10, nuri::GpuFrameTimeSample{2u, 12.0f}));
+  EXPECT_TRUE(sampler.tick(0.05, nuri::GpuFrameTimeSample{3u, 10.0f}));
+
+  const nuri::FrameTimeDisplayValues values = sampler.values();
+  EXPECT_TRUE(values.cpuAvailable);
+  EXPECT_TRUE(values.gpuAvailable);
+  EXPECT_NEAR(values.cpuMilliseconds, 250.0f / 3.0f, 1.0e-4f);
+  EXPECT_NEAR(values.gpuMilliseconds, 10.0f, 1.0e-4f);
+}
+
+TEST(FrameTimeDisplaySamplerTests,
+     DeduplicatesGpuReportsAndRetainsTheLastPublishedValue) {
+  nuri::FrameTimeDisplaySampler sampler(0.20);
+
+  EXPECT_FALSE(sampler.tick(0.05, nuri::GpuFrameTimeSample{7u, 10.0f}));
+  EXPECT_FALSE(sampler.tick(0.05, nuri::GpuFrameTimeSample{7u, 10.0f}));
+  EXPECT_TRUE(sampler.tick(0.10, nuri::GpuFrameTimeSample{8u, 20.0f}));
+  EXPECT_NEAR(sampler.values().gpuMilliseconds, 15.0f, 1.0e-4f);
+
+  EXPECT_FALSE(sampler.tick(0.10, std::nullopt));
+  EXPECT_TRUE(sampler.tick(0.10, std::nullopt));
+  EXPECT_TRUE(sampler.values().gpuAvailable);
+  EXPECT_NEAR(sampler.values().gpuMilliseconds, 15.0f, 1.0e-4f);
+}
+
+TEST(FrameTimeDisplaySamplerTests, IgnoresInvalidGpuSamples) {
+  nuri::FrameTimeDisplaySampler sampler(0.10);
+
+  EXPECT_TRUE(sampler.tick(
+      0.10,
+      nuri::GpuFrameTimeSample{1u, std::numeric_limits<float>::quiet_NaN()}));
+  EXPECT_TRUE(sampler.values().cpuAvailable);
+  EXPECT_FALSE(sampler.values().gpuAvailable);
+}
 
 TEST(AlignUpU64Tests, SupportsZeroOnePowerOfTwoAndArbitraryAlignments) {
   uint64_t aligned = 99u;
@@ -89,8 +165,9 @@ bool throwOnce(const RetryEvent &event, void *user) {
   return false;
 }
 
-std::vector<uint32_t> dispatchWithOneRetry(
-    std::initializer_list<uint32_t> eventIds, uint32_t throwOn) {
+std::vector<uint32_t>
+dispatchWithOneRetry(std::initializer_list<uint32_t> eventIds,
+                     uint32_t throwOn) {
   std::pmr::memory_resource *memory = std::pmr::new_delete_resource();
   nuri::EventManager events(*memory);
   RetryState state{.throwOn = throwOn};
@@ -106,8 +183,7 @@ std::vector<uint32_t> dispatchWithOneRetry(
 }
 
 TEST(EventManagerTests, RetriesOnlyThrowingQueuedEvent) {
-  EXPECT_EQ(dispatchWithOneRetry({7u}, 7u),
-            (std::vector<uint32_t>{7u, 7u}));
+  EXPECT_EQ(dispatchWithOneRetry({7u}, 7u), (std::vector<uint32_t>{7u, 7u}));
 }
 
 TEST(EventManagerTests, RetriesFirstThrowingQueuedEventAndLaterEvents) {

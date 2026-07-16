@@ -2441,6 +2441,17 @@ Result<bool, std::string> validateAutotestCase(const AutotestCase &testCase) {
   if (valid.hasError()) {
     return valid;
   }
+  if (testCase.backend != "default" && testCase.backend != "nvrhi") {
+    return Result<bool, std::string>::makeError(
+        "backend must be default or nvrhi");
+  }
+  for (const std::string &backend : testCase.requirements.backends) {
+    if (backend != "default" && backend != "nvrhi") {
+      return Result<bool, std::string>::makeError(
+          "requirements.backends contains unsupported backend '" + backend +
+          "'");
+    }
+  }
   if (testCase.resolution[0] == 0u || testCase.resolution[1] == 0u) {
     return Result<bool, std::string>::makeError(
         "resolution entries must be greater than zero");

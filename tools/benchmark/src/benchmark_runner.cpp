@@ -109,8 +109,6 @@ benchmarkEnvironmentFingerprint(const BenchmarkEnvironment &environment) {
                        environment.devChecks ? "true" : "false"},
       FingerprintField{"profiling.cpu",
                        environment.tracyEnabled ? "true" : "false"},
-      FingerprintField{"profiling.gpu",
-                       environment.tracyGpuEnabled ? "true" : "false"},
   });
   return fingerprint.hasError()
              ? std::nullopt
@@ -2036,7 +2034,6 @@ public:
     config.filePath = path.string();
     config.logLevel = LogLevel::Info;
     config.consoleLevel = LogLevel::Warning;
-    config.threadNames = false;
     Log::initialize(config);
   }
   ~BenchmarkLogGuard() { Log::shutdown(); }
@@ -2044,26 +2041,11 @@ public:
   BenchmarkLogGuard &operator=(const BenchmarkLogGuard &) = delete;
 };
 
-[[nodiscard]] GPUBackendPreference backendPreference(std::string_view backend) {
-  if (backend == "lvk") {
-    return GPUBackendPreference::Lvk;
-  }
-  if (backend == "nvrhi") {
-    return GPUBackendPreference::Nvrhi;
-  }
-  return GPUBackendPreference::Default;
-}
-
 [[nodiscard]] std::string resolveBackendName(const BenchmarkCase &benchmarkCase,
                                              std::string &source) {
-  const std::string envBackend = readProcessEnvironment("NURI_GPU_BACKEND");
   if (benchmarkCase.backend != "default") {
     source = "manifest";
     return benchmarkCase.backend;
-  }
-  if (!envBackend.empty()) {
-    source = "NURI_GPU_BACKEND";
-    return envBackend;
   }
   source = "default";
   return "nvrhi";
@@ -2087,6 +2069,12 @@ public:
 [[nodiscard]] Result<bool, BenchmarkExitCode>
 checkRequirements(const BenchmarkCase &benchmarkCase, std::string_view backend,
                   std::vector<std::string> &warnings, std::string &message) {
+  if (backend != "nvrhi") {
+    message = "unsupported backend '" + std::string(backend) +
+              "'; nvrhi is the only available backend";
+    return Result<bool, BenchmarkExitCode>::makeError(
+        BenchmarkExitCode::InvalidInput);
+  }
   if (!benchmarkCase.requirements.allowVisibleWindow) {
     message = "case requires hidden/headless execution, which is unavailable";
     return Result<bool, BenchmarkExitCode>::makeError(
@@ -2095,6 +2083,11 @@ checkRequirements(const BenchmarkCase &benchmarkCase, std::string_view backend,
   if (!benchmarkCase.requirements.backends.empty()) {
     bool supported = false;
     for (const std::string &allowed : benchmarkCase.requirements.backends) {
+      if (allowed != "default" && allowed != "nvrhi") {
+        message = "unsupported backend requirement '" + allowed + "'";
+        return Result<bool, BenchmarkExitCode>::makeError(
+            BenchmarkExitCode::InvalidInput);
+      }
       supported = supported || allowed == backend || allowed == "default";
     }
     if (!supported) {
@@ -2690,8 +2683,6 @@ benchmarkExitFromOutcome(nuri::tools::core::ToolOutcome outcome) {
          lhs.loggingEnabled == rhs.loggingEnabled &&
          lhs.assertsEnabled == rhs.assertsEnabled &&
          lhs.tracyEnabled == rhs.tracyEnabled &&
-         lhs.tracyGpuEnabled == rhs.tracyGpuEnabled &&
-         lhs.tracyGpuDrawZonesEnabled == rhs.tracyGpuDrawZonesEnabled &&
          lhs.tracyDiagnostic == rhs.tracyDiagnostic &&
          lhs.devChecks == rhs.devChecks;
 }
@@ -2716,9 +2707,7 @@ repetitionWarmupStatus(const BenchmarkReport &report) {
 [[nodiscard]] nuri::tools::core::BaselineProfileObservedEnvironment
 observedProfileEnvironment(const BenchmarkEnvironment &environment) {
   std::string profiling = "off";
-  if (environment.tracyGpuEnabled) {
-    profiling = "cpu-gpu";
-  } else if (environment.tracyEnabled) {
+  if (environment.tracyEnabled) {
     profiling = "cpu";
   }
   return {
@@ -3423,9 +3412,7 @@ BenchmarkRunResult runBenchmarkCase(BenchmarkCase benchmarkCase,
       computeBenchmarkReportStats(report);
       return finalizeResult();
     }
-    GPUDeviceCreateDesc deviceDesc{};
-    deviceDesc.backend = backendPreference(backend);
-    std::unique_ptr<GPUDevice> gpu = GPUDevice::create(*window, deviceDesc);
+    std::unique_ptr<GPUDevice> gpu = GPUDevice::create(*window);
     if (!gpu) {
       result.exitCode = BenchmarkExitCode::EnvironmentUnavailable;
       result.message = "failed to create GPU device";

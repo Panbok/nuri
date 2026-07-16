@@ -146,8 +146,6 @@ validateSnapshotReportV1(yyjson_val *root) {
       JsonField{"NURI_WITH_LOGGING", JsonType::Boolean},
       JsonField{"NURI_WITH_ASSERTS", JsonType::Boolean},
       JsonField{"NURI_WITH_TRACY", JsonType::Boolean},
-      JsonField{"NURI_WITH_TRACY_GPU", JsonType::Boolean},
-      JsonField{"NURI_WITH_TRACY_GPU_DRAW_ZONES", JsonType::Boolean},
       JsonField{"devChecks", JsonType::Boolean},
   };
   valid = validateObject(yyjson_obj_get(root, "environment"), environmentFields,
@@ -429,10 +427,6 @@ yyjson_mut_val *makeEnvironmentObject(yyjson_mut_doc *doc,
   yyjson_mut_obj_add_bool(doc, object, "NURI_WITH_LOGGING", env.loggingEnabled);
   yyjson_mut_obj_add_bool(doc, object, "NURI_WITH_ASSERTS", env.assertsEnabled);
   yyjson_mut_obj_add_bool(doc, object, "NURI_WITH_TRACY", env.tracyEnabled);
-  yyjson_mut_obj_add_bool(doc, object, "NURI_WITH_TRACY_GPU",
-                          env.tracyGpuEnabled);
-  yyjson_mut_obj_add_bool(doc, object, "NURI_WITH_TRACY_GPU_DRAW_ZONES",
-                          env.tracyGpuDrawZonesEnabled);
   yyjson_mut_obj_add_bool(doc, object, "devChecks", env.devChecks);
   return object;
 }
@@ -1613,11 +1607,6 @@ readSnapshotReportFile(const std::filesystem::path &path) {
         environment, "NURI_WITH_ASSERTS", report.environment.assertsEnabled);
     report.environment.tracyEnabled = readBool(environment, "NURI_WITH_TRACY",
                                                report.environment.tracyEnabled);
-    report.environment.tracyGpuEnabled = readBool(
-        environment, "NURI_WITH_TRACY_GPU", report.environment.tracyGpuEnabled);
-    report.environment.tracyGpuDrawZonesEnabled =
-        readBool(environment, "NURI_WITH_TRACY_GPU_DRAW_ZONES",
-                 report.environment.tracyGpuDrawZonesEnabled);
     report.environment.devChecks =
         readBool(environment, "devChecks", report.environment.devChecks);
   }

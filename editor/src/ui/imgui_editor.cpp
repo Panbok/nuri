@@ -23,6 +23,7 @@
 #include "nuri/ui/camera_controller_widget.h"
 #include "nuri/ui/file_dialog_widget.h"
 #include "nuri/ui/linear_graph.h"
+#include "nuri/utils/frame_time_display.h"
 #include "nuri/utils/fsp_counter.h"
 #include "scene_light_editor.h"
 
@@ -38,6 +39,7 @@ constexpr size_t kMaxLogLines = 2000;
 constexpr float kLogFilterWidth = 200.0f;
 constexpr float kPassListWidth = 140.0f;
 constexpr double kMetricGraphUpdateIntervalSeconds = 0.04;
+constexpr double kFrameTimeDisplayUpdateIntervalSeconds = 0.25;
 constexpr double kLogUpdateIntervalSeconds = 0.10;
 constexpr double kPassMetricsUpdateIntervalSeconds = 0.50;
 constexpr float kMetricGraphWindowWidth = 300.0f;
@@ -2537,7 +2539,8 @@ std::string msaaMetricsSummary(const AntiAliasingFrameMetrics &metrics) {
 std::string opaqueMetricsSummary(const OpaqueFrameMetrics &metrics) {
   return std::format(
       "opaque={{gpuMs={:.3f} gpuTiming={} sourceFrame={} totalInstances={} "
-      "visibleInstances={} draws={} indirectDraws={} indirectCommands={} "
+      "visibleInstances={} submittedDrawPackets={} submittedIndirectCalls={} "
+      "submittedIndirectCommands={} "
       "computeDispatches={} computeDispatchX={} depthPrepass={} "
       "depthPrepassDraws={} tessDraws={} tessInstances={} overlays={}}}",
       metrics.gpuTimeMs, metrics.gpuTimingAvailable,
@@ -5300,31 +5303,24 @@ void setLogWindowPlacementWithoutDock(const ImGuiViewport *viewport) {
   ImGui::SetNextWindowViewport(viewport->ID);
 }
 
-struct OverlayGpuFrameTime {
-  float milliseconds = 0.0f;
-  bool available = false;
-};
-
-[[nodiscard]] OverlayGpuFrameTime
-computeOverlayGpuFrameTime(const GpuTimingReport &report) {
-  OverlayGpuFrameTime frameTime{};
+[[nodiscard]] std::optional<GpuFrameTimeSample>
+overlayGpuFrameTimeSample(const GpuTimingReport &report) {
   if (!hasGpuTimingScope(report, GpuTimingScope::WholeFrame)) {
-    return frameTime;
+    return std::nullopt;
   }
-  frameTime.available = true;
-  if (std::isfinite(report.wholeFrameTimeMs) &&
-      report.wholeFrameTimeMs > 0.0f) {
-    frameTime.milliseconds = report.wholeFrameTimeMs;
-  }
-  return frameTime;
+  return GpuFrameTimeSample{
+      .sourceFrame = report.wholeFrameSourceFrameIndex,
+      .milliseconds = report.wholeFrameTimeMs,
+  };
 }
 
 void drawFpsOverlay(const FPSCounter &fpsCounter, LinearGraph &fpsGraph,
-                    LinearGraph &frametimeGraph, GPUDevice &gpu,
+                    LinearGraph &frametimeGraph,
+                    const FrameTimeDisplayValues &frameTimes,
                     const RenderFrameMetrics &frameMetrics,
                     const RenderSettings &renderSettings,
                     const TelemetryOverlayUiState &telemetryState,
-                    double frameDeltaSeconds, float overlayRightBoundaryX) {
+                    float overlayRightBoundaryX) {
   if (!telemetryState.overlayEnabled) {
     return;
   }
@@ -5348,59 +5344,92 @@ void drawFpsOverlay(const FPSCounter &fpsCounter, LinearGraph &fpsGraph,
                        ImGuiWindowFlags_NoFocusOnAppearing |
                        ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoMove)) {
     const float fps = fpsCounter.getFPS();
-    const float cpuMilliseconds =
-        sanitizeSample(static_cast<float>(frameDeltaSeconds * 1000.0));
-    const OverlayGpuFrameTime gpuFrameTime =
-        computeOverlayGpuFrameTime(gpu.getLatestCompletedGpuTimingReport());
     bool drewStats = false;
     if (telemetryState.showFpsMs) {
-      ImGui::Text("FPS   : %i", static_cast<int>(fps));
-      ImGui::Text("CPU ms: %.2f", cpuMilliseconds);
-      if (gpuFrameTime.available) {
-        ImGui::Text("GPU ms: %.2f", gpuFrameTime.milliseconds);
+      ImGui::Text("FPS: %i", static_cast<int>(fps));
+      if (frameTimes.cpuAvailable) {
+        ImGui::Text("CPU: %.2f ms", frameTimes.cpuMilliseconds);
       } else {
-        ImGui::TextUnformatted("GPU ms: pending");
+        ImGui::TextUnformatted("CPU: sampling");
+      }
+      if (frameTimes.gpuAvailable) {
+        ImGui::Text("GPU: %.2f ms", frameTimes.gpuMilliseconds);
+      } else {
+        ImGui::TextUnformatted("GPU: timing pending");
       }
       drewStats = true;
     }
+    const ResolvedGeometryWorkMetrics geometryWork =
+        resolveGeometryWorkMetrics(frameMetrics);
     if (telemetryState.showInstanceStats) {
-      ImGui::Text("Inst: %u / %u", frameMetrics.opaque.visibleInstances,
-                  frameMetrics.opaque.totalInstances);
+      if (geometryWork.mainReadbackAvailable) {
+        ImGui::Text("Visible instances: %u / %u", geometryWork.visibleInstances,
+                    geometryWork.instanceCandidates);
+      } else {
+        ImGui::TextUnformatted("Visible instances: GPU readback pending");
+      }
       drewStats = true;
     }
     if (telemetryState.showDrawTessStats) {
-      ImGui::Text("Draw: %u (Tess: %u)  Tess Inst: %u",
-                  frameMetrics.opaque.instancedDraws,
-                  frameMetrics.opaque.tessellatedDraws,
-                  frameMetrics.opaque.tessellatedInstances);
+      if (frameMetrics.opaque.meshletModeActive != 0u) {
+        if (geometryWork.meshletReadbackAvailable) {
+          ImGui::Text("Emitted meshlets: %u / %u", geometryWork.emittedMeshlets,
+                      geometryWork.meshletCandidates);
+        } else {
+          ImGui::TextUnformatted("Emitted meshlets: GPU readback pending");
+        }
+      } else {
+        ImGui::Text("Submitted draws: %u (tess: %u)",
+                    frameMetrics.opaque.instancedDraws,
+                    frameMetrics.opaque.tessellatedDraws);
+      }
       drewStats = true;
     }
     if (telemetryState.showIndirectStats) {
-      ImGui::Text("Indirect: %u calls / %u cmds",
-                  frameMetrics.opaque.indirectDrawCalls,
-                  frameMetrics.opaque.indirectCommands);
+      if (geometryWork.indirectReadbackAvailable) {
+        ImGui::Text("Visible indirect: %u / %u",
+                    geometryWork.visibleIndirectCommands,
+                    geometryWork.indirectCommands);
+      } else if (frameMetrics.opaque.meshletModeActive == 0u) {
+        ImGui::Text("Submitted indirect: %u calls / %u cmds",
+                    frameMetrics.opaque.indirectDrawCalls,
+                    frameMetrics.opaque.indirectCommands);
+      }
       drewStats = true;
     }
     if (telemetryState.showDebugDrawStats) {
-      ImGui::Text("Debug Draws: %u (Fallback: %u)",
+      ImGui::Text("Debug draws: %u (fallback: %u)",
                   frameMetrics.opaque.debugOverlayDraws,
                   frameMetrics.opaque.debugOverlayFallbackDraws);
       drewStats = true;
     }
     if (telemetryState.showPatchHeatmap) {
-      ImGui::Text("Patch Heatmap: %u",
+      ImGui::Text("Patch heatmap: %u",
                   frameMetrics.opaque.debugPatchHeatmapDraws);
       drewStats = true;
     }
     if (telemetryState.showDispatchStats) {
-      ImGui::Text("Dispatch: %u x%u", frameMetrics.opaque.computeDispatches,
+      ImGui::Text("Compute: %u dispatches (X=%u)",
+                  frameMetrics.opaque.computeDispatches,
                   frameMetrics.opaque.computeDispatchX);
       const OpaqueFrameMetrics &opaqueMetrics = frameMetrics.opaque;
       const std::string_view activeRoute = activeGeometryRouteLabel(
           renderSettings.opaque.meshletMode, opaqueMetrics);
-      ImGui::Text("Route: %.*s D:%u G:%u", static_cast<int>(activeRoute.size()),
-                  activeRoute.data(), opaqueMetrics.meshletDispatches,
-                  opaqueMetrics.meshletTaskGroups);
+      if (opaqueMetrics.meshletModeActive != 0u) {
+        ImGui::Text("Route: %.*s (%u packets)",
+                    static_cast<int>(activeRoute.size()), activeRoute.data(),
+                    opaqueMetrics.meshletDispatches);
+        if (geometryWork.meshletReadbackAvailable) {
+          ImGui::Text("Executed task groups: %u / %u",
+                      geometryWork.executedMeshletTaskGroups,
+                      opaqueMetrics.meshletTaskGroups);
+        } else {
+          ImGui::TextUnformatted("Task groups: GPU readback pending");
+        }
+      } else {
+        ImGui::TextWrapped("Route: %.*s", static_cast<int>(activeRoute.size()),
+                           activeRoute.data());
+      }
       drewStats = true;
     }
 
@@ -6875,6 +6904,9 @@ struct ImGuiEditor::Impl {
     NURI_PROFILER_ZONE("ImGuiEditor::UpdateMetricsAndLogs",
                        NURI_PROFILER_COLOR_CMD_DRAW);
     fpsCounter.tick(frameDeltaSeconds, true);
+    frameTimeDisplaySampler.tick(
+        frameDeltaSeconds,
+        overlayGpuFrameTimeSample(gpu.getLatestCompletedGpuTimingReport()));
     updateMetricGraphs(std::max(frameDeltaSeconds, 0.0));
     updateAntiAliasingDiagnosticsLog(frameDeltaSeconds);
 
@@ -7101,8 +7133,9 @@ struct ImGuiEditor::Impl {
         overlayRightBoundaryX = inspectorWindowMinX;
       }
     }
-    drawFpsOverlay(fpsCounter, *fpsGraph, *frametimeGraph, gpu, frameMetrics,
-                   renderSettings, telemetryOverlayState, frameDeltaSeconds,
+    drawFpsOverlay(fpsCounter, *fpsGraph, *frametimeGraph,
+                   frameTimeDisplaySampler.values(), frameMetrics,
+                   renderSettings, telemetryOverlayState,
                    overlayRightBoundaryX);
     NURI_PROFILER_ZONE_END();
 
@@ -7162,6 +7195,8 @@ struct ImGuiEditor::Impl {
   std::unique_ptr<ImGuiGlfwPlatform> platform;
   std::unique_ptr<ImGuiGpuRenderer> renderer;
   FPSCounter fpsCounter{0.5f};
+  FrameTimeDisplaySampler frameTimeDisplaySampler{
+      kFrameTimeDisplayUpdateIntervalSeconds};
   std::unique_ptr<LinearGraph> fpsGraph =
       createImPlotLinearGraph(kMetricGraphSampleCount);
   std::unique_ptr<LinearGraph> frametimeGraph =

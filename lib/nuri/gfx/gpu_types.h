@@ -65,7 +65,7 @@ static_assert(BufferHandle{.index = 7u, .generation = 3u} !=
 static_assert(isValid(BufferHandle{.index = 7u, .generation = 3u}));
 static_assert(!isValid(BufferHandle{}));
 
-// GPU enums (LVK-free)
+// Backend-neutral GPU enums.
 enum class Format : uint8_t {
   R32_UINT,
   RGBA8_UNORM,
@@ -332,15 +332,8 @@ struct MeshletLimits {
   bool supportsMeshDispatchIndirectCount = false;
 };
 
-enum class GPUBackendPreference : uint8_t {
-  Default = 0,
-  Nvrhi = 1,
-  Lvk = 2,
-};
-
 struct GPUDeviceCreateDesc {
   GeometryPoolConfig geometryPool{};
-  GPUBackendPreference backend = GPUBackendPreference::Default;
 };
 
 struct BufferCopyRegion {

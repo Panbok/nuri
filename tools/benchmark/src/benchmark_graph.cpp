@@ -722,8 +722,7 @@ void appendReportTable(std::ostringstream &out,
         << escapeHtml(report.environment.buildType) << "</td><td>"
         << report.run.warmupFrames << " / " << report.run.measurementFrames
         << " / " << report.run.cooldownFrames << "</td><td>"
-        << (report.environment.tracyEnabled ? "cpu" : "off")
-        << (report.environment.tracyGpuEnabled ? "+gpu" : "") << "</td><td>"
+        << (report.environment.tracyEnabled ? "cpu" : "off") << "</td><td>"
         << (report.timingDrain.drainComplete ? "complete" : "timeout")
         << ", missing " << report.timingDrain.missingGpuTimingFrames
         << ", dropped " << report.timingDrain.droppedGpuTimingReports
@@ -751,7 +750,7 @@ void appendTracySection(std::ostringstream &out,
   }
   if (!hasTracy) {
     out << "<section class=\"panel tracy-panel\" id=\"tracy\"><div "
-           "class=\"section-head\"><div><h2>Tracy diagnostics</h2><p>CPU/GPU "
+           "class=\"section-head\"><div><h2>Tracy diagnostics</h2><p>CPU "
            "call-stack evidence for targeted performance investigation.</p>"
            "</div><span class=\"status-badge status-unavailable\">not "
            "collected</span></div><div class=\"diagnostics tone-warn\" "
@@ -759,7 +758,7 @@ void appendTracySection(std::ostringstream &out,
            "<p>Every input report was recorded with Tracy disabled. Metric "
            "charts remain valid, but there is no trace or flame graph to "
            "inspect.</p><p><strong>Collect it:</strong> build with the "
-           "<code>cpu-gpu</code> profiling mode and run the case with "
+           "<code>cpu</code> profiling mode and run the case with "
            "<code>--tracy-diagnostic</code>.</p></div></section>";
     return;
   }

@@ -23,11 +23,7 @@ struct LogConfig {
   LogLevel logLevel = LogLevel::Debug;
   LogLevel consoleLevel = LogLevel::Info;
   bool forceFlush = true;
-  bool writeIntro = true;
-  bool writeOutro = true;
   bool coloredConsole = true;
-  bool htmlLog = false;
-  bool threadNames = false;
 };
 
 class NURI_API Log {

@@ -6,7 +6,7 @@ set "PROFILE=%~1"
 if "%PROFILE%"=="" set "PROFILE=app"
 set "TRACY_MODE=%~2"
 if not "%~3"=="" (
-  echo Usage: %~nx0 [lib^|app^|editor^|tests] [cpu^|cpu-gpu^|off]
+  echo Usage: %~nx0 [lib^|app^|editor^|tests] [cpu^|off]
   exit /b 1
 )
 

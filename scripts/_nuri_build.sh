@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-usage="Usage: $(basename "$0") <debug|release> <lib|app|editor|tests|bench|bench-tests|snapshot|snapshot-tests|autotest|autotest-tests> [cpu|cpu-gpu|off] [devchecks]"
+usage="Usage: $(basename "$0") <debug|release> <lib|app|editor|tests|bench|bench-tests|snapshot|snapshot-tests|autotest|autotest-tests> [cpu|off] [devchecks]"
 
 if [[ $# -lt 2 || $# -gt 4 ]]; then
   echo "${usage}"
@@ -145,7 +145,7 @@ esac
 
 for arg in "${@:3}"; do
   case "${arg}" in
-    cpu|cpu-gpu|off)
+    cpu|off)
       if [[ -n "${tracy_mode}" ]]; then
         echo "${usage}"
         exit 1
@@ -166,8 +166,6 @@ nuri_with_asan="OFF"
 nuri_with_logging="OFF"
 nuri_with_asserts="OFF"
 nuri_with_tracy="OFF"
-nuri_with_tracy_gpu="OFF"
-nuri_with_tracy_gpu_draw_zones="OFF"
 nuri_with_fsr31="${NURI_WITH_FSR31:-OFF}"
 if [[ "${nuri_with_fsr31}" != "ON" && "${nuri_with_fsr31}" != "OFF" ]]; then
   echo "NURI_WITH_FSR31 must be ON or OFF"
@@ -178,8 +176,6 @@ if [[ "${mode}" == "debug" ]]; then
   nuri_with_logging="ON"
   nuri_with_asserts="ON"
   nuri_with_tracy="ON"
-  nuri_with_tracy_gpu="ON"
-  nuri_with_tracy_gpu_draw_zones="OFF"
 fi
 
 if [[ "${mode}" == "release" && "${devchecks}" == "ON" ]]; then
@@ -192,18 +188,9 @@ case "${tracy_mode}" in
     ;;
   cpu)
     nuri_with_tracy="ON"
-    nuri_with_tracy_gpu="OFF"
-    nuri_with_tracy_gpu_draw_zones="OFF"
-    ;;
-  cpu-gpu)
-    nuri_with_tracy="ON"
-    nuri_with_tracy_gpu="ON"
-    nuri_with_tracy_gpu_draw_zones="ON"
     ;;
   off)
     nuri_with_tracy="OFF"
-    nuri_with_tracy_gpu="OFF"
-    nuri_with_tracy_gpu_draw_zones="OFF"
     ;;
 esac
 
@@ -213,8 +200,6 @@ manifest_feature_args=()
 if [[ -n "${manifest_features}" ]]; then
   manifest_feature_args=(-DVCPKG_MANIFEST_FEATURES="${manifest_features}")
 fi
-
-"${script_dir}/bootstrap_lightweightvk.sh"
 
 configure_args=(
   -S "${repo_root}"
@@ -248,8 +233,6 @@ case "${mode}" in
       -DVCPKG_BUILD_TYPE=release
       -DNURI_BUILD_SHARED=ON
       -DNURI_WITH_TRACY="${nuri_with_tracy}"
-      -DNURI_WITH_TRACY_GPU="${nuri_with_tracy_gpu}"
-      -DNURI_WITH_TRACY_GPU_DRAW_ZONES="${nuri_with_tracy_gpu_draw_zones}"
     )
     ;;
   release)
@@ -258,8 +241,6 @@ case "${mode}" in
       -DVCPKG_BUILD_TYPE=release
       -DNURI_BUILD_SHARED=OFF
       -DNURI_WITH_TRACY="${nuri_with_tracy}"
-      -DNURI_WITH_TRACY_GPU="${nuri_with_tracy_gpu}"
-      -DNURI_WITH_TRACY_GPU_DRAW_ZONES="${nuri_with_tracy_gpu_draw_zones}"
     )
     ;;
 esac

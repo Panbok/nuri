@@ -21,8 +21,6 @@ if /I "%~1"=="cpu" (
   set "BUILD_ARGS=%BUILD_ARGS% cpu"
 ) else if /I "%~1"=="--no-build" (
   set "NO_BUILD=1"
-) else if /I "%~1"=="cpu-gpu" (
-  set "BUILD_ARGS=%BUILD_ARGS% cpu-gpu"
 ) else if /I "%~1"=="off" (
   set "BUILD_ARGS=%BUILD_ARGS% off"
 ) else if /I "%~1"=="devchecks" (

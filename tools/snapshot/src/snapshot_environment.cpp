@@ -24,8 +24,6 @@ void applyCommonEnvironment(
   env.loggingEnabled = common.build.loggingEnabled;
   env.assertsEnabled = common.build.assertsEnabled;
   env.tracyEnabled = common.build.tracyEnabled;
-  env.tracyGpuEnabled = common.build.tracyGpuEnabled;
-  env.tracyGpuDrawZonesEnabled = common.build.tracyGpuDrawZonesEnabled;
   env.devChecks = common.build.devChecks;
 }
 
@@ -58,9 +56,6 @@ SnapshotEnvironment collectSnapshotEnvironment(
           .loggingEnabled = NURI_SNAPSHOT_WITH_LOGGING != 0,
           .assertsEnabled = NURI_SNAPSHOT_WITH_ASSERTS != 0,
           .tracyEnabled = NURI_SNAPSHOT_WITH_TRACY != 0,
-          .tracyGpuEnabled = NURI_SNAPSHOT_WITH_TRACY_GPU != 0,
-          .tracyGpuDrawZonesEnabled =
-              NURI_SNAPSHOT_WITH_TRACY_GPU_DRAW_ZONES != 0,
           .devChecks = NURI_SNAPSHOT_DEV_CHECKS != 0,
       });
   applyCommonEnvironment(env, common);

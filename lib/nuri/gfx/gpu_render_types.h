@@ -13,8 +13,7 @@
 
 namespace nuri {
 
-// Buffer dependency spans are capped for graph payload size. LVK has a smaller
-// backend submit array and validates that cap when recording LVK passes; NVRHI
+// Buffer dependency spans are capped to keep graph payloads bounded. The device
 // consumes these as state-transition spans.
 constexpr size_t kMaxDependencyResources = 32;
 constexpr size_t kMaxDependencyBuffers = kMaxDependencyResources;

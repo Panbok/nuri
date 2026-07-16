@@ -265,11 +265,8 @@ preflightProfile(const std::vector<BenchmarkCase> &cases,
     std::string backendSource = "manifest";
     std::string backend = benchmarkCase.backend;
     if (backend == "default") {
-      backend = readProcessEnvironment("NURI_GPU_BACKEND");
-      backendSource = backend.empty() ? "default" : "NURI_GPU_BACKEND";
-      if (backend.empty()) {
-        backend = "nvrhi";
-      }
+      backend = "nvrhi";
+      backendSource = "default";
     }
     std::string presentMode = benchmarkCase.presentMode;
     if (presentMode == "default") {

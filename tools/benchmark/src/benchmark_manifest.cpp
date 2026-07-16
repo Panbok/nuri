@@ -1330,10 +1330,9 @@ loadBenchmarkCaseManifest(const std::filesystem::path &path) {
     return Result<BenchmarkCase, std::string>::makeError(text.error());
   }
   out.backend = std::move(text.value());
-  if (out.backend != "default" && out.backend != "lvk" &&
-      out.backend != "nvrhi") {
+  if (out.backend != "default" && out.backend != "nvrhi") {
     return Result<BenchmarkCase, std::string>::makeError(
-        "$.backend must be default, lvk, or nvrhi");
+        "$.backend must be default or nvrhi");
   }
   text = readString(root, "presentMode", "$", false, out.presentMode);
   if (text.hasError()) {
@@ -1505,7 +1504,7 @@ loadBenchmarkCaseManifest(const std::filesystem::path &path) {
     }
     out.requirements.backends = std::move(array.value());
     for (const std::string &backend : out.requirements.backends) {
-      if (backend != "default" && backend != "lvk" && backend != "nvrhi") {
+      if (backend != "default" && backend != "nvrhi") {
         return Result<BenchmarkCase, std::string>::makeError(
             "requirements.backends contains unsupported backend '" + backend +
             "'");

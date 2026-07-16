@@ -135,6 +135,18 @@ TEST(BaselineProfile, LoadsStrictV1Contract) {
   EXPECT_EQ(loaded.value().sourcePath.filename(), "test-profile.json");
 }
 
+TEST(BaselineProfile, RejectsRemovedGpuProfilingMode) {
+  ProfileDirectory profiles;
+  std::string json = validProfile("removed-gpu-profiling");
+  json.replace(json.find("\"profiling\": \"off\""), 18u,
+               "\"profiling\": \"unsupported\"");
+  profiles.write("removed-gpu-profiling", json);
+
+  auto loaded = loadBaselineProfile(profiles.path(), "removed-gpu-profiling");
+  ASSERT_TRUE(loaded.hasError());
+  EXPECT_NE(loaded.error().find("unsupported value"), std::string::npos);
+}
+
 TEST(BaselineProfile, AcceptsNullableHardwareSelectors) {
   ProfileDirectory profiles;
   std::string json = validProfile("nullable");

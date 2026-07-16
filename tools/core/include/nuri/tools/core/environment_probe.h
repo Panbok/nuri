@@ -28,8 +28,6 @@ struct EnvironmentBuildFacts {
   bool loggingEnabled = false;
   bool assertsEnabled = false;
   bool tracyEnabled = false;
-  bool tracyGpuEnabled = false;
-  bool tracyGpuDrawZonesEnabled = false;
   bool devChecks = false;
 };
 
