@@ -1,6 +1,6 @@
 # nuri
 
-This project uses [LightweightVK](https://github.com/corporateshark/lightweightvk) (LVK) + GLFW on Vulkan. LVK is included as a git submodule at `external/lightweightvk` and is always built as part of the project. GLFW and LVK are hidden behind the platform layer (`lib/nuri/platform`) so app code and public headers stay LVK/GLFW-free.
+This project uses NVRHI + GLFW on Vulkan. NVRHI is included as a git submodule at `external/nvrhi` and is built as part of the project. NVRHI, Vulkan, and GLFW remain private to the platform layer (`lib/nuri/platform`).
 
 ## Prerequisites
 
@@ -10,7 +10,7 @@ This project uses [LightweightVK](https://github.com/corporateshark/lightweightv
 - CMake 3.29+
 - Ninja
 - Clang (recommended; the provided scripts use `clang`/`clang++`)
-- vcpkg (used for `glm` and `assimp`)
+- vcpkg (used for third-party packages)
 
 ## Windows (PowerShell)
 
@@ -23,7 +23,7 @@ git submodule update --init --recursive   # safe to re-run
 # Point to your vcpkg installation
 $env:VCPKG_ROOT = "E:\install\vcpkg"   # adjust
 
-# Build + run app (debug by default; bootstraps LVK deps automatically)
+# Build + run app (debug by default)
 .\scripts\run_app.bat
 
 # Build + run editor
@@ -59,7 +59,7 @@ Notes for RenderDoc:
 - Use `FIFO` present mode for RenderDoc captures. `IMMEDIATE` present mode can trigger a RenderDoc-only `VK_ERROR_DEVICE_LOST` during frame pacing / swapchain synchronization.
 - If you capture the sample app instead of the editor, launch `E:\install\nuri\build\release\nuri_app.exe` from the same shell after setting the same environment variables.
 - `NURI_VK_VALIDATION=1` enables Vulkan validation in Release builds for capture sessions.
-- `NURI_VK_SYNC_VALIDATION=1` enables synchronization validation in LVK and is useful for debugging swapchain / submit ordering issues.
+- `NURI_VK_SYNC_VALIDATION=1` enables Vulkan synchronization validation and is useful for debugging swapchain / submit ordering issues.
 - `NURI_VK_DIAGNOSTICS=1` enables extra submit / present logging in the Vulkan backend.
 - In RenderDoc, disable `DebugOutputMute` if you want validation-layer messages to appear in the app log during capture.
 
@@ -93,7 +93,7 @@ Benchmarks:
 .\scripts\run_benchmarks.bat release off --suite stress --artifact-dir artifacts\bench\stress --html-out artifacts\bench\stress\index.html
 
 # Run a diagnostic benchmark-owned Tracy capture
-.\scripts\run_benchmarks.bat release cpu-gpu run --case smoke.procedural.default --tracy-diagnostic --artifact-dir artifacts\bench\tracy-smoke
+.\scripts\run_benchmarks.bat release cpu run --case smoke.procedural.default --tracy-diagnostic --artifact-dir artifacts\bench\tracy-smoke
 
 # Compare a report with a saved baseline
 .\scripts\run_benchmarks.bat release off compare --current artifacts\bench\current.json --baseline path\to\baseline.json --json-out artifacts\bench\comparison.json --html-out artifacts\bench\comparison.html
@@ -217,7 +217,7 @@ Benchmarks:
 ./scripts/run_benchmarks.sh release off --suite stress --artifact-dir artifacts/bench/stress --html-out artifacts/bench/stress/index.html
 
 # Run a diagnostic benchmark-owned Tracy capture
-./scripts/run_benchmarks.sh release cpu-gpu run --case smoke.procedural.default --tracy-diagnostic --artifact-dir artifacts/bench/tracy-smoke
+./scripts/run_benchmarks.sh release cpu run --case smoke.procedural.default --tracy-diagnostic --artifact-dir artifacts/bench/tracy-smoke
 
 # Compare a report with a saved baseline
 ./scripts/run_benchmarks.sh release off compare --current artifacts/bench/current.json --baseline path/to/baseline.json --json-out artifacts/bench/comparison.json --html-out artifacts/bench/comparison.html
@@ -239,8 +239,6 @@ HTML graphs include all numeric metrics by default, grouped by CPU timings, GPU 
 
 ## Notes
 
-- LVK’s bootstrap downloads and builds third-party deps into `external/lightweightvk/third-party/deps` (first run can take a while).
-- The warning about Python packages `paramiko`/`scp` can be ignored; they’re only needed for optional bootstrap features.
 - Target-specific scripts configure a minimal build tree per mode and target set. Debug `app` uses `build/`, other Debug profiles use `build_<target>/`, and Release profiles use `build_release/<target>/`.
 - `build_debug`/`build_release` remain as compatibility wrappers and default to the `app` profile.
 
@@ -248,6 +246,6 @@ HTML graphs include all numeric metrics by default, grouped by CPU timings, GPU 
 
 - `app/` sample application using engine APIs
 - `lib/nuri/platform/` platform-facing abstractions (Window, GPUDevice)
-- `lib/nuri/gfx/` renderer and pipeline/shader front-end (LVK-free)
+- `lib/nuri/gfx/` backend-neutral renderer and pipeline/shader front-end
 - `lib/nuri/resources/` CPU/GPU asset types
-- `external/lightweightvk/` LVK submodule
+- `external/nvrhi/` NVRHI submodule

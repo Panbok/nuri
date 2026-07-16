@@ -43,7 +43,7 @@ Tracy is a benchmark diagnostic artifact, not a separate first-choice workflow.
   `--html-out`, plus optional `--html-metric` and `--html-stat` filters.
 - For a diagnostic trace, build/run with Tracy enabled and ask the benchmark to
   own the capture:
-  `scripts/run_benchmarks.bat release cpu-gpu run --case <id> --tracy-diagnostic --artifact-dir artifacts/bench/<run-id>`.
+  `scripts/run_benchmarks.bat release cpu run --case <id> --tracy-diagnostic --artifact-dir artifacts/bench/<run-id>`.
 - Visual correctness is still separate: run `nuri-snapshot run` after renderer
   changes. Do not approve visual baselines unless explicitly asked.
 

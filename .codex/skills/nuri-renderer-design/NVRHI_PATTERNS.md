@@ -40,12 +40,12 @@ and direct-hot-loop requirements.
 - `TextureUsage` encodes combination enumerants instead of orthogonal flags.
 - `RenderPipelineDesc` has both a format vector and attachment count.
 - `TextureDesc`/`BufferDesc` mix structural creation with upload policy/data.
-- Render graph barriers, adapter dependency inference, and NVRHI automatic barriers
+- Render graph barriers, implementation dependency inference, and NVRHI automatic barriers
   are competing state authorities.
 - Barrier records are too coarse and transition all texture subresources.
-- Both adapters duplicate recording-context, submission, timing, validation,
-  geometry, and resource-table plumbing.
-- NVRHI adapter creates command-list objects per acquired context and locks a global
+- The NVRHI implementation still combines recording-context, submission, timing,
+  validation, geometry, and resource-table plumbing.
+- The NVRHI implementation creates command-list objects per acquired context and locks a global
   graphics mutex across pass encoding.
 - NVRHI owning handles are copied in draw encoding. Do not assume those copies are
   material: a 2026-07-15 raw borrowed-pointer experiment regressed the local route
@@ -70,8 +70,8 @@ lifecycle and hide substantial implementation.
 
 ## Backend representation
 
-Prefer factory-only exposure for `LvkGPUDevice` and `NvrhiGPUDevice`. Define concrete
-final adapters and direct state in private backend headers, then split their source by
-domain like NVRHI. This removes redundant public declarations/PIMPL objects while
-preserving third-party dependency hiding. It is primarily a locality and build-shape
-change; benchmark runtime separately.
+Prefer factory-only exposure for the concrete `NvrhiGPUDevice`. Define its final
+state in private implementation headers, then split source by domain where that
+deepens lifecycle ownership. This removes redundant public declarations while
+preserving third-party dependency hiding. It is primarily a locality and
+build-shape change; benchmark runtime separately.

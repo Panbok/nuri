@@ -2,10 +2,10 @@
 
 ## Purpose
 
-Nuri is a correctness-first, performance-critical renderer with runtime-selectable
-LVK and NVRHI backends. The renderer should expose a small number of deep,
-data-oriented modules. Backend details remain private, while higher layers operate
-on Nuri descriptors, typed handles, compiled frame plans, and submission tokens.
+Nuri is a correctness-first, performance-critical renderer implemented on NVRHI.
+The renderer exposes a small number of deep, data-oriented modules. NVRHI details
+remain private, while higher layers operate on Nuri descriptors, typed handles,
+compiled frame plans, and submission tokens.
 
 The governing renderer rules live in
 `.codex/skills/nuri-renderer-design/SKILL.md`. The current migration is specified
@@ -40,7 +40,7 @@ in `docs/renderer_refactor_plan.md` and
 - **Pipeline library**: canonical immutable pipeline and variant ownership outside
   frame encoding.
 - **Validation layer**: optional debug/contract validation before hot lowering.
-- **Backend adapter**: private concrete lowering of Nuri operations to LVK or
+- **NVRHI implementation**: private concrete lowering of Nuri operations to
   NVRHI. It is not a public renderer domain type.
 
 ## Authoritative representations
@@ -74,7 +74,7 @@ Application loop
      -> UploadQueue
      -> GpuRetirementQueue
      -> PipelineLibrary
-        -> private LVK backend | private NVRHI backend
+        -> private NVRHI implementation
 ```
 
 These are deep modules, not one interface per method. The backend seam is crossed
@@ -125,12 +125,11 @@ through extra ownership or allocation for each draw.
 - The canonical stress workload is the full Niagara Bistro rapid route with
   Reference TAA Ultra, GTAO Ultra, and shadows Ultra.
 
-## Current migration constraints
+## Current implementation constraints
 
-- LVK remains supported while NVRHI matures.
+- NVRHI is the sole GPU implementation; there is no runtime backend selection.
 - The render graph's submission-based transient retirement is the proven lifetime
   model to generalize.
 - Existing microbenchmarks remain isolated; the full-pipeline route supplements
   rather than replaces them.
 - Large modules are split through verified vertical slices, not a flag-day rewrite.
-

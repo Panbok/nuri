@@ -15,7 +15,7 @@ Triage uses the standard five-role label vocabulary. See `docs/agents/triage-lab
 This is a single-context repository with root domain docs and ADRs. See `docs/agents/domain.md`.
 
 ## Project intent
-- This codebase builds a renderer on top of LVK (LightweightVK). Keep LVK usage behind clean abstractions where it makes sense so higher-level code is not tightly coupled to the backend.
+- This codebase builds a renderer on NVRHI. Keep NVRHI types private so higher-level code depends on Nuri's typed descriptors, handles, and submission contracts.
 - Correctness is the top priority, with performance as a critical constraint to be optimized after correctness is ensured. Optimize throughput and frame time only once behavior is correct.
 
 ## C++ and memory
@@ -43,9 +43,8 @@ This is a single-context repository with root domain docs and ADRs. See `docs/ag
 
 ## Profiling (Tracy)
 - Prefer measuring before optimizing. Use `nuri-bench` as the primary renderer performance oracle and Tracy as a benchmark-owned diagnostic artifact.
-- Enable profiling through the build/run scripts with `cpu` or `cpu-gpu`; do not invoke CMake directly.
+- Enable CPU profiling through the build/run scripts with `cpu`; do not invoke CMake directly.
 - Instrument with `lib/nuri/core/profiling.h` macros and keep zones coarse and meaningful before drilling down.
-- Per-draw Tracy GPU zones are diagnostic-only and must not be enabled for authoritative benchmark gates.
 
 ## Logging
 - `fatal`: use for paths that will crash or abort the app.
@@ -56,5 +55,5 @@ This is a single-context repository with root domain docs and ADRs. See `docs/ag
 
 ## Naming conventions
 - `ModelData` is CPU-side asset data; `Model` is the GPU/renderable object.
-- `Buffer` and `Texture` refer to GPU resources (wrapping LVK handles), not raw data containers.
+- `Buffer` and `Texture` refer to GPU resources, not raw data containers.
 
