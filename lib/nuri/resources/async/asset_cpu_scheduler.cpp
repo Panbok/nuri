@@ -18,7 +18,9 @@ resolveWorkerCount(const AssetCpuSchedulerConfig &config) noexcept {
     return config.workerCount;
   }
   const uint32_t hardware = std::thread::hardware_concurrency();
-  return std::max(1u, hardware > 2u ? hardware - 2u : 1u);
+  return std::max(1u, hardware > config.reservedLogicalThreads
+                          ? hardware - config.reservedLogicalThreads
+                          : 1u);
 }
 
 [[nodiscard]] size_t priorityIndex(AssetPriority priority) noexcept {
@@ -28,7 +30,7 @@ resolveWorkerCount(const AssetCpuSchedulerConfig &config) noexcept {
 
 [[nodiscard]] size_t workClassIndex(AssetWorkClass workClass) noexcept {
   return std::min(static_cast<size_t>(workClass),
-                  static_cast<size_t>(AssetWorkClass::Metadata));
+                  static_cast<size_t>(AssetWorkClass::GpuMaterialization));
 }
 
 } // namespace
@@ -36,6 +38,11 @@ resolveWorkerCount(const AssetCpuSchedulerConfig &config) noexcept {
 AssetCpuScheduler::AssetCpuScheduler(AssetCpuSchedulerConfig config)
     : config_(config) {
   config_.workerCount = resolveWorkerCount(config_);
+  config_.interactiveWorkerCount = std::clamp(
+      config_.interactiveWorkerCount == 0u ? config_.workerCount
+                                           : config_.interactiveWorkerCount,
+      1u, config_.workerCount);
+  activeWorkerLimit_ = config_.workerCount;
   config_.maxInFlightJobs = std::max(config_.maxInFlightJobs, 1u);
   config_.maxInFlightBytes = std::max(config_.maxInFlightBytes, 1ull);
   const auto resolveConcurrency = [this](uint32_t requested) {
@@ -48,14 +55,14 @@ AssetCpuScheduler::AssetCpuScheduler(AssetCpuSchedulerConfig config)
       resolveConcurrency(config_.cookConcurrency),
       resolveConcurrency(config_.transcodeConcurrency),
       resolveConcurrency(config_.metadataConcurrency),
+      resolveConcurrency(config_.gpuMaterializationConcurrency),
   };
   workers_.reserve(config_.workerCount);
   for (uint32_t workerIndex = 0u; workerIndex < config_.workerCount;
        ++workerIndex) {
-    workers_.emplace_back(
-        [this, workerIndex](std::stop_token stopToken) {
-          workerMain(stopToken, workerIndex);
-        });
+    workers_.emplace_back([this, workerIndex](std::stop_token stopToken) {
+      workerMain(stopToken, workerIndex);
+    });
   }
 }
 
@@ -135,9 +142,8 @@ bool AssetCpuScheduler::setPriority(AssetCpuTaskHandle handle,
 
   for (auto &queue : queues_) {
     auto jobIt = std::find_if(
-        queue.begin(), queue.end(), [handle](const QueuedJob &queued) {
-          return queued.handle == handle;
-        });
+        queue.begin(), queue.end(),
+        [handle](const QueuedJob &queued) { return queued.handle == handle; });
     if (jobIt == queue.end()) {
       continue;
     }
@@ -152,6 +158,16 @@ bool AssetCpuScheduler::setPriority(AssetCpuTaskHandle handle,
 
   control->priority = priority;
   return true;
+}
+
+void AssetCpuScheduler::setInteractiveMode(bool enabled) {
+  {
+    std::lock_guard lock(mutex_);
+    interactiveMode_ = enabled;
+    activeWorkerLimit_ =
+        enabled ? config_.interactiveWorkerCount : config_.workerCount;
+  }
+  workCv_.notify_all();
 }
 
 void AssetCpuScheduler::requestStop() {
@@ -193,15 +209,16 @@ void AssetCpuScheduler::requestStop() {
 
 void AssetCpuScheduler::waitIdle() {
   std::unique_lock lock(mutex_);
-  idleCv_.wait(lock, [this] {
-    return queuedJobs_ == 0u && runningJobs_ == 0u;
-  });
+  idleCv_.wait(lock,
+               [this] { return queuedJobs_ == 0u && runningJobs_ == 0u; });
 }
 
 AssetCpuSchedulerStats AssetCpuScheduler::stats() const {
   std::lock_guard lock(mutex_);
   return AssetCpuSchedulerStats{
       .workerCount = config_.workerCount,
+      .activeWorkerLimit = activeWorkerLimit_,
+      .interactiveMode = interactiveMode_,
       .queuedJobs = queuedJobs_,
       .runningJobs = runningJobs_,
       .inFlightBytes = inFlightBytes_,
@@ -219,13 +236,15 @@ bool AssetCpuScheduler::hasQueuedJobsLocked() const noexcept {
 }
 
 bool AssetCpuScheduler::hasRunnableJobLocked() const noexcept {
+  if (runningJobs_ >= activeWorkerLimit_) {
+    return false;
+  }
   for (const auto &queue : queues_) {
     for (const QueuedJob &queued : queue) {
       const size_t classIndex = workClassIndex(queued.job.workClass);
-      if (runningByClass_[classIndex] <
-              concurrencyByClass_[classIndex] &&
+      if (runningByClass_[classIndex] < concurrencyByClass_[classIndex] &&
           queued.job.estimatedBytes <=
-          config_.maxInFlightBytes - inFlightBytes_) {
+              config_.maxInFlightBytes - inFlightBytes_) {
         return true;
       }
     }
@@ -234,15 +253,16 @@ bool AssetCpuScheduler::hasRunnableJobLocked() const noexcept {
 }
 
 AssetCpuScheduler::QueuedJob AssetCpuScheduler::popNextJobLocked() {
+  NURI_ASSERT(runningJobs_ < activeWorkerLimit_,
+              "AssetCpuScheduler::popNextJobLocked: worker limit reached");
   for (auto &queue : queues_) {
     auto jobIt = std::find_if(
         queue.begin(), queue.end(), [this](const QueuedJob &queued) {
-          const size_t classIndex =
-              workClassIndex(queued.job.workClass);
+          const size_t classIndex = workClassIndex(queued.job.workClass);
           return runningByClass_[classIndex] <
                      concurrencyByClass_[classIndex] &&
                  queued.job.estimatedBytes <=
-                 config_.maxInFlightBytes - inFlightBytes_;
+                     config_.maxInFlightBytes - inFlightBytes_;
         });
     if (jobIt == queue.end()) {
       continue;
@@ -261,18 +281,15 @@ AssetCpuScheduler::QueuedJob AssetCpuScheduler::popNextJobLocked() {
 
 void AssetCpuScheduler::workerMain(std::stop_token stopToken,
                                    uint32_t workerIndex) {
-  const std::string threadName =
-      "Asset CPU " + std::to_string(workerIndex);
+  const std::string threadName = "Asset CPU " + std::to_string(workerIndex);
   NURI_PROFILER_THREAD(threadName.c_str());
   while (!stopToken.stop_requested()) {
     QueuedJob queued{};
     {
       std::unique_lock lock(mutex_);
-      workCv_.wait(lock, stopToken, [this] {
-        return stopping_ || hasRunnableJobLocked();
-      });
-      if (stopToken.stop_requested() ||
-          (stopping_ && !hasQueuedJobsLocked())) {
+      workCv_.wait(lock, stopToken,
+                   [this] { return stopping_ || hasRunnableJobLocked(); });
+      if (stopToken.stop_requested() || (stopping_ && !hasQueuedJobsLocked())) {
         break;
       }
       queued = popNextJobLocked();
@@ -309,8 +326,7 @@ void AssetCpuScheduler::workerMain(std::stop_token stopToken,
       --runningByClass_[classIndex];
       inFlightBytes_ -= queued.job.estimatedBytes;
       controls_.erase(queued.handle.value);
-      if (cancelledBeforeRun ||
-          queued.control->stop.stop_requested()) {
+      if (cancelledBeforeRun || queued.control->stop.stop_requested()) {
         ++cancelledJobs_;
       } else {
         ++completedJobs_;

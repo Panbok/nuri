@@ -114,8 +114,16 @@ StreamingSceneState::operator=(StreamingSceneState &&other) noexcept {
   renderableId = std::exchange(other.renderableId, kInvalidRenderableId);
   baseModel = other.baseModel;
   configured = std::exchange(other.configured, false);
+  baseConfigured = std::exchange(other.baseConfigured, false);
+  populationComplete = std::exchange(other.populationComplete, false);
+  cameraConfigured = std::exchange(other.cameraConfigured, false);
+  lightingConfigured = std::exchange(other.lightingConfigured, false);
   loadFailed = std::exchange(other.loadFailed, false);
   loadError = std::move(other.loadError);
+  populationCursor = std::exchange(other.populationCursor, 0u);
+  populationProgress = std::exchange(other.populationProgress, 0.0f);
+  graphCapacityReservation = other.graphCapacityReservation;
+  other.graphCapacityReservation = {};
   textureArtifactBakeQueued =
       std::exchange(other.textureArtifactBakeQueued, false);
   loadStartTimeSeconds = std::exchange(other.loadStartTimeSeconds, 0.0);
@@ -135,8 +143,15 @@ void StreamingSceneState::release() noexcept {
   renderableId = kInvalidRenderableId;
   baseModel = glm::mat4(1.0f);
   configured = false;
+  baseConfigured = false;
+  populationComplete = false;
+  cameraConfigured = false;
+  lightingConfigured = false;
   loadFailed = false;
   loadError.clear();
+  populationCursor = 0u;
+  populationProgress = 0.0f;
+  graphCapacityReservation = {};
   assets = nullptr;
   textureArtifactBakeQueued = false;
   loadStartTimeSeconds = 0.0;
@@ -159,8 +174,9 @@ Result<void, std::string> prepareImportedPrefabSceneResources(
       .path = modelPath.string(),
       .importOptions = SceneImportOptions{.assetBuildOptions = importOptions},
       .priority = AssetPriority::Critical,
-      .publication = ScenePublicationPolicy::Progressive,
+      .publication = ScenePublicationPolicy::CompleteOnly,
       .failurePolicy = SceneFailurePolicy::BestEffort,
+      .publicationTarget = runtime.scenePublicationTarget(),
       .debugName = std::string(sceneName),
   });
   if (requested.hasError()) {
@@ -315,31 +331,7 @@ queueSceneTextureArtifactBake(EditorRuntime &runtime,
   if (queuedFlag) {
     return;
   }
-  bakery::BakerySystem *bakery = runtime.bakery();
-  if (bakery == nullptr) {
-    NURI_LOG_WARNING(
-        "queueSceneTextureArtifactBakeIfNeeded: bakery system is unavailable "
-        "for '%s'",
-        sourcePath.string().c_str());
-    return;
-  }
-  auto enqueueResult = bakery->enqueue(
-      bakery::BakeRequest{bakery::SceneTextureArtifactsBakeRequest{
-          .scenePath = sourcePath,
-          .prebuildNativeTargets =
-              {
-                  bakery::SceneTextureArtifactTarget::BC7,
-              },
-          .forceRebuild = false,
-      }});
-  if (enqueueResult.hasError()) {
-    NURI_LOG_WARNING(
-        "queueSceneTextureArtifactBakeIfNeeded: failed to queue scene texture "
-        "artifact bake for '%s': %s",
-        sourcePath.string().c_str(), enqueueResult.error().c_str());
-    return;
-  }
-  queuedFlag = true;
+  queuedFlag = runtime.deferSceneTextureArtifactBake(sourcePath);
 }
 
 void queueSceneTextureArtifactBakeIfNeeded(

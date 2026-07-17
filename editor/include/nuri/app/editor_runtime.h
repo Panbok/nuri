@@ -15,7 +15,9 @@
 #include "nuri/ui/editor_overlay_controller.h"
 #include "nuri/ui/editor_services.h"
 
+#include <chrono>
 #include <cstdint>
+#include <deque>
 #include <limits>
 #include <memory>
 #include <memory_resource>
@@ -61,21 +63,17 @@ public:
   [[nodiscard]] const Application &app() const noexcept { return app_; }
   [[nodiscard]] ResourceManager &resources();
   [[nodiscard]] AssetSystem &assets();
-  [[nodiscard]] RenderScene &scene() noexcept { return scene_; }
-  [[nodiscard]] SceneRuntimeHost &sceneRuntime() noexcept {
-    return sceneRuntime_;
-  }
+  [[nodiscard]] RenderScene &scene() noexcept;
+  [[nodiscard]] SceneRuntimeHost &sceneRuntime() noexcept;
   [[nodiscard]] CameraSystem &cameraSystem() noexcept { return cameraSystem_; }
   [[nodiscard]] bakery::BakerySystem *bakery() noexcept {
     return bakerySystem_.get();
   }
   [[nodiscard]] TextSystem *textSystem() noexcept { return textSystem_.get(); }
-  [[nodiscard]] RenderSettings &renderSettings() noexcept {
-    return renderSettings_;
-  }
-  [[nodiscard]] const RenderSettings &renderSettings() const noexcept {
-    return renderSettings_;
-  }
+  [[nodiscard]] RenderSettings &renderSettings() noexcept;
+  [[nodiscard]] const RenderSettings &renderSettings() const noexcept;
+  [[nodiscard]] ScenePublicationTargetHandle
+  scenePublicationTarget() const noexcept;
   [[nodiscard]] CameraHandle mainCameraHandle() const noexcept {
     return mainCameraHandle_;
   }
@@ -89,6 +87,9 @@ public:
   [[nodiscard]] RenderFrameContext &frameContext() noexcept {
     return frameContext_;
   }
+  [[nodiscard]] bool lastFrameOutputAvailable() const noexcept {
+    return lastFrameOutputAvailable_;
+  }
   [[nodiscard]] SceneEditorSelectionState &selectionState() noexcept {
     return sceneEditorSelectionState_;
   }
@@ -99,6 +100,7 @@ public:
   void syncEditorCameraWidgetState(const Camera &camera);
   void syncSceneSelectionUi(const EditorSceneCatalog &catalog);
   [[nodiscard]] std::optional<std::string> takeSceneSelectionRequest();
+  [[nodiscard]] bool takeSceneCancelRequest();
 
   void resetSceneState();
   void finalizeSceneLighting(std::span<const ImportedSceneLight> fallbackLights,
@@ -146,8 +148,46 @@ public:
   void logSingleRenderableSceneStats(std::string_view sceneName,
                                      const Model &model,
                                      const FramedSceneCameraState &cameraState);
+  void resetSceneCameraController();
+  // Scene factories call this while authoring either the active or staging
+  // document. Staging requests are held until after atomic activation so the
+  // bakery cannot compete with the critical transition path.
+  [[nodiscard]] bool
+  deferSceneTextureArtifactBake(const std::filesystem::path &sourcePath);
 
 private:
+  friend class EditorSceneCatalog;
+  struct EditorSceneDocument;
+
+  class SceneDocumentScope final {
+  public:
+    ~SceneDocumentScope();
+    SceneDocumentScope(const SceneDocumentScope &) = delete;
+    SceneDocumentScope &operator=(const SceneDocumentScope &) = delete;
+    SceneDocumentScope(SceneDocumentScope &&other) noexcept;
+    SceneDocumentScope &operator=(SceneDocumentScope &&) = delete;
+
+  private:
+    friend class EditorRuntime;
+    SceneDocumentScope(EditorRuntime &runtime, EditorSceneDocument *document);
+    EditorRuntime *runtime_ = nullptr;
+    EditorSceneDocument *previous_ = nullptr;
+  };
+
+  [[nodiscard]] EditorSceneDocument &currentDocument() noexcept;
+  [[nodiscard]] const EditorSceneDocument &currentDocument() const noexcept;
+  [[nodiscard]] SceneDocumentScope useActiveSceneDocument();
+  [[nodiscard]] SceneDocumentScope useStagingSceneDocument();
+  [[nodiscard]] Result<void, std::string> beginStagingSceneDocument();
+  [[nodiscard]] Result<bool, std::string> finalizeStagingSceneDocument();
+  [[nodiscard]] bool activateStagingSceneDocument();
+  void retireStagingSceneDocument();
+  void tickRetiringSceneDocuments();
+  void tickDeferredSceneTextureArtifactBakes();
+  [[nodiscard]] ScenePublicationTargetSnapshot
+  stagingScenePublicationSnapshot();
+  void bindActiveSceneServices();
+
   void initializeCamera();
   void initializeTextSystem();
   void initializeEditorRenderFeature();
@@ -155,6 +195,7 @@ private:
   void removeEditorOverlay();
   void toggleEditorOverlay();
   void updateMetrics(double deltaTime);
+  void recordFrameOutput();
   void buildFrameContext(const Camera &camera, double timeSeconds);
   void submitPipelineFrame();
   void enqueueDebugShadowInspectProbe();
@@ -172,16 +213,20 @@ private:
 
   Application &app_;
   const RuntimeConfig config_;
-  // EditorRuntime keeps cameraMemory_, sceneMemory_, and pipelineMemory_ as
+  // EditorRuntime keeps cameraMemory_ and pipelineMemory_ as
   // unsynchronized_pool_resource instances; they are main-thread-only.
   std::pmr::unsynchronized_pool_resource cameraMemory_;
-  std::pmr::unsynchronized_pool_resource sceneMemory_;
   std::pmr::unsynchronized_pool_resource pipelineMemory_;
   CameraSystem cameraSystem_;
-  RenderScene scene_;
-  SceneRuntimeHost sceneRuntime_;
+  std::unique_ptr<EditorSceneDocument> activeDocument_{};
+  std::unique_ptr<EditorSceneDocument> stagingDocument_{};
+  std::deque<std::unique_ptr<EditorSceneDocument>> retiringDocuments_{};
+  std::deque<std::filesystem::path> deferredSceneTextureArtifactBakes_{};
+  std::chrono::steady_clock::time_point backgroundWorkResumeTime_{};
+  EditorSceneDocument *callbackDocument_ = nullptr;
   SceneEditorSelectionState sceneEditorSelectionState_{};
   std::unique_ptr<AnimationGpuServices> animationGpuServices_{};
+  AnimationSceneFrameProvider *animationFrameProvider_ = nullptr;
   std::unique_ptr<EditorAnimationPlayerService> animationPlayerService_{};
   std::unique_ptr<bakery::BakerySystem> bakerySystem_{};
   std::unique_ptr<TextSystem> textSystem_{};
@@ -194,11 +239,10 @@ private:
   // Non-owning observer; the render pipeline owns the EditorOverlayFeature.
   EditorOverlayFeature *editorRenderFeature_ = nullptr;
   CameraHandle mainCameraHandle_{};
-  // Persistent user-configured render settings exposed through accessors.
-  RenderSettings renderSettings_{};
   // Transient per-frame render settings after frame-local overrides.
   RenderSettings frameRenderSettings_{};
   RenderFrameContext frameContext_{};
+  bool lastFrameOutputAvailable_ = false;
   TemporalFrameService temporalFrameService_{};
   uint64_t frameIndex_ = 0;
   uint64_t simulationFrameIndex_ = 0;
@@ -213,9 +257,7 @@ private:
   double fpsAccumulatorSeconds_ = 0.0;
   uint32_t fpsFrameCount_ = 0;
   float currentFps_ = 0.0f;
-  bool text3DEnabled_ = false;
   bool textOverlayEnabled_ = false;
-  bool sceneHasAuthoredLights_ = false;
   EnvironmentAssetHandle sharedEnvironmentLoad_{};
 };
 

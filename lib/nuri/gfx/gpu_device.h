@@ -1,9 +1,11 @@
 #pragma once
 
 #include <cstddef>
+#include <memory>
 #include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "nuri/core/result.h"
 #include "nuri/core/window.h"
@@ -13,6 +15,43 @@
 #include "nuri/gfx/gpu_types.h"
 
 namespace nuri {
+
+// Backend-private buffer allocation produced off the render thread. Prepared
+// buffers do not enter public handle tables until the render thread publishes
+// them, so driver allocation cannot stall editor event processing.
+class NURI_API PreparedGpuBuffer {
+public:
+  virtual ~PreparedGpuBuffer() = default;
+
+  PreparedGpuBuffer(const PreparedGpuBuffer &) = delete;
+  PreparedGpuBuffer &operator=(const PreparedGpuBuffer &) = delete;
+  PreparedGpuBuffer(PreparedGpuBuffer &&) = delete;
+  PreparedGpuBuffer &operator=(PreparedGpuBuffer &&) = delete;
+
+protected:
+  PreparedGpuBuffer() = default;
+};
+
+// Backend-private texture allocation produced off the render thread. The
+// object deliberately exposes no native API types; only the originating
+// GPUDevice may publish or discard it.
+class NURI_API PreparedGpuTexture {
+public:
+  virtual ~PreparedGpuTexture() = default;
+
+  PreparedGpuTexture(const PreparedGpuTexture &) = delete;
+  PreparedGpuTexture &operator=(const PreparedGpuTexture &) = delete;
+  PreparedGpuTexture(PreparedGpuTexture &&) = delete;
+  PreparedGpuTexture &operator=(PreparedGpuTexture &&) = delete;
+
+protected:
+  PreparedGpuTexture() = default;
+};
+
+struct PreparedBufferRequest {
+  BufferDesc desc{};
+  std::string_view debugName{};
+};
 
 struct TextureReadbackRegion {
   uint32_t x = 0;
@@ -84,8 +123,55 @@ public:
   // Resource creation
   virtual Result<BufferHandle, std::string>
   createBuffer(const BufferDesc &desc, std::string_view debugName = {}) = 0;
+  // Optional two-phase path for streaming and inactive renderer preparation.
+  // prepareBuffer may run on a resource worker and must not mutate public Nuri
+  // handle tables. Publication is render-thread-only and intentionally small.
+  [[nodiscard]] virtual bool
+  supportsBackgroundBufferPreparation() const noexcept {
+    return false;
+  }
+  virtual Result<std::unique_ptr<PreparedGpuBuffer>, std::string>
+  prepareBuffer(const BufferDesc &, std::string_view = {}) {
+    return Result<std::unique_ptr<PreparedGpuBuffer>, std::string>::makeError(
+        "background buffer preparation is unsupported");
+  }
+  virtual Result<BufferHandle, std::string>
+  publishPreparedBuffer(std::unique_ptr<PreparedGpuBuffer>) {
+    return Result<BufferHandle, std::string>::makeError(
+        "prepared buffer publication is unsupported");
+  }
+  // A batch is indivisible with respect to upload submission. This is used by
+  // compound assets whose buffers must share one residency fence.
+  [[nodiscard]] virtual bool
+  supportsBackgroundBufferBatchPreparation() const noexcept {
+    return false;
+  }
+  virtual Result<std::vector<std::unique_ptr<PreparedGpuBuffer>>, std::string>
+  prepareBufferBatch(std::span<const PreparedBufferRequest>) {
+    return Result<std::vector<std::unique_ptr<PreparedGpuBuffer>>,
+                  std::string>::
+        makeError("background buffer batch preparation is unsupported");
+  }
   virtual Result<TextureHandle, std::string>
   createTexture(const TextureDesc &desc, std::string_view debugName = {}) = 0;
+  // Optional two-phase path for asset streaming. prepareTexture may run on a
+  // dedicated resource worker and must not mutate public Nuri handle tables.
+  // publishPreparedTexture is render-thread-only and performs the bounded
+  // handle/descriptor adoption step.
+  [[nodiscard]] virtual bool
+  supportsBackgroundTexturePreparation() const noexcept {
+    return false;
+  }
+  virtual Result<std::unique_ptr<PreparedGpuTexture>, std::string>
+  prepareTexture(const TextureDesc &, std::string_view = {}) {
+    return Result<std::unique_ptr<PreparedGpuTexture>, std::string>::makeError(
+        "background texture preparation is unsupported");
+  }
+  virtual Result<TextureHandle, std::string>
+  publishPreparedTexture(std::unique_ptr<PreparedGpuTexture>) {
+    return Result<TextureHandle, std::string>::makeError(
+        "prepared texture publication is unsupported");
+  }
   virtual Result<TextureHandle, std::string>
   createFramebufferTexture(const TextureDesc &desc,
                            std::string_view debugName = {}) = 0;
@@ -229,6 +315,19 @@ public:
   allocateGeometry(std::span<const std::byte> vertexBytes, uint32_t vertexCount,
                    std::span<const std::byte> indexBytes, uint32_t indexCount,
                    std::string_view debugName = {}) = 0;
+  // Optional publication seam for geometry whose immutable vertex/index
+  // buffers were prepared on a resource worker. Ownership of both buffers is
+  // transferred to the geometry pool only when publication succeeds.
+  [[nodiscard]] virtual bool
+  supportsBackgroundGeometryPreparation() const noexcept {
+    return false;
+  }
+  virtual Result<GeometryAllocationHandle, std::string>
+  adoptPreparedGeometry(BufferHandle, size_t, uint32_t, BufferHandle, size_t,
+                        uint32_t, std::string_view = {}) {
+    return Result<GeometryAllocationHandle, std::string>::makeError(
+        "prepared geometry publication is unsupported");
+  }
   virtual void releaseGeometry(GeometryAllocationHandle h) = 0;
   virtual Result<SubmissionHandle, std::string>
   submitBackgroundBufferCopies(std::span<const BufferCopyRegion> regions,

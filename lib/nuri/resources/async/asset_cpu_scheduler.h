@@ -33,11 +33,19 @@ enum class AssetWorkClass : uint8_t {
   Cook,
   Transcode,
   Metadata,
+  GpuMaterialization,
   Count,
 };
 
 struct AssetCpuSchedulerConfig {
   uint32_t workerCount = 0u;
+  // Auto-sized pools leave this many logical processors for the editor,
+  // render submission, driver, and OS.
+  uint32_t reservedLogicalThreads = 4u;
+  // Zero keeps the resolved worker pool available while interactive loading is
+  // active. Set an explicit lower value only when a measured workload needs an
+  // additional admission limit beyond reservedLogicalThreads.
+  uint32_t interactiveWorkerCount = 0u;
   uint32_t maxInFlightJobs = 4096u;
   uint64_t maxInFlightBytes = 512ull * 1024ull * 1024ull;
   uint32_t ioConcurrency = 0u;
@@ -45,12 +53,15 @@ struct AssetCpuSchedulerConfig {
   uint32_t cookConcurrency = 0u;
   uint32_t transcodeConcurrency = 1u;
   uint32_t metadataConcurrency = 0u;
+  // GPU driver allocation is isolated from the render thread and serialized
+  // unless a backend-specific design proves a wider safe concurrency.
+  uint32_t gpuMaterializationConcurrency = 1u;
 };
 
 struct AssetCpuTaskHandle {
   uint64_t value = 0u;
-  constexpr bool operator==(const AssetCpuTaskHandle &) const noexcept =
-      default;
+  constexpr bool
+  operator==(const AssetCpuTaskHandle &) const noexcept = default;
 };
 
 struct AssetCpuJob {
@@ -64,6 +75,8 @@ struct AssetCpuJob {
 
 struct AssetCpuSchedulerStats {
   uint32_t workerCount = 0u;
+  uint32_t activeWorkerLimit = 0u;
+  bool interactiveMode = false;
   uint32_t queuedJobs = 0u;
   uint32_t runningJobs = 0u;
   uint64_t inFlightBytes = 0u;
@@ -90,6 +103,7 @@ public:
   [[nodiscard]] bool cancel(AssetCpuTaskHandle handle);
   [[nodiscard]] bool setPriority(AssetCpuTaskHandle handle,
                                  AssetPriority priority);
+  void setInteractiveMode(bool enabled);
   void requestStop();
   void waitIdle();
 
@@ -127,6 +141,8 @@ private:
   uint64_t nextTaskId_ = 1u;
   uint32_t queuedJobs_ = 0u;
   uint32_t runningJobs_ = 0u;
+  uint32_t activeWorkerLimit_ = 1u;
+  bool interactiveMode_ = false;
   std::array<uint32_t, kWorkClassCount> runningByClass_{};
   std::array<uint32_t, kWorkClassCount> concurrencyByClass_{};
   uint64_t inFlightBytes_ = 0u;

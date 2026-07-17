@@ -9,6 +9,7 @@
 #include "nuri/resources/gpu/resource_handles.h"
 #include "nuri/resources/mesh_importer.h"
 #include "nuri/resources/scene_importer.h"
+#include "nuri/scene/scene_graph.h"
 #include "nuri/scene/scene_prefab.h"
 #include "nuri/sim/animation_pose_simulation.h"
 #include "nuri/sim/simulation_handles.h"
@@ -43,6 +44,13 @@ struct EditorSceneEntry {
   bool active = false;
 };
 
+struct EditorSceneStagingStatus {
+  bool ready = true;
+  bool failed = false;
+  float progress = 1.0f;
+  std::string error{};
+};
+
 struct EditorSceneSpec {
   EditorSceneInfo info{};
   std::function<Result<void, std::string>(EditorScenePrepareContext &)>
@@ -51,6 +59,10 @@ struct EditorSceneSpec {
       activate{};
   std::function<void(EditorSceneDeactivateContext &)> deactivate{};
   std::function<void(EditorSceneUpdateContext &)> update{};
+  // Optional authoritative readiness for scene-local staging work that is not
+  // represented by AssetSystem publication requests. When omitted, callbacks
+  // are required to finish their small staging work synchronously.
+  std::function<EditorSceneStagingStatus()> stagingStatus{};
 };
 
 struct ImportedPrefabSceneResources {
@@ -122,8 +134,15 @@ struct StreamingSceneState {
   RenderableId renderableId = kInvalidRenderableId;
   glm::mat4 baseModel{1.0f};
   bool configured = false;
+  bool baseConfigured = false;
+  bool populationComplete = false;
+  bool cameraConfigured = false;
+  bool lightingConfigured = false;
   bool loadFailed = false;
   std::string loadError{};
+  uint32_t populationCursor = 0u;
+  float populationProgress = 0.0f;
+  SceneGraphCapacityReservation graphCapacityReservation{};
   bool textureArtifactBakeQueued = false;
   double loadStartTimeSeconds = 0.0;
   double lastProgressLogTimeSeconds = 0.0;
@@ -184,9 +203,20 @@ struct StreamingSceneFactoryDesc {
   std::string instanceName{};
   std::string fallbackMaterialDebugName{};
   glm::vec3 lodThresholds{8.0f, 24.0f, 48.0f};
+  bool scaleToNiagaraBistro = false;
+  // Optional absolute capacities reserved incrementally before custom scene
+  // population begins. Use these for large authored/instanced scenes so node
+  // and component arrays never grow opportunistically in an editor frame.
+  size_t stagingNodeCapacity = 0u;
+  size_t stagingRenderableCapacity = 0u;
   std::function<void(EditorRuntime &)> configureRender{};
   std::function<void(EditorRuntime &, StreamingSceneState &)>
       configureLoadedScene{};
+  // Called once per editor frame after the imported prefab is resident. Return
+  // true when all custom authored staging work is complete.
+  std::function<Result<bool, std::string>(EditorRuntime &,
+                                          StreamingSceneState &)>
+      populateLoadedSceneStep{};
   std::function<void(EditorRuntime &, StreamingSceneState &)> configureCamera{};
 };
 

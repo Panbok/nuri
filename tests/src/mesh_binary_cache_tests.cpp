@@ -10,7 +10,9 @@
 
 #include <array>
 #include <cstddef>
+#include <future>
 #include <span>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -100,10 +102,83 @@ static_assert(sizeof(TestMeshletDescriptorGpu) == 64);
 class FakeMeshletUploadGpuDevice final
     : public nuri::test_support::FakeGPUDeviceBase {
 public:
+  class PreparedBuffer final : public nuri::PreparedGpuBuffer {
+  public:
+    explicit PreparedBuffer(const nuri::PreparedBufferRequest &request)
+        : desc(request.desc), debugName(request.debugName),
+          bytes(request.desc.data.begin(), request.desc.data.end()) {
+      desc.data = {};
+    }
+
+    nuri::BufferDesc desc{};
+    std::string debugName{};
+    std::vector<std::byte> bytes{};
+  };
+
+  [[nodiscard]] bool
+  supportsBackgroundBufferPreparation() const noexcept override {
+    return true;
+  }
+
+  [[nodiscard]] bool
+  supportsBackgroundBufferBatchPreparation() const noexcept override {
+    return true;
+  }
+
+  [[nodiscard]] bool
+  supportsBackgroundGeometryPreparation() const noexcept override {
+    return true;
+  }
+
+  nuri::Result<std::unique_ptr<nuri::PreparedGpuBuffer>, std::string>
+  prepareBuffer(const nuri::BufferDesc &desc,
+                std::string_view debugName) override {
+    const std::array requests{nuri::PreparedBufferRequest{
+        .desc = desc,
+        .debugName = debugName,
+    }};
+    auto batch = prepareBufferBatch(requests);
+    if (batch.hasError()) {
+      return nuri::Result<std::unique_ptr<nuri::PreparedGpuBuffer>,
+                          std::string>::makeError(batch.error());
+    }
+    return nuri::Result<std::unique_ptr<nuri::PreparedGpuBuffer>,
+                        std::string>::makeResult(std::move(batch.value()
+                                                               .front()));
+  }
+
+  nuri::Result<std::vector<std::unique_ptr<nuri::PreparedGpuBuffer>>,
+               std::string>
+  prepareBufferBatch(
+      std::span<const nuri::PreparedBufferRequest> requests) override {
+    ++preparedBatchCount;
+    preparationThread = std::this_thread::get_id();
+    std::vector<std::unique_ptr<nuri::PreparedGpuBuffer>> result{};
+    result.reserve(requests.size());
+    for (const nuri::PreparedBufferRequest &request : requests) {
+      result.push_back(std::make_unique<PreparedBuffer>(request));
+    }
+    return nuri::Result<std::vector<std::unique_ptr<nuri::PreparedGpuBuffer>>,
+                        std::string>::makeResult(std::move(result));
+  }
+
+  nuri::Result<nuri::BufferHandle, std::string> publishPreparedBuffer(
+      std::unique_ptr<nuri::PreparedGpuBuffer> prepared) override {
+    auto *typed = dynamic_cast<PreparedBuffer *>(prepared.get());
+    if (typed == nullptr) {
+      return nuri::Result<nuri::BufferHandle, std::string>::makeError(
+          "unexpected prepared buffer type");
+    }
+    nuri::BufferDesc desc = typed->desc;
+    desc.data = typed->bytes;
+    return createBufferImpl(desc);
+  }
+
   nuri::Result<nuri::GeometryAllocationHandle, std::string>
   allocateGeometry(std::span<const std::byte> vertexBytes, uint32_t vertexCount,
                    std::span<const std::byte> indexBytes, uint32_t indexCount,
                    std::string_view) override {
+    ++synchronousGeometryAllocationCount;
     auto vertexBuffer = createBufferImpl(nuri::BufferDesc{
         .usage = nuri::BufferUsage::Vertex,
         .storage = nuri::Storage::Device,
@@ -146,6 +221,35 @@ public:
                         std::string>::makeResult(handle);
   }
 
+  nuri::Result<nuri::GeometryAllocationHandle, std::string>
+  adoptPreparedGeometry(nuri::BufferHandle vertexBuffer, size_t vertexBytes,
+                        uint32_t vertexCount, nuri::BufferHandle indexBuffer,
+                        size_t indexBytes, uint32_t indexCount,
+                        std::string_view) override {
+    if (!isValid(vertexBuffer) || !isValid(indexBuffer)) {
+      return nuri::Result<nuri::GeometryAllocationHandle, std::string>::
+          makeError("prepared geometry buffers are invalid");
+    }
+    const nuri::GeometryAllocationHandle handle{.index = nextGeometryIndex_++,
+                                                .generation = 1u};
+    geometries_.emplace(handle.index,
+                        GeometryEntry{.generation = handle.generation,
+                                      .view = nuri::GeometryAllocationView{
+                                          .vertexBuffer = vertexBuffer,
+                                          .vertexByteOffset = 0u,
+                                          .vertexByteSize = vertexBytes,
+                                          .indexBuffer = indexBuffer,
+                                          .indexByteOffset = 0u,
+                                          .indexByteSize = indexBytes,
+                                          .vertexCount = vertexCount,
+                                          .indexCount = indexCount,
+                                      }});
+    ++preparedGeometryAdoptionCount;
+    ++geometryMutationVersion_;
+    return nuri::Result<nuri::GeometryAllocationHandle,
+                        std::string>::makeResult(handle);
+  }
+
   void releaseGeometry(nuri::GeometryAllocationHandle h) override {
     const auto it = geometries_.find(h.index);
     if (it == geometries_.end() || it->second.generation != h.generation) {
@@ -170,6 +274,11 @@ public:
   uint64_t geometryMutationVersion() const override {
     return geometryMutationVersion_;
   }
+
+  uint32_t preparedBatchCount = 0u;
+  uint32_t preparedGeometryAdoptionCount = 0u;
+  uint32_t synchronousGeometryAllocationCount = 0u;
+  std::thread::id preparationThread{};
 
 private:
   struct GeometryEntry {
@@ -379,6 +488,43 @@ TEST(MeshBinaryCacheTests, PreparedModelOwnsCpuPayloadUntilGpuCreation) {
   EXPECT_EQ(modelResult.value()->indexCount(), expectedIndexCount);
   EXPECT_EQ(modelResult.value()->meshletGpuView().meshletCount,
             expectedMeshletCount);
+  EXPECT_EQ(gpu.waitIdleCallCount, 0u);
+}
+
+TEST(MeshBinaryCacheTests,
+     PreparedGpuModelPublishesWithoutSynchronousGeometryAllocation) {
+  FakeMeshletUploadGpuDevice gpu;
+  nuri::MeshData mesh = makeMeshletUploadMesh();
+  const uint32_t expectedVertexCount =
+      static_cast<uint32_t>(mesh.vertices.size());
+  const uint32_t expectedIndexCount =
+      static_cast<uint32_t>(mesh.indices.size());
+  const std::thread::id mainThread = std::this_thread::get_id();
+
+  auto cpuPrepared = nuri::Model::prepare(std::move(mesh));
+  ASSERT_FALSE(cpuPrepared.hasError()) << cpuPrepared.error();
+  auto worker =
+      std::async(std::launch::async,
+                 [&gpu, prepared = std::move(cpuPrepared.value())]() mutable {
+                   return nuri::Model::prepareGpu(gpu, std::move(prepared),
+                                                  "background_prepared_model");
+                 });
+  auto gpuPrepared = worker.get();
+  ASSERT_FALSE(gpuPrepared.hasError()) << gpuPrepared.error();
+  ASSERT_NE(gpuPrepared.value(), nullptr);
+  EXPECT_NE(gpu.preparationThread, mainThread);
+  EXPECT_EQ(gpu.preparedBatchCount, 1u);
+  EXPECT_EQ(gpu.synchronousGeometryAllocationCount, 0u);
+
+  auto model =
+      nuri::Model::publishPreparedGpu(gpu, std::move(gpuPrepared.value()));
+  ASSERT_FALSE(model.hasError()) << model.error();
+  ASSERT_NE(model.value(), nullptr);
+  EXPECT_EQ(model.value()->vertexCount(), expectedVertexCount);
+  EXPECT_EQ(model.value()->indexCount(), expectedIndexCount);
+  EXPECT_EQ(model.value()->meshletGpuView().meshletCount, 2u);
+  EXPECT_EQ(gpu.preparedGeometryAdoptionCount, 1u);
+  EXPECT_EQ(gpu.synchronousGeometryAllocationCount, 0u);
   EXPECT_EQ(gpu.waitIdleCallCount, 0u);
 }
 

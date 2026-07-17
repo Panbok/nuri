@@ -5,6 +5,7 @@
 #include "nuri/core/log.h"
 #include "nuri/core/pmr_scratch.h"
 #include "nuri/core/profiling.h"
+#include "nuri/core/thread_priority.h"
 #include "nuri/gfx/renderers/detail/renderable_material_resolution.h"
 #include "nuri/gfx/renderers/detail/shadow_math.h"
 #include "nuri/resources/gpu/resource_manager.h"
@@ -1590,7 +1591,148 @@ hashStaticShadowCasterRasterSignature(uint64_t signature, const Entry &entry) {
   return signature;
 }
 
+struct ShadowBackgroundPreparedBuffer {
+  BufferDesc desc{};
+  std::string debugName{};
+  std::unique_ptr<PreparedGpuBuffer> prepared{};
+  std::string error{};
+  std::shared_ptr<void> dataOwner{};
+  std::atomic_bool ready = false;
+};
+
+Result<bool, std::string> advanceShadowPreparedBuffer(
+    GPUDevice &gpu, std::shared_ptr<ShadowBackgroundPreparedBuffer> &work,
+    DynamicBufferSlot &slot, const BufferDesc &desc, std::string_view debugName,
+    std::shared_ptr<void> dataOwner = {}) {
+  if (slot.buffer && slot.buffer->valid() && slot.capacityBytes >= desc.size) {
+    return Result<bool, std::string>::makeResult(true);
+  }
+  if (!gpu.supportsBackgroundBufferPreparation()) {
+    auto created = Buffer::create(gpu, desc, debugName);
+    if (created.hasError()) {
+      return Result<bool, std::string>::makeError(created.error());
+    }
+    slot.buffer = std::move(created.value());
+    slot.capacityBytes = desc.size;
+    return Result<bool, std::string>::makeResult(true);
+  }
+  if (!work) {
+    work = std::make_shared<ShadowBackgroundPreparedBuffer>();
+    work->desc = desc;
+    work->debugName = std::string(debugName);
+    work->dataOwner = std::move(dataOwner);
+    GPUDevice *const workerGpu = &gpu;
+    std::shared_ptr<ShadowBackgroundPreparedBuffer> workerState = work;
+    std::thread([workerGpu, workerState] {
+      setCurrentThreadBackgroundPriority();
+      auto prepared =
+          workerGpu->prepareBuffer(workerState->desc, workerState->debugName);
+      if (prepared.hasError()) {
+        workerState->error = prepared.error();
+      } else {
+        workerState->prepared = std::move(prepared.value());
+      }
+      workerState->ready.store(true, std::memory_order_release);
+    }).detach();
+    return Result<bool, std::string>::makeResult(false);
+  }
+  if (!work->ready.load(std::memory_order_acquire)) {
+    return Result<bool, std::string>::makeResult(false);
+  }
+  if (!work->error.empty()) {
+    return Result<bool, std::string>::makeError(work->error);
+  }
+  auto published = Buffer::publishPrepared(gpu, std::move(work->prepared),
+                                           work->desc, work->debugName);
+  if (published.hasError()) {
+    return Result<bool, std::string>::makeError(published.error());
+  }
+  slot.buffer = std::move(published.value());
+  slot.capacityBytes = work->desc.size;
+  work.reset();
+  return Result<bool, std::string>::makeResult(true);
+}
+
 } // namespace
+
+struct ShadowRenderer::SceneCachePreparation {
+  enum class Stage : uint8_t {
+    BuildTemplates,
+    BuildStaticCasters,
+    BuildBatchOffsets,
+    FillBatchInstances,
+    BuildInstanceMatrices,
+    EnsureMatricesRing,
+    UploadMatricesRing,
+    EnsureRemapRing,
+    Ready,
+  };
+
+  const RenderScene *scene = nullptr;
+  const ResourceManager *resources = nullptr;
+  uint64_t sceneId = 0u;
+  uint64_t topologyVersion = 0u;
+  uint64_t materialVersion = 0u;
+  uint64_t modelMaterialBindingVersion = 0u;
+  uint64_t deformationVersion = 0u;
+  uint64_t geometryMutationVersion = 0u;
+  size_t cursor = 0u;
+  Stage stage = Stage::BuildTemplates;
+  bool reserved = false;
+  bool ready = false;
+  bool staticCachePrepared = false;
+  bool hasSettings = false;
+  RenderSettings settings{};
+  bool enableCascadeCasterCulling = false;
+  int32_t forcedMeshLod = 0;
+  uint64_t pipelineSignature = 0u;
+  uint64_t staticCacheContentSignature = kFnvOffsetBasis64;
+  uint64_t staticCacheIndexCountEstimate = 0u;
+  glm::vec3 staticBoundsMin{std::numeric_limits<float>::max()};
+  glm::vec3 staticBoundsMax{std::numeric_limits<float>::lowest()};
+  bool hasStaticBounds = false;
+  std::atomic_bool allocationReady = false;
+  std::atomic_bool allocationFailed = false;
+  std::pmr::vector<MeshDrawTemplate> meshDrawTemplates;
+  std::pmr::vector<uint32_t> staticTemplateIndices;
+  std::pmr::vector<uint32_t> dynamicTemplateIndices;
+  std::pmr::vector<TextureDependency> textureDependencies;
+  std::pmr::vector<StaticShadowCasterCacheEntry> staticCasterCache;
+  std::pmr::vector<StaticShadowBatchTemplate> staticBatchTemplates;
+  PmrHashMap<StaticShadowBatchKey, uint32_t, StaticShadowBatchKeyHash>
+      staticBatchIndexMap;
+  std::pmr::vector<uint32_t> staticBatchInstanceIndices;
+  std::pmr::vector<uint32_t> staticBatchWriteOffsets;
+  std::pmr::vector<BufferHandle> staticDrawBuffers;
+  std::pmr::vector<glm::vec3> staticFitPoints;
+  std::pmr::vector<InstanceData> instanceMatrices;
+  std::shared_ptr<ShadowBackgroundPreparedBuffer> bufferPreparation;
+  std::pmr::vector<DynamicBufferSlot> matricesRing;
+  std::pmr::vector<DynamicBufferSlot> remapRing;
+  size_t uploadCursor = 0u;
+
+  explicit SceneCachePreparation(std::pmr::memory_resource *memory)
+      : meshDrawTemplates(memory), staticTemplateIndices(memory),
+        dynamicTemplateIndices(memory), textureDependencies(memory),
+        staticCasterCache(memory), staticBatchTemplates(memory),
+        staticBatchIndexMap(memory), staticBatchInstanceIndices(memory),
+        staticBatchWriteOffsets(memory), staticDrawBuffers(memory),
+        staticFitPoints(memory), instanceMatrices(memory), matricesRing(memory),
+        remapRing(memory) {}
+
+  [[nodiscard]] bool matches(const RenderScene &candidateScene,
+                             const ResourceManager &candidateResources,
+                             uint64_t candidateGeometryVersion) const noexcept {
+    return scene == &candidateScene && sceneId == candidateScene.id() &&
+           resources == &candidateResources &&
+           topologyVersion == candidateScene.topologyVersion() &&
+           materialVersion == candidateResources.materialVersion() &&
+           modelMaterialBindingVersion ==
+               candidateResources.modelMaterialBindingVersion() &&
+           deformationVersion == candidateScene.deformationVersion() &&
+           geometryMutationVersion == candidateGeometryVersion;
+  }
+};
 
 ShadowRenderer::ShadowRenderer(GPUDevice &gpu,
                                std::pmr::memory_resource *memory)
@@ -1607,13 +1749,16 @@ ShadowRenderer::ShadowRenderer(GPUDevice &gpu,
       shadowDrawPacketUploadSignatures_(memory_),
       shadowFrameUploadSignatures_(memory_),
       sdsmReduceResultRingPublishedFrames_(memory_),
-      meshDrawTemplates_(memory_), batchBuildScratchArena_(memory_),
-      staticShadowTemplateIndices_(memory_),
-      dynamicShadowTemplateIndices_(memory_), staticShadowCasterCache_(memory_),
-      staticShadowBatchTemplates_(memory_), staticShadowBatchIndexMap_(memory_),
-      staticShadowBatchInstanceIndices_(memory_),
-      staticShadowCasterDrawBuffers_(memory_),
-      staticShadowCasterFitPoints_(memory_),
+      meshDrawTemplates_(std::pmr::new_delete_resource()),
+      batchBuildScratchArena_(memory_),
+      staticShadowTemplateIndices_(std::pmr::new_delete_resource()),
+      dynamicShadowTemplateIndices_(std::pmr::new_delete_resource()),
+      staticShadowCasterCache_(std::pmr::new_delete_resource()),
+      staticShadowBatchTemplates_(std::pmr::new_delete_resource()),
+      staticShadowBatchIndexMap_(std::pmr::new_delete_resource()),
+      staticShadowBatchInstanceIndices_(std::pmr::new_delete_resource()),
+      staticShadowCasterDrawBuffers_(std::pmr::new_delete_resource()),
+      staticShadowCasterFitPoints_(std::pmr::new_delete_resource()),
       staticShadowCasterLightSpaceBounds_(memory_),
       staticShadowBatchLightSpaceBounds_(memory_),
       staticShadowCasterLightGridCells_(memory_),
@@ -1624,14 +1769,16 @@ ShadowRenderer::ShadowRenderer(GPUDevice &gpu,
       staticShadowBatchLargeLightGridEntries_(memory_),
       staticShadowCasterLightGridQueryMarks_(memory_),
       staticShadowCasterLightGridQueryEntries_(memory_),
-      instanceMatrices_(memory_), instanceRemap_(memory_),
-      shadowDrawPacketUploadBytes_(memory_), passBufferDependencies_(memory_),
-      passDependencyBuffers_(memory_),
+      instanceMatrices_(std::pmr::new_delete_resource()),
+      instanceRemap_(memory_), shadowDrawPacketUploadBytes_(memory_),
+      passBufferDependencies_(memory_), passDependencyBuffers_(memory_),
       passDependencyBufferAccessModes_(memory_),
       passDependencyBufferBindings_(memory_),
       passDependencyTextureBindings_(memory_), preResolvedDrawBuffers_(memory_),
-      preResolvedDrawBufferIds_(memory_), passTextureDependencies_(memory_),
+      preResolvedDrawBufferIds_(memory_),
+      passTextureDependencies_(std::pmr::new_delete_resource()),
       previewTextureDependencies_(memory_) {
+  sceneBufferRetirements_.reserve(32u);
   for (uint32_t cascadeIndex = 0u; cascadeIndex < kMaxShadowCascades;
        ++cascadeIndex) {
     cascadePushConstants_[cascadeIndex] =
@@ -2237,6 +2384,576 @@ ShadowRenderer::ensureSdsmReduceResultRingCapacity(size_t requiredBytes) {
     previous.reset();
   }
   return Result<bool, std::string>::makeResult(true);
+}
+
+Result<bool, std::string> ShadowRenderer::prepareSceneCacheStep(
+    const RenderScene &scene, const ResourceManager &resources,
+    uint32_t maxOperations, const RenderSettings *settings) {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CMD_COPY);
+  const uint64_t geometryMutationVersion = gpu_.geometryMutationVersion();
+  const bool preparationMatches =
+      sceneCachePreparation_ && sceneCachePreparation_->matches(
+                                    scene, resources, geometryMutationVersion);
+  if (!preparationMatches) {
+    if (sceneCachePreparation_ && !sceneCachePreparation_->allocationReady.load(
+                                      std::memory_order_acquire)) {
+      return Result<bool, std::string>::makeResult(false);
+    }
+    auto preparation = std::make_shared<SceneCachePreparation>(
+        std::pmr::new_delete_resource());
+    preparation->scene = &scene;
+    preparation->resources = &resources;
+    preparation->sceneId = scene.id();
+    preparation->topologyVersion = scene.topologyVersion();
+    preparation->materialVersion = resources.materialVersion();
+    preparation->modelMaterialBindingVersion =
+        resources.modelMaterialBindingVersion();
+    preparation->deformationVersion = scene.deformationVersion();
+    preparation->geometryMutationVersion = geometryMutationVersion;
+    if (settings != nullptr) {
+      preparation->hasSettings = true;
+      preparation->settings = *settings;
+      preparation->enableCascadeCasterCulling =
+          settings->shadow.debug.enableCascadeCasterCulling;
+      preparation->forcedMeshLod = settings->opaque.forcedMeshLod;
+      preparation->pipelineSignature =
+          shadowPipelineSignature() ^
+          (preparation->enableCascadeCasterCulling ? 0x9e3779b97f4a7c15ull
+                                                   : 0ull);
+    }
+    const size_t renderableCount = scene.renderables().size();
+    const size_t ringCount =
+        std::max<size_t>(2u, gpu_.getSwapchainImageCount() + 1u);
+    preparation->matricesRing.resize(ringCount);
+    preparation->remapRing.resize(ringCount);
+    std::thread([preparation, renderableCount] {
+      setCurrentThreadBackgroundPriority();
+      try {
+        preparation->meshDrawTemplates.reserve(renderableCount);
+        preparation->staticTemplateIndices.reserve(renderableCount);
+        preparation->dynamicTemplateIndices.reserve(renderableCount);
+        preparation->textureDependencies.reserve(renderableCount);
+        preparation->staticCasterCache.reserve(renderableCount);
+        preparation->staticBatchTemplates.reserve(renderableCount);
+        preparation->staticBatchIndexMap.reserve(renderableCount);
+        preparation->staticBatchInstanceIndices.reserve(renderableCount);
+        preparation->staticBatchWriteOffsets.reserve(renderableCount);
+        preparation->staticDrawBuffers.reserve(renderableCount * 2u);
+        preparation->staticFitPoints.reserve(renderableCount * 8u);
+        preparation->instanceMatrices.reserve(renderableCount);
+      } catch (...) {
+        preparation->allocationFailed.store(true, std::memory_order_release);
+      }
+      preparation->allocationReady.store(true, std::memory_order_release);
+    }).detach();
+    sceneCachePreparation_ = preparation;
+  }
+  SceneCachePreparation &preparation = *sceneCachePreparation_;
+  if (!preparation.allocationReady.load(std::memory_order_acquire)) {
+    return Result<bool, std::string>::makeResult(false);
+  }
+  if (preparation.allocationFailed.load(std::memory_order_acquire)) {
+    return Result<bool, std::string>::makeError(
+        "ShadowRenderer::prepareSceneCacheStep: background cache allocation "
+        "failed");
+  }
+  const std::span<const Renderable> renderables = scene.renderables();
+  if (renderables.size() >
+      static_cast<size_t>(std::numeric_limits<uint32_t>::max())) {
+    return Result<bool, std::string>::makeError(
+        "ShadowRenderer::prepareSceneCacheStep: renderables count exceeds "
+        "UINT32_MAX");
+  }
+  if (!preparation.reserved) {
+    preparation.reserved = true;
+    preparation.ready = renderables.empty();
+    return Result<bool, std::string>::makeResult(preparation.ready);
+  }
+
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::microseconds(200);
+  uint32_t operations = 0u;
+  while (preparation.stage == SceneCachePreparation::Stage::BuildTemplates &&
+         preparation.cursor < renderables.size() &&
+         operations < std::max(1u, maxOperations)) {
+    if (operations != 0u && (operations & 7u) == 0u &&
+        std::chrono::steady_clock::now() >= deadline) {
+      break;
+    }
+    const uint32_t renderableIndex =
+        static_cast<uint32_t>(preparation.cursor++);
+    const Renderable &renderable = renderables[renderableIndex];
+    const bool dynamicCaster =
+        !renderable.morphWeights.empty() || !renderable.skinPalette.empty();
+    const ModelRecord *modelRecord = resources.tryGet(renderable.model);
+    if (!modelRecord || !modelRecord->model) {
+      return Result<bool, std::string>::makeError(
+          "ShadowRenderer::prepareSceneCacheStep: failed to resolve model");
+    }
+    GeometryAllocationView geometry{};
+    if (!gpu_.resolveGeometry(modelRecord->model->geometryHandle(), geometry)) {
+      return Result<bool, std::string>::makeError(
+          "ShadowRenderer::prepareSceneCacheStep: failed to resolve "
+          "geometry");
+    }
+    const uint64_t vertexBufferAddress = gpu_.getBufferDeviceAddress(
+        geometry.vertexBuffer, geometry.vertexByteOffset);
+    if (vertexBufferAddress == 0u) {
+      return Result<bool, std::string>::makeError(
+          "ShadowRenderer::prepareSceneCacheStep: invalid vertex buffer "
+          "address");
+    }
+    const std::span<const Submesh> submeshes = modelRecord->model->submeshes();
+    for (uint32_t submeshIndex = 0u;
+         submeshIndex < static_cast<uint32_t>(submeshes.size());
+         ++submeshIndex) {
+      const Submesh &submesh = submeshes[submeshIndex];
+      const MaterialRef resolvedMaterial =
+          resolveRenderableMaterial(renderable, *modelRecord, submeshIndex);
+      const MaterialRecord *materialRecord = resources.tryGet(resolvedMaterial);
+      if (materialRecord != nullptr &&
+          materialRecord->desc.alphaMode == MaterialAlphaMode::Blend) {
+        continue;
+      }
+      const bool alphaMasked =
+          materialRecord != nullptr &&
+          materialRecord->desc.alphaMode == MaterialAlphaMode::Mask;
+      if (alphaMasked) {
+        const TextureRecord *baseColor =
+            resources.tryGet(materialRecord->textureRefs.baseColor);
+        if (baseColor != nullptr) {
+          appendUniqueTextureDependency(preparation.textureDependencies,
+                                        baseColor->texture);
+        }
+      }
+      preparation.meshDrawTemplates.push_back(MeshDrawTemplate{
+          .renderable = &renderable,
+          .submesh = &submesh,
+          .submeshIndex = submeshIndex,
+          .instanceIndex = renderableIndex,
+          .indexBuffer = geometry.indexBuffer,
+          .indexBufferOffset = geometry.indexByteOffset,
+          .indexFormat = resolveGeometryIndexFormat(geometry),
+          .baseVertexBuffer = geometry.vertexBuffer,
+          .vertexDecodeBuffer = modelRecord->model->vertexDecodeBuffer(),
+          .vertexBufferByteOffset = geometry.vertexByteOffset,
+          .vertexBufferAddress = vertexBufferAddress,
+          .vertexDecodeBufferAddress =
+              modelRecord->model->vertexDecodeBufferAddress(),
+          .vertexDecodeIndex = submeshIndex,
+          .packedVertexFormat =
+              static_cast<uint32_t>(modelRecord->model->drawVertexFormat()),
+          .materialIndex = materialRecord != nullptr
+                               ? resources.materialTableIndex(resolvedMaterial)
+                               : 0u,
+          .doubleSided = materialRecord != nullptr
+                             ? materialRecord->desc.doubleSided
+                             : false,
+          .alphaMasked = alphaMasked,
+          .dynamicCaster = dynamicCaster,
+      });
+      const uint32_t templateIndex =
+          static_cast<uint32_t>(preparation.meshDrawTemplates.size() - 1u);
+      (dynamicCaster ? preparation.dynamicTemplateIndices
+                     : preparation.staticTemplateIndices)
+          .push_back(templateIndex);
+    }
+    ++operations;
+  }
+  if (preparation.stage == SceneCachePreparation::Stage::BuildTemplates &&
+      preparation.cursor >= renderables.size()) {
+    preparation.stage = SceneCachePreparation::Stage::BuildStaticCasters;
+    preparation.cursor = 0u;
+  }
+
+  const auto selectShadowPipeline =
+      [this](bool doubleSided, bool alphaMasked) -> RenderPipelineHandle {
+    if (alphaMasked) {
+      return doubleSided && nuri::isValid(shadowAlphaDoubleSidedPipelineHandle_)
+                 ? shadowAlphaDoubleSidedPipelineHandle_
+                 : shadowAlphaPipelineHandle_;
+    }
+    return doubleSided && nuri::isValid(shadowDoubleSidedPipelineHandle_)
+               ? shadowDoubleSidedPipelineHandle_
+               : shadowPipelineHandle_;
+  };
+  const auto makeStaticBatchKey =
+      [](const StaticShadowBatchTemplate &batchTemplate) {
+        return StaticShadowBatchKey{
+            .pipeline = batchTemplate.pipeline,
+            .vertexBuffer = batchTemplate.vertexBuffer,
+            .vertexDecodeBuffer = batchTemplate.vertexDecodeBuffer,
+            .indexBuffer = batchTemplate.indexBuffer,
+            .indexBufferOffset = batchTemplate.indexBufferOffset,
+            .indexFormat = batchTemplate.indexFormat,
+            .indexCount = batchTemplate.indexCount,
+            .firstIndex = batchTemplate.firstIndex,
+            .vertexBufferAddress = batchTemplate.vertexBufferAddress,
+            .vertexDecodeBufferAddress =
+                batchTemplate.vertexDecodeBufferAddress,
+            .vertexDecodeIndex = batchTemplate.vertexDecodeIndex,
+            .packedVertexFormat = batchTemplate.packedVertexFormat,
+            .materialIndex = batchTemplate.materialIndex,
+        };
+      };
+  const auto resolveStaticBatchIndex =
+      [&preparation,
+       &makeStaticBatchKey](const StaticShadowBatchTemplate &candidate) {
+        const StaticShadowBatchKey key = makeStaticBatchKey(candidate);
+        const auto it = preparation.staticBatchIndexMap.find(key);
+        if (it != preparation.staticBatchIndexMap.end()) {
+          return it->second;
+        }
+        const uint32_t index =
+            static_cast<uint32_t>(preparation.staticBatchTemplates.size());
+        preparation.staticBatchTemplates.push_back(candidate);
+        preparation.staticBatchIndexMap.emplace(key, index);
+        return index;
+      };
+
+  const uint32_t operationLimit = std::max(1u, maxOperations);
+  while (operations < operationLimit &&
+         preparation.stage != SceneCachePreparation::Stage::Ready) {
+    if (operations != 0u && (operations & 7u) == 0u &&
+        std::chrono::steady_clock::now() >= deadline) {
+      break;
+    }
+    switch (preparation.stage) {
+    case SceneCachePreparation::Stage::BuildTemplates:
+      break;
+    case SceneCachePreparation::Stage::BuildStaticCasters: {
+      const bool pipelinesReady =
+          nuri::isValid(shadowPipelineHandle_) &&
+          nuri::isValid(shadowDoubleSidedPipelineHandle_) &&
+          nuri::isValid(shadowAlphaPipelineHandle_) &&
+          nuri::isValid(shadowAlphaDoubleSidedPipelineHandle_);
+      if (!preparation.hasSettings || !preparation.settings.shadow.enabled ||
+          !pipelinesReady) {
+        preparation.stage = SceneCachePreparation::Stage::Ready;
+        break;
+      }
+      if (preparation.cursor >= preparation.staticTemplateIndices.size()) {
+        preparation.staticBatchInstanceIndices.resize(
+            preparation.staticCasterCache.size());
+        preparation.staticBatchWriteOffsets.resize(
+            preparation.staticBatchTemplates.size());
+        preparation.stage = SceneCachePreparation::Stage::BuildBatchOffsets;
+        preparation.cursor = 0u;
+        break;
+      }
+      const uint32_t templateIndex =
+          preparation.staticTemplateIndices[preparation.cursor++];
+      if (templateIndex >= preparation.meshDrawTemplates.size()) {
+        return Result<bool, std::string>::makeError(
+            "ShadowRenderer::prepareSceneCacheStep: static template index "
+            "is out of range");
+      }
+      const MeshDrawTemplate &entry =
+          preparation.meshDrawTemplates[templateIndex];
+      if (entry.renderable == nullptr || entry.submesh == nullptr ||
+          entry.instanceIndex >= renderables.size()) {
+        ++operations;
+        break;
+      }
+      const std::optional<SubmeshLod> lod =
+          resolveShadowLod(*entry.submesh, preparation.settings);
+      if (!lod.has_value()) {
+        ++operations;
+        break;
+      }
+      StaticShadowCasterCacheEntry cachedEntry{
+          .templateIndex = templateIndex,
+          .instanceIndex = entry.instanceIndex,
+          .indexBuffer = entry.indexBuffer,
+          .indexBufferOffset = entry.indexBufferOffset,
+          .indexFormat = entry.indexFormat,
+          .vertexBuffer = entry.baseVertexBuffer,
+          .vertexDecodeBuffer = entry.vertexDecodeBuffer,
+          .vertexBufferAddress = entry.vertexBufferAddress,
+          .vertexDecodeBufferAddress = entry.vertexDecodeBufferAddress,
+          .vertexDecodeIndex = entry.vertexDecodeIndex,
+          .packedVertexFormat = entry.packedVertexFormat,
+          .materialIndex = entry.materialIndex,
+          .indexCount = lod->indexCount,
+          .firstIndex = lod->indexOffset,
+          .doubleSided = entry.doubleSided,
+          .alphaMasked = entry.alphaMasked,
+      };
+      cachedEntry.rasterSignature =
+          hashStaticShadowCasterRasterSignature(kFnvOffsetBasis64, cachedEntry);
+      const glm::mat4 &modelMatrix =
+          renderables[entry.instanceIndex].modelMatrix;
+      cachedEntry.rasterSignature =
+          hashCombine64(cachedEntry.rasterSignature,
+                        hashBytes(std::as_bytes(
+                            std::span<const glm::mat4>(&modelMatrix, 1u))));
+      const StaticShadowBatchTemplate batchTemplate{
+          .pipeline =
+              selectShadowPipeline(entry.doubleSided, entry.alphaMasked),
+          .vertexBuffer = cachedEntry.vertexBuffer,
+          .vertexDecodeBuffer = cachedEntry.vertexDecodeBuffer,
+          .indexBuffer = cachedEntry.indexBuffer,
+          .indexBufferOffset = cachedEntry.indexBufferOffset,
+          .indexFormat = cachedEntry.indexFormat,
+          .indexCount = cachedEntry.indexCount,
+          .firstIndex = cachedEntry.firstIndex,
+          .vertexBufferAddress = cachedEntry.vertexBufferAddress,
+          .vertexDecodeBufferAddress = cachedEntry.vertexDecodeBufferAddress,
+          .vertexDecodeIndex = cachedEntry.vertexDecodeIndex,
+          .packedVertexFormat = cachedEntry.packedVertexFormat,
+          .materialIndex = entry.alphaMasked ? cachedEntry.materialIndex : 0u,
+          .rasterSignature = kFnvOffsetBasis64,
+      };
+      cachedEntry.batchIndex = resolveStaticBatchIndex(batchTemplate);
+      StaticShadowBatchTemplate &resolvedBatch =
+          preparation.staticBatchTemplates[cachedEntry.batchIndex];
+      ++resolvedBatch.instanceCount;
+      resolvedBatch.rasterSignature = hashCombine64(
+          resolvedBatch.rasterSignature, cachedEntry.rasterSignature);
+      resolvedBatch.indexCountEstimate += cachedEntry.indexCount;
+      const BoundingBox worldBounds =
+          entry.submesh->bounds.getTransformed(modelMatrix);
+      cachedEntry.casterWorldCorners = shadow_detail::computeBoundsCorners(
+          worldBounds.min_, worldBounds.max_);
+      cachedEntry.hasCasterCullingBounds =
+          preparation.enableCascadeCasterCulling;
+      preparation.staticFitPoints.insert(preparation.staticFitPoints.end(),
+                                         cachedEntry.casterWorldCorners.begin(),
+                                         cachedEntry.casterWorldCorners.end());
+      preparation.staticBoundsMin =
+          glm::min(preparation.staticBoundsMin, worldBounds.min_);
+      preparation.staticBoundsMax =
+          glm::max(preparation.staticBoundsMax, worldBounds.max_);
+      preparation.hasStaticBounds = true;
+      preparation.staticCasterCache.push_back(cachedEntry);
+      preparation.staticCacheContentSignature = hashCombine64(
+          preparation.staticCacheContentSignature, cachedEntry.rasterSignature);
+      preparation.staticCacheIndexCountEstimate += cachedEntry.indexCount;
+      appendUniqueBufferHandle(preparation.staticDrawBuffers,
+                               cachedEntry.vertexBuffer);
+      appendUniqueBufferHandle(preparation.staticDrawBuffers,
+                               cachedEntry.indexBuffer);
+      ++operations;
+      break;
+    }
+    case SceneCachePreparation::Stage::BuildBatchOffsets: {
+      if (preparation.cursor >= preparation.staticBatchTemplates.size()) {
+        preparation.stage = SceneCachePreparation::Stage::FillBatchInstances;
+        preparation.cursor = 0u;
+        break;
+      }
+      StaticShadowBatchTemplate &batch =
+          preparation.staticBatchTemplates[preparation.cursor];
+      const uint32_t first =
+          preparation.cursor == 0u
+              ? 0u
+              : preparation.staticBatchTemplates[preparation.cursor - 1u]
+                        .firstInstanceIndex +
+                    preparation.staticBatchTemplates[preparation.cursor - 1u]
+                        .instanceCount;
+      batch.firstInstanceIndex = first;
+      preparation.staticBatchWriteOffsets[preparation.cursor] = first;
+      ++preparation.cursor;
+      ++operations;
+      break;
+    }
+    case SceneCachePreparation::Stage::FillBatchInstances: {
+      if (preparation.cursor >= preparation.staticCasterCache.size()) {
+        preparation.stage = SceneCachePreparation::Stage::BuildInstanceMatrices;
+        preparation.cursor = 0u;
+        break;
+      }
+      const StaticShadowCasterCacheEntry &entry =
+          preparation.staticCasterCache[preparation.cursor++];
+      if (entry.batchIndex >= preparation.staticBatchWriteOffsets.size()) {
+        return Result<bool, std::string>::makeError(
+            "ShadowRenderer::prepareSceneCacheStep: static batch index is "
+            "out of range");
+      }
+      const uint32_t writeIndex =
+          preparation.staticBatchWriteOffsets[entry.batchIndex]++;
+      if (writeIndex >= preparation.staticBatchInstanceIndices.size()) {
+        return Result<bool, std::string>::makeError(
+            "ShadowRenderer::prepareSceneCacheStep: static batch write is "
+            "out of range");
+      }
+      preparation.staticBatchInstanceIndices[writeIndex] = entry.instanceIndex;
+      ++operations;
+      break;
+    }
+    case SceneCachePreparation::Stage::BuildInstanceMatrices: {
+      if (preparation.cursor >= renderables.size()) {
+        preparation.staticCachePrepared = true;
+        preparation.stage = SceneCachePreparation::Stage::EnsureMatricesRing;
+        preparation.cursor = 0u;
+        break;
+      }
+      preparation.instanceMatrices.push_back(
+          makeInstanceData(renderables[preparation.cursor++].modelMatrix));
+      ++operations;
+      break;
+    }
+    case SceneCachePreparation::Stage::EnsureMatricesRing: {
+      if (preparation.cursor >= preparation.matricesRing.size()) {
+        preparation.stage = SceneCachePreparation::Stage::EnsureRemapRing;
+        preparation.cursor = 0u;
+        break;
+      }
+      DynamicBufferSlot &slot = preparation.matricesRing[preparation.cursor];
+      const BufferDesc desc{
+          .usage = BufferUsage::Storage,
+          .storage = Storage::Device,
+          .size = std::max(renderables.size() * sizeof(InstanceData),
+                           sizeof(InstanceData)),
+          .data = std::as_bytes(std::span<const InstanceData>(
+              preparation.instanceMatrices.data(),
+              preparation.instanceMatrices.size())),
+      };
+      auto result = advanceShadowPreparedBuffer(
+          gpu_, preparation.bufferPreparation, slot, desc,
+          "shadow_prepared_instance_matrices_" +
+              std::to_string(preparation.cursor),
+          sceneCachePreparation_);
+      if (result.hasError()) {
+        return result;
+      }
+      if (!result.value()) {
+        return Result<bool, std::string>::makeResult(false);
+      }
+      ++preparation.cursor;
+      ++operations;
+      break;
+    }
+    case SceneCachePreparation::Stage::UploadMatricesRing: {
+      preparation.stage = SceneCachePreparation::Stage::EnsureRemapRing;
+      preparation.cursor = 0u;
+      break;
+    }
+    case SceneCachePreparation::Stage::EnsureRemapRing: {
+      if (preparation.cursor >= preparation.remapRing.size()) {
+        preparation.stage = SceneCachePreparation::Stage::Ready;
+        break;
+      }
+      const size_t cascadeCount = std::clamp<size_t>(
+          preparation.settings.shadow.cascadeCount, 1u, kMaxShadowCascades);
+      DynamicBufferSlot &slot = preparation.remapRing[preparation.cursor];
+      const BufferDesc desc{
+          .usage = BufferUsage::Storage,
+          .storage = Storage::Device,
+          .size = std::max(cascadeCount * renderables.size() * sizeof(uint32_t),
+                           sizeof(uint32_t)),
+      };
+      auto result = advanceShadowPreparedBuffer(
+          gpu_, preparation.bufferPreparation, slot, desc,
+          "shadow_prepared_instance_remap_" +
+              std::to_string(preparation.cursor),
+          sceneCachePreparation_);
+      if (result.hasError()) {
+        return result;
+      }
+      if (!result.value()) {
+        return Result<bool, std::string>::makeResult(false);
+      }
+      ++preparation.cursor;
+      ++operations;
+      break;
+    }
+    case SceneCachePreparation::Stage::Ready:
+      break;
+    }
+  }
+  preparation.ready = preparation.stage == SceneCachePreparation::Stage::Ready;
+  return Result<bool, std::string>::makeResult(preparation.ready);
+}
+
+bool ShadowRenderer::adoptPreparedSceneCache(const RenderScene &scene,
+                                             const ResourceManager &resources) {
+  const uint64_t geometryMutationVersion = gpu_.geometryMutationVersion();
+  if (!sceneCachePreparation_ || !sceneCachePreparation_->ready ||
+      !sceneCachePreparation_->matches(scene, resources,
+                                       geometryMutationVersion)) {
+    return false;
+  }
+  SceneCachePreparation &preparation = *sceneCachePreparation_;
+  if (preparation.staticCachePrepared &&
+      (instanceMatricesRing_.size() != preparation.matricesRing.size() ||
+       instanceRemapRing_.size() != preparation.remapRing.size())) {
+    return false;
+  }
+  meshDrawTemplates_.swap(preparation.meshDrawTemplates);
+  staticShadowTemplateIndices_.swap(preparation.staticTemplateIndices);
+  dynamicShadowTemplateIndices_.swap(preparation.dynamicTemplateIndices);
+  passTextureDependencies_.swap(preparation.textureDependencies);
+  cachedScene_ = &scene;
+  cachedTopologyVersion_ = scene.topologyVersion();
+  cachedMaterialVersion_ = resources.materialVersion();
+  cachedModelMaterialBindingVersion_ = resources.modelMaterialBindingVersion();
+  cachedDeformationVersion_ = scene.deformationVersion();
+  cachedGeometryMutationVersion_ = preparation.geometryMutationVersion;
+  if (preparation.staticCachePrepared &&
+      preparation.pipelineSignature ==
+          (shadowPipelineSignature() ^
+           (preparation.enableCascadeCasterCulling ? 0x9e3779b97f4a7c15ull
+                                                   : 0ull))) {
+    staticShadowCasterCache_.swap(preparation.staticCasterCache);
+    staticShadowBatchTemplates_.swap(preparation.staticBatchTemplates);
+    staticShadowBatchIndexMap_.swap(preparation.staticBatchIndexMap);
+    staticShadowBatchInstanceIndices_.swap(
+        preparation.staticBatchInstanceIndices);
+    staticShadowCasterDrawBuffers_.swap(preparation.staticDrawBuffers);
+    staticShadowCasterFitPoints_.swap(preparation.staticFitPoints);
+    instanceMatrices_.swap(preparation.instanceMatrices);
+    staticShadowCasterBoundsMin_ = preparation.staticBoundsMin;
+    staticShadowCasterBoundsMax_ = preparation.staticBoundsMax;
+    hasStaticShadowCasterBounds_ = preparation.hasStaticBounds;
+    staticShadowCasterCacheContentSignature_ =
+        preparation.staticCacheContentSignature;
+    staticShadowCasterCacheIndexCountEstimate_ =
+        preparation.staticCacheIndexCountEstimate;
+    staticShadowCasterCacheTransformVersion_ = scene.transformVersion();
+    staticShadowCasterCacheForcedMeshLod_ = preparation.forcedMeshLod;
+    staticShadowCasterCachePipelineSignature_ = preparation.pipelineSignature;
+    staticShadowCasterCacheValid_ = true;
+    cachedTransformVersion_ = scene.transformVersion();
+    std::fill(instanceDataRingUploadVersions_.begin(),
+              instanceDataRingUploadVersions_.end(), scene.transformVersion());
+    for (size_t i = 0u; i < instanceMatricesRing_.size(); ++i) {
+      std::swap(instanceMatricesRing_[i], preparation.matricesRing[i]);
+      std::swap(instanceRemapRing_[i], preparation.remapRing[i]);
+    }
+    instanceRemapUploadSignatures_.assign(instanceRemapRing_.size(), 0u);
+    staticShadowCasterLightSpaceBounds_.clear();
+    staticShadowBatchLightSpaceBounds_.clear();
+    staticShadowCasterLightGridCells_.clear();
+    staticShadowCasterLightGridEntries_.clear();
+    staticShadowCasterLargeLightGridEntries_.clear();
+    staticShadowBatchLightGridCells_.clear();
+    staticShadowBatchLightGridEntries_.clear();
+    staticShadowBatchLargeLightGridEntries_.clear();
+    staticShadowCasterLightGridQueryMarks_.clear();
+    staticShadowCasterLightGridQueryEntries_.clear();
+    staticShadowCasterLightGrid_ = {};
+    staticShadowBatchLightGrid_ = {};
+    hasStaticShadowCasterLightDepthBounds_ = false;
+    hasStaticShadowCasterLightSpaceBounds_ = false;
+    invalidateReusableStaticOnlyCascadeCache();
+  } else {
+    invalidateStaticShadowCasterCache();
+  }
+  const auto queueRetirement = [this](std::unique_ptr<Buffer> &buffer) {
+    if (buffer) {
+      sceneBufferRetirements_.push_back(std::move(buffer));
+    }
+  };
+  for (DynamicBufferSlot &slot : preparation.matricesRing) {
+    queueRetirement(slot.buffer);
+  }
+  for (DynamicBufferSlot &slot : preparation.remapRing) {
+    queueRetirement(slot.buffer);
+  }
+  sceneBufferRetirementCooldownFrames_ = 3u;
+  sceneCachePreparation_.reset();
+  return true;
 }
 
 Result<bool, std::string>
@@ -6073,6 +6790,13 @@ ShadowRenderer::publishFrameData(RenderFrameContext &frame) {
 Result<bool, std::string>
 ShadowRenderer::prepareShadowGraphPasses(RenderFrameContext &frame) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CMD_COPY);
+  if (sceneBufferRetirementCooldownFrames_ != 0u) {
+    --sceneBufferRetirementCooldownFrames_;
+  } else if (!sceneBufferRetirements_.empty()) {
+    std::unique_ptr<Buffer> retired = std::move(sceneBufferRetirements_.back());
+    sceneBufferRetirements_.pop_back();
+    retired.reset();
+  }
   resetFrameBuildState();
   frame.metrics.visibility.shadowCpuCandidates = 0u;
   frame.metrics.visibility.shadowCpuRejected = 0u;
@@ -6113,7 +6837,8 @@ ShadowRenderer::prepareShadowGraphPasses(RenderFrameContext &frame) {
             frame.resources->modelMaterialBindingVersion() ||
         cachedDeformationVersion_ != frame.scene->deformationVersion() ||
         cachedGeometryMutationVersion_ != gpu_.geometryMutationVersion();
-    if (topologyDirty) {
+    if (topologyDirty &&
+        !adoptPreparedSceneCache(*frame.scene, *frame.resources)) {
       auto cacheResult = rebuildSceneCache(
           *frame.scene, *frame.resources,
           static_cast<uint32_t>(materialSnapshot.headers.size()));

@@ -467,26 +467,77 @@ EnvironmentAssetHandle loadSharedEnvironment(EditorRuntime &runtime) {
 
 } // namespace
 
+struct EditorRuntime::EditorSceneDocument {
+  struct PendingAnimationActivation {
+    std::string sceneName{};
+    const ImportedPrefabSceneResources *resources = nullptr;
+    AnimatedPrefabSceneState *instance = nullptr;
+    AnimationPoseSimulationParams params{};
+    std::string simulationDebugName{};
+  };
+
+  std::pmr::unsynchronized_pool_resource memory{};
+  RenderScene scene{&memory};
+  SceneRuntimeHost sceneRuntime;
+  RenderSettings renderSettings{};
+  Camera camera{};
+  ScenePublicationTargetHandle publicationTarget{};
+  std::vector<PendingAnimationActivation> pendingAnimations{};
+  std::vector<std::filesystem::path> deferredTextureArtifactBakes{};
+  bool resetCameraController = false;
+  bool sceneHasAuthoredLights = false;
+  bool text3DEnabled = false;
+  bool publicationTargetUnregistered = false;
+  bool renderSceneFinalized = false;
+
+  explicit EditorSceneDocument(std::pmr::memory_resource *runtimeMemory)
+      : sceneRuntime(runtimeMemory) {}
+};
+
+EditorRuntime::SceneDocumentScope::SceneDocumentScope(
+    EditorRuntime &runtime, EditorSceneDocument *document)
+    : runtime_(&runtime), previous_(runtime.callbackDocument_) {
+  runtime.callbackDocument_ = document;
+}
+
+EditorRuntime::SceneDocumentScope::~SceneDocumentScope() {
+  if (runtime_ != nullptr) {
+    runtime_->callbackDocument_ = previous_;
+  }
+}
+
+EditorRuntime::SceneDocumentScope::SceneDocumentScope(
+    SceneDocumentScope &&other) noexcept
+    : runtime_(std::exchange(other.runtime_, nullptr)),
+      previous_(other.previous_) {}
+
 EditorRuntime::EditorRuntime(Application &app, RuntimeConfig config)
     : app_(app), config_(std::move(config)), cameraSystem_(cameraMemory_),
-      scene_(&sceneMemory_), sceneRuntime_(&sceneMemory_) {}
+      activeDocument_(std::make_unique<EditorSceneDocument>(&pipelineMemory_)) {
+}
 
 EditorRuntime::~EditorRuntime() = default;
 
 void EditorRuntime::initialize() {
   NURI_PROFILER_FUNCTION();
-  scene_.bindResources(&resources());
-  sceneRuntime_.bindScene(&scene_);
+  activeDocument_->scene.bindResources(&resources());
+  activeDocument_->publicationTarget =
+      assets().registerScenePublicationTarget(activeDocument_->scene);
+  activeDocument_->sceneRuntime.bindScene(&activeDocument_->scene);
   animationGpuServices_ = std::make_unique<AnimationGpuServices>(
       app_.getGPU(), config_.roots.shaders, &pipelineMemory_);
-  sceneRuntime_.attachAnimationGpuServices(animationGpuServices_.get());
+  activeDocument_->sceneRuntime.attachAnimationGpuServices(
+      animationGpuServices_.get());
   animationPlayerService_ = std::make_unique<EditorAnimationPlayerService>(
-      scene_, sceneRuntime_, sceneEditorSelectionState_,
-      [this]() { return timeSeconds(); },
-      [this]() { return advanceSimulationFrameIndex(); }, &sceneMemory_);
+      activeDocument_->scene, activeDocument_->sceneRuntime,
+      sceneEditorSelectionState_, [this]() { return timeSeconds(); },
+      [this]() { return advanceSimulationFrameIndex(); }, &pipelineMemory_);
   auto *animationProvider = app_.getRenderPipeline().addProvider(
-      std::make_unique<AnimationSceneFrameProvider>(sceneRuntime_));
-  NURI_ASSERT(animationProvider != nullptr,
+      std::make_unique<AnimationSceneFrameProvider>(
+          activeDocument_->sceneRuntime));
+  animationFrameProvider_ =
+      dynamic_cast<AnimationSceneFrameProvider *>(animationProvider);
+  NURI_ASSERT(animationFrameProvider_ != nullptr,
               "Failed to register animation scene frame provider");
 
   auto bakeryResult = bakery::BakerySystem::create({
@@ -517,11 +568,17 @@ void EditorRuntime::initialize() {
 }
 
 void EditorRuntime::update(double deltaTime) {
+  tickRetiringSceneDocuments();
+  const bool backgroundWorkAllowed =
+      std::chrono::steady_clock::now() >= backgroundWorkResumeTime_;
+  if (backgroundWorkAllowed) {
+    tickDeferredSceneTextureArtifactBakes();
+  }
   updateMetrics(deltaTime);
   if (editorOverlay_ != nullptr) {
     editorOverlay_->onUpdate(deltaTime);
   }
-  (void)sceneRuntime_.tick({
+  (void)activeDocument_->sceneRuntime.tick({
       .frameDeltaSeconds = std::max(0.0, deltaTime),
       .absoluteTimeSeconds = timeSeconds(),
       .frameIndex = advanceSimulationFrameIndex(),
@@ -530,7 +587,7 @@ void EditorRuntime::update(double deltaTime) {
     animationPlayerService_->onUpdate(deltaTime);
   }
   cameraSystem_.update(deltaTime, app_.getInput());
-  if (bakerySystem_) {
+  if (backgroundWorkAllowed && bakerySystem_ && stagingDocument_ == nullptr) {
     bakerySystem_->tick();
   }
 }
@@ -538,7 +595,7 @@ void EditorRuntime::update(double deltaTime) {
 void EditorRuntime::draw() {
   const Camera *activeCamera = cameraSystem_.activeCamera();
   NURI_ASSERT(activeCamera != nullptr, "No active camera");
-  auto commitResult = scene_.commit();
+  auto commitResult = activeDocument_->scene.commit();
   NURI_ASSERT(!commitResult.hasError(), "Scene commit failed: %s",
               commitResult.error().c_str());
   buildFrameContext(*activeCamera, timeSeconds());
@@ -570,15 +627,15 @@ void EditorRuntime::shutdown() {
   if (animationPlayerService_ != nullptr) {
     animationPlayerService_->clear();
   }
-  sceneRuntime_.reset();
-  sceneRuntime_.bindScene(nullptr);
-  scene_.graph().clear();
+  activeDocument_->sceneRuntime.reset();
+  activeDocument_->sceneRuntime.bindScene(nullptr);
+  activeDocument_->scene.graph().clear();
   if (isValidAssetHandle(sharedEnvironmentLoad_)) {
     assets().cancel(sharedEnvironmentLoad_);
     sharedEnvironmentLoad_ = {};
   }
-  scene_.setEnvironment(EnvironmentHandles{});
-  scene_.bindResources(nullptr);
+  activeDocument_->scene.setEnvironment(EnvironmentHandles{});
+  activeDocument_->scene.bindResources(nullptr);
   app_.getWindow().setCursorMode(CursorMode::Normal);
 }
 
@@ -588,17 +645,266 @@ ResourceManager &EditorRuntime::resources() {
 
 AssetSystem &EditorRuntime::assets() { return app_.getRenderer().assets(); }
 
+EditorRuntime::EditorSceneDocument &EditorRuntime::currentDocument() noexcept {
+  NURI_ASSERT(activeDocument_ != nullptr,
+              "EditorRuntime has no active scene document");
+  return callbackDocument_ != nullptr ? *callbackDocument_ : *activeDocument_;
+}
+
+const EditorRuntime::EditorSceneDocument &
+EditorRuntime::currentDocument() const noexcept {
+  NURI_ASSERT(activeDocument_ != nullptr,
+              "EditorRuntime has no active scene document");
+  return callbackDocument_ != nullptr ? *callbackDocument_ : *activeDocument_;
+}
+
+RenderScene &EditorRuntime::scene() noexcept { return currentDocument().scene; }
+
+SceneRuntimeHost &EditorRuntime::sceneRuntime() noexcept {
+  return currentDocument().sceneRuntime;
+}
+
+RenderSettings &EditorRuntime::renderSettings() noexcept {
+  return currentDocument().renderSettings;
+}
+
+const RenderSettings &EditorRuntime::renderSettings() const noexcept {
+  return currentDocument().renderSettings;
+}
+
+ScenePublicationTargetHandle
+EditorRuntime::scenePublicationTarget() const noexcept {
+  return currentDocument().publicationTarget;
+}
+
+EditorRuntime::SceneDocumentScope EditorRuntime::useActiveSceneDocument() {
+  return SceneDocumentScope(*this, activeDocument_.get());
+}
+
+EditorRuntime::SceneDocumentScope EditorRuntime::useStagingSceneDocument() {
+  NURI_ASSERT(stagingDocument_ != nullptr,
+              "EditorRuntime has no staging scene document");
+  return SceneDocumentScope(*this, stagingDocument_.get());
+}
+
+Result<void, std::string> EditorRuntime::beginStagingSceneDocument() {
+  if (stagingDocument_ != nullptr) {
+    return Result<void, std::string>::makeError(
+        "EditorRuntime already has a staging scene document");
+  }
+  auto document = std::make_unique<EditorSceneDocument>(&pipelineMemory_);
+  document->scene.bindResources(&resources());
+  document->sceneRuntime.bindScene(&document->scene);
+  document->sceneRuntime.attachAnimationGpuServices(
+      animationGpuServices_.get());
+  document->scene.setEnvironment(activeDocument_->scene.environment());
+  if (const Camera *camera = cameraSystem_.camera(mainCameraHandle_)) {
+    document->camera = *camera;
+  }
+  document->publicationTarget =
+      assets().registerScenePublicationTarget(document->scene);
+  stagingDocument_ = std::move(document);
+  assets().setInteractiveMode(true);
+  return Result<void, std::string>::makeResult();
+}
+
+Result<bool, std::string> EditorRuntime::finalizeStagingSceneDocument() {
+  if (stagingDocument_ == nullptr) {
+    return Result<bool, std::string>::makeError(
+        "EditorRuntime has no staging scene document to finalize");
+  }
+  if (!stagingDocument_->renderSceneFinalized) {
+    auto commitResult = stagingDocument_->scene.commitInactiveStep(512u);
+    if (commitResult.hasError()) {
+      return commitResult;
+    }
+    if (!commitResult.value()) {
+      return Result<bool, std::string>::makeResult(false);
+    }
+    stagingDocument_->renderSceneFinalized = true;
+  }
+  return app_.getRenderPipeline().prepareSceneStep(
+      stagingDocument_->scene, resources(), 65536u,
+      &stagingDocument_->renderSettings, &stagingDocument_->camera,
+      app_.getAspectRatio(),
+      static_cast<uint32_t>(std::max(app_.getWidth(), 1)),
+      static_cast<uint32_t>(std::max(app_.getHeight(), 1)));
+}
+
+bool EditorRuntime::activateStagingSceneDocument() {
+  if (stagingDocument_ == nullptr) {
+    return false;
+  }
+
+  std::unique_ptr<EditorSceneDocument> previous = std::move(activeDocument_);
+  activeDocument_ = std::move(stagingDocument_);
+  backgroundWorkResumeTime_ =
+      std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+  assets().setInteractiveMode(false);
+  callbackDocument_ = nullptr;
+  retiringDocuments_.push_back(std::move(previous));
+
+  bindActiveSceneServices();
+  if (Camera *camera = cameraSystem_.camera(mainCameraHandle_)) {
+    *camera = activeDocument_->camera;
+    syncEditorCameraWidgetState(*camera);
+  }
+  if (activeDocument_->resetCameraController) {
+    if (CameraController *controller = cameraSystem_.activeController()) {
+      controller->reset();
+    }
+  }
+  sceneEditorSelectionState_.clear();
+  temporalFrameService_.reset();
+  if (editorOverlay_ != nullptr) {
+    editorOverlay_->resetSceneUiState();
+  }
+
+  auto pendingAnimations = std::move(activeDocument_->pendingAnimations);
+  for (std::filesystem::path &path :
+       activeDocument_->deferredTextureArtifactBakes) {
+    deferredSceneTextureArtifactBakes_.push_back(std::move(path));
+  }
+  activeDocument_->deferredTextureArtifactBakes.clear();
+  auto scope = useActiveSceneDocument();
+  for (const EditorSceneDocument::PendingAnimationActivation &pending :
+       pendingAnimations) {
+    if (pending.resources == nullptr || pending.instance == nullptr) {
+      continue;
+    }
+    startAnimatedPrefabSceneSimulation(pending.sceneName, *pending.resources,
+                                       *pending.instance, pending.params,
+                                       pending.simulationDebugName);
+  }
+  return true;
+}
+
+void EditorRuntime::retireStagingSceneDocument() {
+  if (stagingDocument_ == nullptr) {
+    return;
+  }
+  callbackDocument_ = nullptr;
+  retiringDocuments_.push_back(std::move(stagingDocument_));
+  assets().setInteractiveMode(false);
+}
+
+void EditorRuntime::tickRetiringSceneDocuments() {
+  for (auto it = retiringDocuments_.begin(); it != retiringDocuments_.end();
+       ++it) {
+    EditorSceneDocument &document = **it;
+    if (!document.publicationTargetUnregistered) {
+      const ScenePublicationTargetSnapshot snapshot =
+          assets().query(document.publicationTarget);
+      if (snapshot.pendingCount != 0u ||
+          !assets().unregisterScenePublicationTarget(
+              document.publicationTarget)) {
+        continue;
+      }
+      document.publicationTargetUnregistered = true;
+    }
+    if (!document.scene.retireInactiveStep(512u)) {
+      continue;
+    }
+    retiringDocuments_.erase(it);
+    break;
+  }
+}
+
+bool EditorRuntime::deferSceneTextureArtifactBake(
+    const std::filesystem::path &sourcePath) {
+  if (sourcePath.empty()) {
+    return false;
+  }
+  const std::filesystem::path normalized = sourcePath.lexically_normal();
+  if (callbackDocument_ == stagingDocument_.get() &&
+      stagingDocument_ != nullptr) {
+    auto &requests = stagingDocument_->deferredTextureArtifactBakes;
+    if (std::ranges::find(requests, normalized) == requests.end()) {
+      requests.push_back(normalized);
+    }
+    return true;
+  }
+  if (std::ranges::find(deferredSceneTextureArtifactBakes_, normalized) ==
+      deferredSceneTextureArtifactBakes_.end()) {
+    deferredSceneTextureArtifactBakes_.push_back(normalized);
+  }
+  return true;
+}
+
+void EditorRuntime::tickDeferredSceneTextureArtifactBakes() {
+  if (stagingDocument_ != nullptr ||
+      deferredSceneTextureArtifactBakes_.empty() || bakerySystem_ == nullptr) {
+    return;
+  }
+  std::filesystem::path sourcePath =
+      std::move(deferredSceneTextureArtifactBakes_.front());
+  deferredSceneTextureArtifactBakes_.pop_front();
+  auto enqueueResult = bakerySystem_->enqueue(
+      bakery::BakeRequest{bakery::SceneTextureArtifactsBakeRequest{
+          .scenePath = sourcePath,
+          .prebuildNativeTargets =
+              {
+                  bakery::SceneTextureArtifactTarget::BC7,
+              },
+          .forceRebuild = false,
+      }});
+  if (enqueueResult.hasError()) {
+    NURI_LOG_WARNING(
+        "EditorRuntime: failed to queue deferred scene texture artifact "
+        "bake for '%s': %s",
+        sourcePath.string().c_str(), enqueueResult.error().c_str());
+  }
+}
+
+ScenePublicationTargetSnapshot
+EditorRuntime::stagingScenePublicationSnapshot() {
+  if (stagingDocument_ == nullptr) {
+    return ScenePublicationTargetSnapshot{
+        .requestCount = 1u,
+        .failedCount = 1u,
+    };
+  }
+  return assets().query(stagingDocument_->publicationTarget);
+}
+
+void EditorRuntime::bindActiveSceneServices() {
+  NURI_ASSERT(activeDocument_ != nullptr,
+              "EditorRuntime has no active document to bind");
+  if (animationFrameProvider_ != nullptr) {
+    animationFrameProvider_->bindRuntime(activeDocument_->sceneRuntime);
+  }
+  if (animationPlayerService_ != nullptr) {
+    animationPlayerService_->bindScene(activeDocument_->scene,
+                                       activeDocument_->sceneRuntime, false);
+  }
+  if (editorOverlay_ != nullptr) {
+    editorOverlay_->bindScene(activeDocument_->scene);
+  }
+}
+
 Camera *EditorRuntime::mainCamera() {
+  if (callbackDocument_ != nullptr &&
+      callbackDocument_ != activeDocument_.get()) {
+    return &callbackDocument_->camera;
+  }
   return cameraSystem_.camera(mainCameraHandle_);
 }
 
 const Camera *EditorRuntime::mainCamera() const {
+  if (callbackDocument_ != nullptr &&
+      callbackDocument_ != activeDocument_.get()) {
+    return &callbackDocument_->camera;
+  }
   return cameraSystem_.camera(mainCameraHandle_);
 }
 
 double EditorRuntime::timeSeconds() const { return app_.getTime(); }
 
 void EditorRuntime::syncEditorCameraWidgetState(const Camera &camera) {
+  if (callbackDocument_ != nullptr &&
+      callbackDocument_ != activeDocument_.get()) {
+    return;
+  }
   if (editorOverlay_ != nullptr) {
     editorOverlay_->syncCameraControllerWidgetStateFromCamera(camera);
   }
@@ -628,9 +934,35 @@ void EditorRuntime::syncSceneSelectionUi(const EditorSceneCatalog &catalog) {
     }
     sceneSelectionVersion_ = catalog.version();
   }
-  editorOverlay_->setSceneSelectionUi(sceneSelectionOptions_,
-                                      catalog.activeSceneId(),
-                                      catalog.version(), "Toggle Editor: F6");
+  const EditorSceneTransitionSnapshot transition = catalog.transitionSnapshot();
+  std::string_view phase{};
+  switch (transition.phase) {
+  case EditorSceneTransitionPhase::Idle:
+    break;
+  case EditorSceneTransitionPhase::Preparing:
+    phase = "Preparing";
+    break;
+  case EditorSceneTransitionPhase::LoadingAssets:
+    phase = "Loading";
+    break;
+  case EditorSceneTransitionPhase::Finalizing:
+    phase = "Finalizing";
+    break;
+  case EditorSceneTransitionPhase::Failed:
+    phase = "Failed";
+    break;
+  }
+  editorOverlay_->setSceneSelectionUi(
+      sceneSelectionOptions_, catalog.activeSceneId(), catalog.version(),
+      "Toggle Editor: F6",
+      EditorSceneLoadUiState{
+          .pendingSceneId = transition.pendingSceneId,
+          .phase = phase,
+          .error = transition.error,
+          .progress = transition.progress,
+          .cancellable = transition.cancellable,
+          .failed = transition.phase == EditorSceneTransitionPhase::Failed,
+      });
 }
 
 std::optional<std::string> EditorRuntime::takeSceneSelectionRequest() {
@@ -638,23 +970,30 @@ std::optional<std::string> EditorRuntime::takeSceneSelectionRequest() {
                                    : std::nullopt;
 }
 
+bool EditorRuntime::takeSceneCancelRequest() {
+  return editorOverlay_ != nullptr && editorOverlay_->takeSceneCancelRequest();
+}
+
 void EditorRuntime::resetSceneState() {
-  if (animationPlayerService_ != nullptr) {
+  EditorSceneDocument &document = currentDocument();
+  if (&document == activeDocument_.get() &&
+      animationPlayerService_ != nullptr) {
     animationPlayerService_->clear();
   }
-  scene_.graph().clear();
-  if (editorOverlay_ != nullptr) {
+  document.scene.graph().clear();
+  if (&document == activeDocument_.get() && editorOverlay_ != nullptr) {
     editorOverlay_->resetSceneUiState();
   }
-  renderSettings_ = RenderSettings{};
-  sceneHasAuthoredLights_ = false;
-  text3DEnabled_ = false;
+  document.renderSettings = RenderSettings{};
+  document.sceneHasAuthoredLights = false;
+  document.text3DEnabled = false;
+  document.pendingAnimations.clear();
 }
 
 void EditorRuntime::finalizeSceneLighting(
     std::span<const ImportedSceneLight> fallbackLights,
     const glm::mat4 &baseModel) {
-  if (!sceneHasAuthoredLights_ &&
+  if (!currentDocument().sceneHasAuthoredLights &&
       !applyImportedLights(fallbackLights, baseModel)) {
     setupDefaultSceneLighting();
   }
@@ -662,12 +1001,13 @@ void EditorRuntime::finalizeSceneLighting(
 
 void EditorRuntime::configureStaticModelOpaqueSettings(
     const glm::vec3 &lodThresholds) {
-  renderSettings_.opaque.enableInstanceCompute = false;
-  renderSettings_.opaque.enableMeshLod = true;
-  renderSettings_.opaque.enableTessellation = false;
-  renderSettings_.opaque.forcedMeshLod = -1;
-  renderSettings_.opaque.meshLodDistanceThresholds = lodThresholds;
-  renderSettings_.opaque.enableInstanceAnimation = false;
+  RenderSettings &settings = renderSettings();
+  settings.opaque.enableInstanceCompute = false;
+  settings.opaque.enableMeshLod = true;
+  settings.opaque.enableTessellation = false;
+  settings.opaque.forcedMeshLod = -1;
+  settings.opaque.meshLodDistanceThresholds = lodThresholds;
+  settings.opaque.enableInstanceAnimation = false;
 }
 
 const Model &EditorRuntime::requireLoadedModel(ModelRef modelRef,
@@ -684,11 +1024,11 @@ RenderableId EditorRuntime::addRequiredRenderable(ModelRef modelRef,
                                                   const glm::mat4 &modelMatrix,
                                                   const char *errorMessage) {
   auto nodeResult =
-      scene_.graph().createNode(scene_.graph().rootNode(), {}, modelMatrix);
+      scene().graph().createNode(scene().graph().rootNode(), {}, modelMatrix);
   NURI_ASSERT(!nodeResult.hasError(), "%s: %s", errorMessage,
               nodeResult.error().c_str());
   auto addResult =
-      scene_.graph().addRenderable(nodeResult.value(), modelRef, materialRef);
+      scene().graph().addRenderable(nodeResult.value(), modelRef, materialRef);
   NURI_ASSERT(!addResult.hasError(), "%s: %s", errorMessage,
               addResult.error().c_str());
   return addResult.value();
@@ -710,8 +1050,8 @@ RenderableId EditorRuntime::instantiateImportedPrefabScene(
     *outRootNode = kInvalidNodeId;
   }
 
-  auto rootNodeResult = scene_.graph().createNode(scene_.graph().rootNode(),
-                                                  sceneName, baseModel);
+  auto rootNodeResult = scene().graph().createNode(scene().graph().rootNode(),
+                                                   sceneName, baseModel);
   if (rootNodeResult.hasError()) {
     return kInvalidRenderableId;
   }
@@ -719,11 +1059,11 @@ RenderableId EditorRuntime::instantiateImportedPrefabScene(
   SceneInstantiationMap localInstantiated;
   SceneInstantiationMap &instantiated =
       outInstantiation != nullptr ? *outInstantiation : localInstantiated;
-  auto instantiateResult = scene_.graph().instantiatePrefab(
+  auto instantiateResult = scene().graph().instantiatePrefab(
       resourcesIn.prefab, rootNodeResult.value(), resourcesIn.assets,
       &instantiated);
   if (instantiateResult.hasError()) {
-    (void)scene_.graph().destroyNodeSubtree(rootNodeResult.value());
+    (void)scene().graph().destroyNodeSubtree(rootNodeResult.value());
     return kInvalidRenderableId;
   }
 
@@ -735,7 +1075,7 @@ RenderableId EditorRuntime::instantiateImportedPrefabScene(
     animationPlayerService_->registerPrefabInstance(
         sceneName, resourcesIn.prefab, instantiated, rootNodeResult.value());
   }
-  sceneHasAuthoredLights_ = !instantiated.lights.empty();
+  currentDocument().sceneHasAuthoredLights = !instantiated.lights.empty();
   for (RenderableId renderableId : instantiated.renderables) {
     if (isValid(renderableId)) {
       return renderableId;
@@ -892,11 +1232,24 @@ FramedSceneCameraState EditorRuntime::configureDragonSampleCamera(
 
 void EditorRuntime::destroyAnimatedPrefabSceneInstance(
     AnimatedPrefabSceneState &instance) {
+  EditorSceneDocument &document = currentDocument();
+  if (&document != activeDocument_.get()) {
+    std::erase_if(document.pendingAnimations, [&instance](const auto &pending) {
+      return pending.instance == &instance;
+    });
+    instance.simulation = kInvalidSimulationHandle;
+    instance.rootNode = kInvalidNodeId;
+    instance.instantiationMap.nodes.clear();
+    instance.instantiationMap.renderables.clear();
+    instance.instantiationMap.lights.clear();
+    return;
+  }
   if (animationPlayerService_ != nullptr && isValid(instance.rootNode)) {
     animationPlayerService_->unregisterPrefabInstance(instance.rootNode);
     instance.simulation = kInvalidSimulationHandle;
   } else if (isValid(instance.simulation)) {
-    (void)sceneRuntime_.destroyAnimationPoseSimulation(instance.simulation);
+    (void)currentDocument().sceneRuntime.destroyAnimationPoseSimulation(
+        instance.simulation);
     instance.simulation = kInvalidSimulationHandle;
   }
   instance.rootNode = kInvalidNodeId;
@@ -910,6 +1263,18 @@ void EditorRuntime::startAnimatedPrefabSceneSimulation(
     AnimatedPrefabSceneState &instance,
     const AnimationPoseSimulationParams &params,
     std::string_view simulationDebugName) {
+  EditorSceneDocument &document = currentDocument();
+  if (&document != activeDocument_.get()) {
+    document.pendingAnimations.push_back(
+        EditorSceneDocument::PendingAnimationActivation{
+            .sceneName = std::string(sceneName),
+            .resources = &resourcesIn,
+            .instance = &instance,
+            .params = params,
+            .simulationDebugName = std::string(simulationDebugName),
+        });
+    return;
+  }
   const std::string sceneNameString(sceneName);
   NURI_ASSERT(!resourcesIn.prefab.animations.empty(),
               "%s prefab has no animations", sceneNameString.c_str());
@@ -923,10 +1288,10 @@ void EditorRuntime::startAnimatedPrefabSceneSimulation(
                 sceneNameString.c_str(), params.secondary.clipIndex);
   }
 
-  const auto commitResult = scene_.commit();
+  const auto commitResult = scene().commit();
   NURI_ASSERT(!commitResult.hasError(), "Scene commit failed for %s: %s",
               sceneNameString.c_str(), commitResult.error().c_str());
-  (void)sceneRuntime_.tick({
+  (void)currentDocument().sceneRuntime.tick({
       .frameDeltaSeconds = 0.0,
       .absoluteTimeSeconds = timeSeconds(),
       .frameIndex = simulationFrameIndex_++,
@@ -945,14 +1310,15 @@ void EditorRuntime::startAnimatedPrefabSceneSimulation(
     instance.simulation = kInvalidSimulationHandle;
     return;
   }
-  auto fallbackResult = sceneRuntime_.createAnimationPoseSimulation(
-      AnimationPoseSimulationCreateInfo{
-          .prefab = &resourcesIn.prefab,
-          .instantiationMap = &instance.instantiationMap,
-          .rootNode = instance.rootNode,
-          .debugName = simulationDebugName,
-          .params = params,
-      });
+  auto fallbackResult =
+      currentDocument().sceneRuntime.createAnimationPoseSimulation(
+          AnimationPoseSimulationCreateInfo{
+              .prefab = &resourcesIn.prefab,
+              .instantiationMap = &instance.instantiationMap,
+              .rootNode = instance.rootNode,
+              .debugName = simulationDebugName,
+              .params = params,
+          });
   NURI_ASSERT(!fallbackResult.hasError(),
               "Failed to create %s animation simulation: %s",
               sceneNameString.c_str(), fallbackResult.error().c_str());
@@ -976,7 +1342,7 @@ uint32_t EditorRuntime::selectPreferredClipIndex(
 }
 
 void EditorRuntime::setupText3DTestScene() {
-  text3DEnabled_ = true;
+  currentDocument().text3DEnabled = true;
   configureStaticModelOpaqueSettings(glm::vec3(8.0f, 16.0f, 32.0f));
   Camera *camera = mainCamera();
   NURI_ASSERT(camera != nullptr, "Failed to get main camera");
@@ -988,6 +1354,17 @@ void EditorRuntime::setupText3DTestScene() {
   camera->setLookAt(glm::vec3(0.0f, 1.2f, -4.2f), glm::vec3(0.0f, 1.2f, 0.0f),
                     glm::vec3(0.0f, 1.0f, 0.0f));
   syncEditorCameraWidgetState(*camera);
+}
+
+void EditorRuntime::resetSceneCameraController() {
+  EditorSceneDocument &document = currentDocument();
+  if (&document != activeDocument_.get()) {
+    document.resetCameraController = true;
+    return;
+  }
+  if (CameraController *controller = cameraSystem_.activeController()) {
+    controller->reset();
+  }
 }
 
 void EditorRuntime::logSingleRenderableSceneStats(
@@ -1063,7 +1440,7 @@ void EditorRuntime::initializeEditorOverlay() {
   textOverlayEnabled_ = false;
   const EditorServices editorServices{
       .application = &app_,
-      .scene = &scene_,
+      .scene = &activeDocument_->scene,
       .cameraSystem = &cameraSystem_,
       .gpu = &app_.getGPU(),
       .resources = &resources(),
@@ -1107,9 +1484,9 @@ void EditorRuntime::toggleEditorOverlay() {
 
 void EditorRuntime::buildFrameContext(const Camera &camera,
                                       double timeSecondsIn) {
-  frameContext_.scene = &scene_;
+  frameContext_.scene = &activeDocument_->scene;
   frameContext_.resources = &resources();
-  frameRenderSettings_ = renderSettings_;
+  frameRenderSettings_ = activeDocument_->renderSettings;
   applyDebugRenderEnvOverrides(frameRenderSettings_);
   sanitizeHDRPostProcessSettings(frameRenderSettings_.hdrPostProcess);
   sanitizeTransmissionSettings(frameRenderSettings_.transmission);
@@ -1117,12 +1494,12 @@ void EditorRuntime::buildFrameContext(const Camera &camera,
   sanitizeAmbientOcclusionSettings(frameRenderSettings_.ambientOcclusion,
                                    frameRenderSettings_.opaque,
                                    frameRenderSettings_.antiAliasing);
-  frameContext_.frameIndex = frameIndex_++;
+  frameContext_.frameIndex = frameIndex_;
   const TemporalSceneContentState sceneContent{
-      .lightTopologyVersion = scene_.lightTopologyVersion(),
-      .lightTransformVersion = scene_.lightTransformVersion(),
+      .lightTopologyVersion = activeDocument_->scene.lightTopologyVersion(),
+      .lightTransformVersion = activeDocument_->scene.lightTransformVersion(),
       .materialTableVersion = resources().materialVersion(),
-      .environmentVersion = scene_.environmentVersion(),
+      .environmentVersion = activeDocument_->scene.environmentVersion(),
   };
   auto planResult = buildPresentationAAPlan(
       frameRenderSettings_, {}, resources().gpuMultisampleCapabilities());
@@ -1160,13 +1537,19 @@ void EditorRuntime::submitPipelineFrame() {
       app_.getRenderer().render(app_.getRenderPipeline(), frameContext_);
   NURI_ASSERT(!renderResult.hasError(), "Render failed: %s",
               renderResult.error().c_str());
+  lastFrameOutputAvailable_ = renderResult.value();
+  if (lastFrameOutputAvailable_) {
+    ++frameIndex_;
+    recordFrameOutput();
+  }
   logDebugShadowInspectProbeResult();
   if (editorOverlay_ != nullptr) {
     if (auto settingsUpdate = editorOverlay_->takeRenderSettingsUpdate()) {
       frameRenderSettings_ = std::move(*settingsUpdate);
     }
   }
-  persistFrameRenderSettings(renderSettings_, frameRenderSettings_);
+  persistFrameRenderSettings(activeDocument_->renderSettings,
+                             frameRenderSettings_);
 }
 
 void EditorRuntime::enqueueDebugShadowInspectProbe() {
@@ -1175,7 +1558,7 @@ void EditorRuntime::enqueueDebugShadowInspectProbe() {
       debugShadowInspectProbe_.completed ||
       frameContext_.shadowInspectRequest.has_value() ||
       frameContext_.frameIndex < config.warmupFrames ||
-      scene_.renderables().empty()) {
+      activeDocument_->scene.renderables().empty()) {
     return;
   }
 
@@ -1199,7 +1582,7 @@ void EditorRuntime::enqueueDebugShadowInspectProbe() {
                 "request=%llu pixel=(%u,%u) frame=%llu renderables=%zu",
                 static_cast<unsigned long long>(requestId), x, y,
                 static_cast<unsigned long long>(frameContext_.frameIndex),
-                scene_.renderables().size());
+                activeDocument_->scene.renderables().size());
 }
 
 void EditorRuntime::logDebugShadowInspectProbeResult() {
@@ -1262,7 +1645,7 @@ void EditorRuntime::queueTextSamples() {
   if (textOverlayEnabled_) {
     (void)enqueue2DTextSamples(defaultFont, baseFontSizePx, scratch);
   }
-  if (text3DEnabled_) {
+  if (activeDocument_->text3DEnabled) {
     (void)enqueue3DTextSamples(defaultFont, baseFontSizePx, scratch);
   }
 }
@@ -1370,13 +1753,13 @@ bool EditorRuntime::applyImportedLights(
     return false;
   }
   auto rootNodeResult =
-      scene_.graph().createNode(scene_.graph().rootNode(), {}, modelMatrix);
+      scene().graph().createNode(scene().graph().rootNode(), {}, modelMatrix);
   if (rootNodeResult.hasError()) {
     return false;
   }
   bool addedAny = false;
   for (const ImportedSceneLight &importedLight : importedLights) {
-    auto lightNodeResult = scene_.graph().createNode(
+    auto lightNodeResult = scene().graph().createNode(
         rootNodeResult.value(), importedLight.light.name,
         makeTransformMatrix(importedLight.light.position,
                             importedLight.light.rotation));
@@ -1388,7 +1771,7 @@ bool EditorRuntime::applyImportedLights(
     localLight.position = glm::vec3(0.0f);
     localLight.rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
     auto addResult =
-        scene_.graph().addLight(lightNodeResult.value(), localLight);
+        scene().graph().addLight(lightNodeResult.value(), localLight);
     if (addResult.hasError()) {
       continue;
     }
@@ -1411,15 +1794,15 @@ void EditorRuntime::setupDefaultSceneLighting() {
   light.color = glm::vec3(1.0f);
   light.intensity = 2.0f;
   light.enabled = true;
-  auto nodeResult = scene_.graph().createNode(
-      scene_.graph().rootNode(), light.name,
+  auto nodeResult = scene().graph().createNode(
+      scene().graph().rootNode(), light.name,
       makeTransformMatrix(light.position, light.rotation));
   NURI_ASSERT(!nodeResult.hasError(),
               "Failed to create default directional light node: %s",
               nodeResult.error().c_str());
   light.position = glm::vec3(0.0f);
   light.rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
-  auto addResult = scene_.graph().addLight(nodeResult.value(), light);
+  auto addResult = scene().graph().addLight(nodeResult.value(), light);
   NURI_ASSERT(!addResult.hasError(),
               "Failed to add default directional light: %s",
               addResult.error().c_str());
@@ -1428,8 +1811,11 @@ void EditorRuntime::setupDefaultSceneLighting() {
 void EditorRuntime::updateMetrics(double deltaTime) {
   frameDeltaSeconds_ =
       (std::isfinite(deltaTime) && deltaTime >= 0.0) ? deltaTime : 0.0;
-  fpsFrameCount_++;
   fpsAccumulatorSeconds_ += frameDeltaSeconds_;
+}
+
+void EditorRuntime::recordFrameOutput() {
+  ++fpsFrameCount_;
   constexpr double kFpsAverageWindowSeconds = 0.5;
   if (fpsAccumulatorSeconds_ >= kFpsAverageWindowSeconds) {
     currentFps_ =

@@ -1,5 +1,7 @@
 #include "nuri/pch.h"
 
+#include <unordered_set>
+
 #include "nuri/gfx/renderers/opaque_renderer.h"
 
 #include "nuri/core/containers/hash_map.h"
@@ -7,6 +9,7 @@
 #include "nuri/core/log.h"
 #include "nuri/core/pmr_scratch.h"
 #include "nuri/core/profiling.h"
+#include "nuri/core/thread_priority.h"
 #include "nuri/gfx/frame/presentation_aa_plan.h"
 #include "nuri/gfx/renderers/detail/opaque_lod_selection.h"
 #include "nuri/gfx/renderers/detail/opaque_meshlet_routing.h"
@@ -24,6 +27,70 @@
 
 namespace nuri {
 namespace {
+
+struct BackgroundPreparedBuffer {
+  BufferDesc desc{};
+  std::string debugName{};
+  std::unique_ptr<PreparedGpuBuffer> prepared{};
+  std::string error{};
+  std::shared_ptr<void> dataOwner{};
+  std::atomic_bool ready = false;
+};
+
+Result<bool, std::string> advanceBackgroundPreparedBuffer(
+    GPUDevice &gpu, std::shared_ptr<BackgroundPreparedBuffer> &work,
+    std::unique_ptr<Buffer> &outBuffer, size_t &outCapacity,
+    const BufferDesc &desc, std::string_view debugName,
+    std::shared_ptr<void> dataOwner = {}) {
+  if (outBuffer && outBuffer->valid() && outCapacity >= desc.size) {
+    return Result<bool, std::string>::makeResult(true);
+  }
+  if (!gpu.supportsBackgroundBufferPreparation()) {
+    auto created = Buffer::create(gpu, desc, debugName);
+    if (created.hasError()) {
+      return Result<bool, std::string>::makeError(created.error());
+    }
+    outBuffer = std::move(created.value());
+    outCapacity = desc.size;
+    return Result<bool, std::string>::makeResult(true);
+  }
+  if (!work) {
+    work = std::make_shared<BackgroundPreparedBuffer>();
+    work->desc = desc;
+    work->debugName = std::string(debugName);
+    work->dataOwner = std::move(dataOwner);
+    GPUDevice *const workerGpu = &gpu;
+    std::shared_ptr<BackgroundPreparedBuffer> workerState = work;
+    std::thread([workerGpu, workerState] {
+      setCurrentThreadBackgroundPriority();
+      auto prepared =
+          workerGpu->prepareBuffer(workerState->desc, workerState->debugName);
+      if (prepared.hasError()) {
+        workerState->error = prepared.error();
+      } else {
+        workerState->prepared = std::move(prepared.value());
+      }
+      workerState->ready.store(true, std::memory_order_release);
+    }).detach();
+    return Result<bool, std::string>::makeResult(false);
+  }
+  if (!work->ready.load(std::memory_order_acquire)) {
+    return Result<bool, std::string>::makeResult(false);
+  }
+  if (!work->error.empty()) {
+    return Result<bool, std::string>::makeError(work->error);
+  }
+  auto published = Buffer::publishPrepared(gpu, std::move(work->prepared),
+                                           work->desc, work->debugName);
+  if (published.hasError()) {
+    return Result<bool, std::string>::makeError(published.error());
+  }
+  outBuffer = std::move(published.value());
+  outCapacity = work->desc.size;
+  work.reset();
+  return Result<bool, std::string>::makeResult(true);
+}
+
 constexpr float kMinLodRadius = 1.0e-4f;
 constexpr float kBoundsRadiusHalf = 0.5f;
 constexpr size_t kMaxBatchReserve = 128;
@@ -848,6 +915,138 @@ struct IndirectGroupKeyHash {
 
 } // namespace
 
+struct OpaqueRenderer::SceneCachePreparation {
+  enum class Stage : uint8_t {
+    ReserveRenderables,
+    CountMeshDraws,
+    ReserveMeshDraws,
+    BuildTemplates,
+    ReserveCenters,
+    ReserveBaseMatrices,
+    ReserveMatrices,
+    ReserveLodBounds,
+    ReserveLodErrors,
+    ReserveLodCounts,
+    ReserveAutoLodLevels,
+    BuildInstances,
+    BuildMaterialTextures,
+    BuildPreResolvedDecodeBuffers,
+    BuildVisibilityCandidates,
+    ValidateUniformPath,
+    BuildInitialAutoLod,
+    BuildInitialRemap,
+    EnsureCentersBuffer,
+    UploadCentersBuffer,
+    EnsureLodBoundsBuffer,
+    UploadLodBoundsBuffer,
+    EnsureBaseMatricesBuffer,
+    UploadBaseMatricesBuffer,
+    EnsureMatricesRing,
+    UploadMatricesRing,
+    EnsureRemapRing,
+    EnsurePreviousMatricesRing,
+    EnsureVelocityFlagsRing,
+    EnsureVelocityFrameDataRing,
+    Ready,
+  };
+
+  const RenderScene *scene = nullptr;
+  const ResourceManager *resources = nullptr;
+  uint64_t sceneId = 0u;
+  uint64_t topologyVersion = 0u;
+  uint64_t transformVersion = 0u;
+  uint64_t materialVersion = 0u;
+  uint64_t modelMaterialBindingVersion = 0u;
+  uint64_t geometryMutationVersion = 0u;
+  uint64_t deformationVersion = 0u;
+  uint32_t materialCount = 0u;
+  bool excludeTransmission = true;
+  Stage stage = Stage::ReserveRenderables;
+  size_t cursor = 0u;
+  size_t totalMeshDraws = 0u;
+  size_t invalidMaterialFallbackCount = 0u;
+  size_t skippedBlendSubmeshCount = 0u;
+  bool uniformSingleSubmeshPath = true;
+  bool initialAutoLodPrepared = false;
+  bool canPrepareInitialAutoLod = false;
+  glm::mat4 initialView{1.0f};
+  glm::vec3 initialCameraPosition{0.0f};
+  ProjectionType initialProjectionType = ProjectionType::Perspective;
+  float initialNearPlane = 0.1f;
+  float initialProjectionScaleY = 1.0f;
+  float initialTargetPixelError = 1.0f;
+  float initialHysteresisRatio = 0.0f;
+  uint32_t initialRenderHeight = 1u;
+  std::array<size_t, Submesh::kMaxLodCount> initialLodBucketCounts{};
+  std::array<size_t, Submesh::kMaxLodCount> initialLodBucketWrites{};
+  uint64_t initialLod0Count = 0u;
+  uint64_t initialLod1Count = 0u;
+  uint64_t initialRemapSignature = kInvalidDrawSignature;
+  std::pmr::vector<RenderableTemplate> renderableTemplates;
+  std::pmr::vector<MeshDrawTemplate> meshDrawTemplates;
+  std::pmr::vector<glm::vec4> instanceCentersPhase;
+  std::pmr::vector<glm::mat4> instanceBaseMatrices;
+  std::pmr::vector<InstanceData> instanceMatrices;
+  std::pmr::vector<glm::vec4> instanceLodBounds;
+  std::pmr::vector<glm::vec4> instanceLodErrors;
+  std::pmr::vector<uint8_t> instanceLodCounts;
+  std::pmr::vector<uint32_t> instanceAutoLodLevels;
+  std::pmr::vector<uint32_t> initialInstanceRemap;
+  std::pmr::unordered_map<RenderableId, glm::mat4> previousTransformById;
+  std::pmr::vector<TextureHandle> materialTextureAccessHandles;
+  std::pmr::unordered_set<uint64_t> materialTextureKeys;
+  std::pmr::vector<BufferHandle> preResolvedDecodeBuffers;
+  std::pmr::vector<VisibilityCandidate> visibilityCandidates;
+  std::pmr::vector<VisibilityCandidateGpu> visibilityCandidateGpuData;
+  std::shared_ptr<BackgroundPreparedBuffer> bufferPreparation;
+  std::unique_ptr<Buffer> centersBuffer;
+  std::unique_ptr<Buffer> lodBoundsBuffer;
+  std::unique_ptr<Buffer> baseMatricesBuffer;
+  size_t centersBufferCapacity = 0u;
+  size_t lodBoundsBufferCapacity = 0u;
+  size_t baseMatricesBufferCapacity = 0u;
+  std::pmr::vector<DynamicBufferSlot> matricesRing;
+  std::pmr::vector<DynamicBufferSlot> remapRing;
+  std::pmr::vector<DynamicBufferSlot> previousMatricesRing;
+  std::pmr::vector<DynamicBufferSlot> velocityFlagsRing;
+  std::pmr::vector<DynamicBufferSlot> velocityFrameDataRing;
+  size_t uploadCursor = 0u;
+  size_t ringCursor = 0u;
+  bool visibilityCandidatesHadDeformedRenderable = false;
+  std::atomic_bool allocationReady = false;
+  std::atomic_bool allocationFailed = false;
+
+  explicit SceneCachePreparation(std::pmr::memory_resource *memory)
+      : renderableTemplates(memory), meshDrawTemplates(memory),
+        instanceCentersPhase(memory), instanceBaseMatrices(memory),
+        instanceMatrices(memory), instanceLodBounds(memory),
+        instanceLodErrors(memory), instanceLodCounts(memory),
+        instanceAutoLodLevels(memory), initialInstanceRemap(memory),
+        previousTransformById(memory), materialTextureAccessHandles(memory),
+        materialTextureKeys(memory), preResolvedDecodeBuffers(memory),
+        visibilityCandidates(memory), visibilityCandidateGpuData(memory),
+        matricesRing(memory), remapRing(memory), previousMatricesRing(memory),
+        velocityFlagsRing(memory), velocityFrameDataRing(memory) {}
+
+  [[nodiscard]] bool matches(const RenderScene &candidateScene,
+                             const ResourceManager &candidateResources,
+                             uint32_t candidateMaterialCount,
+                             bool candidateExcludeTransmission,
+                             uint64_t candidateGeometryVersion) const noexcept {
+    return scene == &candidateScene && sceneId == candidateScene.id() &&
+           resources == &candidateResources &&
+           topologyVersion == candidateScene.topologyVersion() &&
+           transformVersion == candidateScene.transformVersion() &&
+           deformationVersion == candidateScene.deformationVersion() &&
+           materialVersion == candidateResources.materialVersion() &&
+           modelMaterialBindingVersion ==
+               candidateResources.modelMaterialBindingVersion() &&
+           materialCount == candidateMaterialCount &&
+           excludeTransmission == candidateExcludeTransmission &&
+           geometryMutationVersion == candidateGeometryVersion;
+  }
+};
+
 OpaqueRenderer::OpaqueRenderer(GPUDevice &gpu, OpaqueRendererConfig config,
                                std::pmr::memory_resource *memory)
     : gpu_(gpu), config_(std::move(config)),
@@ -868,8 +1067,8 @@ OpaqueRenderer::OpaqueRenderer(GPUDevice &gpu, OpaqueRendererConfig config,
       meshletCompactionRing_(resolveMemoryResource(memory)),
       singleInstanceBatchCaches_(resolveMemoryResource(memory)),
       staticBatchCache_(resolveMemoryResource(memory)),
-      renderableTemplates_(resolveMemoryResource(memory)),
-      meshDrawTemplates_(resolveMemoryResource(memory)),
+      renderableTemplates_(std::pmr::new_delete_resource()),
+      meshDrawTemplates_(std::pmr::new_delete_resource()),
       indirectSourceDrawIndices_(resolveMemoryResource(memory)),
       instanceMatricesUploadVersions_(resolveMemoryResource(memory)),
       indirectUploadSignatures_(resolveMemoryResource(memory)),
@@ -879,24 +1078,25 @@ OpaqueRenderer::OpaqueRenderer(GPUDevice &gpu, OpaqueRendererConfig config,
       visibilityExpectedVisibleIndexHashes_(resolveMemoryResource(memory)),
       visibilityExpectedVisibleListsValid_(resolveMemoryResource(memory)),
       visibilityVisibleIndexReadback_(resolveMemoryResource(memory)),
-      visibilityCandidates_(resolveMemoryResource(memory)),
-      visibilityCandidateGpuData_(resolveMemoryResource(memory)),
+      visibilityCandidates_(std::pmr::new_delete_resource()),
+      visibilityCandidateGpuData_(std::pmr::new_delete_resource()),
       templateBatchIndices_(resolveMemoryResource(memory)),
       cachedVisibleTemplateBatchIndices_(resolveMemoryResource(memory)),
       visibleBatchActiveRemap_(resolveMemoryResource(memory)),
       cachedVisibleBatchEntries_(resolveMemoryResource(memory)),
       batchWriteOffsets_(resolveMemoryResource(memory)),
-      instanceCentersPhase_(resolveMemoryResource(memory)),
-      instanceBaseMatrices_(resolveMemoryResource(memory)),
-      instanceMatricesCpuCache_(resolveMemoryResource(memory)),
-      instanceLodCentersInvRadiusSq_(resolveMemoryResource(memory)),
-      instanceAutoLodWorldErrors_(resolveMemoryResource(memory)),
-      instanceAutoLodCounts_(resolveMemoryResource(memory)),
-      materialTextureAccessHandles_(resolveMemoryResource(memory)),
-      instanceAutoLodLevels_(resolveMemoryResource(memory)),
+      instanceCentersPhase_(std::pmr::new_delete_resource()),
+      instanceBaseMatrices_(std::pmr::new_delete_resource()),
+      instanceMatricesCpuCache_(std::pmr::new_delete_resource()),
+      instanceLodCentersInvRadiusSq_(std::pmr::new_delete_resource()),
+      instanceAutoLodWorldErrors_(std::pmr::new_delete_resource()),
+      instanceAutoLodCounts_(std::pmr::new_delete_resource()),
+      materialTextureAccessHandles_(std::pmr::new_delete_resource()),
+      instanceAutoLodLevels_(std::pmr::new_delete_resource()),
+      preparedInitialInstanceRemap_(std::pmr::new_delete_resource()),
       instanceTessSelection_(resolveMemoryResource(memory)),
       tessCandidates_(resolveMemoryResource(memory)),
-      instanceRemap_(resolveMemoryResource(memory)),
+      instanceRemap_(std::pmr::new_delete_resource()),
       drawPushConstants_(resolveMemoryResource(memory)),
       drawItems_(resolveMemoryResource(memory)),
       drawAlphaMasked_(resolveMemoryResource(memory)),
@@ -975,7 +1175,7 @@ OpaqueRenderer::OpaqueRenderer(GPUDevice &gpu, OpaqueRendererConfig config,
       visibilityGpuDependencyTextures_(resolveMemoryResource(memory)),
       passDependencyBuffers_(resolveMemoryResource(memory)),
       passDependencyBufferAccessModes_(resolveMemoryResource(memory)),
-      preResolvedDecodeBuffers_(resolveMemoryResource(memory)),
+      preResolvedDecodeBuffers_(std::pmr::new_delete_resource()),
       preResolvedDrawBuffers_(resolveMemoryResource(memory)),
       cachedPreResolvedDrawBufferIds_(resolveMemoryResource(memory)),
       dispatchDependencyBuffers_(resolveMemoryResource(memory)),
@@ -988,8 +1188,8 @@ OpaqueRenderer::OpaqueRenderer(GPUDevice &gpu, OpaqueRendererConfig config,
       velocityPassDependencyBufferAccessModes_(resolveMemoryResource(memory)),
       reactivePassDependencyBuffers_(resolveMemoryResource(memory)),
       reactivePassDependencyBufferAccessModes_(resolveMemoryResource(memory)),
-      previousTransformById_(resolveMemoryResource(memory)),
-      pendingPreviousTransformById_(resolveMemoryResource(memory)),
+      previousTransformById_(std::pmr::new_delete_resource()),
+      pendingPreviousTransformById_(std::pmr::new_delete_resource()),
       previousInstanceMatricesCpuCache_(resolveMemoryResource(memory)),
       velocityInstanceFlagsCpuCache_(resolveMemoryResource(memory)),
       velocityGeometryCpuCache_(resolveMemoryResource(memory)),
@@ -1000,6 +1200,7 @@ OpaqueRenderer::OpaqueRenderer(GPUDevice &gpu, OpaqueRendererConfig config,
   for (size_t i = 0; i < kSingleInstanceCacheVariantCount; ++i) {
     singleInstanceBatchCaches_.emplace_back(resource);
   }
+  sceneBufferRetirements_.reserve(32u);
 }
 
 OpaqueRenderer::~OpaqueRenderer() { onDetach(); }
@@ -1184,6 +1385,7 @@ void OpaqueRenderer::onDetach() {
   instanceAutoLodWorldErrors_.clear();
   instanceAutoLodCounts_.clear();
   materialTextureAccessHandles_.clear();
+  materialTextureAccessCacheValid_ = false;
   instanceAutoLodLevels_.clear();
   instanceTessSelection_.clear();
   tessCandidates_.clear();
@@ -2290,20 +2492,28 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     inFlightShadowInspectReadback_.reset();
     NURI_PROFILER_ZONE_END();
   }
-  const bool topologyDirty =
-      cachedScene_ != frame.scene ||
-      cachedTopologyVersion_ != frame.scene->topologyVersion();
+  bool topologyDirty = cachedScene_ != frame.scene ||
+                       cachedTopologyVersion_ != frame.scene->topologyVersion();
   const uint64_t modelMaterialBindingVersion =
       frame.resources->modelMaterialBindingVersion();
-  const bool materialDirty =
+  bool materialDirty =
       topologyDirty || cachedScene_ != frame.scene ||
       cachedMaterialVersion_ != materialSnapshot.version ||
       cachedModelMaterialBindingVersion_ != modelMaterialBindingVersion;
   const bool excludeTransmission = true;
-  const bool transmissionPolicyDirty =
+  bool transmissionPolicyDirty =
       cachedExcludeTransmission_ != excludeTransmission;
   const uint64_t geometryMutationVersion = gpu_.geometryMutationVersion();
   const bool hasGeometryMutationTracking = geometryMutationVersion != 0;
+  if ((topologyDirty || materialDirty || transmissionPolicyDirty) &&
+      adoptPreparedSceneCache(
+          *frame.scene, *frame.resources,
+          static_cast<uint32_t>(materialSnapshot.headers.size()),
+          excludeTransmission)) {
+    topologyDirty = false;
+    materialDirty = false;
+    transmissionPolicyDirty = false;
+  }
   if (topologyDirty || materialDirty || transmissionPolicyDirty) {
     auto cacheResult = rebuildSceneCache(
         *frame.scene, *frame.resources,
@@ -2704,7 +2914,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     cachedModelMaterialBindingVersion_ = modelMaterialBindingVersion;
   }
   if (materialDirty || transmissionPolicyDirty ||
-      materialTextureAccessHandles_.empty()) {
+      !materialTextureAccessCacheValid_) {
     NURI_PROFILER_ZONE("OpaqueRenderer.material_access_cache",
                        NURI_PROFILER_COLOR_CMD_DRAW);
     auto materialAccessCacheResult = rebuildMaterialTextureAccessCache(
@@ -3281,6 +3491,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       settings.opaque.forcedMeshLod < 0
           ? 0u
           : static_cast<uint32_t>(settings.opaque.forcedMeshLod);
+  bool reusedPreparedInitialAutoLod = false;
   if (useAutoLod) {
     NURI_PROFILER_ZONE("OpaqueRenderer.auto_lod_resolve",
                        NURI_PROFILER_COLOR_CMD_DRAW);
@@ -3297,6 +3508,21 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         std::clamp(settings.opaque.meshLodHysteresisRatio, 0.0f, 0.95f);
     const float projectionScaleY =
         std::abs(frame.camera.currentUnjitteredProj[1][1]);
+    reusedPreparedInitialAutoLod =
+        preparedInitialAutoLodValid_ &&
+        preparedInitialAutoLodScene_ == frame.scene &&
+        preparedInitialAutoLodTransformVersion_ ==
+            frame.scene->transformVersion() &&
+        preparedInitialAutoLodProjectionType_ == frame.camera.projectionType &&
+        preparedInitialAutoLodNearPlane_ == frame.camera.nearPlane &&
+        preparedInitialAutoLodProjectionScaleY_ == projectionScaleY &&
+        preparedInitialAutoLodTargetPixelError_ == targetPixelError &&
+        preparedInitialAutoLodHysteresisRatio_ == hysteresisRatio &&
+        preparedInitialAutoLodRenderHeight_ == frame.camera.renderExtent.y &&
+        std::memcmp(&preparedInitialAutoLodView_, &frame.camera.view,
+                    sizeof(glm::mat4)) == 0 &&
+        instanceAutoLodLevels_.size() == instanceCount &&
+        preparedInitialInstanceRemap_.size() == instanceCount;
     const bool cameraCut = frame.camera.historyResetReason ==
                            TemporalHistoryResetReason::CameraCut;
     bool historyReset =
@@ -3309,7 +3535,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         cachedAutoLodRenderExtent_ != frame.camera.renderExtent ||
         cachedAutoLodProjectionType_ != frame.camera.projectionType ||
         cameraCut;
-    if (instanceAutoLodLevels_.size() != instanceCount) {
+    if (!reusedPreparedInitialAutoLod &&
+        instanceAutoLodLevels_.size() != instanceCount) {
       instanceAutoLodLevels_.assign(instanceCount, 0u);
     }
 
@@ -3319,9 +3546,12 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     const bool orthographic =
         frame.camera.projectionType == ProjectionType::Orthographic;
     uint64_t transitionCount = 0u;
-    uint64_t lod0Count = 0u;
-    uint64_t lod1Count = 0u;
-    for (size_t i = 0; i < instanceCount; ++i) {
+    uint64_t lod0Count =
+        reusedPreparedInitialAutoLod ? preparedInitialAutoLodLod0Count_ : 0u;
+    uint64_t lod1Count =
+        reusedPreparedInitialAutoLod ? preparedInitialAutoLodLod1Count_ : 0u;
+    for (size_t i = 0; !reusedPreparedInitialAutoLod && i < instanceCount;
+         ++i) {
       const glm::vec4 lodBounds = instanceLodCentersInvRadiusSq_[i];
       const glm::vec4 viewCenter =
           frame.camera.view * glm::vec4(glm::vec3(lodBounds), 1.0f);
@@ -3653,7 +3883,12 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       tessCandidates_.reserve(instanceCount);
     }
 
-    for (size_t i = 0; i < instanceCount; ++i) {
+    if (reusedPreparedInitialAutoLod) {
+      autoLodBucketCounts = preparedInitialAutoLodBucketCounts_;
+      remapCount = preparedInitialInstanceRemap_.size();
+    }
+    for (size_t i = 0; !reusedPreparedInitialAutoLod && i < instanceCount;
+         ++i) {
       uint32_t requestedLod = detail::resolveOpaqueAutomaticLod(
           instanceAutoLodLevels_[i], templateEntry.alphaMasked, true);
       const auto resolvedLod = resolveAvailableLod(submesh, requestedLod);
@@ -4202,10 +4437,17 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         firstInstance += batch.instanceCount;
       }
     }
-    if (instanceRemap_.size() != remapCount) {
+    const bool usePreparedInitialRemap =
+        reusedPreparedInitialAutoLod && usedUniformAutoLodFastPath &&
+        preparedInitialInstanceRemap_.size() == remapCount;
+    if (usePreparedInitialRemap) {
+      instanceRemap_.swap(preparedInitialInstanceRemap_);
+    } else if (instanceRemap_.size() != remapCount) {
       instanceRemap_.resize(remapCount);
     }
-    remapSignature = hashCombine64(kFnvOffsetBasis64, remapCount);
+    remapSignature = usePreparedInitialRemap
+                         ? preparedInitialRemapSignature_
+                         : hashCombine64(kFnvOffsetBasis64, remapCount);
     remapSignatureValid = true;
 
     const auto writeRemapEntry =
@@ -4226,7 +4468,10 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       return Result<bool, std::string>::makeResult(true);
     };
 
-    if (usedUniformAutoLodFastPath) {
+    if (usePreparedInitialRemap) {
+      // The staged remap already uses the same stable LOD bucket order and
+      // signature as the first active frame.
+    } else if (usedUniformAutoLodFastPath) {
       for (uint32_t lod = 0; lod < Submesh::kMaxLodCount; ++lod) {
         autoLodBucketWrites[lod] = autoLodBucketStarts[lod];
       }
@@ -4308,6 +4553,11 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     }
     cachedRemapSignature_ = remapSignature;
     cachedRemapSignatureValid_ = true;
+    if (reusedPreparedInitialAutoLod) {
+      preparedInitialAutoLodValid_ = false;
+      preparedInitialAutoLodScene_ = nullptr;
+      preparedInitialInstanceRemap_.clear();
+    }
 
     if (settings.opaque.enableIndirectDraw) {
       indirectDrawSignature = hashCombine64(kFnvOffsetBasis64, batchCount);
@@ -8550,6 +8800,13 @@ bool OpaqueRenderer::shouldBuildTransmissionVisibilityDepth(
 
 Result<bool, std::string>
 OpaqueRenderer::prepareOpaqueGraphPasses(RenderFrameContext &frame) {
+  if (sceneBufferRetirementCooldownFrames_ != 0u) {
+    --sceneBufferRetirementCooldownFrames_;
+  } else if (!sceneBufferRetirements_.empty()) {
+    std::unique_ptr<Buffer> retired = std::move(sceneBufferRetirements_.back());
+    sceneBufferRetirements_.pop_back();
+    retired.reset();
+  }
   preparedGraphPasses_.clear();
 
   Result<bool, std::string> buildResult =
@@ -8564,6 +8821,774 @@ OpaqueRenderer::prepareOpaqueGraphPasses(RenderFrameContext &frame) {
     return buildResult;
   }
   return Result<bool, std::string>::makeResult(true);
+}
+
+Result<bool, std::string> OpaqueRenderer::prepareSceneCacheStep(
+    const RenderScene &scene, const ResourceManager &resources,
+    uint32_t maxOperations, const RenderSettings *settings,
+    const Camera *camera, float aspectRatio, uint32_t renderWidth,
+    uint32_t renderHeight) {
+  NURI_PROFILER_FUNCTION();
+  const MaterialTableSnapshot materialSnapshot = resources.materialSnapshot();
+  const uint32_t materialCount =
+      static_cast<uint32_t>(materialSnapshot.headers.size());
+  constexpr bool kExcludeTransmission = true;
+  (void)renderWidth;
+  const uint64_t geometryMutationVersion = gpu_.geometryMutationVersion();
+  const bool preparationMatches =
+      sceneCachePreparation_ &&
+      sceneCachePreparation_->matches(scene, resources, materialCount,
+                                      kExcludeTransmission,
+                                      geometryMutationVersion);
+  if (!preparationMatches) {
+    // Keep at most one detached reserve worker in flight. Rapidly superseded
+    // editor loads can otherwise create an unbounded sequence of workers.
+    if (sceneCachePreparation_ && !sceneCachePreparation_->allocationReady.load(
+                                      std::memory_order_acquire)) {
+      return Result<bool, std::string>::makeResult(false);
+    }
+    auto preparation = std::make_shared<SceneCachePreparation>(
+        std::pmr::new_delete_resource());
+    preparation->scene = &scene;
+    preparation->resources = &resources;
+    preparation->sceneId = scene.id();
+    preparation->topologyVersion = scene.topologyVersion();
+    preparation->transformVersion = scene.transformVersion();
+    preparation->materialVersion = resources.materialVersion();
+    preparation->modelMaterialBindingVersion =
+        resources.modelMaterialBindingVersion();
+    preparation->geometryMutationVersion = geometryMutationVersion;
+    preparation->deformationVersion = scene.deformationVersion();
+    preparation->materialCount = materialCount;
+    preparation->excludeTransmission = kExcludeTransmission;
+    if (settings != nullptr && camera != nullptr) {
+      const VisibilityResolvedSettings visibilitySettings =
+          visibilitySettingsFromRenderSettings(*settings);
+      preparation->canPrepareInitialAutoLod =
+          settings->opaque.enableMeshLod &&
+          settings->opaque.forcedMeshLod < 0 &&
+          !settings->opaque.enableTessellation &&
+          !usesCpuMainVisibility(visibilitySettings.mainViewMode);
+      preparation->initialView = camera->viewMatrix();
+      preparation->initialCameraPosition = camera->position();
+      preparation->initialProjectionType = camera->projectionType();
+      preparation->initialNearPlane =
+          camera->projectionType() == ProjectionType::Orthographic
+              ? camera->orthographic().nearPlane
+              : camera->perspective().nearPlane;
+      const glm::mat4 projection =
+          camera->projectionMatrix(std::max(aspectRatio, 1.0e-4f));
+      preparation->initialProjectionScaleY = std::abs(projection[1][1]);
+      preparation->initialTargetPixelError =
+          std::max(settings->opaque.meshLodTargetPixelError, 1.0e-3f);
+      preparation->initialHysteresisRatio =
+          std::clamp(settings->opaque.meshLodHysteresisRatio, 0.0f, 0.95f);
+      preparation->initialRenderHeight = std::max(renderHeight, 1u);
+    }
+    const size_t renderableCount = scene.renderables().size();
+    const size_t ringCount =
+        std::max<size_t>(1u, gpu_.getSwapchainImageCount());
+    preparation->matricesRing.resize(ringCount);
+    preparation->remapRing.resize(ringCount);
+    preparation->previousMatricesRing.resize(ringCount);
+    preparation->velocityFlagsRing.resize(ringCount);
+    preparation->velocityFrameDataRing.resize(ringCount);
+    std::thread([preparation, renderableCount] {
+      setCurrentThreadBackgroundPriority();
+      try {
+        preparation->renderableTemplates.reserve(renderableCount);
+        preparation->meshDrawTemplates.reserve(renderableCount);
+        preparation->instanceCentersPhase.reserve(renderableCount);
+        preparation->instanceBaseMatrices.reserve(renderableCount);
+        preparation->instanceMatrices.reserve(renderableCount);
+        preparation->instanceLodBounds.reserve(renderableCount);
+        preparation->instanceLodErrors.reserve(renderableCount);
+        preparation->instanceLodCounts.reserve(renderableCount);
+        preparation->instanceAutoLodLevels.reserve(renderableCount);
+        preparation->initialInstanceRemap.reserve(renderableCount);
+        preparation->previousTransformById.reserve(renderableCount);
+        preparation->materialTextureKeys.reserve(renderableCount);
+        preparation->materialTextureAccessHandles.reserve(renderableCount);
+        preparation->preResolvedDecodeBuffers.reserve(renderableCount);
+        preparation->visibilityCandidates.reserve(renderableCount);
+        preparation->visibilityCandidateGpuData.reserve(renderableCount);
+      } catch (...) {
+        preparation->allocationFailed.store(true, std::memory_order_release);
+      }
+      preparation->allocationReady.store(true, std::memory_order_release);
+    }).detach();
+    sceneCachePreparation_ = preparation;
+  }
+
+  SceneCachePreparation &preparation = *sceneCachePreparation_;
+  if (!preparation.allocationReady.load(std::memory_order_acquire)) {
+    return Result<bool, std::string>::makeResult(false);
+  }
+  if (preparation.allocationFailed.load(std::memory_order_acquire)) {
+    return Result<bool, std::string>::makeError(
+        "OpaqueRenderer::prepareSceneCacheStep: background cache allocation "
+        "failed");
+  }
+  const std::span<const Renderable> renderables = scene.renderables();
+  if (renderables.size() >
+      static_cast<size_t>(std::numeric_limits<uint32_t>::max())) {
+    return Result<bool, std::string>::makeError(
+        "OpaqueRenderer::prepareSceneCacheStep: renderables count exceeds "
+        "UINT32_MAX");
+  }
+
+  const auto advanceStage = [&preparation](SceneCachePreparation::Stage stage) {
+    preparation.stage = stage;
+    preparation.cursor = 0u;
+  };
+  uint32_t operations = 0u;
+  const uint32_t operationLimit = std::max(1u, maxOperations);
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::microseconds(200);
+  while (operations < operationLimit &&
+         preparation.stage != SceneCachePreparation::Stage::Ready) {
+    if (operations != 0u && (operations & 7u) == 0u &&
+        std::chrono::steady_clock::now() >= deadline) {
+      break;
+    }
+    switch (preparation.stage) {
+    case SceneCachePreparation::Stage::ReserveRenderables:
+      advanceStage(SceneCachePreparation::Stage::CountMeshDraws);
+      ++operations;
+      break;
+    case SceneCachePreparation::Stage::CountMeshDraws: {
+      if (preparation.cursor >= renderables.size()) {
+        advanceStage(SceneCachePreparation::Stage::ReserveMeshDraws);
+        break;
+      }
+      const Renderable &renderable = renderables[preparation.cursor++];
+      const ModelRecord *modelRecord = resources.tryGet(renderable.model);
+      if (!modelRecord || !modelRecord->model) {
+        return Result<bool, std::string>::makeError(
+            "OpaqueRenderer::prepareSceneCacheStep: renderable model handle "
+            "is invalid");
+      }
+      preparation.totalMeshDraws += modelRecord->model->submeshes().size();
+      ++operations;
+      break;
+    }
+    case SceneCachePreparation::Stage::ReserveMeshDraws:
+      advanceStage(SceneCachePreparation::Stage::BuildTemplates);
+      ++operations;
+      break;
+    case SceneCachePreparation::Stage::BuildTemplates: {
+      if (preparation.cursor >= renderables.size()) {
+        advanceStage(SceneCachePreparation::Stage::ReserveCenters);
+        break;
+      }
+      const uint32_t index = static_cast<uint32_t>(preparation.cursor++);
+      const Renderable &renderable = renderables[index];
+      const ModelRecord *modelRecord = resources.tryGet(renderable.model);
+      if (!modelRecord || !modelRecord->model) {
+        return Result<bool, std::string>::makeError(
+            "OpaqueRenderer::prepareSceneCacheStep: failed to resolve model "
+            "handle");
+      }
+      const Model *model = modelRecord->model.get();
+      GeometryAllocationView geometry{};
+      if (!gpu_.resolveGeometry(model->geometryHandle(), geometry)) {
+        return Result<bool, std::string>::makeError(
+            "OpaqueRenderer::prepareSceneCacheStep: failed to resolve "
+            "geometry allocation");
+      }
+      if (!nuri::isValid(geometry.vertexBuffer) ||
+          !nuri::isValid(geometry.indexBuffer)) {
+        return Result<bool, std::string>::makeError(
+            "OpaqueRenderer::prepareSceneCacheStep: resolved geometry uses "
+            "invalid buffers");
+      }
+      const uint64_t vertexBufferAddress = gpu_.getBufferDeviceAddress(
+          geometry.vertexBuffer, geometry.vertexByteOffset);
+      if (vertexBufferAddress == 0u) {
+        return Result<bool, std::string>::makeError(
+            "OpaqueRenderer::prepareSceneCacheStep: invalid geometry vertex "
+            "buffer address");
+      }
+      preparation.renderableTemplates.push_back(
+          RenderableTemplate{.renderable = &renderable, .model = model});
+      const std::span<const Submesh> submeshes = model->submeshes();
+      for (size_t submeshIndex = 0u; submeshIndex < submeshes.size();
+           ++submeshIndex) {
+        const MaterialRef resolvedMaterial = resolveRenderableMaterial(
+            renderable, *modelRecord, static_cast<uint32_t>(submeshIndex));
+        const MaterialRecord *materialRecord =
+            resources.tryGet(resolvedMaterial);
+        const bool doubleSided =
+            materialRecord != nullptr && materialRecord->desc.doubleSided;
+        const bool alphaMasked =
+            materialRecord != nullptr &&
+            materialRecord->desc.alphaMode == MaterialAlphaMode::Mask;
+        const bool materialNormalRequired =
+            alphaMasked ||
+            (materialRecord != nullptr &&
+             (nuri::isValid(materialRecord->textureRefs.normal) ||
+              nuri::isValid(materialRecord->desc.textures.normal)));
+        if (materialRecord != nullptr &&
+            (materialRecord->desc.alphaMode == MaterialAlphaMode::Blend ||
+             (kExcludeTransmission &&
+              isTransmissionMaterial(*materialRecord)))) {
+          ++preparation.skippedBlendSubmeshCount;
+          continue;
+        }
+        uint32_t finalMaterialIndex =
+            resources.materialTableIndex(resolvedMaterial);
+        if (materialCount == 0u || finalMaterialIndex >= materialCount) {
+          finalMaterialIndex = 0u;
+          ++preparation.invalidMaterialFallbackCount;
+        }
+        preparation.meshDrawTemplates.push_back(MeshDrawTemplate{
+            .renderable = &renderable,
+            .submesh = &submeshes[submeshIndex],
+            .submeshIndex = static_cast<uint32_t>(submeshIndex),
+            .instanceIndex = index,
+            .geometryHandle = model->geometryHandle(),
+            .indexBuffer = geometry.indexBuffer,
+            .indexBufferOffset = geometry.indexByteOffset,
+            .baseVertexBuffer = geometry.vertexBuffer,
+            .vertexBuffer = geometry.vertexBuffer,
+            .baseVertexDecodeBuffer = model->vertexDecodeBuffer(),
+            .vertexDecodeBuffer = model->vertexDecodeBuffer(),
+            .baseVertexBufferAddress = vertexBufferAddress,
+            .baseVertexDecodeBufferAddress = model->vertexDecodeBufferAddress(),
+            .vertexBufferAddress = vertexBufferAddress,
+            .vertexDecodeBufferAddress = model->vertexDecodeBufferAddress(),
+            .basePackedVertexFormat =
+                static_cast<uint32_t>(model->drawVertexFormat()),
+            .vertexDecodeIndex = static_cast<uint32_t>(submeshIndex),
+            .packedVertexFormat =
+                static_cast<uint32_t>(model->drawVertexFormat()),
+            .materialIndex = finalMaterialIndex,
+            .meshletView =
+                model->hasMeshlets() ? &model->meshletGpuView() : nullptr,
+            .doubleSided = doubleSided,
+            .alphaMasked = alphaMasked,
+            .materialNormalRequired = materialNormalRequired,
+        });
+      }
+      ++operations;
+      break;
+    }
+    case SceneCachePreparation::Stage::ReserveCenters:
+      advanceStage(SceneCachePreparation::Stage::ReserveBaseMatrices);
+      ++operations;
+      break;
+    case SceneCachePreparation::Stage::ReserveBaseMatrices:
+      advanceStage(SceneCachePreparation::Stage::ReserveMatrices);
+      ++operations;
+      break;
+    case SceneCachePreparation::Stage::ReserveMatrices:
+      advanceStage(SceneCachePreparation::Stage::ReserveLodBounds);
+      ++operations;
+      break;
+    case SceneCachePreparation::Stage::ReserveLodBounds:
+      advanceStage(SceneCachePreparation::Stage::ReserveLodErrors);
+      ++operations;
+      break;
+    case SceneCachePreparation::Stage::ReserveLodErrors:
+      advanceStage(SceneCachePreparation::Stage::ReserveLodCounts);
+      ++operations;
+      break;
+    case SceneCachePreparation::Stage::ReserveLodCounts:
+      advanceStage(SceneCachePreparation::Stage::ReserveAutoLodLevels);
+      ++operations;
+      break;
+    case SceneCachePreparation::Stage::ReserveAutoLodLevels:
+      advanceStage(SceneCachePreparation::Stage::BuildInstances);
+      ++operations;
+      break;
+    case SceneCachePreparation::Stage::BuildInstances: {
+      if (preparation.cursor >= preparation.renderableTemplates.size()) {
+        advanceStage(SceneCachePreparation::Stage::BuildMaterialTextures);
+        break;
+      }
+      const size_t index = preparation.cursor++;
+      const RenderableTemplate &templ = preparation.renderableTemplates[index];
+      const Renderable *renderable = templ.renderable;
+      const Model *model = templ.model;
+      if (!renderable || !model) {
+        return Result<bool, std::string>::makeError(
+            "OpaqueRenderer::prepareSceneCacheStep: invalid opaque "
+            "renderable");
+      }
+      const glm::vec3 center = glm::vec3(renderable->modelMatrix[3]);
+      preparation.instanceCentersPhase.push_back(
+          glm::vec4(center, deterministicPhase(static_cast<uint32_t>(index))));
+      glm::mat4 baseMatrix = renderable->modelMatrix;
+      baseMatrix[3] = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
+      preparation.instanceBaseMatrices.push_back(baseMatrix);
+      preparation.instanceMatrices.push_back(
+          makeInstanceData(renderable->modelMatrix));
+      const BoundingBox &bounds = model->bounds();
+      const glm::vec3 localCenter = bounds.getCenter();
+      const float localRadius =
+          kBoundsRadiusHalf * glm::length(bounds.getSize());
+      const glm::vec3 worldCenter =
+          glm::vec3(renderable->modelMatrix * glm::vec4(localCenter, 1.0f));
+      const float worldScale = maxAxisScale(renderable->modelMatrix);
+      const float worldRadius =
+          std::max(localRadius * worldScale, kMinLodRadius);
+      preparation.instanceLodBounds.push_back(
+          glm::vec4(worldCenter, 1.0f / (worldRadius * worldRadius)));
+      glm::vec4 worldErrors(0.0f);
+      uint32_t availableLodCount = 1u;
+      for (const Submesh &submesh : model->submeshes()) {
+        const uint32_t stableLodCount = std::min(
+            submesh.lodCount, detail::kMaxStableGeneratedOpaqueLod + 1u);
+        availableLodCount = std::max(availableLodCount, stableLodCount);
+        for (uint32_t lod = 1u; lod < stableLodCount; ++lod) {
+          worldErrors[lod] =
+              std::max(worldErrors[lod],
+                       std::max(submesh.lods[lod].error, 0.0f) * worldScale);
+        }
+      }
+      preparation.instanceLodErrors.push_back(worldErrors);
+      preparation.instanceLodCounts.push_back(
+          static_cast<uint8_t>(availableLodCount));
+      preparation.instanceAutoLodLevels.push_back(0u);
+      if (nuri::isValid(renderable->id)) {
+        preparation.previousTransformById.emplace(renderable->id,
+                                                  renderable->modelMatrix);
+      }
+      ++operations;
+      break;
+    }
+    case SceneCachePreparation::Stage::BuildMaterialTextures: {
+      if (preparation.cursor >= renderables.size()) {
+        advanceStage(
+            SceneCachePreparation::Stage::BuildPreResolvedDecodeBuffers);
+        break;
+      }
+      const Renderable &renderable = renderables[preparation.cursor++];
+      const ModelRecord *modelRecord = resources.tryGet(renderable.model);
+      if (modelRecord != nullptr && modelRecord->model != nullptr) {
+        for (size_t submeshIndex = 0u;
+             submeshIndex < modelRecord->model->submeshes().size();
+             ++submeshIndex) {
+          const MaterialRef material = resolveRenderableMaterial(
+              renderable, *modelRecord, static_cast<uint32_t>(submeshIndex));
+          const MaterialRecord *record = resources.tryGet(material);
+          if (record == nullptr ||
+              record->desc.alphaMode == MaterialAlphaMode::Blend ||
+              (kExcludeTransmission && isTransmissionMaterial(*record))) {
+            continue;
+          }
+          forEachMaterialTextureRef(record->textureRefs, [&](TextureRef ref) {
+            const TextureRecord *texture = resources.tryGet(ref);
+            if (texture == nullptr || !nuri::isValid(texture->texture)) {
+              return;
+            }
+            const uint64_t key =
+                foldHandle(texture->texture.index, texture->texture.generation);
+            if (preparation.materialTextureKeys.insert(key).second) {
+              preparation.materialTextureAccessHandles.push_back(
+                  texture->texture);
+            }
+          });
+        }
+      }
+      ++operations;
+      break;
+    }
+    case SceneCachePreparation::Stage::BuildPreResolvedDecodeBuffers: {
+      if (preparation.cursor >= preparation.meshDrawTemplates.size()) {
+        preparation.uniformSingleSubmeshPath =
+            !preparation.meshDrawTemplates.empty() &&
+            preparation.meshDrawTemplates.size() ==
+                preparation.renderableTemplates.size();
+        advanceStage(SceneCachePreparation::Stage::BuildVisibilityCandidates);
+        break;
+      }
+      const MeshDrawTemplate &entry =
+          preparation.meshDrawTemplates[preparation.cursor++];
+      if (entry.packedVertexFormat ==
+              static_cast<uint32_t>(PackedVertexFormat::StaticQuantized20) &&
+          nuri::isValid(entry.vertexDecodeBuffer)) {
+        appendUniqueDrawBuffer(preparation.preResolvedDecodeBuffers,
+                               entry.vertexDecodeBuffer);
+      }
+      ++operations;
+      break;
+    }
+    case SceneCachePreparation::Stage::BuildVisibilityCandidates: {
+      if (preparation.cursor >= preparation.meshDrawTemplates.size()) {
+        advanceStage(SceneCachePreparation::Stage::ValidateUniformPath);
+        break;
+      }
+      const size_t templateIndex = preparation.cursor++;
+      const MeshDrawTemplate &templ =
+          preparation.meshDrawTemplates[templateIndex];
+      if (templ.renderable == nullptr || templ.submesh == nullptr) {
+        return Result<bool, std::string>::makeError(
+            "OpaqueRenderer::prepareSceneCacheStep: invalid visibility "
+            "template");
+      }
+      const bool deformed = !templ.renderable->morphWeights.empty() ||
+                            !templ.renderable->skinPalette.empty();
+      preparation.visibilityCandidatesHadDeformedRenderable |= deformed;
+      VisibilityCandidate candidate{
+          .renderableIndex = templ.instanceIndex,
+          .templateIndex = static_cast<uint32_t>(templateIndex),
+          .submeshIndex = templ.submeshIndex,
+          .materialIndex = templ.materialIndex,
+          .geometryVersion = preparation.geometryMutationVersion,
+          .transformVersion = preparation.transformVersion,
+          .deformationVersion = preparation.deformationVersion,
+          .flags = deformed ? static_cast<uint32_t>(
+                                  kVisibilityCandidateConservativeVisible)
+                            : 0u,
+          .localBounds = templ.submesh->bounds,
+          .worldFromLocal = templ.renderable->modelMatrix,
+          .meshletView = templ.meshletView,
+      };
+      preparation.visibilityCandidateGpuData.push_back(
+          makeVisibilityCandidateGpu(candidate));
+      preparation.visibilityCandidates.push_back(candidate);
+      ++operations;
+      break;
+    }
+    case SceneCachePreparation::Stage::ValidateUniformPath: {
+      if (!preparation.uniformSingleSubmeshPath ||
+          preparation.cursor >= preparation.meshDrawTemplates.size()) {
+        advanceStage(SceneCachePreparation::Stage::BuildInitialAutoLod);
+        break;
+      }
+      const MeshDrawTemplate &first = preparation.meshDrawTemplates.front();
+      const MeshDrawTemplate &entry =
+          preparation.meshDrawTemplates[preparation.cursor];
+      if (entry.instanceIndex != preparation.cursor ||
+          entry.geometryHandle.index != first.geometryHandle.index ||
+          entry.geometryHandle.generation != first.geometryHandle.generation ||
+          entry.submesh != first.submesh ||
+          entry.materialIndex != first.materialIndex) {
+        preparation.uniformSingleSubmeshPath = false;
+      }
+      ++preparation.cursor;
+      ++operations;
+      break;
+    }
+    case SceneCachePreparation::Stage::BuildInitialAutoLod: {
+      if (!preparation.canPrepareInitialAutoLod ||
+          !preparation.uniformSingleSubmeshPath ||
+          preparation.meshDrawTemplates.empty()) {
+        advanceStage(SceneCachePreparation::Stage::EnsureCentersBuffer);
+        break;
+      }
+      if (preparation.cursor >= preparation.instanceLodBounds.size()) {
+        size_t firstInstance = 0u;
+        for (size_t lod = 0u; lod < Submesh::kMaxLodCount; ++lod) {
+          preparation.initialLodBucketWrites[lod] = firstInstance;
+          firstInstance += preparation.initialLodBucketCounts[lod];
+        }
+        preparation.initialInstanceRemap.resize(firstInstance);
+        preparation.initialRemapSignature =
+            hashCombine64(kFnvOffsetBasis64, firstInstance);
+        advanceStage(SceneCachePreparation::Stage::BuildInitialRemap);
+        break;
+      }
+      const size_t index = preparation.cursor++;
+      const glm::vec4 lodBounds = preparation.instanceLodBounds[index];
+      const glm::vec4 viewCenter =
+          preparation.initialView * glm::vec4(glm::vec3(lodBounds), 1.0f);
+      const float worldRadius =
+          lodBounds.w > 0.0f ? 1.0f / std::sqrt(lodBounds.w) : kMinLodRadius;
+      const bool orthographic =
+          preparation.initialProjectionType == ProjectionType::Orthographic;
+      const float nearestDepth = orthographic
+                                     ? 1.0f
+                                     : std::max(-viewCenter.z - worldRadius,
+                                                preparation.initialNearPlane);
+      const detail::OpaqueLodProjection projection{
+          .pixelScaleY = 0.5f *
+                         static_cast<float>(preparation.initialRenderHeight) *
+                         preparation.initialProjectionScaleY,
+          .nearestDepth = nearestDepth,
+          .orthographic = orthographic,
+      };
+      const glm::vec4 worldErrors = preparation.instanceLodErrors[index];
+      const std::array<float, Submesh::kMaxLodCount> errors{
+          worldErrors.x, worldErrors.y, worldErrors.z, worldErrors.w};
+      const uint32_t lodCount = std::clamp<uint32_t>(
+          preparation.instanceLodCounts[index], 1u, Submesh::kMaxLodCount);
+      uint32_t selectedLod = detail::selectOpaqueLod(
+          std::span<const float>(errors.data(), lodCount),
+          preparation.initialTargetPixelError,
+          preparation.initialHysteresisRatio, projection, std::nullopt);
+      const MeshDrawTemplate &templateEntry =
+          preparation.meshDrawTemplates.front();
+      selectedLod = detail::resolveOpaqueAutomaticLod(
+          selectedLod, templateEntry.alphaMasked, true);
+      if (templateEntry.submesh != nullptr) {
+        const auto resolved =
+            resolveAvailableLod(*templateEntry.submesh, selectedLod);
+        if (resolved.has_value()) {
+          selectedLod = *resolved;
+        }
+      }
+      preparation.instanceAutoLodLevels[index] = selectedLod;
+      ++preparation.initialLodBucketCounts[selectedLod];
+      preparation.initialLod0Count += selectedLod == 0u ? 1u : 0u;
+      preparation.initialLod1Count += selectedLod == 1u ? 1u : 0u;
+      ++operations;
+      break;
+    }
+    case SceneCachePreparation::Stage::BuildInitialRemap: {
+      if (preparation.cursor >= preparation.instanceAutoLodLevels.size()) {
+        preparation.initialAutoLodPrepared = true;
+        advanceStage(SceneCachePreparation::Stage::EnsureCentersBuffer);
+        break;
+      }
+      const uint32_t instanceId = static_cast<uint32_t>(preparation.cursor++);
+      const uint32_t lod = preparation.instanceAutoLodLevels[instanceId];
+      const size_t writeIndex = preparation.initialLodBucketWrites[lod]++;
+      preparation.initialInstanceRemap[writeIndex] = instanceId;
+      preparation.initialRemapSignature = hashCombine64(
+          preparation.initialRemapSignature, static_cast<uint64_t>(instanceId));
+      ++operations;
+      break;
+    }
+    case SceneCachePreparation::Stage::EnsureCentersBuffer: {
+      const BufferDesc desc{
+          .usage = BufferUsage::Storage,
+          .storage = Storage::Device,
+          .size = std::max(renderables.size() * sizeof(glm::vec4),
+                           sizeof(glm::vec4)),
+          .data = std::as_bytes(std::span<const glm::vec4>(
+              preparation.instanceCentersPhase.data(),
+              preparation.instanceCentersPhase.size())),
+      };
+      auto result = advanceBackgroundPreparedBuffer(
+          gpu_, preparation.bufferPreparation, preparation.centersBuffer,
+          preparation.centersBufferCapacity, desc,
+          "opaque_prepared_instance_centers_phase_buffer",
+          sceneCachePreparation_);
+      if (result.hasError()) {
+        return result;
+      }
+      if (!result.value()) {
+        return Result<bool, std::string>::makeResult(false);
+      }
+      advanceStage(SceneCachePreparation::Stage::EnsureLodBoundsBuffer);
+      ++operations;
+      break;
+    }
+    case SceneCachePreparation::Stage::UploadCentersBuffer: {
+      advanceStage(SceneCachePreparation::Stage::EnsureLodBoundsBuffer);
+      break;
+    }
+    case SceneCachePreparation::Stage::EnsureLodBoundsBuffer: {
+      const BufferDesc desc{
+          .usage = BufferUsage::Storage,
+          .storage = Storage::Device,
+          .size = std::max(renderables.size() * sizeof(glm::vec4),
+                           sizeof(glm::vec4)),
+          .data = std::as_bytes(
+              std::span<const glm::vec4>(preparation.instanceLodBounds.data(),
+                                         preparation.instanceLodBounds.size())),
+      };
+      auto result = advanceBackgroundPreparedBuffer(
+          gpu_, preparation.bufferPreparation, preparation.lodBoundsBuffer,
+          preparation.lodBoundsBufferCapacity, desc,
+          "opaque_prepared_instance_lod_bounds_buffer", sceneCachePreparation_);
+      if (result.hasError()) {
+        return result;
+      }
+      if (!result.value()) {
+        return Result<bool, std::string>::makeResult(false);
+      }
+      advanceStage(SceneCachePreparation::Stage::EnsureBaseMatricesBuffer);
+      ++operations;
+      break;
+    }
+    case SceneCachePreparation::Stage::UploadLodBoundsBuffer: {
+      advanceStage(SceneCachePreparation::Stage::EnsureBaseMatricesBuffer);
+      break;
+    }
+    case SceneCachePreparation::Stage::EnsureBaseMatricesBuffer: {
+      const BufferDesc desc{
+          .usage = BufferUsage::Storage,
+          .storage = Storage::Device,
+          .size = std::max(renderables.size() * sizeof(glm::mat4),
+                           sizeof(glm::mat4)),
+          .data = std::as_bytes(std::span<const glm::mat4>(
+              preparation.instanceBaseMatrices.data(),
+              preparation.instanceBaseMatrices.size())),
+      };
+      auto result = advanceBackgroundPreparedBuffer(
+          gpu_, preparation.bufferPreparation, preparation.baseMatricesBuffer,
+          preparation.baseMatricesBufferCapacity, desc,
+          "opaque_prepared_instance_base_matrices_buffer",
+          sceneCachePreparation_);
+      if (result.hasError()) {
+        return result;
+      }
+      if (!result.value()) {
+        return Result<bool, std::string>::makeResult(false);
+      }
+      advanceStage(SceneCachePreparation::Stage::EnsureMatricesRing);
+      ++operations;
+      break;
+    }
+    case SceneCachePreparation::Stage::UploadBaseMatricesBuffer: {
+      advanceStage(SceneCachePreparation::Stage::EnsureMatricesRing);
+      break;
+    }
+    case SceneCachePreparation::Stage::EnsureMatricesRing: {
+      if (preparation.cursor >= preparation.matricesRing.size()) {
+        advanceStage(SceneCachePreparation::Stage::EnsureRemapRing);
+        break;
+      }
+      DynamicBufferSlot &slot = preparation.matricesRing[preparation.cursor];
+      const BufferDesc desc{
+          .usage = BufferUsage::Storage,
+          .storage = Storage::Device,
+          .size = std::max(renderables.size() * sizeof(InstanceData),
+                           sizeof(InstanceData)),
+          .data = std::as_bytes(std::span<const InstanceData>(
+              preparation.instanceMatrices.data(),
+              preparation.instanceMatrices.size())),
+      };
+      auto result = advanceBackgroundPreparedBuffer(
+          gpu_, preparation.bufferPreparation, slot.buffer, slot.capacityBytes,
+          desc,
+          "opaque_prepared_instance_matrices_buffer_" +
+              std::to_string(preparation.cursor),
+          sceneCachePreparation_);
+      if (result.hasError()) {
+        return result;
+      }
+      if (!result.value()) {
+        return Result<bool, std::string>::makeResult(false);
+      }
+      ++preparation.cursor;
+      ++operations;
+      break;
+    }
+    case SceneCachePreparation::Stage::UploadMatricesRing: {
+      advanceStage(SceneCachePreparation::Stage::EnsureRemapRing);
+      break;
+    }
+    case SceneCachePreparation::Stage::EnsureRemapRing: {
+      if (preparation.cursor >= preparation.remapRing.size()) {
+        advanceStage(SceneCachePreparation::Stage::EnsurePreviousMatricesRing);
+        break;
+      }
+      DynamicBufferSlot &slot = preparation.remapRing[preparation.cursor];
+      const BufferDesc desc{
+          .usage = BufferUsage::Storage,
+          .storage = Storage::Device,
+          .size =
+              std::max(renderables.size() * sizeof(uint32_t), sizeof(uint32_t)),
+      };
+      auto result = advanceBackgroundPreparedBuffer(
+          gpu_, preparation.bufferPreparation, slot.buffer, slot.capacityBytes,
+          desc,
+          "opaque_prepared_instance_remap_buffer_" +
+              std::to_string(preparation.cursor),
+          sceneCachePreparation_);
+      if (result.hasError()) {
+        return result;
+      }
+      if (!result.value()) {
+        return Result<bool, std::string>::makeResult(false);
+      }
+      ++preparation.cursor;
+      ++operations;
+      break;
+    }
+    case SceneCachePreparation::Stage::EnsurePreviousMatricesRing: {
+      if (preparation.cursor >= preparation.previousMatricesRing.size()) {
+        advanceStage(SceneCachePreparation::Stage::EnsureVelocityFlagsRing);
+        break;
+      }
+      DynamicBufferSlot &slot =
+          preparation.previousMatricesRing[preparation.cursor];
+      const BufferDesc desc{
+          .usage = BufferUsage::Storage,
+          .storage = Storage::HostVisible,
+          .size = std::max(renderables.size() * sizeof(InstanceData),
+                           sizeof(InstanceData)),
+      };
+      auto result = advanceBackgroundPreparedBuffer(
+          gpu_, preparation.bufferPreparation, slot.buffer, slot.capacityBytes,
+          desc,
+          "opaque_prepared_previous_instance_matrices_buffer_" +
+              std::to_string(preparation.cursor));
+      if (result.hasError()) {
+        return result;
+      }
+      if (!result.value()) {
+        return Result<bool, std::string>::makeResult(false);
+      }
+      ++preparation.cursor;
+      ++operations;
+      break;
+    }
+    case SceneCachePreparation::Stage::EnsureVelocityFlagsRing: {
+      if (preparation.cursor >= preparation.velocityFlagsRing.size()) {
+        advanceStage(SceneCachePreparation::Stage::EnsureVelocityFrameDataRing);
+        break;
+      }
+      DynamicBufferSlot &slot =
+          preparation.velocityFlagsRing[preparation.cursor];
+      const BufferDesc desc{
+          .usage = BufferUsage::Storage,
+          .storage = Storage::HostVisible,
+          .size =
+              std::max(renderables.size() * sizeof(uint32_t), sizeof(uint32_t)),
+      };
+      auto result = advanceBackgroundPreparedBuffer(
+          gpu_, preparation.bufferPreparation, slot.buffer, slot.capacityBytes,
+          desc,
+          "opaque_prepared_velocity_instance_flags_buffer_" +
+              std::to_string(preparation.cursor));
+      if (result.hasError()) {
+        return result;
+      }
+      if (!result.value()) {
+        return Result<bool, std::string>::makeResult(false);
+      }
+      ++preparation.cursor;
+      ++operations;
+      break;
+    }
+    case SceneCachePreparation::Stage::EnsureVelocityFrameDataRing: {
+      if (preparation.cursor >= preparation.velocityFrameDataRing.size()) {
+        advanceStage(SceneCachePreparation::Stage::Ready);
+        break;
+      }
+      DynamicBufferSlot &slot =
+          preparation.velocityFrameDataRing[preparation.cursor];
+      const BufferDesc desc{
+          .usage = BufferUsage::Storage,
+          .storage = Storage::HostVisible,
+          .size = sizeof(VelocityFrameGpuData),
+      };
+      auto result = advanceBackgroundPreparedBuffer(
+          gpu_, preparation.bufferPreparation, slot.buffer, slot.capacityBytes,
+          desc,
+          "opaque_prepared_velocity_frame_data_buffer_" +
+              std::to_string(preparation.cursor));
+      if (result.hasError()) {
+        return result;
+      }
+      if (!result.value()) {
+        return Result<bool, std::string>::makeResult(false);
+      }
+      ++preparation.cursor;
+      ++operations;
+      break;
+    }
+    case SceneCachePreparation::Stage::Ready:
+      break;
+    }
+  }
+  return Result<bool, std::string>::makeResult(
+      preparation.stage == SceneCachePreparation::Stage::Ready);
 }
 
 bool OpaqueRenderer::hasPreparedOpaqueMainPasses() const noexcept {
@@ -10213,31 +11238,47 @@ OpaqueRenderer::ensureRingBufferCount(uint32_t requiredCount) {
 
 Result<bool, std::string>
 OpaqueRenderer::ensureInstanceMatricesRingCapacity(size_t requiredBytes) {
+  for (size_t i = 0; i < instanceMatricesRing_.size(); ++i) {
+    auto result = ensureInstanceMatricesRingSlotCapacity(requiredBytes, i);
+    if (result.hasError()) {
+      return result;
+    }
+  }
+  return Result<bool, std::string>::makeResult(true);
+}
+
+Result<bool, std::string>
+OpaqueRenderer::ensureInstanceMatricesRingSlotCapacity(size_t requiredBytes,
+                                                       size_t slotIndex) {
+  if (slotIndex >= instanceMatricesRing_.size()) {
+    return Result<bool, std::string>::makeError(
+        "OpaqueRenderer::ensureInstanceMatricesRingSlotCapacity: slot index "
+        "is out of range");
+  }
   const size_t sceneInstanceBytes =
       std::max(instanceMatricesCpuCache_.size(), size_t{1u}) *
       sizeof(InstanceData);
   const size_t requested =
       std::max({requiredBytes, sceneInstanceBytes, sizeof(InstanceData)});
-  for (size_t i = 0; i < instanceMatricesRing_.size(); ++i) {
-    DynamicBufferSlot &slot = instanceMatricesRing_[i];
-    if (slot.buffer && slot.buffer->valid() &&
-        slot.capacityBytes >= requested) {
-      continue;
-    }
-    const BufferDesc desc{
-        .usage = BufferUsage::Storage,
-        .storage = Storage::Device,
-        .size = requested,
-    };
-    auto createResult = ensureDynamicBufferCapacity(
-        gpu_, slot, desc,
-        "opaque_instance_matrices_buffer_" + std::to_string(i));
-    if (createResult.hasError()) {
-      return Result<bool, std::string>::makeError(createResult.error());
-    }
-    if (createResult.value() && i < instanceMatricesUploadVersions_.size()) {
-      instanceMatricesUploadVersions_[i] = std::numeric_limits<uint64_t>::max();
-    }
+  DynamicBufferSlot &slot = instanceMatricesRing_[slotIndex];
+  if (slot.buffer && slot.buffer->valid() && slot.capacityBytes >= requested) {
+    return Result<bool, std::string>::makeResult(true);
+  }
+  const BufferDesc desc{
+      .usage = BufferUsage::Storage,
+      .storage = Storage::Device,
+      .size = requested,
+  };
+  auto createResult = ensureDynamicBufferCapacity(
+      gpu_, slot, desc,
+      "opaque_instance_matrices_buffer_" + std::to_string(slotIndex));
+  if (createResult.hasError()) {
+    return Result<bool, std::string>::makeError(createResult.error());
+  }
+  if (createResult.value() &&
+      slotIndex < instanceMatricesUploadVersions_.size()) {
+    instanceMatricesUploadVersions_[slotIndex] =
+        std::numeric_limits<uint64_t>::max();
   }
   return Result<bool, std::string>::makeResult(true);
 }
@@ -10725,13 +11766,168 @@ Result<bool, std::string> OpaqueRenderer::rebuildSceneCache(
   return Result<bool, std::string>::makeResult(true);
 }
 
+bool OpaqueRenderer::adoptPreparedSceneCache(const RenderScene &scene,
+                                             const ResourceManager &resources,
+                                             uint32_t materialCount,
+                                             bool excludeTransmission) {
+  const uint64_t geometryMutationVersion = gpu_.geometryMutationVersion();
+  if (!sceneCachePreparation_ ||
+      sceneCachePreparation_->stage != SceneCachePreparation::Stage::Ready ||
+      !sceneCachePreparation_->matches(scene, resources, materialCount,
+                                       excludeTransmission,
+                                       geometryMutationVersion)) {
+    return false;
+  }
+
+  SceneCachePreparation &preparation = *sceneCachePreparation_;
+  if (instanceMatricesRing_.size() != preparation.matricesRing.size() ||
+      instanceRemapRing_.size() != preparation.remapRing.size() ||
+      previousInstanceMatricesRing_.size() !=
+          preparation.previousMatricesRing.size() ||
+      velocityInstanceFlagsRing_.size() !=
+          preparation.velocityFlagsRing.size() ||
+      velocityFrameDataRing_.size() !=
+          preparation.velocityFrameDataRing.size()) {
+    return false;
+  }
+  renderableTemplates_.swap(preparation.renderableTemplates);
+  meshDrawTemplates_.swap(preparation.meshDrawTemplates);
+  instanceCentersPhase_.swap(preparation.instanceCentersPhase);
+  instanceBaseMatrices_.swap(preparation.instanceBaseMatrices);
+  instanceMatricesCpuCache_.swap(preparation.instanceMatrices);
+  instanceLodCentersInvRadiusSq_.swap(preparation.instanceLodBounds);
+  instanceAutoLodWorldErrors_.swap(preparation.instanceLodErrors);
+  instanceAutoLodCounts_.swap(preparation.instanceLodCounts);
+  instanceAutoLodLevels_.swap(preparation.instanceAutoLodLevels);
+  materialTextureAccessHandles_.swap(preparation.materialTextureAccessHandles);
+  materialTextureAccessCacheValid_ = true;
+  preResolvedDecodeBuffers_.swap(preparation.preResolvedDecodeBuffers);
+  previousTransformById_.swap(preparation.previousTransformById);
+  previousTransformSceneId_ = scene.id();
+  previousTransformCaptureFrameIndex_ = std::numeric_limits<uint64_t>::max();
+  previousTransformCaptureTopologyVersion_ = scene.topologyVersion();
+  previousTransformCaptureTransformVersion_ = scene.transformVersion();
+  pendingPreviousTransformById_.clear();
+  pendingPreviousTransformFrameIndex_ = std::numeric_limits<uint64_t>::max();
+  pendingPreviousTransformDataChanged_ = false;
+
+  visibilityCandidates_.swap(preparation.visibilityCandidates);
+  visibilityCandidateGpuData_.swap(preparation.visibilityCandidateGpuData);
+  instanceCentersPhaseBuffer_.swap(preparation.centersBuffer);
+  instanceLodBoundsBuffer_.swap(preparation.lodBoundsBuffer);
+  instanceBaseMatricesBuffer_.swap(preparation.baseMatricesBuffer);
+  std::swap(instanceCentersPhaseBufferCapacityBytes_,
+            preparation.centersBufferCapacity);
+  std::swap(instanceLodBoundsBufferCapacityBytes_,
+            preparation.lodBoundsBufferCapacity);
+  std::swap(instanceBaseMatricesBufferCapacityBytes_,
+            preparation.baseMatricesBufferCapacity);
+  for (size_t i = 0u; i < instanceMatricesRing_.size(); ++i) {
+    std::swap(instanceMatricesRing_[i], preparation.matricesRing[i]);
+    std::swap(instanceRemapRing_[i], preparation.remapRing[i]);
+    std::swap(previousInstanceMatricesRing_[i],
+              preparation.previousMatricesRing[i]);
+    std::swap(velocityInstanceFlagsRing_[i], preparation.velocityFlagsRing[i]);
+    std::swap(velocityFrameDataRing_[i], preparation.velocityFrameDataRing[i]);
+  }
+  cachedVisibilityCandidateTopologyVersion_ = scene.topologyVersion();
+  cachedVisibilityCandidateTransformVersion_ = scene.transformVersion();
+  cachedVisibilityCandidateDeformationVersion_ = scene.deformationVersion();
+  cachedVisibilityCandidateGeometryVersion_ = geometryMutationVersion;
+  cachedVisibilityCandidatesHadDeformedRenderable_ =
+      preparation.visibilityCandidatesHadDeformedRenderable;
+  cachedScene_ = &scene;
+  cachedTopologyVersion_ = scene.topologyVersion();
+  cachedTransformVersion_ = scene.transformVersion();
+  cachedMaterialVersion_ = resources.materialVersion();
+  cachedModelMaterialBindingVersion_ = resources.modelMaterialBindingVersion();
+  // Keep the version used while preparing. A later unrelated geometry-pool
+  // mutation will take the normal refresh path without discarding the entire
+  // prepared scene cache.
+  cachedGeometryMutationVersion_ = preparation.geometryMutationVersion;
+  cachedExcludeTransmission_ = excludeTransmission;
+  uniformSingleSubmeshPath_ = preparation.uniformSingleSubmeshPath;
+  preparedInitialAutoLodValid_ = preparation.initialAutoLodPrepared;
+  if (preparedInitialAutoLodValid_) {
+    preparedInitialInstanceRemap_.swap(preparation.initialInstanceRemap);
+    preparedInitialAutoLodScene_ = &scene;
+    preparedInitialAutoLodTransformVersion_ = scene.transformVersion();
+    preparedInitialAutoLodView_ = preparation.initialView;
+    preparedInitialAutoLodProjectionType_ = preparation.initialProjectionType;
+    preparedInitialAutoLodNearPlane_ = preparation.initialNearPlane;
+    preparedInitialAutoLodProjectionScaleY_ =
+        preparation.initialProjectionScaleY;
+    preparedInitialAutoLodTargetPixelError_ =
+        preparation.initialTargetPixelError;
+    preparedInitialAutoLodHysteresisRatio_ = preparation.initialHysteresisRatio;
+    preparedInitialAutoLodRenderHeight_ = preparation.initialRenderHeight;
+    preparedInitialAutoLodBucketCounts_ = preparation.initialLodBucketCounts;
+    preparedInitialAutoLodLod0Count_ = preparation.initialLod0Count;
+    preparedInitialAutoLodLod1Count_ = preparation.initialLod1Count;
+    preparedInitialRemapSignature_ = preparation.initialRemapSignature;
+  } else {
+    preparedInitialInstanceRemap_.clear();
+    preparedInitialAutoLodScene_ = nullptr;
+  }
+
+  if (preparation.invalidMaterialFallbackCount > 0u) {
+    if (!loggedMaterialFallbackWarning_) {
+      NURI_LOG_WARNING(
+          "OpaqueRenderer::adoptPreparedSceneCache: %zu submesh draw(s) "
+          "used fallback material index 0",
+          preparation.invalidMaterialFallbackCount);
+      loggedMaterialFallbackWarning_ = true;
+    }
+  } else {
+    loggedMaterialFallbackWarning_ = false;
+  }
+  loggedBlendMaterialUnsupportedWarning_ = false;
+  instanceStaticBuffersDirty_ = false;
+  instanceMatricesUploadVersions_.assign(instanceMatricesRing_.size(),
+                                         scene.transformVersion());
+  remapUploadSignatures_.assign(instanceRemapRing_.size(),
+                                kInvalidDrawSignature);
+  invalidateAutoLodHistory();
+  invalidateSingleInstanceBatchCache();
+  invalidateStaticBatchCache();
+  invalidateIndirectPackCache();
+  const auto queueRetirement = [this](std::unique_ptr<Buffer> &buffer) {
+    if (buffer) {
+      sceneBufferRetirements_.push_back(std::move(buffer));
+    }
+  };
+  queueRetirement(preparation.centersBuffer);
+  queueRetirement(preparation.lodBoundsBuffer);
+  queueRetirement(preparation.baseMatricesBuffer);
+  for (DynamicBufferSlot &slot : preparation.matricesRing) {
+    queueRetirement(slot.buffer);
+  }
+  for (DynamicBufferSlot &slot : preparation.remapRing) {
+    queueRetirement(slot.buffer);
+  }
+  for (DynamicBufferSlot &slot : preparation.previousMatricesRing) {
+    queueRetirement(slot.buffer);
+  }
+  for (DynamicBufferSlot &slot : preparation.velocityFlagsRing) {
+    queueRetirement(slot.buffer);
+  }
+  for (DynamicBufferSlot &slot : preparation.velocityFrameDataRing) {
+    queueRetirement(slot.buffer);
+  }
+  sceneBufferRetirementCooldownFrames_ = 3u;
+  sceneCachePreparation_.reset();
+  return true;
+}
+
 Result<bool, std::string> OpaqueRenderer::rebuildMaterialTextureAccessCache(
     const RenderScene &scene, const ResourceManager &resources,
     bool excludeTransmission) {
   NURI_PROFILER_FUNCTION();
   materialTextureAccessHandles_.clear();
+  materialTextureAccessCacheValid_ = false;
   const std::span<const Renderable> renderables = scene.renderables();
   if (renderables.empty()) {
+    materialTextureAccessCacheValid_ = true;
     return Result<bool, std::string>::makeResult(true);
   }
 
@@ -10773,6 +11969,7 @@ Result<bool, std::string> OpaqueRenderer::rebuildMaterialTextureAccessCache(
     }
   }
 
+  materialTextureAccessCacheValid_ = true;
   return Result<bool, std::string>::makeResult(true);
 }
 

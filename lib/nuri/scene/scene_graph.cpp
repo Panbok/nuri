@@ -89,7 +89,8 @@ void recycleLightSlot(Store &store, std::pmr::vector<uint32_t> &head,
 
 SceneGraph::SceneGraph(std::pmr::memory_resource *memory)
     : memory_(memory != nullptr ? memory : std::pmr::get_default_resource()),
-      dirtyRoots_(memory_), nodes_(memory_), renderableComponents_(memory_),
+      worldSyncRoots_(memory_), worldSyncStack_(memory_), dirtyRoots_(memory_),
+      nodes_(memory_), renderableComponents_(memory_),
       directionalLights_(memory_), pointLights_(memory_), spotLights_(memory_) {
   clear();
 }
@@ -97,6 +98,7 @@ SceneGraph::SceneGraph(std::pmr::memory_resource *memory)
 void SceneGraph::clear() {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
   dirtyRoots_.clear();
+  resetWorldTransformSync();
   nodes_ = NodeStore(memory_);
   renderableComponents_ = RenderableStore(memory_);
   directionalLights_ = DirectionalLightStore(memory_);
@@ -135,6 +137,134 @@ void SceneGraph::clear() {
   nodes_.spotLightHead[rootIndex] = kInvalidIndex;
   nodes_.spotLightTail[rootIndex] = kInvalidIndex;
   rootNode_ = makeNodeId(rootIndex, root.generation);
+}
+
+Result<bool, std::string>
+SceneGraph::reserveCapacityStep(SceneGraphCapacityReservation &reservation,
+                                uint32_t maxOperations) {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
+  if (reservation.nodeCapacity > kResourceHandleIndexMask ||
+      reservation.renderableCapacity > kResourceHandleIndexMask) {
+    return Result<bool, std::string>::makeError(
+        "SceneGraph::reserveCapacityStep: requested capacity exceeds handle "
+        "index range");
+  }
+  const uint32_t nodeCapacity = static_cast<uint32_t>(reservation.nodeCapacity);
+  const uint32_t renderableCapacity =
+      static_cast<uint32_t>(reservation.renderableCapacity);
+  const uint32_t operationLimit = std::max(maxOperations, 1u);
+  uint32_t operations = 0u;
+  try {
+    while (reservation.stage < SceneGraphCapacityReservation::kStageCount &&
+           operations < operationLimit) {
+      switch (reservation.stage) {
+      case 0u:
+        dirtyRoots_.reserve(nodeCapacity);
+        break;
+      case 1u:
+        worldSyncRoots_.reserve(nodeCapacity);
+        break;
+      case 2u:
+        worldSyncStack_.reserve(nodeCapacity);
+        break;
+      case 3u:
+        nodes_.slots.reserve(nodeCapacity);
+        break;
+      case 4u:
+        nodes_.parent.reserve(nodeCapacity);
+        break;
+      case 5u:
+        nodes_.firstChild.reserve(nodeCapacity);
+        break;
+      case 6u:
+        nodes_.nextSibling.reserve(nodeCapacity);
+        break;
+      case 7u:
+        nodes_.prevSibling.reserve(nodeCapacity);
+        break;
+      case 8u:
+        nodes_.depth.reserve(nodeCapacity);
+        break;
+      case 9u:
+        nodes_.localFromParent.reserve(nodeCapacity);
+        break;
+      case 10u:
+        nodes_.worldFromRoot.reserve(nodeCapacity);
+        break;
+      case 11u:
+        nodes_.dirty.reserve(nodeCapacity);
+        break;
+      case 12u:
+        nodes_.dirtyRootQueued.reserve(nodeCapacity);
+        break;
+      case 13u:
+        nodes_.names.reserve(nodeCapacity);
+        break;
+      case 14u:
+        nodes_.renderableHead.reserve(nodeCapacity);
+        break;
+      case 15u:
+        nodes_.renderableTail.reserve(nodeCapacity);
+        break;
+      case 16u:
+        nodes_.directionalLightHead.reserve(nodeCapacity);
+        break;
+      case 17u:
+        nodes_.directionalLightTail.reserve(nodeCapacity);
+        break;
+      case 18u:
+        nodes_.pointLightHead.reserve(nodeCapacity);
+        break;
+      case 19u:
+        nodes_.pointLightTail.reserve(nodeCapacity);
+        break;
+      case 20u:
+        nodes_.spotLightHead.reserve(nodeCapacity);
+        break;
+      case 21u:
+        nodes_.spotLightTail.reserve(nodeCapacity);
+        break;
+      case 22u:
+        renderableComponents_.slots.reserve(renderableCapacity);
+        break;
+      case 23u:
+        renderableComponents_.node.reserve(renderableCapacity);
+        break;
+      case 24u:
+        renderableComponents_.models.reserve(renderableCapacity);
+        break;
+      case 25u:
+        renderableComponents_.materials.reserve(renderableCapacity);
+        break;
+      case 26u:
+        renderableComponents_.materialOverrides.reserve(renderableCapacity);
+        break;
+      case 27u:
+        renderableComponents_.morphWeights.reserve(renderableCapacity);
+        break;
+      case 28u:
+        renderableComponents_.skinPalette.reserve(renderableCapacity);
+        break;
+      case 29u:
+        renderableComponents_.flatRenderableIndex.reserve(renderableCapacity);
+        break;
+      case 30u:
+        renderableComponents_.nextOnNode.reserve(renderableCapacity);
+        break;
+      case 31u:
+        renderableComponents_.prevOnNode.reserve(renderableCapacity);
+        break;
+      default:
+        break;
+      }
+      ++reservation.stage;
+      ++operations;
+    }
+  } catch (const std::bad_alloc &) {
+    return Result<bool, std::string>::makeError(
+        "SceneGraph::reserveCapacityStep: backing-array allocation failed");
+  }
+  return Result<bool, std::string>::makeResult(reservation.complete());
 }
 
 Result<SlotReservation, std::string> SceneGraph::allocateNodeSlot() {
@@ -409,91 +539,125 @@ void SceneGraph::markSubtreeDirty(uint32_t rootIndex) {
     return;
   }
 
-  if (nodes_.dirtyRootQueued[rootIndex] == 0u) {
+  resetWorldTransformSync();
+  bool coveredByDirtyAncestor = false;
+  for (uint32_t ancestor = nodes_.parent[rootIndex]; ancestor != kInvalidIndex;
+       ancestor = nodes_.parent[ancestor]) {
+    if (nodes_.dirtyRootQueued[ancestor] != 0u) {
+      coveredByDirtyAncestor = true;
+      break;
+    }
+  }
+  if (!coveredByDirtyAncestor && nodes_.dirtyRootQueued[rootIndex] == 0u) {
     nodes_.dirtyRootQueued[rootIndex] = 1u;
     dirtyRoots_.push_back(rootIndex);
   }
+  nodes_.dirty[rootIndex] = 1u;
 
-  std::pmr::vector<uint32_t> stack(memory_);
-  stack.push_back(rootIndex);
-  while (!stack.empty()) {
-    const uint32_t nodeIndex = stack.back();
-    stack.pop_back();
-    if (!nodes_.slots.isLive(nodeIndex)) {
-      continue;
+  // Large batches of sibling mutations otherwise produce a large roots list.
+  // Collapse it to the graph root; the subsequent transform walk is already
+  // incremental, so this trades a bounded amount of extra work for bounded
+  // admission cost.
+  if (dirtyRoots_.size() > 256u && nodeSlotValid(rootNode_)) {
+    for (const uint32_t dirtyRoot : dirtyRoots_) {
+      if (dirtyRoot < nodes_.dirtyRootQueued.size()) {
+        nodes_.dirtyRootQueued[dirtyRoot] = 0u;
+      }
     }
-    nodes_.dirty[nodeIndex] = 1u;
-    for (uint32_t child = nodes_.firstChild[nodeIndex]; child != kInvalidIndex;
-         child = nodes_.nextSibling[child]) {
-      stack.push_back(child);
-    }
+    dirtyRoots_.clear();
+    const uint32_t graphRoot = indexOf(rootNode_);
+    nodes_.dirtyRootQueued[graphRoot] = 1u;
+    nodes_.dirty[graphRoot] = 1u;
+    dirtyRoots_.push_back(graphRoot);
   }
 }
 
-bool SceneGraph::syncWorldTransforms() {
+void SceneGraph::resetWorldTransformSync() noexcept {
+  worldSyncRoots_.clear();
+  worldSyncStack_.clear();
+  worldSyncRootCursor_ = 0u;
+  worldSyncPrepared_ = false;
+}
+
+bool SceneGraph::syncWorldTransformsStep(uint32_t maxNodes) {
   if (dirtyRoots_.empty()) {
-    return false;
+    resetWorldTransformSync();
+    return true;
   }
 
-  std::pmr::vector<uint32_t> roots(memory_);
-  roots.reserve(dirtyRoots_.size());
-  for (const uint32_t rootIndex : dirtyRoots_) {
-    if (rootIndex < nodes_.slots.slotCount() &&
-        nodes_.slots.isLive(rootIndex) &&
-        nodes_.dirtyRootQueued[rootIndex] != 0u) {
-      roots.push_back(rootIndex);
-    }
-  }
-  std::sort(roots.begin(), roots.end(), [this](uint32_t lhs, uint32_t rhs) {
-    return nodes_.depth[lhs] < nodes_.depth[rhs];
-  });
-
-  std::pmr::vector<uint32_t> filtered(memory_);
-  filtered.reserve(roots.size());
-  for (const uint32_t rootIndex : roots) {
-    bool covered = false;
-    for (uint32_t parent = nodes_.parent[rootIndex]; parent != kInvalidIndex;
-         parent = nodes_.parent[parent]) {
-      if (parent < nodes_.dirtyRootQueued.size() &&
-          nodes_.dirtyRootQueued[parent] != 0u) {
-        covered = true;
-        break;
+  if (!worldSyncPrepared_) {
+    worldSyncRoots_.reserve(dirtyRoots_.size());
+    for (const uint32_t rootIndex : dirtyRoots_) {
+      if (rootIndex < nodes_.slots.slotCount() &&
+          nodes_.slots.isLive(rootIndex) &&
+          nodes_.dirtyRootQueued[rootIndex] != 0u) {
+        worldSyncRoots_.push_back(rootIndex);
       }
     }
-    if (!covered) {
-      filtered.push_back(rootIndex);
-    }
-  }
-
-  std::pmr::vector<uint32_t> stack(memory_);
-  bool updated = false;
-  for (const uint32_t rootIndex : filtered) {
-    stack.clear();
-    stack.push_back(rootIndex);
-    while (!stack.empty()) {
-      const uint32_t nodeIndex = stack.back();
-      stack.pop_back();
-      if (nodeIndex >= nodes_.slots.slotCount() ||
-          !nodes_.slots.isLive(nodeIndex)) {
-        continue;
+    std::sort(worldSyncRoots_.begin(), worldSyncRoots_.end(),
+              [this](uint32_t lhs, uint32_t rhs) {
+                return nodes_.depth[lhs] < nodes_.depth[rhs];
+              });
+    size_t writeIndex = 0u;
+    for (const uint32_t rootIndex : worldSyncRoots_) {
+      bool covered = false;
+      for (uint32_t parent = nodes_.parent[rootIndex]; parent != kInvalidIndex;
+           parent = nodes_.parent[parent]) {
+        if (parent < nodes_.dirtyRootQueued.size() &&
+            nodes_.dirtyRootQueued[parent] != 0u) {
+          covered = true;
+          break;
+        }
       }
-      const uint32_t parentIndex = nodes_.parent[nodeIndex];
-      nodes_.worldFromRoot[nodeIndex] =
-          parentIndex == kInvalidIndex ? nodes_.localFromParent[nodeIndex]
-                                       : nodes_.worldFromRoot[parentIndex] *
-                                             nodes_.localFromParent[nodeIndex];
-      nodes_.dirty[nodeIndex] = 0u;
-      nodes_.dirtyRootQueued[nodeIndex] = 0u;
-      updated = true;
-      for (uint32_t child = nodes_.firstChild[nodeIndex];
-           child != kInvalidIndex; child = nodes_.nextSibling[child]) {
-        stack.push_back(child);
+      if (!covered) {
+        worldSyncRoots_[writeIndex++] = rootIndex;
       }
     }
+    worldSyncRoots_.resize(writeIndex);
+    worldSyncPrepared_ = true;
   }
 
-  dirtyRoots_.clear();
-  return updated;
+  uint32_t processed = 0u;
+  while (processed < std::max(maxNodes, 1u)) {
+    if (worldSyncStack_.empty()) {
+      if (worldSyncRootCursor_ >= worldSyncRoots_.size()) {
+        for (const uint32_t rootIndex : dirtyRoots_) {
+          if (rootIndex < nodes_.dirtyRootQueued.size()) {
+            nodes_.dirtyRootQueued[rootIndex] = 0u;
+          }
+        }
+        dirtyRoots_.clear();
+        resetWorldTransformSync();
+        return true;
+      }
+      worldSyncStack_.push_back(worldSyncRoots_[worldSyncRootCursor_++]);
+    }
+    const uint32_t nodeIndex = worldSyncStack_.back();
+    worldSyncStack_.pop_back();
+    if (nodeIndex >= nodes_.slots.slotCount() ||
+        !nodes_.slots.isLive(nodeIndex)) {
+      continue;
+    }
+    const uint32_t parentIndex = nodes_.parent[nodeIndex];
+    nodes_.worldFromRoot[nodeIndex] =
+        parentIndex == kInvalidIndex ? nodes_.localFromParent[nodeIndex]
+                                     : nodes_.worldFromRoot[parentIndex] *
+                                           nodes_.localFromParent[nodeIndex];
+    nodes_.dirty[nodeIndex] = 0u;
+    ++processed;
+    for (uint32_t child = nodes_.firstChild[nodeIndex]; child != kInvalidIndex;
+         child = nodes_.nextSibling[child]) {
+      worldSyncStack_.push_back(child);
+    }
+  }
+  return false;
+}
+
+bool SceneGraph::syncWorldTransforms() {
+  const bool hadDirtyRoots = !dirtyRoots_.empty();
+  while (!syncWorldTransformsStep(std::numeric_limits<uint32_t>::max())) {
+  }
+  return hadDirtyRoots;
 }
 
 Result<NodeId, std::string>
@@ -787,11 +951,24 @@ SceneGraph::addRenderablesInstanced(ModelRef model, MaterialRef material,
         "SceneGraph::addRenderablesInstanced: modelMatrices is empty");
   }
 
-  std::pmr::vector<NodeId> createdNodes(memory_);
-  createdNodes.reserve(modelMatrices.size());
-  const auto rollback = [this, &createdNodes]() {
-    for (auto it = createdNodes.rbegin(); it != createdNodes.rend(); ++it) {
-      (void)destroyNodeSubtree(*it);
+  // Small streaming batches are the common path. Keep their rollback journal
+  // inline so incremental scene population cannot inherit allocator stalls.
+  constexpr size_t kInlineRollbackCapacity = 64u;
+  std::array<NodeId, kInlineRollbackCapacity> inlineCreatedNodes{};
+  std::pmr::vector<NodeId> overflowCreatedNodes(memory_);
+  std::span<NodeId> createdNodes;
+  if (modelMatrices.size() <= inlineCreatedNodes.size()) {
+    createdNodes =
+        std::span<NodeId>(inlineCreatedNodes.data(), modelMatrices.size());
+  } else {
+    overflowCreatedNodes.resize(modelMatrices.size());
+    createdNodes = overflowCreatedNodes;
+  }
+  size_t createdNodeCount = 0u;
+  const auto rollback = [this, &createdNodes, &createdNodeCount]() {
+    while (createdNodeCount != 0u) {
+      --createdNodeCount;
+      (void)destroyNodeSubtree(createdNodes[createdNodeCount]);
     }
   };
 
@@ -802,7 +979,7 @@ SceneGraph::addRenderablesInstanced(ModelRef model, MaterialRef material,
       rollback();
       return Result<uint32_t, std::string>::makeError(nodeResult.error());
     }
-    createdNodes.push_back(nodeResult.value());
+    createdNodes[createdNodeCount++] = nodeResult.value();
     auto renderableResult = addRenderable(nodeResult.value(), model, material);
     if (renderableResult.hasError()) {
       rollback();
@@ -1360,70 +1537,112 @@ Result<NodeId, std::string>
 SceneGraph::instantiatePrefabStructure(const ScenePrefab &prefab, NodeId parent,
                                        SceneInstantiationMap *outMap) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
-  if (!nodeSlotValid(parent)) {
+  SceneInstantiationMap localMap(memory_);
+  SceneInstantiationMap &instantiation = outMap != nullptr ? *outMap : localMap;
+  ScenePrefabStructureCursor cursor{};
+  auto result =
+      instantiatePrefabStructureStep(prefab, parent, instantiation, cursor,
+                                     std::numeric_limits<uint32_t>::max());
+  if (result.hasError()) {
+    return Result<NodeId, std::string>::makeError(result.error());
+  }
+  if (!result.value()) {
     return Result<NodeId, std::string>::makeError(
+        "SceneGraph::instantiatePrefabStructure: structure did not complete");
+  }
+  return Result<NodeId, std::string>::makeResult(cursor.firstRoot);
+}
+
+Result<bool, std::string> SceneGraph::instantiatePrefabStructureStep(
+    const ScenePrefab &prefab, NodeId parent, SceneInstantiationMap &outMap,
+    ScenePrefabStructureCursor &cursor, uint32_t maxOperations) {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
+  if (!nodeSlotValid(parent)) {
+    return Result<bool, std::string>::makeError(
         "SceneGraph::instantiatePrefabStructure: parent node is invalid");
   }
   if (prefab.nodes.empty()) {
-    return Result<NodeId, std::string>::makeError(
+    return Result<bool, std::string>::makeError(
         "SceneGraph::instantiatePrefabStructure: prefab has no nodes");
   }
 
-  SceneInstantiationMap localMap(memory_);
-  localMap.nodes.resize(prefab.nodes.size(), kInvalidNodeId);
-  localMap.renderables.resize(prefab.renderables.size(), kInvalidRenderableId);
-  localMap.lights.reserve(prefab.lights.size());
-  std::pmr::vector<NodeId> createdRoots(memory_);
+  if (cursor.complete) {
+    return Result<bool, std::string>::makeResult(true);
+  }
+  if (!cursor.initialized) {
+    outMap.nodes.assign(prefab.nodes.size(), kInvalidNodeId);
+    outMap.renderables.assign(prefab.renderables.size(), kInvalidRenderableId);
+    outMap.lights.clear();
+    outMap.lights.reserve(prefab.lights.size());
+    cursor = ScenePrefabStructureCursor{.initialized = true};
+  }
 
   const auto rollbackAndReturnError = [&](std::string error) {
-    for (auto it = createdRoots.rbegin(); it != createdRoots.rend(); ++it) {
-      (void)destroyNodeSubtree(*it);
+    for (uint32_t nodeIndex = cursor.nextNode; nodeIndex > 0u; --nodeIndex) {
+      const uint32_t prefabNodeIndex = nodeIndex - 1u;
+      if (prefab.nodes[prefabNodeIndex].parentIndex !=
+              kInvalidScenePrefabIndex ||
+          prefabNodeIndex >= outMap.nodes.size() ||
+          !isValid(outMap.nodes[prefabNodeIndex])) {
+        continue;
+      }
+      (void)destroyNodeSubtree(outMap.nodes[prefabNodeIndex]);
     }
-    if (outMap != nullptr) {
-      *outMap = std::move(localMap);
-    }
-    return Result<NodeId, std::string>::makeError(std::move(error));
+    cursor.complete = false;
+    return Result<bool, std::string>::makeError(std::move(error));
   };
 
-  NodeId firstRoot = kInvalidNodeId;
-  for (uint32_t prefabNodeIndex = 0; prefabNodeIndex < prefab.nodes.size();
-       ++prefabNodeIndex) {
+  uint32_t completedOperations = 0u;
+  while (cursor.nextNode < prefab.nodes.size() &&
+         completedOperations < maxOperations) {
+    const uint32_t prefabNodeIndex = cursor.nextNode;
     const ScenePrefabNode &prefabNode = prefab.nodes[prefabNodeIndex];
+    if (prefabNode.parentIndex != kInvalidScenePrefabIndex &&
+        prefabNode.parentIndex >= prefabNodeIndex) {
+      return rollbackAndReturnError(
+          "SceneGraph::instantiatePrefabStructure: prefab parent index must "
+          "refer to an earlier node");
+    }
     const NodeId parentNode = prefabNode.parentIndex == kInvalidScenePrefabIndex
                                   ? parent
-                                  : localMap.nodes[prefabNode.parentIndex];
+                                  : outMap.nodes[prefabNode.parentIndex];
     auto createResult =
         createNode(parentNode, prefabNode.name, prefabNode.localFromParent);
     if (createResult.hasError()) {
       return rollbackAndReturnError(createResult.error());
     }
-    localMap.nodes[prefabNodeIndex] = createResult.value();
-    if (prefabNode.parentIndex == kInvalidScenePrefabIndex) {
-      createdRoots.push_back(createResult.value());
+    outMap.nodes[prefabNodeIndex] = createResult.value();
+    if (!isValid(cursor.firstRoot)) {
+      cursor.firstRoot = createResult.value();
     }
-    if (!isValid(firstRoot)) {
-      firstRoot = createResult.value();
-    }
+    ++cursor.nextNode;
+    ++completedOperations;
   }
 
-  for (const ScenePrefabLight &prefabLight : prefab.lights) {
-    if (prefabLight.nodeIndex >= localMap.nodes.size()) {
+  while (cursor.nextNode == prefab.nodes.size() &&
+         cursor.nextLight < prefab.lights.size() &&
+         completedOperations < maxOperations) {
+    const ScenePrefabLight &prefabLight = prefab.lights[cursor.nextLight];
+    if (prefabLight.nodeIndex >= outMap.nodes.size()) {
       return rollbackAndReturnError(
           "SceneGraph::instantiatePrefabStructure: prefab light node index is "
           "invalid");
     }
     auto lightResult =
-        addLight(localMap.nodes[prefabLight.nodeIndex], prefabLight.light);
+        addLight(outMap.nodes[prefabLight.nodeIndex], prefabLight.light);
     if (lightResult.hasError()) {
       return rollbackAndReturnError(lightResult.error());
     }
-    localMap.lights.push_back(lightResult.value());
+    outMap.lights.push_back(lightResult.value());
+    ++cursor.nextLight;
+    ++completedOperations;
   }
 
-  if (outMap != nullptr) {
-    *outMap = std::move(localMap);
+  if (cursor.nextNode == prefab.nodes.size() &&
+      cursor.nextLight == prefab.lights.size()) {
+    cursor.complete = true;
   }
-  return Result<NodeId, std::string>::makeResult(firstRoot);
+  return Result<bool, std::string>::makeResult(cursor.complete);
 }
 
 Result<RenderableId, std::string> SceneGraph::attachPrefabRenderable(

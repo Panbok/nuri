@@ -7,6 +7,7 @@
 #include "nuri/bakery/scene_asset_baker.h"
 #include "nuri/core/log.h"
 #include "nuri/core/profiling.h"
+#include "nuri/core/thread_priority.h"
 #include "nuri/gfx/gpu_device.h"
 
 #include <format>
@@ -90,8 +91,12 @@ struct BakerySystem::Impl {
   struct SceneJobData {
     detail::SceneTextureArtifactBakePlan plan{};
     std::shared_future<
+        Result<detail::SceneTextureArtifactBakePlan, std::string>>
+        planFuture{};
+    std::shared_future<
         Result<detail::SceneTextureArtifactBakeStats, std::string>>
         bakeFuture{};
+    bool planInFlight = false;
     bool bakeInFlight = false;
   };
 
@@ -262,6 +267,17 @@ struct BakerySystem::Impl {
                                   job.state == BakeJobState::GpuStep ||
                                   job.state == BakeJobState::WriteQueued ||
                                   job.state == BakeJobState::WriteInFlight)) {
+        if (auto *data = std::get_if<SceneJobData>(&job.data);
+            data != nullptr &&
+            ((data->planInFlight && data->planFuture.valid() &&
+              data->planFuture.wait_for(std::chrono::seconds(0)) !=
+                  std::future_status::ready) ||
+             (data->bakeInFlight && data->bakeFuture.valid() &&
+              data->bakeFuture.wait_for(std::chrono::seconds(0)) !=
+                  std::future_status::ready))) {
+          job.summary = "Cancellation waiting for background scene work";
+          continue;
+        }
         cleanupJobGpu(job);
         job.state = BakeJobState::Canceled;
         job.summary = "Canceled";
@@ -308,6 +324,7 @@ struct BakerySystem::Impl {
   }
 
   void workerLoop() {
+    setCurrentThreadBackgroundPriority();
     NURI_PROFILER_THREAD("BakeryWorker");
     while (true) {
       WriteTask task{};
@@ -483,7 +500,31 @@ struct BakerySystem::Impl {
         return;
       }
 
-      auto planResult = detail::planSceneTextureArtifactsBake(*request);
+      auto *data = std::get_if<SceneJobData>(&job.data);
+      if (data == nullptr) {
+        SceneJobData pending{};
+        pending.planFuture =
+            std::async(std::launch::async, [request = *request]() {
+              return detail::planSceneTextureArtifactsBake(request);
+            }).share();
+        pending.planInFlight = true;
+        job.data = std::move(pending);
+        job.summary = "Background cache check running";
+        return;
+      }
+      if (!data->planInFlight || !data->planFuture.valid()) {
+        setFailed(job, "BakerySystem: missing scene cache-check future");
+        return;
+      }
+      if (data->planFuture.wait_for(std::chrono::seconds(0)) !=
+          std::future_status::ready) {
+        job.summary = "Background cache check running";
+        return;
+      }
+
+      auto planResult = data->planFuture.get();
+      data->planFuture = {};
+      data->planInFlight = false;
       if (planResult.hasError()) {
         setFailed(job, planResult.error());
         return;
@@ -497,9 +538,7 @@ struct BakerySystem::Impl {
         return;
       }
 
-      SceneJobData data{};
-      data.plan = std::move(plan);
-      job.data = std::move(data);
+      data->plan = std::move(plan);
       job.totalSteps = 1u;
       job.completedSteps = 0u;
       job.summary = "Cache check complete";
@@ -753,7 +792,9 @@ struct BakerySystem::Impl {
     }
 
     if (auto *data = std::get_if<SceneJobData>(&job.data); data != nullptr) {
+      data->planFuture = {};
       data->bakeFuture = {};
+      data->planInFlight = false;
       data->bakeInFlight = false;
     }
   }

@@ -15,8 +15,6 @@ namespace {
 
 constexpr std::string_view kSampleDuckModelRelativePath =
     "rubber_duck/scene.gltf";
-constexpr std::string_view kSampleDuckAlbedoRelativePath =
-    "rubber_duck/textures/Duck_baseColor.png";
 constexpr std::string_view kNiagaraBistroModelRelativePath =
     "NiagaraBistro/bistrox.gltf";
 constexpr std::string_view kDamagedHelmetModelRelativePath =
@@ -362,87 +360,25 @@ Result<void, std::string> registerBuiltInScenes(EditorSceneCatalog &catalog,
   MeshImportOptions dragonImportOptions{};
   dragonImportOptions.flipUVs = false;
 
-  auto duckAssets = std::make_shared<SimpleModelSceneAssets>();
-  auto prepareDuckScene =
-      [duckAssets,
-       config](EditorScenePrepareContext &ctx) -> Result<void, std::string> {
-    if (duckAssets->ready) {
-      return Result<void, std::string>::makeResult();
-    }
-    duckAssets->resources = &ctx.runtime.resources();
-    duckAssets->sourcePath = modelPath(config, kSampleDuckModelRelativePath);
-    auto modelResult = ctx.runtime.resources().acquireModel(ModelRequest{
-        .path = duckAssets->sourcePath.string(),
-        .debugName = "rubber_duck",
-    });
-    if (modelResult.hasError()) {
-      return Result<void, std::string>::makeError(modelResult.error());
-    }
-    duckAssets->model = modelResult.value();
-
-    auto albedoResult = ctx.runtime.resources().acquireTexture(TextureRequest{
-        .path = (config.roots.models / kSampleDuckAlbedoRelativePath).string(),
-        .loadOptions =
-            TextureLoadOptions{.srgb = true, .generateMipmaps = true},
-        .kind = TextureRequestKind::Texture2D,
-        .debugName = "duck_albedo",
-    });
-    if (albedoResult.hasError()) {
-      return Result<void, std::string>::makeError(albedoResult.error());
-    }
-
-    const TextureRecord *duckAlbedoRecord =
-        ctx.runtime.resources().tryGet(albedoResult.value());
-    NURI_ASSERT(duckAlbedoRecord != nullptr,
-                "Duck albedo record lookup failed");
-    MaterialDesc duckMaterialDesc{};
-    duckMaterialDesc.textures.baseColor = duckAlbedoRecord->texture;
-    auto materialResult =
-        ctx.runtime.resources().acquireMaterial(MaterialRequest{
-            .desc = duckMaterialDesc,
-            .textureRefs =
-                MaterialRequest::TextureRefs{.baseColor = albedoResult.value()},
-            .debugName = "duck_material",
-        });
-    ctx.runtime.resources().release(albedoResult.value());
-    if (materialResult.hasError()) {
-      return Result<void, std::string>::makeError(materialResult.error());
-    }
-    duckAssets->material = materialResult.value();
-    ctx.runtime.resources().setModelMaterialForAllSources(duckAssets->model,
-                                                          duckAssets->material);
-    loadImportedLightsForScene("Rubber Duck", duckAssets->sourcePath.string(),
-                               duckAssets->fallbackLights);
-    duckAssets->ready = true;
-    queueSceneTextureArtifactBakeIfNeeded(ctx.runtime, *duckAssets);
-    return Result<void, std::string>::makeResult();
-  };
-
   {
-    auto result = catalog.append(makeCustomScene(EditorSceneSpec{
+    auto result = catalog.append(makeStreamingScene({
         .info = {.id = "single_duck", .label = "Single Duck"},
-        .prepare = prepareDuckScene,
-        .activate = [duckAssets](EditorSceneActivateContext &ctx)
-            -> Result<void, std::string> {
-          ctx.runtime.configureStaticModelOpaqueSettings(
-              glm::vec3(8.0f, 16.0f, 32.0f));
-          const RenderableId duckRenderable = ctx.runtime.addRequiredRenderable(
-              duckAssets->model, duckAssets->material, glm::mat4(1.0f),
-              "Failed to add duck renderable");
-          if (!isValid(duckRenderable)) {
-            return Result<void, std::string>::makeError(
-                "Failed to add duck renderable");
-          }
-          Camera *camera = ctx.runtime.mainCamera();
-          NURI_ASSERT(camera != nullptr, "Failed to get main camera");
-          camera->setLookAt(glm::vec3(0.0f, 1.0f, -1.5f),
-                            glm::vec3(0.0f, 0.5f, 0.0f),
-                            glm::vec3(0.0f, 1.0f, 0.0f));
-          ctx.runtime.syncEditorCameraWidgetState(*camera);
-          ctx.runtime.finalizeSceneLighting(duckAssets->fallbackLights,
-                                            glm::mat4(1.0f));
-          return Result<void, std::string>::makeResult();
-        },
+        .sourcePath = modelPath(config, kSampleDuckModelRelativePath),
+        .instanceName = "RubberDuck",
+        .configureRender =
+            [](EditorRuntime &runtime) {
+              runtime.configureStaticModelOpaqueSettings(
+                  glm::vec3(8.0f, 16.0f, 32.0f));
+            },
+        .configureCamera =
+            [](EditorRuntime &runtime, StreamingSceneState &) {
+              Camera *camera = runtime.mainCamera();
+              NURI_ASSERT(camera != nullptr, "Failed to get main camera");
+              camera->setLookAt(glm::vec3(0.0f, 1.0f, -1.5f),
+                                glm::vec3(0.0f, 0.5f, 0.0f),
+                                glm::vec3(0.0f, 1.0f, 0.0f));
+              runtime.syncEditorCameraWidgetState(*camera);
+            },
     }));
     if (result.hasError()) {
       return result;
@@ -450,44 +386,91 @@ Result<void, std::string> registerBuiltInScenes(EditorSceneCatalog &catalog,
   }
 
   {
-    auto result =
-        catalog.append(makeInstancedModelScene(makeCustomScene(EditorSceneSpec{
-            .info = {.id = "instanced_duck_32k", .label = "Instanced Duck 32K"},
-            .prepare = prepareDuckScene,
-            .activate = [duckAssets](EditorSceneActivateContext &ctx)
-                -> Result<void, std::string> {
-              ctx.runtime.renderSettings().opaque.enableInstanceCompute = true;
+    auto result = catalog.append(makeStreamingScene({
+        .info = {.id = "instanced_duck_32k", .label = "Instanced Duck 32K"},
+        .sourcePath = modelPath(config, kSampleDuckModelRelativePath),
+        .instanceName = "RubberDuck32K",
+        // Include the graph root, imported prefab hierarchy, and staged
+        // lighting so the final instance batch cannot trigger backing-array
+        // growth after the explicit reservation has completed.
+        .stagingNodeCapacity = kDuckInstanceCount + 64u,
+        .stagingRenderableCapacity = kDuckInstanceCount,
+        .configureRender =
+            [](EditorRuntime &runtime) {
+              runtime.renderSettings().opaque.enableInstanceCompute = true;
               // Instance compute culling plus animation and mesh LOD keep this
               // 32K-instance scene vertex-bound; depth prepass overhead wins
               // over its occlusion benefit here.
-              ctx.runtime.renderSettings().opaque.enableDepthPrepass = false;
-              ctx.runtime.renderSettings().opaque.enableMeshLod = true;
-              ctx.runtime.renderSettings().opaque.forcedMeshLod = -1;
-              ctx.runtime.renderSettings().opaque.meshLodDistanceThresholds =
+              runtime.renderSettings().opaque.enableDepthPrepass = false;
+              runtime.renderSettings().opaque.enableMeshLod = true;
+              runtime.renderSettings().opaque.forcedMeshLod = -1;
+              runtime.renderSettings().opaque.meshLodDistanceThresholds =
                   glm::vec3(4.0f, 8.0f, 16.0f);
-              ctx.runtime.renderSettings().opaque.enableInstanceAnimation =
-                  true;
-              std::vector<glm::mat4> transforms;
-              transforms.reserve(kDuckInstanceCount);
-              for (uint32_t i = 0; i < kDuckInstanceCount; ++i) {
-                transforms.push_back(glm::translate(
-                    glm::mat4(1.0f), instancePositionFromGrid(i)));
-              }
-              auto addResult =
-                  ctx.runtime.scene().graph().addRenderablesInstanced(
-                      duckAssets->model, duckAssets->material, transforms);
-              if (addResult.hasError()) {
-                return Result<void, std::string>::makeError(addResult.error());
-              }
-              Camera *camera = ctx.runtime.mainCamera();
+              runtime.renderSettings().opaque.enableInstanceAnimation = true;
+            },
+        .populateLoadedSceneStep =
+            [](EditorRuntime &runtime,
+               StreamingSceneState &state) -> Result<bool, std::string> {
+          // At 60 Hz this bounds 32K stress-scene population to roughly
+          // nine seconds. The step is composed from small rollback-safe
+          // work units and also obeys a wall-clock deadline.
+          constexpr uint32_t kInstancesPerBatch = 8u;
+          constexpr uint32_t kMaxInstancesPerStep = 64u;
+          constexpr auto kPopulationDeadline = std::chrono::microseconds(200);
+          if (state.populationCursor == 0u) {
+            // The imported prefab already contributes the first instance.
+            state.populationCursor = 1u;
+          }
+          MaterialRef material = kInvalidMaterialRef;
+          if (!runtime.scene().graph().getRenderableMaterial(state.renderableId,
+                                                             material) ||
+              !isValid(material)) {
+            return Result<bool, std::string>::makeError(
+                "Instanced Duck 32K source material is unavailable");
+          }
+          const auto deadline =
+              std::chrono::steady_clock::now() + kPopulationDeadline;
+          uint32_t admittedThisStep = 0u;
+          while (state.populationCursor < kDuckInstanceCount &&
+                 admittedThisStep < kMaxInstancesPerStep) {
+            const uint32_t remaining =
+                kDuckInstanceCount - state.populationCursor;
+            const uint32_t count =
+                std::min({remaining, kInstancesPerBatch,
+                          kMaxInstancesPerStep - admittedThisStep});
+            std::array<glm::mat4, kInstancesPerBatch> transforms{};
+            for (uint32_t offset = 0u; offset < count; ++offset) {
+              const uint32_t index = state.populationCursor + offset;
+              transforms[offset] = glm::translate(
+                  glm::mat4(1.0f), instancePositionFromGrid(index));
+            }
+            auto added = runtime.scene().graph().addRenderablesInstanced(
+                state.model, material,
+                std::span<const glm::mat4>(transforms.data(), count));
+            if (added.hasError()) {
+              return Result<bool, std::string>::makeError(added.error());
+            }
+            state.populationCursor += count;
+            admittedThisStep += count;
+            if (std::chrono::steady_clock::now() >= deadline) {
+              break;
+            }
+          }
+          state.populationProgress =
+              static_cast<float>(state.populationCursor) /
+              static_cast<float>(kDuckInstanceCount);
+          return Result<bool, std::string>::makeResult(state.populationCursor ==
+                                                       kDuckInstanceCount);
+        },
+        .configureCamera =
+            [](EditorRuntime &runtime, StreamingSceneState &) {
+              Camera *camera = runtime.mainCamera();
               NURI_ASSERT(camera != nullptr, "Failed to get main camera");
               camera->setLookAt(glm::vec3(0.0f, 120.0f, -760.0f),
                                 glm::vec3(0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
-              ctx.runtime.syncEditorCameraWidgetState(*camera);
-              ctx.runtime.finalizeSceneLighting({}, glm::mat4(1.0f));
-              return Result<void, std::string>::makeResult();
+              runtime.syncEditorCameraWidgetState(*camera);
             },
-        })));
+    }));
     if (result.hasError()) {
       return result;
     }
@@ -689,6 +672,7 @@ Result<void, std::string> registerBuiltInScenes(EditorSceneCatalog &catalog,
         .importOptions = meshletImport,
         .instanceName = "NiagaraBistro",
         .fallbackMaterialDebugName = "niagara_bistro_fallback_material",
+        .scaleToNiagaraBistro = true,
         .configureRender =
             [](EditorRuntime &runtime) {
               runtime.configureStaticModelOpaqueSettings(
@@ -735,10 +719,7 @@ Result<void, std::string> registerBuiltInScenes(EditorSceneCatalog &catalog,
                             -requestedDirection.z));
               camera->setLookAt(position, position + direction,
                                 glm::vec3(0.0f, 1.0f, 0.0f));
-              if (CameraController *controller =
-                      runtime.cameraSystem().activeController()) {
-                controller->reset();
-              }
+              runtime.resetSceneCameraController();
               const glm::vec3 actualPosition = camera->position();
               const glm::vec3 actualDirection = camera->forward();
               NURI_LOG_INFO(

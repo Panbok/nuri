@@ -12,5 +12,5 @@ int main() {
 
   nuri::EditorApplication app{std::move(configResult.value())};
   app.run();
-  return 0;
+  return app.exitCode();
 }

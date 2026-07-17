@@ -206,7 +206,7 @@ EditorAnimationPlayerService::EditorAnimationPlayerService(
     std::function<double()> currentTimeSeconds,
     std::function<uint64_t()> nextSimulationFrameIndex,
     std::pmr::memory_resource *memory)
-    : scene_(scene), sceneRuntime_(sceneRuntime),
+    : scene_(&scene), sceneRuntime_(&sceneRuntime),
       selectionState_(selectionState),
       currentTimeSeconds_(std::move(currentTimeSeconds)),
       nextSimulationFrameIndex_(std::move(nextSimulationFrameIndex)),
@@ -239,13 +239,30 @@ void EditorAnimationPlayerService::onUpdate(double deltaTime) {
 void EditorAnimationPlayerService::clear() {
   for (InstanceRecord &record : records_) {
     if (isValid(record.simulation)) {
-      (void)sceneRuntime_.destroyAnimationPoseSimulation(record.simulation);
+      (void)sceneRuntime_->destroyAnimationPoseSimulation(record.simulation);
       record.simulation = kInvalidSimulationHandle;
     }
   }
   records_.clear();
   recordIndexByNode_.clear();
   recordIndexByRenderable_.clear();
+}
+
+void EditorAnimationPlayerService::bindScene(RenderScene &scene,
+                                             SceneRuntimeHost &sceneRuntime,
+                                             bool destroyExistingSimulations) {
+  if (scene_ == &scene && sceneRuntime_ == &sceneRuntime) {
+    return;
+  }
+  if (destroyExistingSimulations) {
+    clear();
+  } else {
+    records_.clear();
+    recordIndexByNode_.clear();
+    recordIndexByRenderable_.clear();
+  }
+  scene_ = &scene;
+  sceneRuntime_ = &sceneRuntime;
 }
 
 void EditorAnimationPlayerService::registerPrefabInstance(
@@ -467,18 +484,19 @@ void EditorAnimationPlayerService::unregisterPrefabInstance(NodeId rootNode) {
     return;
   }
 
-  auto removeIt = std::remove_if(
-      records_.begin(), records_.end(),
-      [this, rootNode](InstanceRecord &record) {
-        if (record.instanceRootNode != rootNode) {
-          return false;
-        }
-        if (isValid(record.simulation)) {
-          (void)sceneRuntime_.destroyAnimationPoseSimulation(record.simulation);
-          record.simulation = kInvalidSimulationHandle;
-        }
-        return true;
-      });
+  auto removeIt =
+      std::remove_if(records_.begin(), records_.end(),
+                     [this, rootNode](InstanceRecord &record) {
+                       if (record.instanceRootNode != rootNode) {
+                         return false;
+                       }
+                       if (isValid(record.simulation)) {
+                         (void)sceneRuntime_->destroyAnimationPoseSimulation(
+                             record.simulation);
+                         record.simulation = kInvalidSimulationHandle;
+                       }
+                       return true;
+                     });
   if (removeIt == records_.end()) {
     return;
   }
@@ -555,10 +573,10 @@ bool EditorAnimationPlayerService::startPrefabInstancePlayback(
       return false;
     }
     if (record.params.primary.playing) {
-      if (!sceneRuntime_.simulations().resume(record.simulation)) {
+      if (!sceneRuntime_->simulations().resume(record.simulation)) {
         return false;
       }
-    } else if (!sceneRuntime_.simulations().pause(record.simulation)) {
+    } else if (!sceneRuntime_->simulations().pause(record.simulation)) {
       return false;
     }
     updatedAny = true;
@@ -585,7 +603,7 @@ EditorAnimationPlayerView EditorAnimationPlayerService::selectedView() const {
         .availability = EditorAnimationPlayerAvailability::NotAnimated,
         .selectionLabel =
             hasNodeSelection
-                ? nodeDisplayName(scene_.graph(), selectionState_.node)
+                ? nodeDisplayName(scene_->graph(), selectionState_.node)
                 : std::string{},
     };
   }
@@ -596,7 +614,7 @@ EditorAnimationPlayerView EditorAnimationPlayerService::selectedView() const {
   return EditorAnimationPlayerView{
       .availability = EditorAnimationPlayerAvailability::Animated,
       .instanceLabel = std::string(record->label),
-      .selectionLabel = hasNodeSelection ? nodeDisplayName(scene_.graph(),
+      .selectionLabel = hasNodeSelection ? nodeDisplayName(scene_->graph(),
                                                            selectionState_.node)
                                          : std::string{},
       .clips = std::span<const EditorAnimationClipInfo>(
@@ -630,13 +648,13 @@ bool EditorAnimationPlayerService::startSelectionPlayback() {
   if (!pushRuntimeParams(*record)) {
     return false;
   }
-  return sceneRuntime_.simulations().resume(record->simulation);
+  return sceneRuntime_->simulations().resume(record->simulation);
 }
 
 bool EditorAnimationPlayerService::pauseSelectionPlayback() {
   InstanceRecord *record = selectedRecord();
   return record != nullptr && isValid(record->simulation) &&
-         sceneRuntime_.simulations().pause(record->simulation);
+         sceneRuntime_->simulations().pause(record->simulation);
 }
 
 bool EditorAnimationPlayerService::restartSelectionPlayback() {
@@ -650,7 +668,7 @@ bool EditorAnimationPlayerService::restartSelectionPlayback() {
   if (!ensureSimulation(*record, false) || !pushRuntimeParams(*record)) {
     return false;
   }
-  return sceneRuntime_.simulations().resume(record->simulation);
+  return sceneRuntime_->simulations().resume(record->simulation);
 }
 
 bool EditorAnimationPlayerService::seekSelectionPlayback(float timeSeconds) {
@@ -807,14 +825,14 @@ bool EditorAnimationPlayerService::ensureSimulation(InstanceRecord &record,
     SimulationState state = SimulationState::Stopped;
     if (simulationState(record, state)) {
       if (paused && state != SimulationState::Paused) {
-        (void)sceneRuntime_.simulations().pause(record.simulation);
+        (void)sceneRuntime_->simulations().pause(record.simulation);
       }
       return true;
     }
     record.simulation = kInvalidSimulationHandle;
   }
 
-  auto commitResult = scene_.commit();
+  auto commitResult = scene_->commit();
   if (commitResult.hasError()) {
     NURI_LOG_WARNING(
         "EditorAnimationPlayerService::ensureSimulation: scene commit failed: "
@@ -822,7 +840,7 @@ bool EditorAnimationPlayerService::ensureSimulation(InstanceRecord &record,
         commitResult.error().c_str());
     return false;
   }
-  (void)sceneRuntime_.tick({
+  (void)sceneRuntime_->tick({
       .frameDeltaSeconds = 0.0,
       .absoluteTimeSeconds = currentTimeSeconds_ ? currentTimeSeconds_() : 0.0,
       .frameIndex =
@@ -837,7 +855,7 @@ bool EditorAnimationPlayerService::ensureSimulation(InstanceRecord &record,
   record.params.primary.timeSeconds = params.primary.timeSeconds;
   record.params.secondary.timeSeconds = computeSecondaryTime(record);
   params.secondary.timeSeconds = record.params.secondary.timeSeconds;
-  auto createResult = sceneRuntime_.createAnimationPoseSimulation(
+  auto createResult = sceneRuntime_->createAnimationPoseSimulation(
       AnimationPoseSimulationCreateInfo{
           .prefab = record.prefab,
           .instantiationMap = &record.instantiationMap,
@@ -857,7 +875,7 @@ bool EditorAnimationPlayerService::ensureSimulation(InstanceRecord &record,
   }
 
   record.simulation = createResult.value();
-  if (paused && !sceneRuntime_.simulations().pause(record.simulation)) {
+  if (paused && !sceneRuntime_->simulations().pause(record.simulation)) {
     NURI_LOG_WARNING(
         "EditorAnimationPlayerService::ensureSimulation: failed to pause new "
         "simulation for '%s'",
@@ -896,8 +914,8 @@ bool EditorAnimationPlayerService::pushRuntimeParams(InstanceRecord &record) {
         record.label.c_str(), validateResult.error().c_str());
     return false;
   }
-  if (!sceneRuntime_.simulations().setParams(record.simulation,
-                                             asBytes(params))) {
+  if (!sceneRuntime_->simulations().setParams(record.simulation,
+                                              asBytes(params))) {
     NURI_LOG_WARNING(
         "EditorAnimationPlayerService::pushRuntimeParams: failed to update "
         "simulation params for '%s'",
@@ -911,7 +929,7 @@ bool EditorAnimationPlayerService::pushRuntimeParams(InstanceRecord &record) {
 bool EditorAnimationPlayerService::simulationState(const InstanceRecord &record,
                                                    SimulationState &out) const {
   return isValid(record.simulation) &&
-         sceneRuntime_.simulations().getState(record.simulation, out);
+         sceneRuntime_->simulations().getState(record.simulation, out);
 }
 
 float EditorAnimationPlayerService::computeSecondaryTime(

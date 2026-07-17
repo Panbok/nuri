@@ -12,6 +12,7 @@
 #include "nuri/scene/render_scene.h"
 
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <deque>
 #include <memory>
@@ -36,12 +37,14 @@ struct ModelAssetTag;
 struct MaterialAssetTag;
 struct EnvironmentAssetTag;
 struct SceneLoadTag;
+struct ScenePublicationTargetTag;
 
 using TextureAssetHandle = AssetHandle<TextureAssetTag>;
 using ModelAssetHandle = AssetHandle<ModelAssetTag>;
 using MaterialAssetHandle = AssetHandle<MaterialAssetTag>;
 using EnvironmentAssetHandle = AssetHandle<EnvironmentAssetTag>;
 using SceneLoadHandle = AssetHandle<SceneLoadTag>;
+using ScenePublicationTargetHandle = AssetHandle<ScenePublicationTargetTag>;
 
 template <typename Tag>
 [[nodiscard]] constexpr bool
@@ -54,6 +57,7 @@ enum class AssetState : uint8_t {
   CpuRunning,
   CpuReady,
   GpuQueued,
+  GpuReady,
   GpuSubmitted,
   Resident,
   Published,
@@ -103,7 +107,23 @@ struct SceneLoadRequest {
   AssetPriority priority = AssetPriority::Normal;
   ScenePublicationPolicy publication = ScenePublicationPolicy::Progressive;
   SceneFailurePolicy failurePolicy = SceneFailurePolicy::BestEffort;
+  // Optional explicit main-thread publication target. When invalid, the
+  // request uses AssetPublicationContext::scene for legacy/tool callers.
+  ScenePublicationTargetHandle publicationTarget{};
   std::string debugName{};
+};
+
+struct ScenePublicationTargetSnapshot {
+  uint32_t requestCount = 0u;
+  uint32_t pendingCount = 0u;
+  uint32_t failedCount = 0u;
+  uint32_t cancelledCount = 0u;
+  float progress = 0.0f;
+
+  [[nodiscard]] bool ready() const noexcept {
+    return requestCount == 0u ||
+           (pendingCount == 0u && failedCount == 0u && cancelledCount == 0u);
+  }
 };
 
 struct SceneAssetCounts {
@@ -153,6 +173,8 @@ struct AssetSystemConfig {
   uint64_t maxGpuUploadBytesPerFrame = 256ull * 1024ull * 1024ull;
   uint32_t maxMaterialPublicationsPerFrame = 256u;
   uint32_t maxScenePatchesPerFrame = 1024u;
+  uint32_t maxCpuCompletionsPerFrame = 64u;
+  double maxMainThreadMillisecondsPerFrame = 2.0;
 };
 
 struct AssetPublicationStats {
@@ -164,6 +186,10 @@ struct AssetPublicationStats {
   uint32_t scenePatches = 0u;
   uint32_t sceneCommits = 0u;
   uint64_t uploadBytes = 0u;
+  uint32_t deferredCpuCompletions = 0u;
+  double mainThreadMilliseconds = 0.0;
+  double maxOperationMilliseconds = 0.0;
+  bool deadlineExceeded = false;
 };
 
 struct MaterialAssetRequest {
@@ -227,6 +253,18 @@ public:
   requestEnvironment(const EnvironmentAssetRequest &request);
   [[nodiscard]] Result<SceneLoadHandle, std::string>
   requestScene(const SceneLoadRequest &request);
+  void setInteractiveMode(bool enabled);
+
+  // Scene publication targets are registered and resolved only on the
+  // render/main thread. A document must keep its target registered until every
+  // request that references it is terminal.
+  [[nodiscard]] ScenePublicationTargetHandle
+  registerScenePublicationTarget(RenderScene &scene,
+                                 NodeId parent = kInvalidNodeId);
+  [[nodiscard]] bool
+  unregisterScenePublicationTarget(ScenePublicationTargetHandle handle);
+  [[nodiscard]] ScenePublicationTargetSnapshot
+  query(ScenePublicationTargetHandle handle) const;
 
   [[nodiscard]] AssetLoadSnapshot query(TextureAssetHandle handle) const;
   [[nodiscard]] AssetLoadSnapshot query(ModelAssetHandle handle) const;
@@ -277,7 +315,11 @@ private:
     TextureRequest request{};
     TextureKey key{};
     AssetCpuTaskHandle cpuTask{};
+    AssetCpuTaskHandle gpuTask{};
     std::optional<PreparedTextureData> prepared{};
+    std::unique_ptr<PreparedGpuTexture> preparedGpuTexture{};
+    TextureDesc preparedGpuDesc{};
+    std::string preparedGpuDebugName{};
     std::unique_ptr<Texture> pendingTexture{};
     SubmissionHandle upload{};
     TextureRef published = kInvalidTextureRef;
@@ -293,7 +335,9 @@ private:
     ModelRequest request{};
     ModelKey key{};
     AssetCpuTaskHandle cpuTask{};
+    AssetCpuTaskHandle gpuTask{};
     std::optional<PreparedModelData> prepared{};
+    std::unique_ptr<PreparedGpuModelData> preparedGpuModel{};
     std::unique_ptr<Model> pendingModel{};
     SubmissionHandle upload{};
     ModelRef published = kInvalidModelRef;
@@ -343,6 +387,7 @@ private:
     uint64_t importOptionsHash = 0u;
     ScenePublicationPolicy publication = ScenePublicationPolicy::Progressive;
     SceneFailurePolicy failurePolicy = SceneFailurePolicy::BestEffort;
+    ScenePublicationTargetHandle publicationTarget{};
 
     bool operator==(const SceneKey &) const noexcept = default;
   };
@@ -367,16 +412,39 @@ private:
     SceneInstantiationMap instantiation{};
     NodeId root = kInvalidNodeId;
     RenderScene *boundScene = nullptr;
+    ScenePublicationTargetHandle publicationTarget{};
     std::vector<uint8_t> modelFallbackMapped{};
-    std::vector<std::vector<uint8_t>> modelMaterialMapped{};
+    std::vector<uint8_t> renderableMaterialMapped{};
+    ScenePrefabStructureCursor structureCursor{};
+    uint32_t modelAdmissionCursor = 0u;
+    uint32_t materialAdmissionCursor = 0u;
+    uint32_t modelMappingCursor = 0u;
+    uint32_t materialMappingCursor = 0u;
+    uint32_t renderableCursor = 0u;
+    uint32_t cancellationTaskCursor = 0u;
+    uint32_t cancellationModelCursor = 0u;
+    uint32_t cancellationMaterialCursor = 0u;
+    uint32_t cancellationTextureSubscriptionCursor = 0u;
+    uint32_t cancellationTextureCursor = 0u;
     uint32_t subscriberCount = 1u;
     uint32_t requiredFailures = 0u;
     uint32_t optionalFailures = 0u;
     uint64_t cpuPayloadBytes = 0u;
     float progress = 0.0f;
     bool hierarchyPublished = false;
+    bool fallbackRequested = false;
+    bool manifestAdmissionComplete = false;
+    bool commitPending = false;
     bool dependenciesCancelled = false;
+    bool manifestTaskCancelled = false;
+    bool fallbackMaterialCancelled = false;
     std::string error{};
+  };
+
+  struct ScenePublicationTargetNode {
+    ScenePublicationTargetHandle handle{};
+    RenderScene *scene = nullptr;
+    NodeId parent = kInvalidNodeId;
   };
 
   struct TextureCpuCompletion {
@@ -389,6 +457,22 @@ private:
   struct ModelCpuCompletion {
     ModelAssetHandle handle{};
     std::optional<PreparedModelData> prepared{};
+    std::string error{};
+    bool cancelled = false;
+  };
+
+  struct TextureGpuCompletion {
+    TextureAssetHandle handle{};
+    std::unique_ptr<PreparedGpuTexture> prepared{};
+    TextureDesc desc{};
+    std::string debugName{};
+    std::string error{};
+    bool cancelled = false;
+  };
+
+  struct ModelGpuCompletion {
+    ModelAssetHandle handle{};
+    std::unique_ptr<PreparedGpuModelData> prepared{};
     std::string error{};
     bool cancelled = false;
   };
@@ -410,6 +494,7 @@ private:
 
   using CpuCompletion =
       std::variant<TextureCpuCompletion, ModelCpuCompletion,
+                   TextureGpuCompletion, ModelGpuCompletion,
                    SceneManifestCompletion, SceneMaterialCompletion>;
 
   [[nodiscard]] TextureNode *find(TextureAssetHandle handle);
@@ -423,10 +508,20 @@ private:
   find(EnvironmentAssetHandle handle) const;
   [[nodiscard]] SceneNode *find(SceneLoadHandle handle);
   [[nodiscard]] const SceneNode *find(SceneLoadHandle handle) const;
+  [[nodiscard]] ScenePublicationTargetNode *
+  find(ScenePublicationTargetHandle handle);
+  [[nodiscard]] const ScenePublicationTargetNode *
+  find(ScenePublicationTargetHandle handle) const;
 
   void reclaimReleasedNodes();
   void pushCompletion(CpuCompletion completion);
-  [[nodiscard]] std::vector<CpuCompletion> takeCompletions();
+  [[nodiscard]] std::vector<CpuCompletion>
+  takeCompletions(uint32_t maxCompletions);
+  void returnCompletions(std::span<CpuCompletion> completions);
+  void
+  discardPreparedTextureAsync(std::unique_ptr<PreparedGpuTexture> prepared);
+  void
+  discardPreparedModelAsync(std::unique_ptr<PreparedGpuModelData> prepared);
   void finishTextureNode(TextureNode &node, AssetState terminalState,
                          std::string error = {});
   void finishModelNode(ModelNode &node, AssetState terminalState,
@@ -435,10 +530,14 @@ private:
                           std::string error = {});
   void finishSceneNode(SceneNode &node, SceneLoadState terminalState,
                        std::string error = {});
-  void cancelSceneDependencies(SceneNode &node);
+  [[nodiscard]] bool
+  cancelSceneDependencies(SceneNode &node,
+                          std::chrono::steady_clock::time_point deadline,
+                          uint32_t maxOperations = 64u);
   [[nodiscard]] Result<bool, std::string>
   prepareSceneNode(SceneNode &node, AssetPublicationContext &context,
-                   AssetPublicationStats &stats, uint32_t &patchBudget);
+                   AssetPublicationStats &stats, uint32_t &patchBudget,
+                   std::chrono::steady_clock::time_point deadline);
   [[nodiscard]] static SceneAssetCounts
   collectSceneCounts(const AssetSystem &assets,
                      std::span<const ModelAssetHandle> handles);
@@ -469,11 +568,13 @@ private:
   std::deque<MaterialNode> materialNodes_{};
   std::deque<EnvironmentNode> environmentNodes_{};
   std::deque<SceneNode> sceneNodes_{};
+  std::deque<ScenePublicationTargetNode> scenePublicationTargets_{};
   SlotPool<UnmaskedNonZeroGenerationPolicy> textureSlots_{};
   SlotPool<UnmaskedNonZeroGenerationPolicy> modelSlots_{};
   SlotPool<UnmaskedNonZeroGenerationPolicy> materialSlots_{};
   SlotPool<UnmaskedNonZeroGenerationPolicy> environmentSlots_{};
   SlotPool<UnmaskedNonZeroGenerationPolicy> sceneSlots_{};
+  SlotPool<UnmaskedNonZeroGenerationPolicy> scenePublicationTargetSlots_{};
   std::unordered_map<TextureKey, TextureAssetHandle, TextureKeyHash>
       textureInFlight_{};
   std::unordered_map<ModelKey, ModelAssetHandle, ModelKeyHash> modelInFlight_{};
@@ -485,6 +586,7 @@ private:
   mutable std::mutex completionMutex_{};
   std::vector<CpuCompletion> completions_{};
   mutable std::recursive_mutex stateMutex_{};
+  size_t scenePrepareCursor_ = 0u;
   bool releasedTerminalNodes_ = false;
 };
 

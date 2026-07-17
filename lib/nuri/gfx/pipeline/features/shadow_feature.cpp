@@ -37,6 +37,12 @@ Result<bool, std::string> ShadowFeature::prepare(FrameBuildContext &ctx) {
   return renderer_->prepareShadowGraphPasses(ctx.frame);
 }
 
+Result<bool, std::string>
+ShadowFeature::prepareSceneStep(RenderScenePreparationContext &ctx) {
+  return renderer_->prepareSceneCacheStep(ctx.scene, ctx.resources,
+                                          ctx.maxOperations, ctx.settings);
+}
+
 std::span<RenderFeaturePass *const> ShadowFeature::passes() noexcept {
   return passes_;
 }

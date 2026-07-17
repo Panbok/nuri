@@ -105,11 +105,12 @@ TEST(AssetSystemTests, DeduplicatesAndPublishesOnlyAfterUploadCompletion) {
   nuri::AssetSystem assets(
       gpu, resources,
       nuri::AssetSystemConfig{
-          .cpu = nuri::AssetCpuSchedulerConfig{
-              .workerCount = 1u,
-              .maxInFlightJobs = 8u,
-              .maxInFlightBytes = 16ull * 1024ull * 1024ull,
-          },
+          .cpu =
+              nuri::AssetCpuSchedulerConfig{
+                  .workerCount = 1u,
+                  .maxInFlightJobs = 8u,
+                  .maxInFlightBytes = 16ull * 1024ull * 1024ull,
+              },
           .maxGpuMaterializationsPerFrame = 4u,
           .maxGpuUploadBytesPerFrame = 16ull * 1024ull * 1024ull,
       });
@@ -162,11 +163,12 @@ TEST(AssetSystemTests, CancellationAfterSubmissionRetiresWithoutPublishing) {
   nuri::AssetSystem assets(
       gpu, resources,
       nuri::AssetSystemConfig{
-          .cpu = nuri::AssetCpuSchedulerConfig{
-              .workerCount = 1u,
-              .maxInFlightJobs = 8u,
-              .maxInFlightBytes = 16ull * 1024ull * 1024ull,
-          },
+          .cpu =
+              nuri::AssetCpuSchedulerConfig{
+                  .workerCount = 1u,
+                  .maxInFlightJobs = 8u,
+                  .maxInFlightBytes = 16ull * 1024ull * 1024ull,
+              },
       });
   auto request = assets.requestTexture(nuri::TextureRequest{
       .path = texturePath.string(),
@@ -210,11 +212,12 @@ TEST(AssetSystemTests, SharedRequestSurvivesOneSubscriberCancellation) {
   nuri::AssetSystem assets(
       gpu, resources,
       nuri::AssetSystemConfig{
-          .cpu = nuri::AssetCpuSchedulerConfig{
-              .workerCount = 1u,
-              .maxInFlightJobs = 8u,
-              .maxInFlightBytes = 16ull * 1024ull * 1024ull,
-          },
+          .cpu =
+              nuri::AssetCpuSchedulerConfig{
+                  .workerCount = 1u,
+                  .maxInFlightJobs = 8u,
+                  .maxInFlightBytes = 16ull * 1024ull * 1024ull,
+              },
       });
   const nuri::TextureRequest request{
       .path = texturePath.string(),
@@ -247,11 +250,12 @@ TEST(AssetSystemTests, PublishesMaterialBatchWithSingleVersionAdvance) {
   nuri::AssetSystem assets(
       gpu, resources,
       nuri::AssetSystemConfig{
-          .cpu = nuri::AssetCpuSchedulerConfig{
-              .workerCount = 1u,
-              .maxInFlightJobs = 8u,
-              .maxInFlightBytes = 16ull * 1024ull * 1024ull,
-          },
+          .cpu =
+              nuri::AssetCpuSchedulerConfig{
+                  .workerCount = 1u,
+                  .maxInFlightJobs = 8u,
+                  .maxInFlightBytes = 16ull * 1024ull * 1024ull,
+              },
       });
 
   nuri::MaterialAssetRequest firstRequest{
@@ -311,11 +315,12 @@ TEST(AssetSystemTests,
   nuri::AssetSystem assets(
       gpu, resources,
       nuri::AssetSystemConfig{
-          .cpu = nuri::AssetCpuSchedulerConfig{
-              .workerCount = 3u,
-              .maxInFlightJobs = 32u,
-              .maxInFlightBytes = 64ull * 1024ull * 1024ull,
-          },
+          .cpu =
+              nuri::AssetCpuSchedulerConfig{
+                  .workerCount = 3u,
+                  .maxInFlightJobs = 32u,
+                  .maxInFlightBytes = 64ull * 1024ull * 1024ull,
+              },
           .maxGpuMaterializationsPerFrame = 4u,
           .maxGpuUploadBytesPerFrame = 32ull * 1024ull * 1024ull,
       });
@@ -350,8 +355,7 @@ TEST(AssetSystemTests,
     std::this_thread::sleep_for(2ms);
   }
 
-  const nuri::SceneLoadSnapshot finalSnapshot =
-      assets.query(requested.value());
+  const nuri::SceneLoadSnapshot finalSnapshot = assets.query(requested.value());
   EXPECT_TRUE(sawHierarchyWithoutRenderable);
   EXPECT_EQ(finalSnapshot.state, nuri::SceneLoadState::Complete)
       << "models failed=" << finalSnapshot.models.failed
@@ -375,11 +379,12 @@ TEST(AssetSystemTests, CompleteOnlyScenePublishesAsOneGraphTransaction) {
   nuri::AssetSystem assets(
       gpu, resources,
       nuri::AssetSystemConfig{
-          .cpu = nuri::AssetCpuSchedulerConfig{
-              .workerCount = 3u,
-              .maxInFlightJobs = 32u,
-              .maxInFlightBytes = 64ull * 1024ull * 1024ull,
-          },
+          .cpu =
+              nuri::AssetCpuSchedulerConfig{
+                  .workerCount = 3u,
+                  .maxInFlightJobs = 32u,
+                  .maxInFlightBytes = 64ull * 1024ull * 1024ull,
+              },
           .maxScenePatchesPerFrame = 1u,
       });
   nuri::RenderScene scene(&memory);
@@ -411,12 +416,133 @@ TEST(AssetSystemTests, CompleteOnlyScenePublishesAsOneGraphTransaction) {
   }
 
   const nuri::SceneLoadSnapshot snapshot = assets.query(requested.value());
-  EXPECT_EQ(snapshot.state, nuri::SceneLoadState::Complete)
-      << snapshot.error;
+  EXPECT_EQ(snapshot.state, nuri::SceneLoadState::Complete) << snapshot.error;
   EXPECT_TRUE(snapshot.hierarchyPublished);
   ASSERT_EQ(scene.renderables().size(), 1u);
   EXPECT_TRUE(nuri::isValid(scene.renderables()[0].model));
   EXPECT_TRUE(nuri::isValid(scene.renderables()[0].material));
+}
+
+TEST(AssetSystemTests, ExplicitPublicationTargetKeepsActiveSceneIsolated) {
+  ScopedAssetTempDir dir;
+  writeObjScene(dir.path);
+
+  nuri::test_support::FakeExecutorGPUDevice gpu;
+  std::pmr::monotonic_buffer_resource memory;
+  nuri::ResourceManager resources(gpu, &memory);
+  nuri::AssetSystem assets(
+      gpu, resources,
+      nuri::AssetSystemConfig{
+          .cpu =
+              nuri::AssetCpuSchedulerConfig{
+                  .workerCount = 3u,
+                  .maxInFlightJobs = 32u,
+                  .maxInFlightBytes = 64ull * 1024ull * 1024ull,
+              },
+          .maxScenePatchesPerFrame = 1u,
+      });
+  nuri::RenderScene activeScene(&memory);
+  nuri::RenderScene stagingScene(&memory);
+  activeScene.bindResources(&resources);
+  stagingScene.bindResources(&resources);
+
+  auto activeRequested = assets.requestScene(nuri::SceneLoadRequest{
+      .path = (dir.path / "scene.obj").string(),
+      .publication = nuri::ScenePublicationPolicy::CompleteOnly,
+  });
+  ASSERT_FALSE(activeRequested.hasError()) << activeRequested.error();
+
+  uint64_t frameIndex = 1u;
+  for (uint32_t attempt = 0u; attempt < 500u; ++attempt) {
+    ASSERT_FALSE(gpu.beginFrame(frameIndex).hasError());
+    resources.beginFrame(frameIndex);
+    auto prepared = assets.prepareFrame(nuri::AssetPublicationContext{
+        .scene = &activeScene,
+    });
+    ASSERT_FALSE(prepared.hasError()) << prepared.error();
+    if (assets.query(activeRequested.value()).terminal()) {
+      break;
+    }
+    ++frameIndex;
+    std::this_thread::sleep_for(2ms);
+  }
+
+  ASSERT_EQ(assets.query(activeRequested.value()).state,
+            nuri::SceneLoadState::Complete);
+  ASSERT_EQ(activeScene.renderables().size(), 1u);
+  const nuri::ModelRef activeModel = activeScene.renderables()[0].model;
+  const nuri::MaterialRef activeMaterial =
+      resources.modelMaterialForSubmesh(activeModel, 0u);
+  ASSERT_TRUE(nuri::isValid(activeMaterial));
+
+  const nuri::ScenePublicationTargetHandle target =
+      assets.registerScenePublicationTarget(stagingScene);
+  auto requested = assets.requestScene(nuri::SceneLoadRequest{
+      .path = (dir.path / "scene.obj").string(),
+      .publication = nuri::ScenePublicationPolicy::CompleteOnly,
+      .publicationTarget = target,
+  });
+  ASSERT_FALSE(requested.hasError()) << requested.error();
+
+  ++frameIndex;
+  for (uint32_t attempt = 0u; attempt < 500u; ++attempt) {
+    ASSERT_FALSE(gpu.beginFrame(frameIndex).hasError());
+    resources.beginFrame(frameIndex);
+    auto prepared = assets.prepareFrame(nuri::AssetPublicationContext{
+        .scene = &activeScene,
+    });
+    ASSERT_FALSE(prepared.hasError()) << prepared.error();
+    ASSERT_EQ(activeScene.renderables().size(), 1u);
+    EXPECT_EQ(resources.modelMaterialForSubmesh(activeModel, 0u).value,
+              activeMaterial.value);
+    EXPECT_TRUE(stagingScene.renderables().empty());
+    if (assets.query(requested.value()).terminal()) {
+      break;
+    }
+    ++frameIndex;
+    std::this_thread::sleep_for(2ms);
+  }
+
+  ASSERT_EQ(assets.query(requested.value()).state,
+            nuri::SceneLoadState::Complete);
+  EXPECT_TRUE(assets.query(target).ready());
+  bool finalized = false;
+  const auto finalizeDeadline = std::chrono::steady_clock::now() + 1s;
+  while (!finalized && std::chrono::steady_clock::now() < finalizeDeadline) {
+    auto committed = stagingScene.commitInactiveStep(1u);
+    ASSERT_FALSE(committed.hasError()) << committed.error();
+    finalized = committed.value();
+    if (!finalized) {
+      std::this_thread::sleep_for(1ms);
+    }
+  }
+  ASSERT_TRUE(finalized);
+  ASSERT_EQ(stagingScene.renderables().size(), 1u);
+  EXPECT_EQ(stagingScene.renderables()[0].model.value, activeModel.value);
+  ASSERT_EQ(activeScene.renderables().size(), 1u);
+  EXPECT_EQ(resources.modelMaterialForSubmesh(activeModel, 0u).value,
+            activeMaterial.value);
+  EXPECT_TRUE(assets.unregisterScenePublicationTarget(target));
+}
+
+TEST(AssetSystemTests, StalePublicationTargetIsRejectedBeforeWorkStarts) {
+  nuri::test_support::FakeExecutorGPUDevice gpu;
+  std::pmr::monotonic_buffer_resource memory;
+  nuri::ResourceManager resources(gpu, &memory);
+  nuri::AssetSystem assets(gpu, resources);
+  nuri::RenderScene stagingScene(&memory);
+  stagingScene.bindResources(&resources);
+  const nuri::ScenePublicationTargetHandle target =
+      assets.registerScenePublicationTarget(stagingScene);
+  ASSERT_TRUE(assets.unregisterScenePublicationTarget(target));
+
+  auto requested = assets.requestScene(nuri::SceneLoadRequest{
+      .path = "unused.obj",
+      .publication = nuri::ScenePublicationPolicy::CompleteOnly,
+      .publicationTarget = target,
+  });
+  ASSERT_TRUE(requested.hasError());
+  EXPECT_NE(requested.error().find("stale"), std::string::npos);
 }
 
 TEST(AssetSystemTests, SceneCancellationRemovesPublishedHierarchy) {
@@ -429,11 +555,12 @@ TEST(AssetSystemTests, SceneCancellationRemovesPublishedHierarchy) {
   nuri::AssetSystem assets(
       gpu, resources,
       nuri::AssetSystemConfig{
-          .cpu = nuri::AssetCpuSchedulerConfig{
-              .workerCount = 3u,
-              .maxInFlightJobs = 32u,
-              .maxInFlightBytes = 64ull * 1024ull * 1024ull,
-          },
+          .cpu =
+              nuri::AssetCpuSchedulerConfig{
+                  .workerCount = 3u,
+                  .maxInFlightJobs = 32u,
+                  .maxInFlightBytes = 64ull * 1024ull * 1024ull,
+              },
       });
   nuri::RenderScene scene(&memory);
   scene.bindResources(&resources);
@@ -498,26 +625,28 @@ TEST(AssetSystemTests, EnvironmentPublishesRequiredSetTransactionally) {
   nuri::AssetSystem assets(
       gpu, resources,
       nuri::AssetSystemConfig{
-          .cpu = nuri::AssetCpuSchedulerConfig{
-              .workerCount = 2u,
-              .maxInFlightJobs = 8u,
-              .maxInFlightBytes = 16ull * 1024ull * 1024ull,
-          },
+          .cpu =
+              nuri::AssetCpuSchedulerConfig{
+                  .workerCount = 2u,
+                  .maxInFlightJobs = 8u,
+                  .maxInFlightBytes = 16ull * 1024ull * 1024ull,
+              },
           .maxGpuMaterializationsPerFrame = 1u,
       });
   nuri::RenderScene scene(&memory);
   scene.bindResources(&resources);
-  auto requested =
-      assets.requestEnvironment(nuri::EnvironmentAssetRequest{
-          .cubemap = nuri::TextureRequest{
+  auto requested = assets.requestEnvironment(nuri::EnvironmentAssetRequest{
+      .cubemap =
+          nuri::TextureRequest{
               .path = cubemapPath.string(),
               .debugName = "environment_cubemap",
           },
-          .irradiance = nuri::TextureRequest{
+      .irradiance =
+          nuri::TextureRequest{
               .path = irradiancePath.string(),
               .debugName = "environment_irradiance",
           },
-      });
+  });
   ASSERT_FALSE(requested.hasError()) << requested.error();
 
   uint64_t frameIndex = 1u;
@@ -540,11 +669,18 @@ TEST(AssetSystemTests, EnvironmentPublishesRequiredSetTransactionally) {
     std::this_thread::sleep_for(1ms);
   }
 
-  EXPECT_EQ(assets.query(requested.value()).state,
-            nuri::AssetState::Published);
+  EXPECT_EQ(assets.query(requested.value()).state, nuri::AssetState::Published);
   EXPECT_TRUE(nuri::isValid(scene.environment().cubemap));
   EXPECT_TRUE(nuri::isValid(scene.environment().irradiance));
   EXPECT_TRUE(assets.tryResolve(requested.value()).has_value());
+
+  ASSERT_FALSE(gpu.beginFrame(++frameIndex).hasError());
+  resources.beginFrame(frameIndex);
+  auto idleFrame = assets.prepareFrame(nuri::AssetPublicationContext{
+      .scene = &scene,
+  });
+  ASSERT_FALSE(idleFrame.hasError()) << idleFrame.error();
+  EXPECT_EQ(idleFrame.value().published, 0u);
 
   assets.cancel(requested.value());
   ASSERT_FALSE(gpu.beginFrame(++frameIndex).hasError());
@@ -553,8 +689,7 @@ TEST(AssetSystemTests, EnvironmentPublishesRequiredSetTransactionally) {
       .scene = &scene,
   });
   ASSERT_FALSE(prepared.hasError()) << prepared.error();
-  EXPECT_EQ(assets.query(requested.value()).state,
-            nuri::AssetState::Cancelled);
+  EXPECT_EQ(assets.query(requested.value()).state, nuri::AssetState::Cancelled);
   EXPECT_FALSE(nuri::isValid(scene.environment().cubemap));
   EXPECT_FALSE(nuri::isValid(scene.environment().irradiance));
 }

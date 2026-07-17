@@ -24,6 +24,7 @@ public:
   void setShadowInspectRequestsEnabled(bool enabled) override;
   void invalidatePendingPicks() override;
   void reset() override;
+  void bindScene(RenderScene &scene) override;
 
 private:
   struct Impl;

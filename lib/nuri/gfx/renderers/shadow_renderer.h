@@ -60,6 +60,9 @@ public:
 
   Result<bool, std::string> publishFrameData(RenderFrameContext &frame);
   Result<bool, std::string> prepareShadowGraphPasses(RenderFrameContext &frame);
+  Result<bool, std::string> prepareSceneCacheStep(
+      const RenderScene &scene, const ResourceManager &resources,
+      uint32_t maxOperations = 128u, const RenderSettings *settings = nullptr);
   [[nodiscard]] bool hasPreparedShadowDepthPasses() const noexcept;
   Result<bool, std::string> appendShadowDepthPasses(RenderFrameContext &frame,
                                                     RenderGraphBuilder &graph);
@@ -344,6 +347,7 @@ private:
     uint64_t lastLoggedFrameIndex = std::numeric_limits<uint64_t>::max();
     std::array<CascadeLightState, kMaxShadowCascades> cascadeLightStates{};
   };
+  struct SceneCachePreparation;
 
   Result<bool, std::string> ensureInitialized();
   Result<bool, std::string> createShaders();
@@ -376,6 +380,8 @@ private:
   Result<bool, std::string> rebuildSceneCache(const RenderScene &scene,
                                               const ResourceManager &resources,
                                               uint32_t materialCount);
+  bool adoptPreparedSceneCache(const RenderScene &scene,
+                               const ResourceManager &resources);
   Result<bool, std::string>
   rebuildStaticShadowCasterCache(const RenderScene &scene,
                                  const RenderSettings &settings);
@@ -419,6 +425,9 @@ private:
   std::pmr::vector<uint64_t> shadowFrameUploadSignatures_;
   std::pmr::vector<uint64_t> sdsmReduceResultRingPublishedFrames_;
   std::pmr::vector<MeshDrawTemplate> meshDrawTemplates_;
+  std::shared_ptr<SceneCachePreparation> sceneCachePreparation_;
+  std::vector<std::unique_ptr<Buffer>> sceneBufferRetirements_;
+  uint32_t sceneBufferRetirementCooldownFrames_ = 0u;
   ScratchArena batchBuildScratchArena_;
   std::pmr::vector<uint32_t> staticShadowTemplateIndices_;
   std::pmr::vector<uint32_t> dynamicShadowTemplateIndices_;

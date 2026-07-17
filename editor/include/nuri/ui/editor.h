@@ -11,6 +11,8 @@
 
 namespace nuri {
 
+class RenderScene;
+
 struct GizmoUiDrawConfig {
   // Non-owning views; referenced titles must outlive this config and the draw
   // call that consumes it.
@@ -27,6 +29,15 @@ struct EditorSceneSelectionOption {
   std::string_view label{};
 };
 
+struct EditorSceneLoadUiState {
+  std::string_view pendingSceneId{};
+  std::string_view phase{};
+  std::string_view error{};
+  float progress = 0.0f;
+  bool cancellable = false;
+  bool failed = false;
+};
+
 class GizmoController {
 public:
   GizmoController(const GizmoController &) = delete;
@@ -40,6 +51,7 @@ public:
   virtual void setShadowInspectRequestsEnabled(bool enabled) = 0;
   virtual void invalidatePendingPicks() = 0;
   virtual void reset() = 0;
+  virtual void bindScene(RenderScene &scene) = 0;
 
 protected:
   GizmoController() = default;

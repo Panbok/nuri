@@ -39,6 +39,12 @@ public:
   [[nodiscard]] Result<bool, std::string>
   buildRenderGraph(RenderFrameContext &frame, ResourceManager &resources,
                    RenderGraphBuilder &graph);
+  [[nodiscard]] Result<bool, std::string>
+  prepareSceneStep(RenderScene &scene, ResourceManager &resources,
+                   uint32_t maxOperations = 128u,
+                   const RenderSettings *settings = nullptr,
+                   const Camera *camera = nullptr, float aspectRatio = 1.0f,
+                   uint32_t renderWidth = 1u, uint32_t renderHeight = 1u);
   void onFrameSubmitted(const RenderFrameContext &frame) noexcept;
   void onFrameAbandoned(const RenderFrameContext &frame) noexcept;
 

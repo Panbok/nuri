@@ -30,6 +30,20 @@ public:
             desc.usage, desc.storage, std::string(debugName))));
   }
 
+  [[nodiscard]] static Result<std::unique_ptr<Buffer>, std::string>
+  publishPrepared(GPUDevice &gpu, std::unique_ptr<PreparedGpuBuffer> prepared,
+                  const BufferDesc &desc, std::string_view debugName = {}) {
+    auto result = gpu.publishPreparedBuffer(std::move(prepared));
+    if (result.hasError()) {
+      return Result<std::unique_ptr<Buffer>, std::string>::makeError(
+          result.error());
+    }
+    return Result<std::unique_ptr<Buffer>, std::string>::makeResult(
+        std::unique_ptr<Buffer>(new Buffer(
+            gpu, result.value(), desc.size != 0 ? desc.size : desc.data.size(),
+            desc.usage, desc.storage, std::string(debugName))));
+  }
+
   [[nodiscard]] BufferHandle handle() const noexcept { return resource_.get(); }
   [[nodiscard]] size_t size() const noexcept { return size_; }
   [[nodiscard]] BufferUsage usage() const noexcept { return usage_; }

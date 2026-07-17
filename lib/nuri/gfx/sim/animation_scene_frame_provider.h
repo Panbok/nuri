@@ -14,7 +14,7 @@ class SceneRuntimeHost;
 class NURI_API AnimationSceneFrameProvider final : public FrameDataProvider {
 public:
   explicit AnimationSceneFrameProvider(SceneRuntimeHost &runtime)
-      : runtime_(runtime) {}
+      : runtime_(&runtime) {}
   AnimationSceneFrameProvider(const AnimationSceneFrameProvider &) = delete;
   AnimationSceneFrameProvider &
   operator=(const AnimationSceneFrameProvider &) = delete;
@@ -28,9 +28,10 @@ public:
   Result<bool, std::string> prepare(FrameBuildContext &ctx) override;
   void onFrameSubmitted(const RenderFrameContext &frame) noexcept override;
   void onFrameAbandoned(const RenderFrameContext &frame) noexcept override;
+  void bindRuntime(SceneRuntimeHost &runtime) noexcept { runtime_ = &runtime; }
 
 private:
-  SceneRuntimeHost &runtime_;
+  SceneRuntimeHost *runtime_ = nullptr;
 };
 
 } // namespace nuri

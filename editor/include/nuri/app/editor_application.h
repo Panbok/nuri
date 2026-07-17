@@ -4,12 +4,14 @@
 #include "nuri/app/editor_scene_catalog.h"
 #include "nuri/core/application.h"
 
+#include <memory>
+
 namespace nuri {
 
 class EditorApplication final : public Application {
 public:
   explicit EditorApplication(RuntimeConfig config);
-  ~EditorApplication() override = default;
+  ~EditorApplication() override;
   EditorApplication(const EditorApplication &) = delete;
   EditorApplication &operator=(const EditorApplication &) = delete;
   EditorApplication(EditorApplication &&) = delete;
@@ -22,13 +24,18 @@ public:
   bool onInput(const InputEvent &event) override;
   void onShutdown() override;
 
+  [[nodiscard]] int exitCode() const noexcept;
+
 private:
   static ApplicationConfig
   makeEditorApplicationConfig(const RuntimeConfig &config);
 
+  struct TransitionProbe;
+
   const RuntimeConfig config_;
   EditorRuntime runtime_;
   EditorSceneCatalog scenes_;
+  std::unique_ptr<TransitionProbe> transitionProbe_{};
 };
 
 } // namespace nuri

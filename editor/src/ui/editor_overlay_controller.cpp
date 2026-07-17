@@ -68,6 +68,15 @@ void EditorOverlayController::resetSceneUiState() {
   }
 }
 
+void EditorOverlayController::bindScene(RenderScene &scene) {
+  if (editor_) {
+    editor_->bindScene(scene);
+  }
+  if (gizmoController_) {
+    gizmoController_->bindScene(scene);
+  }
+}
+
 void EditorOverlayController::syncCameraControllerWidgetStateFromCamera(
     const Camera &camera) {
   if (editor_) {
@@ -78,15 +87,20 @@ void EditorOverlayController::syncCameraControllerWidgetStateFromCamera(
 void EditorOverlayController::setSceneSelectionUi(
     std::span<const EditorSceneSelectionOption> scenes,
     std::string_view selectedSceneId, uint64_t version,
-    std::string_view hotkeyHint) {
+    std::string_view hotkeyHint, const EditorSceneLoadUiState &load) {
   if (editor_) {
-    editor_->setSceneSelectionUi(scenes, selectedSceneId, version, hotkeyHint);
+    editor_->setSceneSelectionUi(scenes, selectedSceneId, version, hotkeyHint,
+                                 load);
   }
 }
 
 std::optional<std::string>
 EditorOverlayController::takeSceneSelectionRequest() {
   return editor_ ? editor_->takeSceneSelectionRequest() : std::nullopt;
+}
+
+bool EditorOverlayController::takeSceneCancelRequest() {
+  return editor_ != nullptr && editor_->takeSceneCancelRequest();
 }
 
 std::optional<RenderSettings>

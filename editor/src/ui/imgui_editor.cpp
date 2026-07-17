@@ -907,11 +907,18 @@ struct SceneSelectionUiState {
   std::string hotkeyHint = "Toggle Editor: F6";
   int selectedIndex = 0;
   std::optional<std::string> pendingSelectionRequest{};
+  std::string pendingSceneId{};
+  std::string loadPhase{};
+  std::string loadError{};
+  float loadProgress = 0.0f;
+  bool loadCancellable = false;
+  bool loadFailed = false;
+  bool pendingCancelRequest = false;
   uint64_t version = 0;
 
   void set(std::span<const EditorSceneSelectionOption> scenes,
            std::string_view selectedSceneId, uint64_t newVersion,
-           std::string_view hotkeyHintIn) {
+           std::string_view hotkeyHintIn, const EditorSceneLoadUiState &load) {
     if (version != newVersion) {
       version = newVersion;
       ids.clear();
@@ -941,6 +948,13 @@ struct SceneSelectionUiState {
     auto it = std::find(ids.begin(), ids.end(), selectedSceneId);
     selectedIndex =
         it == ids.end() ? 0 : static_cast<int>(std::distance(ids.begin(), it));
+    pendingSceneId.assign(load.pendingSceneId.data(),
+                          load.pendingSceneId.size());
+    loadPhase.assign(load.phase.data(), load.phase.size());
+    loadError.assign(load.error.data(), load.error.size());
+    loadProgress = std::clamp(load.progress, 0.0f, 1.0f);
+    loadCancellable = load.cancellable;
+    loadFailed = load.failed;
   }
 };
 
@@ -5598,6 +5612,14 @@ struct ImGuiEditor::Impl {
     suppressRevealForNextSelectionChange = false;
     hierarchyTopologyCacheValid = false;
     hierarchyStatsCacheValid = false;
+    cachedHierarchyTopologyVersion = std::numeric_limits<uint64_t>::max();
+    hierarchyTopologyBuildQueue.clear();
+    hierarchyTopologyBuildQueueCursor = 0u;
+    hierarchyTopologyBuildNode = kInvalidNodeId;
+    hierarchyTopologyBuildNextChild = kInvalidNodeId;
+    hierarchyTopologyBuildNodeStarted = false;
+    hierarchyStatsBuilding = false;
+    hierarchyStatsBuildCursor = 0u;
     cachedSelectedPathLeaf = kInvalidNodeId;
     cachedLightCount = 0u;
     cachedRenderableCount = 0u;
@@ -5756,92 +5778,148 @@ struct ImGuiEditor::Impl {
       hierarchyNodeOpenFlags.clear();
       hierarchyOpenBatchKeys.clear();
       hierarchySelectedRowIndex = -1;
+      hierarchyTopologyBuildQueue.clear();
+      hierarchyTopologyBuildQueueCursor = 0u;
+      hierarchyTopologyBuildNode = kInvalidNodeId;
+      hierarchyTopologyBuildNextChild = kInvalidNodeId;
+      hierarchyTopologyBuildNodeStarted = false;
+      hierarchyStatsBuilding = false;
+      hierarchyStatsBuildCursor = 0u;
       return;
     }
 
     uint32_t currentLightCount = 0u;
-    uint32_t maxLightNodeValue = 0u;
     scene->graph().forEachLightId([&](LightId lightId) {
       NodeId node = kInvalidNodeId;
       if (scene->graph().getLightNode(lightId, node) && isValid(node)) {
         ++currentLightCount;
-        maxLightNodeValue =
-            std::max(maxLightNodeValue, static_cast<uint32_t>(indexOf(node)));
       }
     });
 
     const uint32_t currentRenderableCount =
         static_cast<uint32_t>(scene->renderables().size());
-    if (hierarchyStatsCacheValid &&
-        (currentRenderableCount != cachedRenderableCount ||
-         currentLightCount != cachedLightCount)) {
+    if (scene->topologyVersion() != cachedHierarchyTopologyVersion) {
       hierarchyTopologyCacheValid = false;
+      hierarchyStatsCacheValid = false;
+      hierarchyTopologyBuildQueue.clear();
+      hierarchyTopologyBuildQueueCursor = 0u;
+      hierarchyTopologyBuildNode = kInvalidNodeId;
+      hierarchyTopologyBuildNextChild = kInvalidNodeId;
+      hierarchyTopologyBuildNodeStarted = false;
+      hierarchyStatsBuilding = false;
     }
     if (!hierarchyTopologyCacheValid) {
       NURI_PROFILER_ZONE("ImGuiEditor::HierarchyWindow::BuildTopologyCache",
                          NURI_PROFILER_COLOR_CMD_DRAW);
-      hierarchyNodeTopology.clear();
-      std::vector<NodeId> stack;
-      stack.push_back(scene->graph().rootNode());
-      while (!stack.empty()) {
-        const NodeId node = stack.back();
-        stack.pop_back();
-        if (!isValid(node)) {
+      if (hierarchyTopologyBuildQueue.empty()) {
+        hierarchyNodeTopology.clear();
+        hierarchyTopologyBuildQueue.push_back(scene->graph().rootNode());
+        hierarchyTopologyBuildQueueCursor = 0u;
+      }
+      constexpr uint32_t kTopologyOperationsPerFrame = 512u;
+      uint32_t operations = 0u;
+      while (operations < kTopologyOperationsPerFrame) {
+        if (!hierarchyTopologyBuildNodeStarted) {
+          if (hierarchyTopologyBuildQueueCursor >=
+              hierarchyTopologyBuildQueue.size()) {
+            hierarchyTopologyCacheValid = true;
+            cachedHierarchyTopologyVersion = scene->topologyVersion();
+            hierarchyTopologyBuildQueue.clear();
+            hierarchyTopologyBuildQueueCursor = 0u;
+            if (hierarchyNodeOpenFlags.size() < hierarchyNodeTopology.size()) {
+              hierarchyNodeOpenFlags.resize(hierarchyNodeTopology.size(), 0u);
+            }
+            break;
+          }
+          hierarchyTopologyBuildNode =
+              hierarchyTopologyBuildQueue[hierarchyTopologyBuildQueueCursor++];
+          hierarchyTopologyBuildNodeStarted = true;
+          const size_t nodeSlot = hierarchyNodeSlot(hierarchyTopologyBuildNode);
+          if (nodeSlot >= hierarchyNodeTopology.size()) {
+            hierarchyNodeTopology.resize(nodeSlot + 1u);
+          }
+          HierarchyNodeTopology &entry = hierarchyNodeTopology[nodeSlot];
+          entry.labelName =
+              nodeDisplayName(scene->graph(), hierarchyTopologyBuildNode);
+          entry.children.clear();
+          if (!scene->graph().getNodeFirstChild(
+                  hierarchyTopologyBuildNode,
+                  hierarchyTopologyBuildNextChild)) {
+            hierarchyTopologyBuildNextChild = kInvalidNodeId;
+          }
+          ++operations;
           continue;
         }
-
-        const size_t nodeSlot = hierarchyNodeSlot(node);
-        if (nodeSlot >= hierarchyNodeTopology.size()) {
-          hierarchyNodeTopology.resize(nodeSlot + 1u);
+        if (!isValid(hierarchyTopologyBuildNextChild)) {
+          hierarchyTopologyBuildNodeStarted = false;
+          hierarchyTopologyBuildNode = kInvalidNodeId;
+          continue;
         }
-        HierarchyNodeTopology &entry = hierarchyNodeTopology[nodeSlot];
-        entry.labelName = nodeDisplayName(scene->graph(), node);
-        entry.children = collectChildNodes(scene->graph(), node);
-        for (auto it = entry.children.rbegin(); it != entry.children.rend();
-             ++it) {
-          stack.push_back(*it);
+        const NodeId child = hierarchyTopologyBuildNextChild;
+        hierarchyNodeTopology[hierarchyNodeSlot(hierarchyTopologyBuildNode)]
+            .children.push_back(child);
+        hierarchyTopologyBuildQueue.push_back(child);
+        if (!scene->graph().getNodeNextSibling(
+                child, hierarchyTopologyBuildNextChild)) {
+          hierarchyTopologyBuildNextChild = kInvalidNodeId;
         }
-      }
-      hierarchyTopologyCacheValid = true;
-      if (hierarchyNodeOpenFlags.size() < hierarchyNodeTopology.size()) {
-        hierarchyNodeOpenFlags.resize(hierarchyNodeTopology.size(), 0u);
+        ++operations;
       }
       NURI_PROFILER_ZONE_END();
+      if (!hierarchyTopologyCacheValid) {
+        return;
+      }
     }
     if (!hierarchyStatsCacheValid ||
         currentRenderableCount != cachedRenderableCount ||
         currentLightCount != cachedLightCount) {
+      bool statsIncomplete = false;
       NURI_PROFILER_ZONE("ImGuiEditor::HierarchyWindow::BuildNodeStats",
                          NURI_PROFILER_COLOR_CMD_DRAW);
-      uint32_t maxNodeIndex = maxLightNodeValue;
-      for (const Renderable &renderable : scene->renderables()) {
+      if (!hierarchyStatsBuilding) {
+        hierarchyNodeStats.assign(hierarchyNodeTopology.size(),
+                                  HierarchyNodeStats{});
+        hierarchyStatsBuildCursor = 0u;
+        hierarchyStatsBuilding = true;
+      }
+      constexpr uint32_t kRenderableStatsPerFrame = 2048u;
+      uint32_t processed = 0u;
+      const std::span<const Renderable> renderables = scene->renderables();
+      while (hierarchyStatsBuildCursor < renderables.size() &&
+             processed < kRenderableStatsPerFrame) {
+        const Renderable &renderable = renderables[hierarchyStatsBuildCursor++];
+        ++processed;
         if (!isValid(renderable.node)) {
           continue;
         }
-        maxNodeIndex = std::max(
-            maxNodeIndex, static_cast<uint32_t>(indexOf(renderable.node)));
-      }
-
-      hierarchyNodeStats.assign(static_cast<size_t>(maxNodeIndex) + 1u,
-                                HierarchyNodeStats{});
-      for (const Renderable &renderable : scene->renderables()) {
-        if (!isValid(renderable.node)) {
-          continue;
+        const size_t nodeSlot = hierarchyNodeSlot(renderable.node);
+        if (nodeSlot >= hierarchyNodeStats.size()) {
+          hierarchyNodeStats.resize(nodeSlot + 1u);
         }
-        ++hierarchyNodeStats[hierarchyNodeSlot(renderable.node)]
-              .renderableCount;
+        ++hierarchyNodeStats[nodeSlot].renderableCount;
       }
-      scene->graph().forEachLightId([&](LightId lightId) {
-        NodeId node = kInvalidNodeId;
-        if (scene->graph().getLightNode(lightId, node) && isValid(node)) {
-          ++hierarchyNodeStats[hierarchyNodeSlot(node)].lightCount;
-        }
-      });
+      statsIncomplete = hierarchyStatsBuildCursor < renderables.size();
+      if (!statsIncomplete) {
+        scene->graph().forEachLightId([&](LightId lightId) {
+          NodeId node = kInvalidNodeId;
+          if (scene->graph().getLightNode(lightId, node) && isValid(node)) {
+            const size_t nodeSlot = hierarchyNodeSlot(node);
+            if (nodeSlot >= hierarchyNodeStats.size()) {
+              hierarchyNodeStats.resize(nodeSlot + 1u);
+            }
+            ++hierarchyNodeStats[nodeSlot].lightCount;
+          }
+        });
 
-      cachedRenderableCount = currentRenderableCount;
-      cachedLightCount = currentLightCount;
-      hierarchyStatsCacheValid = true;
+        cachedRenderableCount = currentRenderableCount;
+        cachedLightCount = currentLightCount;
+        hierarchyStatsCacheValid = true;
+        hierarchyStatsBuilding = false;
+      }
       NURI_PROFILER_ZONE_END();
+      if (statsIncomplete) {
+        return;
+      }
     }
 
     const NodeId selectedLeaf =
@@ -6258,6 +6336,40 @@ struct ImGuiEditor::Impl {
     }
     if (!sceneSelectionState.hotkeyHint.empty()) {
       ImGui::TextUnformatted(sceneSelectionState.hotkeyHint.c_str());
+    }
+    if (!sceneSelectionState.pendingSceneId.empty()) {
+      const auto pendingIt = std::find(sceneSelectionState.ids.begin(),
+                                       sceneSelectionState.ids.end(),
+                                       sceneSelectionState.pendingSceneId);
+      const std::string_view pendingLabel =
+          pendingIt != sceneSelectionState.ids.end()
+              ? std::string_view(sceneSelectionState.names[static_cast<size_t>(
+                    std::distance(sceneSelectionState.ids.begin(), pendingIt))])
+              : std::string_view(sceneSelectionState.pendingSceneId);
+      if (sceneSelectionState.loadFailed) {
+        ImGui::Text("Failed to load %.*s",
+                    static_cast<int>(pendingLabel.size()), pendingLabel.data());
+        if (!sceneSelectionState.loadError.empty()) {
+          ImGui::TextWrapped("%s", sceneSelectionState.loadError.c_str());
+        }
+        if (ImGui::Button("Retry scene load")) {
+          sceneSelectionState.pendingSelectionRequest =
+              sceneSelectionState.pendingSceneId;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Dismiss")) {
+          sceneSelectionState.pendingCancelRequest = true;
+        }
+      } else {
+        ImGui::Text("%s %.*s", sceneSelectionState.loadPhase.c_str(),
+                    static_cast<int>(pendingLabel.size()), pendingLabel.data());
+        ImGui::ProgressBar(sceneSelectionState.loadProgress,
+                           ImVec2(-FLT_MIN, 0.0f));
+        if (sceneSelectionState.loadCancellable &&
+            ImGui::Button("Cancel scene load")) {
+          sceneSelectionState.pendingCancelRequest = true;
+        }
+      }
     }
   }
 
@@ -7268,7 +7380,16 @@ struct ImGuiEditor::Impl {
   bool hierarchyTopologyCacheValid = false;
   uint32_t cachedRenderableCount = 0u;
   uint32_t cachedLightCount = 0u;
+  uint64_t cachedHierarchyTopologyVersion =
+      std::numeric_limits<uint64_t>::max();
   NodeId cachedSelectedPathLeaf = kInvalidNodeId;
+  std::vector<NodeId> hierarchyTopologyBuildQueue{};
+  size_t hierarchyTopologyBuildQueueCursor = 0u;
+  NodeId hierarchyTopologyBuildNode = kInvalidNodeId;
+  NodeId hierarchyTopologyBuildNextChild = kInvalidNodeId;
+  bool hierarchyTopologyBuildNodeStarted = false;
+  bool hierarchyStatsBuilding = false;
+  size_t hierarchyStatsBuildCursor = 0u;
   std::vector<HierarchyNodeTopology> hierarchyNodeTopology{};
   std::vector<HierarchyNodeStats> hierarchyNodeStats{};
   std::vector<uint8_t> selectedPathNodeFlags{};
@@ -7427,11 +7548,12 @@ void ImGuiEditor::syncCameraControllerWidgetStateFromCamera(
 void ImGuiEditor::setSceneSelectionUi(
     std::span<const EditorSceneSelectionOption> scenes,
     std::string_view selectedSceneId, uint64_t version,
-    std::string_view hotkeyHint) {
+    std::string_view hotkeyHint, const EditorSceneLoadUiState &load) {
   if (!impl_) {
     return;
   }
-  impl_->sceneSelectionState.set(scenes, selectedSceneId, version, hotkeyHint);
+  impl_->sceneSelectionState.set(scenes, selectedSceneId, version, hotkeyHint,
+                                 load);
 }
 
 void ImGuiEditor::resetSceneUiState() {
@@ -7441,11 +7563,24 @@ void ImGuiEditor::resetSceneUiState() {
   impl_->resetSceneUiState();
 }
 
+void ImGuiEditor::bindScene(RenderScene &scene) {
+  if (!impl_) {
+    return;
+  }
+  impl_->resetSceneUiState();
+  impl_->scene = &scene;
+}
+
 std::optional<std::string> ImGuiEditor::takeSceneSelectionRequest() {
   return impl_
              ? std::exchange(impl_->sceneSelectionState.pendingSelectionRequest,
                              std::nullopt)
              : std::nullopt;
+}
+
+bool ImGuiEditor::takeSceneCancelRequest() {
+  return impl_ != nullptr &&
+         std::exchange(impl_->sceneSelectionState.pendingCancelRequest, false);
 }
 
 bool *ImGuiEditor::gizmoControlsWindowOpenState() {

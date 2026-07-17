@@ -2603,6 +2603,8 @@ struct RenderFrameMetrics {
   struct AssetStreamingFrameMetrics {
     uint32_t cpuCompletions = 0u;
     uint32_t cpuWorkers = 0u;
+    uint32_t cpuActiveWorkerLimit = 0u;
+    uint32_t cpuInteractiveMode = 0u;
     uint32_t cpuQueuedJobs = 0u;
     uint32_t cpuRunningJobs = 0u;
     uint32_t cpuRunningIo = 0u;
@@ -2617,6 +2619,10 @@ struct RenderFrameMetrics {
     uint32_t failed = 0u;
     uint32_t scenePatches = 0u;
     uint32_t sceneCommits = 0u;
+    uint32_t deferredCpuCompletions = 0u;
+    uint32_t publicationDeadlineExceeded = 0u;
+    double publicationMainThreadMilliseconds = 0.0;
+    double publicationMaxOperationMilliseconds = 0.0;
     uint64_t cpuInFlightBytes = 0u;
     uint64_t uploadBytes = 0u;
     uint64_t submittedJobs = 0u;

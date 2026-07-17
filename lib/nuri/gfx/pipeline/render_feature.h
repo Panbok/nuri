@@ -11,6 +11,22 @@
 
 namespace nuri {
 
+class RenderScene;
+class ResourceManager;
+class Camera;
+struct RenderSettings;
+
+struct RenderScenePreparationContext {
+  RenderScene &scene;
+  ResourceManager &resources;
+  uint32_t maxOperations = 128u;
+  const RenderSettings *settings = nullptr;
+  const Camera *camera = nullptr;
+  float aspectRatio = 1.0f;
+  uint32_t renderWidth = 1u;
+  uint32_t renderHeight = 1u;
+};
+
 class NURI_API RenderFeature {
 public:
   virtual ~RenderFeature() = default;
@@ -31,6 +47,14 @@ public:
   }
   [[nodiscard]] virtual Result<bool, std::string>
   prepare(FrameBuildContext &ctx) {
+    (void)ctx;
+    return Result<bool, std::string>::makeResult(true);
+  }
+  // Advances renderer-owned, scene-derived caches without making the scene
+  // active. Returning true means this feature is ready to render the exact
+  // topology/resource versions supplied by ctx.
+  [[nodiscard]] virtual Result<bool, std::string>
+  prepareSceneStep(RenderScenePreparationContext &ctx) {
     (void)ctx;
     return Result<bool, std::string>::makeResult(true);
   }

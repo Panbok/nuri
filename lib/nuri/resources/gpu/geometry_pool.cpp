@@ -1076,6 +1076,96 @@ GeometryPool::allocate(std::span<const std::byte> vertexBytes,
       });
 }
 
+Result<GeometryAllocationHandle, std::string>
+GeometryPool::adoptPrepared(BufferHandle vertexBuffer, size_t vertexBytes,
+                            uint32_t vertexCount, BufferHandle indexBuffer,
+                            size_t indexBytes, uint32_t indexCount,
+                            std::string_view debugName) {
+  if (!nuri::isValid(vertexBuffer) || !gpu_.isValid(vertexBuffer) ||
+      vertexBytes == 0u || vertexCount == 0u) {
+    return Result<GeometryAllocationHandle, std::string>::makeError(
+        "GeometryPool::adoptPrepared: invalid vertex buffer");
+  }
+  if (!nuri::isValid(indexBuffer) || !gpu_.isValid(indexBuffer) ||
+      indexBytes == 0u || indexCount == 0u) {
+    return Result<GeometryAllocationHandle, std::string>::makeError(
+        "GeometryPool::adoptPrepared: invalid index buffer");
+  }
+
+  const auto adoptChunk =
+      [this](std::pmr::vector<Chunk> &chunks,
+             SlotPool<UnmaskedNonZeroGenerationPolicy> &chunkSlots,
+             BufferHandle buffer, size_t sizeBytes) -> ChunkHandle {
+    const SlotReservation slot = chunkSlots.acquire();
+    if (slot.appended) {
+      NURI_ASSERT(slot.index == chunks.size(),
+                  "GeometryPool::adoptPrepared: appended chunk index=%u but "
+                  "chunks.size()=%zu",
+                  slot.index, chunks.size());
+      chunks.emplace_back(memory_);
+    } else {
+      NURI_ASSERT(slot.index < chunks.size(),
+                  "GeometryPool::adoptPrepared: reused chunk index=%u is out "
+                  "of range for chunks.size()=%zu",
+                  slot.index, chunks.size());
+      chunks[slot.index].reset();
+    }
+    Chunk &chunk = chunks[slot.index];
+    chunk.buffer = buffer;
+    chunk.sizeBytes = sizeBytes;
+    chunk.freeBytes = 0u;
+    chunk.retireFrame = 0u;
+    chunk.role = ChunkRole::ActiveAllocatable;
+    chunk.freeBlocks.clear();
+    return ChunkHandle{.index = slot.index, .generation = slot.generation};
+  };
+
+  const ChunkHandle vertexChunk =
+      adoptChunk(vertexChunks_, vertexChunkSlots_, vertexBuffer, vertexBytes);
+  const ChunkHandle indexChunk =
+      adoptChunk(indexChunks_, indexChunkSlots_, indexBuffer, indexBytes);
+
+  const SlotReservation slot = allocationSlots_.acquire();
+  if (slot.appended) {
+    NURI_ASSERT(slot.index == allocations_.size(),
+                "GeometryPool::adoptPrepared: appended allocation index=%u "
+                "but allocations_.size()=%zu",
+                slot.index, allocations_.size());
+    allocations_.emplace_back(memory_);
+  } else {
+    NURI_ASSERT(slot.index < allocations_.size(),
+                "GeometryPool::adoptPrepared: reused allocation index=%u is "
+                "out of range for allocations_.size()=%zu",
+                slot.index, allocations_.size());
+  }
+
+  AllocationEntry &entry = allocations_[slot.index];
+  entry.state = AllocationEntry::State::Live;
+  entry.vertex = SubAllocation{
+      .chunk = vertexChunk,
+      .offset = 0u,
+      .size = vertexBytes,
+  };
+  entry.index = SubAllocation{
+      .chunk = indexChunk,
+      .offset = 0u,
+      .size = indexBytes,
+  };
+  entry.vertexCount = vertexCount;
+  entry.indexCount = indexCount;
+  entry.retireFrame = 0u;
+  entry.retirementSubmission = {};
+  entry.retirementCaptureFailed = false;
+  entry.debugName.assign(debugName.data(), debugName.size());
+  bumpMutationVersion();
+
+  return Result<GeometryAllocationHandle, std::string>::makeResult(
+      GeometryAllocationHandle{
+          .index = slot.index,
+          .generation = slot.generation,
+      });
+}
+
 void GeometryPool::release(GeometryAllocationHandle handle) {
   if (!isHandleLive(handle)) {
     return;

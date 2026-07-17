@@ -1148,12 +1148,45 @@ struct BufferResource {
   bool immutable = false;
 };
 
+class NvrhiPreparedGpuBuffer final : public PreparedGpuBuffer {
+public:
+  NvrhiPreparedGpuBuffer(nvrhi::DeviceHandle device, BufferResource resource)
+      : device_(std::move(device)), resource_(std::move(resource)) {}
+
+  ~NvrhiPreparedGpuBuffer() override {
+    if (resource_.mapped != nullptr && resource_.buffer && device_) {
+      device_->unmapBuffer(resource_.buffer.Get());
+    }
+  }
+
+  [[nodiscard]] BufferResource take() {
+    BufferResource result = std::move(resource_);
+    resource_ = {};
+    return result;
+  }
+
+private:
+  nvrhi::DeviceHandle device_{};
+  BufferResource resource_{};
+};
+
 struct TextureResource {
   nvrhi::TextureHandle texture{};
   std::string debugName;
   Format format = Format::RGBA8_UNORM;
   TextureDesc desc{};
   nvrhi::TextureDimension dimension = nvrhi::TextureDimension::Unknown;
+};
+
+class NvrhiPreparedGpuTexture final : public PreparedGpuTexture {
+public:
+  explicit NvrhiPreparedGpuTexture(TextureResource resource)
+      : resource_(std::move(resource)) {}
+
+  [[nodiscard]] TextureResource take() { return std::move(resource_); }
+
+private:
+  TextureResource resource_{};
 };
 
 struct ShaderResource {
@@ -1595,6 +1628,10 @@ struct NvrhiGPUDeviceImpl {
   uint64_t latestAsyncUploadCopyInstance = 0u;
 
   mutable std::mutex immediateMutex;
+  // Serializes driver-side native resource allocation performed by asset
+  // workers. Prepared resources do not enter Nuri handle tables until the
+  // render thread publishes them.
+  std::mutex resourcePreparationMutex;
   std::mutex graphicsContextMutex;
   std::vector<ActiveGraphicsRecordingContext> activeGraphicsContexts;
   std::vector<RecordedGraphicsCommandBuffer> recordedGraphicsCommandBuffers;
@@ -5160,32 +5197,31 @@ NvrhiGPUDevice::setSwapchainPresentMode(SwapchainPresentMode mode) {
       impl_->activePresentMode);
 }
 
-Result<BufferHandle, std::string>
-NvrhiGPUDevice::createBuffer(const BufferDesc &desc,
-                             std::string_view debugName) {
-  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
-  if (impl_ == nullptr || !impl_->nvrhiDevice) {
-    return Result<BufferHandle, std::string>::makeError(
-        "NVRHI device is not initialized");
-  }
+namespace {
+
+Result<BufferResource, std::string>
+prepareBufferResource(Impl &impl, const BufferDesc &desc,
+                      std::string_view debugName,
+                      bool immediateMutexAlreadyLocked = false) {
   const size_t resolvedSize = desc.size != 0u ? desc.size : desc.data.size();
   if (resolvedSize == 0u) {
-    return Result<BufferHandle, std::string>::makeError("Buffer size is zero");
+    return Result<BufferResource, std::string>::makeError(
+        "Buffer size is zero");
   }
   if (!desc.data.empty() && desc.size != 0u && desc.data.size() != desc.size) {
-    return Result<BufferHandle, std::string>::makeError(
+    return Result<BufferResource, std::string>::makeError(
         "Buffer data size must match buffer size");
   }
   if (desc.usage == BufferUsage::None) {
-    return Result<BufferHandle, std::string>::makeError(
+    return Result<BufferResource, std::string>::makeError(
         "Buffer usage is empty");
   }
   if (desc.immutable && desc.storage != Storage::Device) {
-    return Result<BufferHandle, std::string>::makeError(
+    return Result<BufferResource, std::string>::makeError(
         "Immutable buffers must use device-local storage");
   }
   if (desc.immutable && desc.data.empty()) {
-    return Result<BufferHandle, std::string>::makeError(
+    return Result<BufferResource, std::string>::makeError(
         "Immutable buffers require initial data");
   }
 
@@ -5205,9 +5241,9 @@ NvrhiGPUDevice::createBuffer(const BufferDesc &desc,
     bufferDesc.setCpuAccess(nvrhi::CpuAccessMode::Write);
   }
 
-  nvrhi::BufferHandle buffer = impl_->nvrhiDevice->createBuffer(bufferDesc);
+  nvrhi::BufferHandle buffer = impl.nvrhiDevice->createBuffer(bufferDesc);
   if (!buffer) {
-    return Result<BufferHandle, std::string>::makeError(
+    return Result<BufferResource, std::string>::makeError(
         "Failed to create NVRHI buffer");
   }
 
@@ -5222,27 +5258,28 @@ NvrhiGPUDevice::createBuffer(const BufferDesc &desc,
     const nvrhi::Object nativeMemory =
         buffer->getNativeObject(nvrhi::ObjectTypes::VK_DeviceMemory);
     resource.mappedMemory = VkDeviceMemory(nativeMemory.integer);
-    resource.mapped = static_cast<std::byte *>(impl_->nvrhiDevice->mapBuffer(
-        buffer.Get(), nvrhi::CpuAccessMode::Write));
+    resource.mapped = static_cast<std::byte *>(
+        impl.nvrhiDevice->mapBuffer(buffer.Get(), nvrhi::CpuAccessMode::Write));
     if (!resource.mapped) {
-      return Result<BufferHandle, std::string>::makeError(
+      return Result<BufferResource, std::string>::makeError(
           "Failed to map host-visible buffer");
     }
     if (!desc.data.empty()) {
       std::memcpy(resource.mapped, desc.data.data(), desc.data.size());
-      flushMappedBufferRange(*impl_, resource, 0u, desc.data.size());
+      flushMappedBufferRange(impl, resource, 0u, desc.data.size());
     }
   }
 
-  BufferHandle handle = impl_->buffers.allocate(std::move(resource));
   if (!desc.data.empty() && desc.storage == Storage::Device) {
-    std::lock_guard lock(impl_->immediateMutex);
-    collectCompletedAsyncUploadSubmissions(*impl_);
+    std::unique_lock immediateLock(impl.immediateMutex, std::defer_lock);
+    if (!immediateMutexAlreadyLocked) {
+      immediateLock.lock();
+    }
+    collectCompletedAsyncUploadSubmissions(impl);
     nvrhi::CommandListHandle &commandList =
-        ensurePendingAsyncUploadCommandList(*impl_);
+        ensurePendingAsyncUploadCommandList(impl);
     if (!commandList) {
-      impl_->buffers.deallocate(handle);
-      return Result<BufferHandle, std::string>::makeError(
+      return Result<BufferResource, std::string>::makeError(
           "Failed to create buffer upload command list");
     }
     commandList->writeBuffer(buffer.Get(), desc.data.data(), desc.data.size(),
@@ -5251,23 +5288,130 @@ NvrhiGPUDevice::createBuffer(const BufferDesc &desc,
       commandList->setPermanentBufferState(
           buffer.Get(), permanentReadBufferState(desc.usage));
     }
-    impl_->pendingAsyncUploadBytes += static_cast<uint64_t>(desc.data.size());
+    impl.pendingAsyncUploadBytes += static_cast<uint64_t>(desc.data.size());
   }
 
-  return Result<BufferHandle, std::string>::makeResult(handle);
+  return Result<BufferResource, std::string>::makeResult(std::move(resource));
+}
+
+} // namespace
+
+Result<BufferHandle, std::string>
+NvrhiGPUDevice::createBuffer(const BufferDesc &desc,
+                             std::string_view debugName) {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
+  auto prepared = prepareBuffer(desc, debugName);
+  if (prepared.hasError()) {
+    return Result<BufferHandle, std::string>::makeError(prepared.error());
+  }
+  return publishPreparedBuffer(std::move(prepared.value()));
+}
+
+Result<std::unique_ptr<PreparedGpuBuffer>, std::string>
+NvrhiGPUDevice::prepareBuffer(const BufferDesc &desc,
+                              std::string_view debugName) {
+  if (impl_ == nullptr || !impl_->nvrhiDevice) {
+    return Result<std::unique_ptr<PreparedGpuBuffer>, std::string>::makeError(
+        "NVRHI device is not initialized");
+  }
+  std::lock_guard preparationLock(impl_->resourcePreparationMutex);
+  auto resource = prepareBufferResource(*impl_, desc, debugName);
+  if (resource.hasError()) {
+    return Result<std::unique_ptr<PreparedGpuBuffer>, std::string>::makeError(
+        resource.error());
+  }
+  std::unique_ptr<PreparedGpuBuffer> prepared =
+      std::make_unique<NvrhiPreparedGpuBuffer>(impl_->nvrhiDevice,
+                                               std::move(resource.value()));
+  return Result<std::unique_ptr<PreparedGpuBuffer>, std::string>::makeResult(
+      std::move(prepared));
+}
+
+Result<BufferHandle, std::string> NvrhiGPUDevice::publishPreparedBuffer(
+    std::unique_ptr<PreparedGpuBuffer> prepared) {
+  if (impl_ == nullptr || prepared == nullptr) {
+    return Result<BufferHandle, std::string>::makeError(
+        "Prepared buffer is null");
+  }
+  auto *typed = dynamic_cast<NvrhiPreparedGpuBuffer *>(prepared.get());
+  if (typed == nullptr) {
+    return Result<BufferHandle, std::string>::makeError(
+        "Prepared buffer belongs to a different GPU backend");
+  }
+  return Result<BufferHandle, std::string>::makeResult(
+      impl_->buffers.allocate(typed->take()));
+}
+
+Result<std::vector<std::unique_ptr<PreparedGpuBuffer>>, std::string>
+NvrhiGPUDevice::prepareBufferBatch(
+    std::span<const PreparedBufferRequest> requests) {
+  if (impl_ == nullptr || !impl_->nvrhiDevice) {
+    return Result<std::vector<std::unique_ptr<PreparedGpuBuffer>>,
+                  std::string>::makeError("NVRHI device is not initialized");
+  }
+  std::scoped_lock lock(impl_->resourcePreparationMutex, impl_->immediateMutex);
+  std::vector<std::unique_ptr<PreparedGpuBuffer>> prepared{};
+  prepared.reserve(requests.size());
+  for (const PreparedBufferRequest &request : requests) {
+    auto resource =
+        prepareBufferResource(*impl_, request.desc, request.debugName, true);
+    if (resource.hasError()) {
+      return Result<std::vector<std::unique_ptr<PreparedGpuBuffer>>,
+                    std::string>::makeError(resource.error());
+    }
+    prepared.push_back(std::make_unique<NvrhiPreparedGpuBuffer>(
+        impl_->nvrhiDevice, std::move(resource.value())));
+  }
+  return Result<std::vector<std::unique_ptr<PreparedGpuBuffer>>,
+                std::string>::makeResult(std::move(prepared));
 }
 
 Result<TextureHandle, std::string>
 NvrhiGPUDevice::createTexture(const TextureDesc &desc,
                               std::string_view debugName) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
+  auto prepared = prepareTexture(desc, debugName);
+  if (prepared.hasError()) {
+    return Result<TextureHandle, std::string>::makeError(prepared.error());
+  }
+  return publishPreparedTexture(std::move(prepared.value()));
+}
+
+Result<std::unique_ptr<PreparedGpuTexture>, std::string>
+NvrhiGPUDevice::prepareTexture(const TextureDesc &desc,
+                               std::string_view debugName) {
+  if (impl_ == nullptr || !impl_->nvrhiDevice) {
+    return Result<std::unique_ptr<PreparedGpuTexture>, std::string>::makeError(
+        "NVRHI device is not initialized");
+  }
+  std::lock_guard preparationLock(impl_->resourcePreparationMutex);
   auto resource = createTextureResource(*impl_, desc, debugName);
   if (resource.hasError()) {
-    return Result<TextureHandle, std::string>::makeError(resource.error());
+    return Result<std::unique_ptr<PreparedGpuTexture>, std::string>::makeError(
+        resource.error());
   }
-  const auto reserved =
-      impl_->textures.reserve(std::string(debugName), desc.format);
-  *reserved.resource = std::move(resource.value());
+  std::unique_ptr<PreparedGpuTexture> prepared =
+      std::make_unique<NvrhiPreparedGpuTexture>(std::move(resource.value()));
+  return Result<std::unique_ptr<PreparedGpuTexture>, std::string>::makeResult(
+      std::move(prepared));
+}
+
+Result<TextureHandle, std::string> NvrhiGPUDevice::publishPreparedTexture(
+    std::unique_ptr<PreparedGpuTexture> prepared) {
+  if (impl_ == nullptr || prepared == nullptr) {
+    return Result<TextureHandle, std::string>::makeError(
+        "Prepared texture is null");
+  }
+  auto *typed = dynamic_cast<NvrhiPreparedGpuTexture *>(prepared.get());
+  if (typed == nullptr) {
+    return Result<TextureHandle, std::string>::makeError(
+        "Prepared texture belongs to a different GPU backend");
+  }
+  TextureResource resource = typed->take();
+  const Format format = resource.format;
+  const std::string debugName = resource.debugName;
+  const auto reserved = impl_->textures.reserve(debugName, format);
+  *reserved.resource = std::move(resource);
   if (!writeTextureDescriptor(*impl_, reserved.handle.index,
                               *reserved.resource)) {
     impl_->textures.deallocate(reserved.handle);
@@ -6724,6 +6868,21 @@ Result<GeometryAllocationHandle, std::string> NvrhiGPUDevice::allocateGeometry(
   }
   return impl_->geometryPool->allocate(vertexBytes, vertexCount, indexBytes,
                                        indexCount, debugName);
+}
+
+Result<GeometryAllocationHandle, std::string>
+NvrhiGPUDevice::adoptPreparedGeometry(BufferHandle vertexBuffer,
+                                      size_t vertexBytes, uint32_t vertexCount,
+                                      BufferHandle indexBuffer,
+                                      size_t indexBytes, uint32_t indexCount,
+                                      std::string_view debugName) {
+  if (impl_ == nullptr || impl_->geometryPool == nullptr) {
+    return Result<GeometryAllocationHandle, std::string>::makeError(
+        "Geometry pool is not initialized");
+  }
+  return impl_->geometryPool->adoptPrepared(vertexBuffer, vertexBytes,
+                                            vertexCount, indexBuffer,
+                                            indexBytes, indexCount, debugName);
 }
 
 void NvrhiGPUDevice::releaseGeometry(GeometryAllocationHandle h) {

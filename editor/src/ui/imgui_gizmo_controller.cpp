@@ -164,7 +164,7 @@ struct Ray {
 
 struct ImGuizmoController::Impl {
   explicit Impl(const EditorServices &services)
-      : scene(*services.scene), cameraSystem(*services.cameraSystem),
+      : scene(services.scene), cameraSystem(*services.cameraSystem),
         gpu(*services.gpu), selectionState(services.selectionState != nullptr
                                                ? services.selectionState
                                                : &localSelectionState) {
@@ -220,11 +220,11 @@ struct ImGuizmoController::Impl {
     }
     updateSelectionFromPickResults();
 
-    SceneGraph &graph = scene.graph();
+    SceneGraph &graph = scene->graph();
     (void)graph.syncWorldTransforms();
     const Renderable *selectedRenderable = nullptr;
     if (selectionState->kind == SceneSelectionKind::NodeRenderable) {
-      selectedRenderable = scene.renderable(selectionState->renderableIndex);
+      selectedRenderable = scene->renderable(selectionState->renderableIndex);
       if (selectedRenderable == nullptr) {
         demoteToNodeSelection();
       } else if (selectedRenderable->id != selectionState->renderableId) {
@@ -436,13 +436,13 @@ struct ImGuizmoController::Impl {
     }
 
     if (selectionState->kind == SceneSelectionKind::Light && hasSelectedLight) {
-      if (!setNodeWorldTransform(scene, selectedLightNode, modelMatrix)) {
+      if (!setNodeWorldTransform(*scene, selectedLightNode, modelMatrix)) {
         clearSelectionState();
       }
       return;
     }
 
-    if (!setNodeWorldTransform(scene, selectedNode, modelMatrix)) {
+    if (!setNodeWorldTransform(*scene, selectedNode, modelMatrix)) {
       clearSelectionState();
     }
   }
@@ -451,6 +451,11 @@ struct ImGuizmoController::Impl {
     invalidatePendingPicks();
     clearSelectionState();
     frame = nullptr;
+  }
+
+  void bindScene(RenderScene &newScene) {
+    reset();
+    scene = &newScene;
   }
 
   void invalidatePendingPicks() {
@@ -549,7 +554,7 @@ private:
     }
 
     NodeId lightNode = kInvalidNodeId;
-    if (!scene.graph().getLightNode(closestLight, lightNode)) {
+    if (!scene->graph().getLightNode(closestLight, lightNode)) {
       return false;
     }
     selectionState->kind = SceneSelectionKind::Light;
@@ -575,7 +580,8 @@ private:
       return;
     }
 
-    const Renderable *renderable = scene.renderable(pickResult.renderableIndex);
+    const Renderable *renderable =
+        scene->renderable(pickResult.renderableIndex);
     if (renderable == nullptr || !isValid(renderable->node)) {
       clearSelectionState();
       return;
@@ -599,7 +605,7 @@ private:
   }
 
   void spawnLight(LightType type) {
-    SceneGraph &graph = scene.graph();
+    SceneGraph &graph = scene->graph();
     LightDesc desc{};
     desc.type = type;
     desc.name = std::string(lightTypeName(type)) + " Light";
@@ -655,7 +661,7 @@ private:
   }
 
   void drawSelectedLightEditor(const LightDesc &selectedLight) {
-    drawLightEditor(scene.graph(), selectionState->lightId, selectedLight,
+    drawLightEditor(scene->graph(), selectionState->lightId, selectedLight,
                     lightEditorDraft);
   }
 
@@ -673,7 +679,7 @@ private:
     invalidateLightEditorDraft(lightEditorDraft);
   }
 
-  RenderScene &scene;
+  RenderScene *scene = nullptr;
   CameraSystem &cameraSystem;
   GPUDevice &gpu;
   SceneEditorSelectionState localSelectionState{};
@@ -720,6 +726,10 @@ void ImGuizmoController::invalidatePendingPicks() {
 }
 
 void ImGuizmoController::reset() { impl_->reset(); }
+
+void ImGuizmoController::bindScene(RenderScene &scene) {
+  impl_->bindScene(scene);
+}
 
 std::shared_ptr<GizmoController>
 createImGuizmoController(const EditorServices &services) {

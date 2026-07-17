@@ -55,6 +55,8 @@ public:
   }
   Result<bool, std::string> publishFrameData(FrameBuildContext &ctx) override;
   Result<bool, std::string> prepare(FrameBuildContext &ctx) override;
+  Result<bool, std::string>
+  prepareSceneStep(RenderScenePreparationContext &ctx) override;
   [[nodiscard]] std::span<RenderFeaturePass *const> passes() noexcept override;
 
 private:

@@ -74,6 +74,8 @@ public:
 
   void onUpdate(double deltaTime);
   void clear();
+  void bindScene(RenderScene &scene, SceneRuntimeHost &sceneRuntime,
+                 bool destroyExistingSimulations = true);
 
   void registerPrefabInstance(std::string_view label, const ScenePrefab &prefab,
                               const SceneInstantiationMap &instantiationMap,
@@ -114,8 +116,8 @@ private:
                                      SimulationState &out) const;
   [[nodiscard]] static float computeSecondaryTime(const InstanceRecord &record);
 
-  RenderScene &scene_;
-  SceneRuntimeHost &sceneRuntime_;
+  RenderScene *scene_ = nullptr;
+  SceneRuntimeHost *sceneRuntime_ = nullptr;
   SceneEditorSelectionState &selectionState_;
   std::function<double()> currentTimeSeconds_;
   std::function<uint64_t()> nextSimulationFrameIndex_;

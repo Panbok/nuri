@@ -1526,6 +1526,11 @@ void appendCounter(BenchmarkFrameMeasurements &measurements,
   measurements.appendRegistered(index, static_cast<double>(value));
 }
 
+void appendValue(BenchmarkFrameMeasurements &measurements,
+                 BenchmarkMetricIndex index, double value) {
+  measurements.appendRegistered(index, value);
+}
+
 void appendBytesAsMiB(BenchmarkFrameMeasurements &measurements,
                       BenchmarkMetricIndex index, uint64_t bytes) {
   measurements.appendRegistered(index, bytesToMiB(bytes));
@@ -1672,6 +1677,10 @@ void addRendererFrameMetrics(BenchmarkFrameMeasurements &measurements,
   addIfNonzero(measurements, "renderer.assets.cpu_completions",
                assets.cpuCompletions);
   addIfNonzero(measurements, "renderer.assets.cpu_workers", assets.cpuWorkers);
+  addIfNonzero(measurements, "renderer.assets.cpu_active_worker_limit",
+               assets.cpuActiveWorkerLimit);
+  addIfNonzero(measurements, "renderer.assets.cpu_interactive_mode",
+               assets.cpuInteractiveMode);
   addIfNonzero(measurements, "renderer.assets.cpu_queued_jobs",
                assets.cpuQueuedJobs);
   addIfNonzero(measurements, "renderer.assets.cpu_running_jobs",
@@ -1697,6 +1706,18 @@ void addRendererFrameMetrics(BenchmarkFrameMeasurements &measurements,
                assets.scenePatches);
   addIfNonzero(measurements, "renderer.assets.scene_commits",
                assets.sceneCommits);
+  addIfNonzero(measurements, "renderer.assets.deferred_cpu_completions",
+               assets.deferredCpuCompletions);
+  addIfNonzero(measurements, "renderer.assets.publication_deadline_exceeded",
+               assets.publicationDeadlineExceeded);
+  appendValue(
+      measurements,
+      NURI_BENCHMARK_METRIC("renderer.assets.publication_main_thread_ms"),
+      assets.publicationMainThreadMilliseconds);
+  appendValue(
+      measurements,
+      NURI_BENCHMARK_METRIC("renderer.assets.publication_max_operation_ms"),
+      assets.publicationMaxOperationMilliseconds);
   addIfNonzero(measurements, "renderer.assets.cpu_in_flight_bytes",
                assets.cpuInFlightBytes);
   addIfNonzero(measurements, "renderer.assets.upload_bytes",

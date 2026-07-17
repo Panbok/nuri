@@ -888,6 +888,17 @@ Texture::createPrepared(GPUDevice &gpu, PreparedTextureData data) {
   return create(gpu, desc, data.debugName);
 }
 
+std::unique_ptr<Texture> Texture::adoptPrepared(GPUDevice &gpu,
+                                                TextureHandle handle,
+                                                const TextureDesc &desc,
+                                                std::string debugName) {
+  if (!nuri::isValid(handle)) {
+    return nullptr;
+  }
+  return std::unique_ptr<Texture>(
+      new Texture(gpu, handle, desc, std::move(debugName)));
+}
+
 Result<std::unique_ptr<Texture>, std::string>
 Texture::loadTexture(GPUDevice &gpu, std::string_view filePath,
                      std::string_view debugName) {

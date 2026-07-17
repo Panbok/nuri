@@ -38,12 +38,10 @@ prepareSceneManifest(std::string_view path,
                      const SceneImportOptions &options = {});
 
 [[nodiscard]] Result<PreparedImportedMaterial, std::string>
-prepareImportedMaterial(const MaterialData &material,
-                        std::string_view scenePath,
-                        uint32_t sourceMaterialIndex,
-                        const TextureCompressionCaps &compressionCaps,
-                        std::span<const EmbeddedSceneTextureData>
-                            embeddedTextures = {},
-                        std::string_view debugNamePrefix = "scene");
+prepareImportedMaterial(
+    const MaterialData &material, std::string_view scenePath,
+    uint32_t sourceMaterialIndex, const TextureCompressionCaps &compressionCaps,
+    std::span<const EmbeddedSceneTextureData> embeddedTextures = {},
+    std::string_view debugNamePrefix = "scene");
 
 } // namespace nuri

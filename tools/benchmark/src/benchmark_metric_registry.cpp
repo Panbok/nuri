@@ -52,6 +52,12 @@ constexpr Aggregation kFrameDistribution =
                     Phase::PostRenderMeasuredFrame,                            \
                     Gate::WorkloadCharacterization)
 
+#define NURI_ASSET_TIMING(id)                                                  \
+  NURI_EXACT_METRIC(id, Unit::Milliseconds, Numeric::Float64,                  \
+                    Direction::LowerIsBetter,                                  \
+                    Availability::EveryMeasuredFrame,                          \
+                    Phase::PostRenderMeasuredFrame, Gate::Eligible)
+
 constexpr BenchmarkMetricDescriptor kDescriptors[] = {
     NURI_CPU_TIMING("cpu.total_ms", Gate::Eligible),
     NURI_CPU_TIMING("cpu.scene_commit_ms", Gate::Eligible),
@@ -170,6 +176,8 @@ constexpr BenchmarkMetricDescriptor kDescriptors[] = {
 
     NURI_COUNTER("renderer.assets.cpu_completions"),
     NURI_COUNTER("renderer.assets.cpu_workers"),
+    NURI_COUNTER("renderer.assets.cpu_active_worker_limit"),
+    NURI_COUNTER("renderer.assets.cpu_interactive_mode"),
     NURI_COUNTER("renderer.assets.cpu_queued_jobs"),
     NURI_COUNTER("renderer.assets.cpu_running_jobs"),
     NURI_COUNTER("renderer.assets.cpu_running_io"),
@@ -184,6 +192,10 @@ constexpr BenchmarkMetricDescriptor kDescriptors[] = {
     NURI_COUNTER("renderer.assets.failed"),
     NURI_COUNTER("renderer.assets.scene_patches"),
     NURI_COUNTER("renderer.assets.scene_commits"),
+    NURI_COUNTER("renderer.assets.deferred_cpu_completions"),
+    NURI_COUNTER("renderer.assets.publication_deadline_exceeded"),
+    NURI_ASSET_TIMING("renderer.assets.publication_main_thread_ms"),
+    NURI_ASSET_TIMING("renderer.assets.publication_max_operation_ms"),
     NURI_COUNTER("renderer.assets.cpu_in_flight_bytes"),
     NURI_COUNTER("renderer.assets.upload_bytes"),
     NURI_COUNTER("renderer.assets.submitted_jobs"),
@@ -425,6 +437,7 @@ constexpr BenchmarkMetricDescriptor kDescriptors[] = {
 };
 
 #undef NURI_RENDERGRAPH_COUNTER
+#undef NURI_ASSET_TIMING
 #undef NURI_COUNTER
 #undef NURI_MEMORY
 #undef NURI_GPU_TIMING

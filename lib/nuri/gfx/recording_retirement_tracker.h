@@ -44,8 +44,7 @@ public:
       if (next == resolvedOutOfOrder_.end()) {
         break;
       }
-      resolvedSubmissionMax_ =
-          std::max(resolvedSubmissionMax_, next->second);
+      resolvedSubmissionMax_ = std::max(resolvedSubmissionMax_, next->second);
       resolvedThroughSerial_ = next->first;
       resolvedOutOfOrder_.erase(next);
     }
@@ -71,7 +70,8 @@ public:
 
   // Returns a conservative graphics-queue last-use value after every recording
   // that existed at logical destruction has resolved. A later resolved
-  // recording may raise the returned value, which delays reuse but remains safe.
+  // recording may raise the returned value, which delays reuse but remains
+  // safe.
   [[nodiscard]] std::optional<uint64_t>
   tryResolveLastUse(uint64_t requiredSerial,
                     uint64_t lastSubmittedAtDestruction) const noexcept {

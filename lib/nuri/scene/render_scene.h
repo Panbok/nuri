@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <memory_resource>
 #include <optional>
 #include <span>
@@ -58,6 +59,14 @@ public:
   // commit() returns true when derived renderer-facing caches changed and false
   // when the authored scene state was already up to date.
   [[nodiscard]] Result<bool, std::string> commit();
+  // Incrementally prepares the derived caches of an inactive, freshly built
+  // scene. Returns true once the scene is ready to activate. The scene must not
+  // be rendered or mutated while this operation is in progress.
+  [[nodiscard]] Result<bool, std::string>
+  commitInactiveStep(uint32_t maxOperations);
+  // Releases resource ownership from a retired, non-rendered scene in bounded
+  // slices. Returns true when no renderer resource references remain.
+  [[nodiscard]] bool retireInactiveStep(uint32_t maxOperations) noexcept;
 
   [[nodiscard]] const Renderable *renderable(uint32_t index) const;
   [[nodiscard]] std::optional<uint32_t>
@@ -116,6 +125,7 @@ public:
   }
 
 private:
+  struct IncrementalCommitState;
   static constexpr uint32_t kInvalidIndex =
       std::numeric_limits<uint32_t>::max();
 
@@ -131,6 +141,7 @@ private:
                              MaterialRef materialOverride);
   void retainEnvironment(const EnvironmentHandles &handles);
   void releaseEnvironment(const EnvironmentHandles &handles);
+  void discardIncrementalCommit() noexcept;
 
   std::pmr::memory_resource *memory_ = std::pmr::get_default_resource();
   SceneGraph sceneGraph_;
@@ -151,6 +162,9 @@ private:
   uint64_t lightTopologyVersion_ = 0u;
   uint64_t lightTransformVersion_ = 0u;
   uint64_t environmentVersion_ = 0u;
+  std::shared_ptr<IncrementalCommitState> incrementalCommit_{};
+  uint32_t retirementCursor_ = 0u;
+  bool retirementEnvironmentReleased_ = false;
 };
 
 } // namespace nuri

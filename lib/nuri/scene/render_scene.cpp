@@ -3,6 +3,7 @@
 #include "nuri/scene/render_scene.h"
 
 #include "nuri/core/profiling.h"
+#include "nuri/core/thread_priority.h"
 #include "nuri/math/light.h"
 #include "nuri/math/utils.h"
 #include "nuri/resources/gpu/resource_manager.h"
@@ -51,23 +52,59 @@ bool sameEnvironmentHandles(const EnvironmentHandles &lhs,
 
 } // namespace
 
+struct RenderScene::IncrementalCommitState {
+  explicit IncrementalCommitState(std::pmr::memory_resource *memory)
+      : renderables(memory), renderableIndexById(memory), morphWeights(memory),
+        skinPalettes(memory) {}
+
+  std::pmr::vector<Renderable> renderables;
+  std::pmr::unordered_map<RenderableId, uint32_t> renderableIndexById;
+  std::pmr::vector<std::pmr::vector<float>> morphWeights;
+  std::pmr::vector<std::pmr::vector<glm::mat4>> skinPalettes;
+  uint64_t graphTopologyVersion = 0u;
+  size_t liveRenderableCount = 0u;
+  uint32_t reserveStage = 0u;
+  uint32_t nextRenderableSlot = 0u;
+  std::atomic_bool allocationReady = false;
+  std::atomic_bool allocationFailed = false;
+};
+
 RenderScene::RenderScene(std::pmr::memory_resource *memory)
     : memory_(memory != nullptr ? memory : std::pmr::get_default_resource()),
-      sceneGraph_(memory_), renderables_(memory_),
-      renderableIndexById_(memory_), renderableMorphWeights_(memory_),
-      renderableSkinPalettes_(memory_), packedDirectionalLights_(memory_),
-      packedLocalLights_(memory_), packedDirectionalLightIds_(memory_),
-      packedLocalLightIds_(memory_),
+      sceneGraph_(memory_), renderables_(std::pmr::new_delete_resource()),
+      renderableIndexById_(std::pmr::new_delete_resource()),
+      renderableMorphWeights_(std::pmr::new_delete_resource()),
+      renderableSkinPalettes_(std::pmr::new_delete_resource()),
+      packedDirectionalLights_(memory_), packedLocalLights_(memory_),
+      packedDirectionalLightIds_(memory_), packedLocalLightIds_(memory_),
       id_(gNextRenderSceneId.fetch_add(1u, std::memory_order_relaxed)),
       topologyVersion_(0u), transformVersion_(0u), deformationVersion_(0u),
       lightTopologyVersion_(0u), lightTransformVersion_(0u) {}
 
 RenderScene::~RenderScene() {
+  discardIncrementalCommit();
   for (const Renderable &renderable : renderables_) {
     releaseRenderableRefs(renderable.model, renderable.material,
                           renderable.materialOverride);
   }
   setEnvironment(EnvironmentHandles{});
+}
+
+void RenderScene::discardIncrementalCommit() noexcept {
+  std::shared_ptr<IncrementalCommitState> pending =
+      std::move(incrementalCommit_);
+  if (pending == nullptr) {
+    return;
+  }
+  // Before allocationReady, the detached reserve worker has exclusive access
+  // to the containers and no renderable references can have been retained.
+  if (!pending->allocationReady.load(std::memory_order_acquire)) {
+    return;
+  }
+  for (const Renderable &renderable : pending->renderables) {
+    releaseRenderableRefs(renderable.model, renderable.material,
+                          renderable.materialOverride);
+  }
 }
 
 const Renderable *RenderScene::renderable(uint32_t index) const {
@@ -302,6 +339,10 @@ void RenderScene::rebuildPackedLocalLights() {
 
 Result<bool, std::string> RenderScene::commit() {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
+  if (incrementalCommit_ != nullptr) {
+    return Result<bool, std::string>::makeError(
+        "RenderScene::commit: an inactive incremental commit is in progress");
+  }
   // Commit is the authored-state to derived-cache boundary: hierarchy,
   // components, and local light data stay in SceneGraph; RenderScene rebuilds
   // the flat renderer-facing views here.
@@ -413,6 +454,208 @@ Result<bool, std::string> RenderScene::commit() {
   }
 
   return Result<bool, std::string>::makeResult(changed);
+}
+
+Result<bool, std::string>
+RenderScene::commitInactiveStep(uint32_t maxOperations) {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
+  const uint32_t operationBudget = std::max(maxOperations, 1u);
+  if (!sceneGraph_.syncWorldTransformsStep(operationBudget)) {
+    return Result<bool, std::string>::makeResult(false);
+  }
+
+  if (!sceneGraph_.renderableTopologyDirty_) {
+    auto committed = commit();
+    if (committed.hasError()) {
+      return Result<bool, std::string>::makeError(committed.error());
+    }
+    return Result<bool, std::string>::makeResult(true);
+  }
+
+  if (incrementalCommit_ == nullptr) {
+    if (!renderables_.empty()) {
+      return Result<bool, std::string>::makeError(
+          "RenderScene::commitInactiveStep requires a freshly built scene");
+    }
+    incrementalCommit_ = std::make_shared<IncrementalCommitState>(
+        std::pmr::new_delete_resource());
+    incrementalCommit_->graphTopologyVersion = sceneGraph_.topologyVersion();
+    incrementalCommit_->liveRenderableCount =
+        sceneGraph_.renderableComponents_.slots.liveCount();
+    std::shared_ptr<IncrementalCommitState> pendingAllocation =
+        incrementalCommit_;
+    std::thread([pendingAllocation] {
+      setCurrentThreadBackgroundPriority();
+      try {
+        pendingAllocation->renderables.reserve(
+            pendingAllocation->liveRenderableCount);
+        pendingAllocation->renderableIndexById.reserve(
+            pendingAllocation->liveRenderableCount);
+        pendingAllocation->morphWeights.reserve(
+            pendingAllocation->liveRenderableCount);
+        pendingAllocation->skinPalettes.reserve(
+            pendingAllocation->liveRenderableCount);
+        pendingAllocation->reserveStage = 4u;
+      } catch (...) {
+        pendingAllocation->allocationFailed.store(true,
+                                                  std::memory_order_release);
+      }
+      pendingAllocation->allocationReady.store(true, std::memory_order_release);
+    }).detach();
+    return Result<bool, std::string>::makeResult(false);
+  }
+  IncrementalCommitState &pending = *incrementalCommit_;
+  if (!pending.allocationReady.load(std::memory_order_acquire)) {
+    return Result<bool, std::string>::makeResult(false);
+  }
+  if (pending.allocationFailed.load(std::memory_order_acquire)) {
+    discardIncrementalCommit();
+    return Result<bool, std::string>::makeError(
+        "RenderScene::commitInactiveStep: background cache allocation "
+        "failed");
+  }
+  if (pending.graphTopologyVersion != sceneGraph_.topologyVersion()) {
+    discardIncrementalCommit();
+    return Result<bool, std::string>::makeError(
+        "RenderScene::commitInactiveStep: scene mutated during finalization");
+  }
+
+  auto &components = sceneGraph_.renderableComponents_;
+  const auto &nodes = sceneGraph_.nodes_;
+  uint32_t processed = 0u;
+  while (pending.nextRenderableSlot < components.slots.slotCount() &&
+         processed < operationBudget) {
+    const uint32_t index = pending.nextRenderableSlot++;
+    ++processed;
+    if (index < components.flatRenderableIndex.size()) {
+      components.flatRenderableIndex[index] = kInvalidIndex;
+    }
+    if (!components.slots.isLive(index)) {
+      continue;
+    }
+    const ModelRef model = components.models[index];
+    const MaterialRef material = components.materials[index];
+    const MaterialRef materialOverride = components.materialOverrides[index];
+    if (!resourceAlive(resources_, model) ||
+        !resourceAlive(resources_, material) ||
+        (isValid(materialOverride) &&
+         !resourceAlive(resources_, materialOverride))) {
+      discardIncrementalCommit();
+      return Result<bool, std::string>::makeError(
+          "RenderScene::commitInactiveStep: authored renderable owns a stale "
+          "resource handle");
+    }
+
+    const uint32_t nodeIndex = components.node[index];
+    const glm::mat4 world =
+        nodeIndex < nodes.worldFromRoot.size() && nodes.slots.isLive(nodeIndex)
+            ? nodes.worldFromRoot[nodeIndex]
+            : glm::mat4(1.0f);
+    pending.morphWeights.emplace_back();
+    pending.morphWeights.back().assign(components.morphWeights[index].begin(),
+                                       components.morphWeights[index].end());
+    pending.skinPalettes.emplace_back();
+    pending.skinPalettes.back().assign(components.skinPalette[index].begin(),
+                                       components.skinPalette[index].end());
+    const uint32_t flatIndex =
+        static_cast<uint32_t>(pending.renderables.size());
+    components.flatRenderableIndex[index] = flatIndex;
+    const Renderable renderable{
+        .id = makeRenderableId(index, components.slots.generation(index)),
+        .node = nodeIndex < nodes.slots.slotCount()
+                    ? makeNodeId(nodeIndex, nodes.slots.generation(nodeIndex))
+                    : kInvalidNodeId,
+        .model = model,
+        .material = material,
+        .materialOverride = materialOverride,
+        .morphWeights =
+            std::span<const float>(pending.morphWeights.back().data(),
+                                   pending.morphWeights.back().size()),
+        .skinPalette =
+            std::span<const glm::mat4>(pending.skinPalettes.back().data(),
+                                       pending.skinPalettes.back().size()),
+        .modelMatrix = world,
+    };
+    retainRenderableRefs(model, material, materialOverride);
+    pending.renderableIndexById.emplace(renderable.id, flatIndex);
+    pending.renderables.push_back(renderable);
+  }
+  if (pending.nextRenderableSlot < components.slots.slotCount()) {
+    return Result<bool, std::string>::makeResult(false);
+  }
+
+  renderables_.swap(pending.renderables);
+  renderableIndexById_.swap(pending.renderableIndexById);
+  renderableMorphWeights_.swap(pending.morphWeights);
+  renderableSkinPalettes_.swap(pending.skinPalettes);
+  incrementalCommit_.reset();
+
+  ++topologyVersion_;
+  ++transformVersion_;
+  ++deformationVersion_;
+  sceneGraph_.renderableTopologyDirty_ = false;
+  sceneGraph_.renderableTransformsDirty_ = false;
+  sceneGraph_.renderableDeformationsDirty_ = false;
+
+  if (sceneGraph_.lightTopologyDirty_) {
+    rebuildPackedDirectionalLights();
+    rebuildPackedLocalLights();
+    noteLightTopologyChanged();
+    sceneGraph_.lightTopologyDirty_ = false;
+    sceneGraph_.lightDataDirty_ = false;
+  } else if (sceneGraph_.lightDataDirty_) {
+    rebuildPackedDirectionalLights();
+    rebuildPackedLocalLights();
+    noteLightTransformChanged();
+    sceneGraph_.lightDataDirty_ = false;
+  }
+  return Result<bool, std::string>::makeResult(true);
+}
+
+bool RenderScene::retireInactiveStep(uint32_t maxOperations) noexcept {
+  uint32_t processed = 0u;
+  const uint32_t operationBudget = std::max(maxOperations, 1u);
+
+  if (incrementalCommit_ != nullptr) {
+    IncrementalCommitState &pending = *incrementalCommit_;
+    if (!pending.allocationReady.load(std::memory_order_acquire)) {
+      return false;
+    }
+    while (retirementCursor_ < pending.renderables.size() &&
+           processed < operationBudget) {
+      Renderable &renderable = pending.renderables[retirementCursor_++];
+      releaseRenderableRefs(renderable.model, renderable.material,
+                            renderable.materialOverride);
+      renderable.model = kInvalidModelRef;
+      renderable.material = kInvalidMaterialRef;
+      renderable.materialOverride = kInvalidMaterialRef;
+      ++processed;
+    }
+    if (retirementCursor_ < pending.renderables.size()) {
+      return false;
+    }
+    incrementalCommit_.reset();
+    retirementCursor_ = 0u;
+  }
+
+  while (retirementCursor_ < renderables_.size() &&
+         processed < operationBudget) {
+    Renderable &renderable = renderables_[retirementCursor_++];
+    releaseRenderableRefs(renderable.model, renderable.material,
+                          renderable.materialOverride);
+    renderable.model = kInvalidModelRef;
+    renderable.material = kInvalidMaterialRef;
+    renderable.materialOverride = kInvalidMaterialRef;
+    ++processed;
+  }
+  if (retirementCursor_ < renderables_.size()) {
+    return false;
+  }
+  if (!retirementEnvironmentReleased_) {
+    setEnvironment(EnvironmentHandles{});
+    retirementEnvironmentReleased_ = true;
+  }
+  return true;
 }
 
 void RenderScene::bindResources(ResourceManager *resources) {

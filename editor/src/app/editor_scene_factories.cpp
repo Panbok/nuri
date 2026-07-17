@@ -124,6 +124,7 @@ EditorSceneSpec makeCustomScene(EditorSceneSpec spec) { return spec; }
 EditorSceneSpec makePrefabScene(PrefabSceneFactoryDesc desc) {
   auto assets = std::make_shared<ImportedPrefabSceneResources>();
   auto configured = std::make_shared<bool>(false);
+  auto stagingError = std::make_shared<std::string>();
   return EditorSceneSpec{
       .info = desc.info,
       .prepare = [desc, assets](EditorScenePrepareContext &ctx)
@@ -134,25 +135,29 @@ EditorSceneSpec makePrefabScene(PrefabSceneFactoryDesc desc) {
         queueSceneTextureArtifactBakeIfNeeded(ctx.runtime, *assets);
         return Result<void, std::string>::makeResult();
       },
-      .activate = [desc, assets, configured](EditorSceneActivateContext &ctx)
-          -> Result<void, std::string> {
+      .activate =
+          [desc, assets, configured, stagingError](
+              EditorSceneActivateContext &ctx) -> Result<void, std::string> {
         if (desc.configureRender) {
           desc.configureRender(ctx.runtime);
         } else {
           ctx.runtime.configureStaticModelOpaqueSettings(desc.lodThresholds);
         }
         *configured = false;
+        stagingError->clear();
         return prepareImportedPrefabSceneResources(ctx.runtime, desc.info.label,
                                                    desc.sourcePath,
                                                    desc.importOptions, *assets);
       },
       .deactivate =
-          [assets, configured](EditorSceneDeactivateContext &) {
+          [assets, configured, stagingError](EditorSceneDeactivateContext &) {
             assets->release();
             *configured = false;
+            stagingError->clear();
           },
       .update =
-          [desc, assets, configured](EditorSceneUpdateContext &ctx) {
+          [desc, assets, configured,
+           stagingError](EditorSceneUpdateContext &ctx) {
             if (*configured || !isValidAssetHandle(assets->sceneLoad)) {
               return;
             }
@@ -164,6 +169,7 @@ EditorSceneSpec makePrefabScene(PrefabSceneFactoryDesc desc) {
               NURI_LOG_ERROR("%s: async prefab load failed: %s",
                              desc.info.label.c_str(),
                              refreshed.error().c_str());
+              *stagingError = refreshed.error();
               *configured = true;
               return;
             }
@@ -178,6 +184,7 @@ EditorSceneSpec makePrefabScene(PrefabSceneFactoryDesc desc) {
                 NURI_LOG_ERROR("%s: additional asset preparation failed: %s",
                                desc.info.label.c_str(),
                                additionalAssetsResult.error().c_str());
+                *stagingError = additionalAssetsResult.error();
                 *configured = true;
                 return;
               }
@@ -188,6 +195,7 @@ EditorSceneSpec makePrefabScene(PrefabSceneFactoryDesc desc) {
             if (!instantiated.has_value() && desc.requirePrefabInstantiation) {
               NURI_LOG_ERROR("%s: scene prefab instantiation failed",
                              desc.info.label.c_str());
+              *stagingError = "scene prefab instantiation failed";
               *configured = true;
               return;
             }
@@ -226,6 +234,8 @@ EditorSceneSpec makePrefabScene(PrefabSceneFactoryDesc desc) {
                 NURI_LOG_ERROR(
                     "%s: scene bounds are unavailable for prefab population",
                     desc.info.label.c_str());
+                *stagingError =
+                    "scene bounds are unavailable for prefab population";
                 *configured = true;
                 return;
               }
@@ -235,6 +245,7 @@ EditorSceneSpec makePrefabScene(PrefabSceneFactoryDesc desc) {
                 NURI_LOG_ERROR("%s: scene population failed: %s",
                                desc.info.label.c_str(),
                                populateResult.error().c_str());
+                *stagingError = populateResult.error();
                 *configured = true;
                 return;
               }
@@ -246,6 +257,15 @@ EditorSceneSpec makePrefabScene(PrefabSceneFactoryDesc desc) {
             }
             *configured = true;
           },
+      .stagingStatus =
+          [configured, stagingError] {
+            return EditorSceneStagingStatus{
+                .ready = *configured && stagingError->empty(),
+                .failed = !stagingError->empty(),
+                .progress = *configured ? 1.0f : 0.0f,
+                .error = *stagingError,
+            };
+          },
   };
 }
 
@@ -253,6 +273,7 @@ EditorSceneSpec makeAnimatedPrefabScene(AnimatedPrefabSceneFactoryDesc desc) {
   auto assets = std::make_shared<ImportedPrefabSceneResources>();
   auto animation = std::make_shared<AnimatedPrefabSceneState>();
   auto configured = std::make_shared<bool>(false);
+  auto stagingError = std::make_shared<std::string>();
   return EditorSceneSpec{
       .info = desc.prefab.info,
       .prepare = [prefab = desc.prefab, assets](EditorScenePrepareContext &ctx)
@@ -264,7 +285,7 @@ EditorSceneSpec makeAnimatedPrefabScene(AnimatedPrefabSceneFactoryDesc desc) {
         return Result<void, std::string>::makeResult();
       },
       .activate =
-          [desc, assets, animation, configured](
+          [desc, assets, animation, configured, stagingError](
               EditorSceneActivateContext &ctx) -> Result<void, std::string> {
         if (desc.prefab.configureRender) {
           desc.prefab.configureRender(ctx.runtime);
@@ -273,6 +294,7 @@ EditorSceneSpec makeAnimatedPrefabScene(AnimatedPrefabSceneFactoryDesc desc) {
               desc.prefab.lodThresholds);
         }
         *configured = false;
+        stagingError->clear();
         animation->rootNode = kInvalidNodeId;
         animation->instantiationMap = SceneInstantiationMap{};
         return prepareImportedPrefabSceneResources(
@@ -280,13 +302,16 @@ EditorSceneSpec makeAnimatedPrefabScene(AnimatedPrefabSceneFactoryDesc desc) {
             desc.prefab.importOptions, *assets);
       },
       .deactivate =
-          [assets, animation, configured](EditorSceneDeactivateContext &ctx) {
+          [assets, animation, configured,
+           stagingError](EditorSceneDeactivateContext &ctx) {
             ctx.runtime.destroyAnimatedPrefabSceneInstance(*animation);
             assets->release();
             *configured = false;
+            stagingError->clear();
           },
       .update =
-          [desc, assets, animation, configured](EditorSceneUpdateContext &ctx) {
+          [desc, assets, animation, configured,
+           stagingError](EditorSceneUpdateContext &ctx) {
             if (*configured || !isValidAssetHandle(assets->sceneLoad)) {
               return;
             }
@@ -298,6 +323,7 @@ EditorSceneSpec makeAnimatedPrefabScene(AnimatedPrefabSceneFactoryDesc desc) {
               NURI_LOG_ERROR("%s: async animated prefab load failed: %s",
                              desc.prefab.info.label.c_str(),
                              refreshed.error().c_str());
+              *stagingError = refreshed.error();
               *configured = true;
               return;
             }
@@ -313,6 +339,7 @@ EditorSceneSpec makeAnimatedPrefabScene(AnimatedPrefabSceneFactoryDesc desc) {
                      .has_value()) {
               NURI_LOG_ERROR("%s: animated scene prefab instantiation failed",
                              desc.prefab.info.label.c_str());
+              *stagingError = "animated scene prefab instantiation failed";
               *configured = true;
               return;
             }
@@ -376,6 +403,15 @@ EditorSceneSpec makeAnimatedPrefabScene(AnimatedPrefabSceneFactoryDesc desc) {
             }
             *configured = true;
           },
+      .stagingStatus =
+          [configured, stagingError] {
+            return EditorSceneStagingStatus{
+                .ready = *configured && stagingError->empty(),
+                .failed = !stagingError->empty(),
+                .progress = *configured ? 1.0f : 0.0f,
+                .error = *stagingError,
+            };
+          },
   };
 }
 
@@ -399,9 +435,8 @@ EditorSceneSpec makeStreamingScene(StreamingSceneFactoryDesc desc) {
       },
       .activate = [desc, state](EditorSceneActivateContext &ctx)
           -> Result<void, std::string> {
-        if (state->loadFailed) {
-          return Result<void, std::string>::makeError(state->loadError);
-        }
+        state->loadFailed = false;
+        state->loadError.clear();
         if (desc.configureRender) {
           desc.configureRender(ctx.runtime);
         }
@@ -410,8 +445,9 @@ EditorSceneSpec makeStreamingScene(StreamingSceneFactoryDesc desc) {
             .importOptions =
                 SceneImportOptions{.assetBuildOptions = desc.importOptions},
             .priority = AssetPriority::Critical,
-            .publication = ScenePublicationPolicy::Progressive,
+            .publication = ScenePublicationPolicy::CompleteOnly,
             .failurePolicy = SceneFailurePolicy::BestEffort,
+            .publicationTarget = ctx.runtime.scenePublicationTarget(),
             .debugName = desc.info.label,
         });
         if (requested.hasError()) {
@@ -421,9 +457,23 @@ EditorSceneSpec makeStreamingScene(StreamingSceneFactoryDesc desc) {
         }
         state->sceneLoad = requested.value();
         state->configured = false;
+        state->baseConfigured = false;
+        state->populationComplete = !desc.populateLoadedSceneStep;
+        state->cameraConfigured = false;
+        state->lightingConfigured = false;
         state->model = kInvalidModelRef;
         state->renderableId = kInvalidRenderableId;
         state->baseModel = glm::mat4(1.0f);
+        state->populationCursor = 0u;
+        state->populationProgress = 0.0f;
+        state->graphCapacityReservation = SceneGraphCapacityReservation{
+            .nodeCapacity = desc.stagingNodeCapacity,
+            .renderableCapacity = desc.stagingRenderableCapacity,
+            .stage = desc.stagingNodeCapacity == 0u &&
+                             desc.stagingRenderableCapacity == 0u
+                         ? SceneGraphCapacityReservation::kStageCount
+                         : 0u,
+        };
         state->loadStartTimeSeconds = ctx.runtime.timeSeconds();
         state->lastProgressLogTimeSeconds = state->loadStartTimeSeconds;
         return Result<void, std::string>::makeResult();
@@ -435,6 +485,10 @@ EditorSceneSpec makeStreamingScene(StreamingSceneFactoryDesc desc) {
               state->sceneLoad = {};
             }
             state->configured = false;
+            state->baseConfigured = false;
+            state->populationComplete = false;
+            state->cameraConfigured = false;
+            state->lightingConfigured = false;
             state->model = kInvalidModelRef;
             state->renderableId = kInvalidRenderableId;
           },
@@ -483,40 +537,102 @@ EditorSceneSpec makeStreamingScene(StreamingSceneFactoryDesc desc) {
               return;
             }
 
-            const std::string sceneInstanceName =
-                desc.instanceName.empty() ? desc.info.label : desc.instanceName;
-            const std::string modelError =
-                "Model for " + sceneInstanceName + " is not loaded";
-            const std::string recordError =
-                sceneInstanceName + " model record lookup failed";
-            const Model &model = ctx.runtime.requireLoadedModel(
-                firstModel, modelError.c_str(), recordError.c_str());
-            const float scale = computeNiagaraBistroScale(model.bounds());
-            state->baseModel = glm::scale(glm::mat4(1.0f), glm::vec3(scale));
-            for (uint32_t nodeIndex = 0u; nodeIndex < prefab->nodes.size();
-                 ++nodeIndex) {
-              if (prefab->nodes[nodeIndex].parentIndex !=
-                      kInvalidScenePrefabIndex ||
-                  nodeIndex >= instantiation->nodes.size() ||
-                  !isValid(instantiation->nodes[nodeIndex])) {
-                continue;
+            if (!state->baseConfigured) {
+              const std::string sceneInstanceName = desc.instanceName.empty()
+                                                        ? desc.info.label
+                                                        : desc.instanceName;
+              const std::string modelError =
+                  "Model for " + sceneInstanceName + " is not loaded";
+              const std::string recordError =
+                  sceneInstanceName + " model record lookup failed";
+              const Model &model = ctx.runtime.requireLoadedModel(
+                  firstModel, modelError.c_str(), recordError.c_str());
+              state->baseModel = glm::mat4(1.0f);
+              if (desc.scaleToNiagaraBistro) {
+                const float scale = computeNiagaraBistroScale(model.bounds());
+                state->baseModel =
+                    glm::scale(glm::mat4(1.0f), glm::vec3(scale));
               }
-              (void)ctx.runtime.scene().graph().setNodeLocalTransform(
-                  instantiation->nodes[nodeIndex],
-                  state->baseModel * prefab->nodes[nodeIndex].localFromParent);
+              for (uint32_t nodeIndex = 0u; nodeIndex < prefab->nodes.size();
+                   ++nodeIndex) {
+                if (prefab->nodes[nodeIndex].parentIndex !=
+                        kInvalidScenePrefabIndex ||
+                    nodeIndex >= instantiation->nodes.size() ||
+                    !isValid(instantiation->nodes[nodeIndex])) {
+                  continue;
+                }
+                (void)ctx.runtime.scene().graph().setNodeLocalTransform(
+                    instantiation->nodes[nodeIndex],
+                    state->baseModel *
+                        prefab->nodes[nodeIndex].localFromParent);
+              }
+              state->model = firstModel;
+              state->renderableId = firstRenderable;
+              if (desc.configureLoadedScene) {
+                desc.configureLoadedScene(ctx.runtime, *state);
+              }
+              state->baseConfigured = true;
             }
-            state->model = firstModel;
-            state->renderableId = firstRenderable;
-            if (desc.configureLoadedScene) {
-              desc.configureLoadedScene(ctx.runtime, *state);
+            if (!state->populationComplete && desc.populateLoadedSceneStep) {
+              if (!state->graphCapacityReservation.complete()) {
+                auto reserved = ctx.runtime.scene().graph().reserveCapacityStep(
+                    state->graphCapacityReservation, 1u);
+                if (reserved.hasError()) {
+                  state->loadFailed = true;
+                  state->loadError = reserved.error();
+                  NURI_LOG_ERROR("%s: %s", desc.info.label.c_str(),
+                                 state->loadError.c_str());
+                  return;
+                }
+                state->populationProgress =
+                    0.02f * state->graphCapacityReservation.progress();
+                if (!reserved.value()) {
+                  return;
+                }
+              }
+              auto populate = desc.populateLoadedSceneStep(ctx.runtime, *state);
+              if (populate.hasError()) {
+                state->loadFailed = true;
+                state->loadError = populate.error();
+                NURI_LOG_ERROR("%s: %s", desc.info.label.c_str(),
+                               state->loadError.c_str());
+                return;
+              }
+              if (!populate.value()) {
+                return;
+              }
+              state->populationComplete = true;
+              return;
             }
-            if (desc.configureCamera) {
-              desc.configureCamera(ctx.runtime, *state);
+            if (!state->cameraConfigured) {
+              if (desc.configureCamera) {
+                desc.configureCamera(ctx.runtime, *state);
+              }
+              state->cameraConfigured = true;
+              return;
             }
-            if (prefab->lights.empty()) {
-              ctx.runtime.finalizeSceneLighting({}, state->baseModel);
+            if (!state->lightingConfigured) {
+              if (prefab->lights.empty()) {
+                ctx.runtime.finalizeSceneLighting({}, state->baseModel);
+              }
+              state->lightingConfigured = true;
+              return;
             }
             state->configured = true;
+          },
+      .stagingStatus =
+          [state] {
+            return EditorSceneStagingStatus{
+                .ready = state->configured && !state->loadFailed,
+                .failed = state->loadFailed,
+                .progress = state->configured
+                                ? 1.0f
+                                : (state->baseConfigured
+                                       ? std::clamp(state->populationProgress,
+                                                    0.05f, 0.99f)
+                                       : 0.0f),
+                .error = state->loadError,
+            };
           },
   };
 }

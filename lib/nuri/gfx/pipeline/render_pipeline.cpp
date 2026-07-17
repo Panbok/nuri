@@ -202,6 +202,35 @@ RenderPipeline::buildRenderGraph(RenderFrameContext &frame,
   return Result<bool, std::string>::makeResult(true);
 }
 
+Result<bool, std::string> RenderPipeline::prepareSceneStep(
+    RenderScene &scene, ResourceManager &resources, uint32_t maxOperations,
+    const RenderSettings *settings, const Camera *camera, float aspectRatio,
+    uint32_t renderWidth, uint32_t renderHeight) {
+  NURI_PROFILER_FUNCTION();
+  RenderScenePreparationContext ctx{
+      .scene = scene,
+      .resources = resources,
+      .maxOperations = std::max(1u, maxOperations),
+      .settings = settings,
+      .camera = camera,
+      .aspectRatio = aspectRatio,
+      .renderWidth = renderWidth,
+      .renderHeight = renderHeight,
+  };
+  bool complete = true;
+  for (const std::unique_ptr<RenderFeature> &feature : features_) {
+    if (!feature) {
+      continue;
+    }
+    auto result = feature->prepareSceneStep(ctx);
+    if (result.hasError()) {
+      return Result<bool, std::string>::makeError(result.error());
+    }
+    complete = complete && result.value();
+  }
+  return Result<bool, std::string>::makeResult(complete);
+}
+
 void RenderPipeline::onFrameSubmitted(
     const RenderFrameContext &frame) noexcept {
   for (const std::unique_ptr<FrameDataProvider> &provider : providers_) {

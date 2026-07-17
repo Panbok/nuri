@@ -24,6 +24,26 @@ namespace nuri {
 class Model;
 struct ModelAnimationPackedData;
 
+// Worker-owned native GPU preparation for a model. The payload exposes no
+// backend types and cannot be rendered until Model::publishPreparedGpu adopts
+// it on the render thread.
+class NURI_API PreparedGpuModelData final {
+public:
+  ~PreparedGpuModelData();
+
+  PreparedGpuModelData(const PreparedGpuModelData &) = delete;
+  PreparedGpuModelData &operator=(const PreparedGpuModelData &) = delete;
+  PreparedGpuModelData(PreparedGpuModelData &&) = delete;
+  PreparedGpuModelData &operator=(PreparedGpuModelData &&) = delete;
+
+private:
+  struct Impl;
+  explicit PreparedGpuModelData(std::unique_ptr<Impl> impl);
+
+  std::unique_ptr<Impl> impl_{};
+  friend class Model;
+};
+
 enum class PackedVertexFormat : uint8_t {
   StaticQuantized20 = 0,
   AnimatedFloat24 = 1,
@@ -177,6 +197,16 @@ public:
   [[nodiscard]] static Result<std::unique_ptr<Model>, std::string>
   createPrepared(GPUDevice &gpu, PreparedModelData data,
                  std::string_view debugName = {});
+  // Two-phase model materialization. prepareGpu is resource-worker-safe on
+  // supporting backends and performs native allocation/upload recording;
+  // publishPreparedGpu only adopts public handles and CPU ownership.
+  [[nodiscard]] static Result<std::unique_ptr<PreparedGpuModelData>,
+                              std::string>
+  prepareGpu(GPUDevice &gpu, PreparedModelData data,
+             std::string_view debugName = {});
+  [[nodiscard]] static Result<std::unique_ptr<Model>, std::string>
+  publishPreparedGpu(GPUDevice &gpu,
+                     std::unique_ptr<PreparedGpuModelData> prepared);
 
   [[nodiscard]] static Result<std::unique_ptr<Model>, std::string>
   createFromFile(

@@ -109,6 +109,13 @@ OpaquePrepassFeature::prepare(FrameBuildContext &ctx) {
 }
 
 Result<bool, std::string>
+OpaquePrepassFeature::prepareSceneStep(RenderScenePreparationContext &ctx) {
+  return renderer_->prepareSceneCacheStep(
+      ctx.scene, ctx.resources, ctx.maxOperations, ctx.settings, ctx.camera,
+      ctx.aspectRatio, ctx.renderWidth, ctx.renderHeight);
+}
+
+Result<bool, std::string>
 OpaquePrepassFeature::publishFrameData(FrameBuildContext &ctx) {
   renderer_->publishFrameData(ctx.frame);
   return Result<bool, std::string>::makeResult(true);

@@ -76,11 +76,12 @@ Result<bool, std::string> Renderer::render(RenderPipeline &pipeline,
     }
     return frameResult;
   }
-
   const AssetCpuSchedulerStats cpuStats = assets_.cpuStats();
   frameContext.metrics.assets = {
       .cpuCompletions = lastAssetPublicationStats_.cpuCompletions,
       .cpuWorkers = cpuStats.workerCount,
+      .cpuActiveWorkerLimit = cpuStats.activeWorkerLimit,
+      .cpuInteractiveMode = cpuStats.interactiveMode ? 1u : 0u,
       .cpuQueuedJobs = cpuStats.queuedJobs,
       .cpuRunningJobs = cpuStats.runningJobs,
       .cpuRunningIo =
@@ -102,6 +103,14 @@ Result<bool, std::string> Renderer::render(RenderPipeline &pipeline,
       .failed = lastAssetPublicationStats_.failed,
       .scenePatches = lastAssetPublicationStats_.scenePatches,
       .sceneCommits = lastAssetPublicationStats_.sceneCommits,
+      .deferredCpuCompletions =
+          lastAssetPublicationStats_.deferredCpuCompletions,
+      .publicationDeadlineExceeded =
+          lastAssetPublicationStats_.deadlineExceeded ? 1u : 0u,
+      .publicationMainThreadMilliseconds =
+          lastAssetPublicationStats_.mainThreadMilliseconds,
+      .publicationMaxOperationMilliseconds =
+          lastAssetPublicationStats_.maxOperationMilliseconds,
       .cpuInFlightBytes = cpuStats.inFlightBytes,
       .uploadBytes = lastAssetPublicationStats_.uploadBytes,
       .submittedJobs = cpuStats.submittedJobs,
@@ -244,7 +253,6 @@ Renderer::compileAndExecuteRenderGraph(uint64_t frameIndex) {
     cachedCompileResult_.reset();
     return Result<bool, std::string>::makeError(executeResult.error());
   }
-
   if (telemetryLevel != RenderGraphTelemetryLevel::None) {
     NURI_PROFILER_ZONE("Renderer.render_graph_telemetry",
                        NURI_PROFILER_COLOR_CMD_COPY);

@@ -8,6 +8,7 @@
 #include "nuri/scene/scene_handles.h"
 #include "nuri/scene/scene_prefab.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <limits>
 #include <memory_resource>
@@ -21,6 +22,29 @@
 namespace nuri {
 
 class RenderScene;
+
+struct ScenePrefabStructureCursor {
+  uint32_t nextNode = 0u;
+  uint32_t nextLight = 0u;
+  NodeId firstRoot = kInvalidNodeId;
+  bool initialized = false;
+  bool complete = false;
+};
+
+// Cursors a capacity reservation over many editor frames so a large authored
+// scene does not grow every scene-graph backing array in one UI tick.
+struct SceneGraphCapacityReservation {
+  static constexpr uint32_t kStageCount = 32u;
+  size_t nodeCapacity = 0u;
+  size_t renderableCapacity = 0u;
+  uint32_t stage = 0u;
+
+  [[nodiscard]] bool complete() const noexcept { return stage >= kStageCount; }
+  [[nodiscard]] float progress() const noexcept {
+    return static_cast<float>(std::min(stage, kStageCount)) /
+           static_cast<float>(kStageCount);
+  }
+};
 
 class NURI_API SceneGraph {
 public:
@@ -53,6 +77,14 @@ public:
   [[nodiscard]] bool setNodeLocalTransform(NodeId node,
                                            const glm::mat4 &localFromParent);
   [[nodiscard]] bool syncWorldTransforms();
+  // Advances at most maxNodes world-transform updates. Returns true when all
+  // currently dirty roots are synchronized.
+  [[nodiscard]] bool syncWorldTransformsStep(uint32_t maxNodes);
+  // Reserves at most maxOperations backing arrays. Existing handles and
+  // authored state remain valid. Returns true once every array is reserved.
+  [[nodiscard]] Result<bool, std::string>
+  reserveCapacityStep(SceneGraphCapacityReservation &reservation,
+                      uint32_t maxOperations);
   [[nodiscard]] bool getNodeLocalTransform(NodeId node, glm::mat4 &out) const;
   [[nodiscard]] bool getCachedNodeWorldTransform(NodeId node,
                                                  glm::mat4 &out) const;
@@ -141,6 +173,12 @@ public:
   [[nodiscard]] Result<NodeId, std::string>
   instantiatePrefabStructure(const ScenePrefab &prefab, NodeId parent,
                              SceneInstantiationMap *outMap = nullptr);
+  // Incremental variant used by interactive scene publication. Each created
+  // node or light consumes one operation. Partial state belongs to `outMap`
+  // and remains authored but unpublished until its owner commits the scene.
+  [[nodiscard]] Result<bool, std::string> instantiatePrefabStructureStep(
+      const ScenePrefab &prefab, NodeId parent, SceneInstantiationMap &outMap,
+      ScenePrefabStructureCursor &cursor, uint32_t maxOperations);
   [[nodiscard]] Result<RenderableId, std::string>
   attachPrefabRenderable(const ScenePrefab &prefab,
                          uint32_t prefabRenderableIndex, ModelRef model,
@@ -316,6 +354,7 @@ private:
   [[nodiscard]] Result<SlotReservation, std::string> allocateSpotLightSlot();
 
   void markSubtreeDirty(uint32_t rootIndex);
+  void resetWorldTransformSync() noexcept;
   void attachNode(uint32_t childIndex, uint32_t parentIndex);
   void detachNode(uint32_t nodeIndex);
   void updateSubtreeDepth(uint32_t rootIndex);
@@ -330,6 +369,10 @@ private:
                                           uint32_t &outNodeIndex) const;
 
   std::pmr::memory_resource *memory_ = std::pmr::get_default_resource();
+  std::pmr::vector<uint32_t> worldSyncRoots_;
+  std::pmr::vector<uint32_t> worldSyncStack_;
+  size_t worldSyncRootCursor_ = 0u;
+  bool worldSyncPrepared_ = false;
   std::pmr::vector<uint32_t> dirtyRoots_;
   NodeStore nodes_;
   RenderableStore renderableComponents_;

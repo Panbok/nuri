@@ -13,6 +13,7 @@ set(NURI_RENDERER_SOURCES
   nuri/core/input_system.cpp
   nuri/core/log.cpp
   nuri/core/runtime_config.cpp
+  nuri/core/thread_priority.cpp
   nuri/gfx/debug_draw_3d.cpp
   nuri/gfx/frame/external_temporal_provider.cpp
   nuri/gfx/frame/temporal_frame_service.cpp

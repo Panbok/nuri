@@ -13,6 +13,23 @@ namespace {
 
 using namespace std::chrono_literals;
 
+TEST(AssetCpuSchedulerTests, InteractiveModeAppliesConfiguredAdmissionLimit) {
+  nuri::AssetCpuScheduler scheduler(nuri::AssetCpuSchedulerConfig{
+      .workerCount = 4u,
+      .interactiveWorkerCount = 1u,
+  });
+  EXPECT_EQ(scheduler.stats().activeWorkerLimit, 4u);
+  EXPECT_FALSE(scheduler.stats().interactiveMode);
+
+  scheduler.setInteractiveMode(true);
+  EXPECT_EQ(scheduler.stats().activeWorkerLimit, 1u);
+  EXPECT_TRUE(scheduler.stats().interactiveMode);
+
+  scheduler.setInteractiveMode(false);
+  EXPECT_EQ(scheduler.stats().activeWorkerLimit, 4u);
+  EXPECT_FALSE(scheduler.stats().interactiveMode);
+}
+
 TEST(AssetCpuSchedulerTests, EnforcesInFlightBudgets) {
   nuri::AssetCpuScheduler scheduler(nuri::AssetCpuSchedulerConfig{
       .workerCount = 1u,
@@ -200,18 +217,16 @@ TEST(AssetCpuSchedulerTests, WorkClassConcurrencyDoesNotBlockOtherClasses) {
                            },
                    })
                    .hasError());
-  ASSERT_FALSE(scheduler
-                   .enqueue(nuri::AssetCpuJob{
-                       .workClass = nuri::AssetWorkClass::Metadata,
-                       .execute =
-                           [&](std::stop_token) {
-                             metadataRan.count_down();
-                           },
-                   })
-                   .hasError());
+  ASSERT_FALSE(
+      scheduler
+          .enqueue(nuri::AssetCpuJob{
+              .workClass = nuri::AssetWorkClass::Metadata,
+              .execute = [&](std::stop_token) { metadataRan.count_down(); },
+          })
+          .hasError());
 
-  for (uint32_t attempt = 0u;
-       attempt < 100u && !metadataRan.try_wait(); ++attempt) {
+  for (uint32_t attempt = 0u; attempt < 100u && !metadataRan.try_wait();
+       ++attempt) {
     std::this_thread::sleep_for(1ms);
   }
   EXPECT_TRUE(metadataRan.try_wait());

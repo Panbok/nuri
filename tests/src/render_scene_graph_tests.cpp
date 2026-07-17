@@ -259,4 +259,80 @@ TEST(RenderSceneGraphTests,
   EXPECT_FLOAT_EQ(scene.renderables()[0].morphWeights[1], 0.75f);
 }
 
+TEST(RenderSceneGraphTests, WorldTransformSynchronizationYieldsByNodeBudget) {
+  nuri::RenderScene scene;
+  nuri::SceneGraph &graph = scene.graph();
+  auto parent = graph.createNode(graph.rootNode(), "Parent",
+                                 translate(glm::vec3(1.0f, 0.0f, 0.0f)));
+  ASSERT_FALSE(parent.hasError()) << parent.error();
+  auto child = graph.createNode(parent.value(), "Child",
+                                translate(glm::vec3(0.0f, 2.0f, 0.0f)));
+  ASSERT_FALSE(child.hasError()) << child.error();
+  auto grandchild = graph.createNode(child.value(), "Grandchild",
+                                     translate(glm::vec3(0.0f, 0.0f, 3.0f)));
+  ASSERT_FALSE(grandchild.hasError()) << grandchild.error();
+
+  EXPECT_FALSE(graph.syncWorldTransformsStep(1u));
+  bool complete = false;
+  for (uint32_t step = 0u; step < 8u && !complete; ++step) {
+    complete = graph.syncWorldTransformsStep(1u);
+  }
+  ASSERT_TRUE(complete);
+  glm::mat4 world(1.0f);
+  ASSERT_TRUE(graph.getCachedNodeWorldTransform(grandchild.value(), world));
+  EXPECT_TRUE(mat4Near(world, translate(glm::vec3(1.0f, 2.0f, 3.0f))));
+}
+
+TEST(RenderSceneGraphTests,
+     PrefabStructureConstructionYieldsByOperationBudget) {
+  nuri::RenderScene scene;
+  nuri::SceneGraph &graph = scene.graph();
+  nuri::ScenePrefab prefab;
+  prefab.nodes.resize(3u);
+  prefab.nodes[0].name = "Root";
+  prefab.nodes[1].name = "Child";
+  prefab.nodes[1].parentIndex = 0u;
+  prefab.nodes[2].name = "Grandchild";
+  prefab.nodes[2].parentIndex = 1u;
+  prefab.lights.push_back(nuri::ScenePrefabLight{
+      .nodeIndex = 2u,
+      .light = nuri::LightDesc{.type = nuri::LightType::Point},
+  });
+
+  nuri::SceneInstantiationMap map;
+  nuri::ScenePrefabStructureCursor cursor;
+  uint32_t incompleteSteps = 0u;
+  bool complete = false;
+  for (uint32_t step = 0u; step < 8u && !complete; ++step) {
+    auto result = graph.instantiatePrefabStructureStep(prefab, graph.rootNode(),
+                                                       map, cursor, 1u);
+    ASSERT_FALSE(result.hasError()) << result.error();
+    complete = result.value();
+    incompleteSteps += complete ? 0u : 1u;
+  }
+  EXPECT_TRUE(complete);
+  EXPECT_GE(incompleteSteps, 3u);
+  EXPECT_EQ(cursor.nextNode, 3u);
+  EXPECT_EQ(cursor.nextLight, 1u);
+  EXPECT_EQ(countChildren(graph, graph.rootNode()), 1u);
+}
+
+TEST(RenderSceneGraphTests, PrefabRejectsParentThatIsNotAnEarlierNode) {
+  nuri::RenderScene scene;
+  nuri::SceneGraph &graph = scene.graph();
+  nuri::ScenePrefab prefab;
+  prefab.nodes.resize(1u);
+  prefab.nodes[0].name = "MalformedRoot";
+  prefab.nodes[0].parentIndex = 7u;
+
+  nuri::SceneInstantiationMap map;
+  nuri::ScenePrefabStructureCursor cursor;
+  auto result = graph.instantiatePrefabStructureStep(prefab, graph.rootNode(),
+                                                     map, cursor, 1u);
+
+  ASSERT_TRUE(result.hasError());
+  EXPECT_NE(result.error().find("parent index"), std::string::npos);
+  EXPECT_EQ(countChildren(graph, graph.rootNode()), 0u);
+}
+
 } // namespace

@@ -10,8 +10,11 @@ Result<bool, std::string>
 AnimationSceneFrameProvider::prepare(FrameBuildContext &ctx) {
   ctx.frame.sharedResources.animationSceneGpuData.reset();
 
+  if (runtime_ == nullptr) {
+    return Result<bool, std::string>::makeResult(true);
+  }
   auto prepareResult =
-      runtime_.prepareAnimationSceneFrame(ctx.frame.frameIndex);
+      runtime_->prepareAnimationSceneFrame(ctx.frame.frameIndex);
   if (prepareResult.hasError()) {
     NURI_LOG_WARNING("AnimationSceneFrameProvider::prepare: failed to prepare "
                      "frame %llu: %s",
@@ -19,7 +22,8 @@ AnimationSceneFrameProvider::prepare(FrameBuildContext &ctx) {
                      prepareResult.error().c_str());
     return prepareResult;
   }
-  const AnimationSceneFrameData *frameData = runtime_.animationSceneFrameData();
+  const AnimationSceneFrameData *frameData =
+      runtime_->animationSceneFrameData();
   if (frameData == nullptr) {
     return Result<bool, std::string>::makeResult(true);
   }
@@ -35,12 +39,16 @@ AnimationSceneFrameProvider::prepare(FrameBuildContext &ctx) {
 
 void AnimationSceneFrameProvider::onFrameSubmitted(
     const RenderFrameContext &frame) noexcept {
-  runtime_.commitAnimationSceneFrame(frame.frameIndex);
+  if (runtime_ != nullptr) {
+    runtime_->commitAnimationSceneFrame(frame.frameIndex);
+  }
 }
 
 void AnimationSceneFrameProvider::onFrameAbandoned(
     const RenderFrameContext &frame) noexcept {
-  runtime_.abandonAnimationSceneFrame(frame.frameIndex);
+  if (runtime_ != nullptr) {
+    runtime_->abandonAnimationSceneFrame(frame.frameIndex);
+  }
 }
 
 } // namespace nuri

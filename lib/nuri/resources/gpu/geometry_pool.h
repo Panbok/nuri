@@ -34,6 +34,11 @@ public:
   allocate(std::span<const std::byte> vertexBytes, uint32_t vertexCount,
            std::span<const std::byte> indexBytes, uint32_t indexCount,
            std::string_view debugName);
+  [[nodiscard]] Result<GeometryAllocationHandle, std::string>
+  adoptPrepared(BufferHandle vertexBuffer, size_t vertexBytes,
+                uint32_t vertexCount, BufferHandle indexBuffer,
+                size_t indexBytes, uint32_t indexCount,
+                std::string_view debugName);
   void release(GeometryAllocationHandle handle);
   [[nodiscard]] bool resolve(GeometryAllocationHandle handle,
                              GeometryAllocationView &out) const;

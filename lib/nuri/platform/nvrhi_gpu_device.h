@@ -35,9 +35,33 @@ public:
   Result<BufferHandle, std::string>
   createBuffer(const BufferDesc &desc,
                std::string_view debugName = {}) override;
+  [[nodiscard]] bool
+  supportsBackgroundBufferPreparation() const noexcept override {
+    return true;
+  }
+  Result<std::unique_ptr<PreparedGpuBuffer>, std::string>
+  prepareBuffer(const BufferDesc &desc,
+                std::string_view debugName = {}) override;
+  Result<BufferHandle, std::string>
+  publishPreparedBuffer(std::unique_ptr<PreparedGpuBuffer> prepared) override;
+  [[nodiscard]] bool
+  supportsBackgroundBufferBatchPreparation() const noexcept override {
+    return true;
+  }
+  Result<std::vector<std::unique_ptr<PreparedGpuBuffer>>, std::string>
+  prepareBufferBatch(std::span<const PreparedBufferRequest> requests) override;
   Result<TextureHandle, std::string>
   createTexture(const TextureDesc &desc,
                 std::string_view debugName = {}) override;
+  [[nodiscard]] bool
+  supportsBackgroundTexturePreparation() const noexcept override {
+    return true;
+  }
+  Result<std::unique_ptr<PreparedGpuTexture>, std::string>
+  prepareTexture(const TextureDesc &desc,
+                 std::string_view debugName = {}) override;
+  Result<TextureHandle, std::string>
+  publishPreparedTexture(std::unique_ptr<PreparedGpuTexture> prepared) override;
   Result<TextureHandle, std::string>
   createFramebufferTexture(const TextureDesc &desc,
                            std::string_view debugName = {}) override;
@@ -125,6 +149,15 @@ public:
   allocateGeometry(std::span<const std::byte> vertexBytes, uint32_t vertexCount,
                    std::span<const std::byte> indexBytes, uint32_t indexCount,
                    std::string_view debugName = {}) override;
+  [[nodiscard]] bool
+  supportsBackgroundGeometryPreparation() const noexcept override {
+    return true;
+  }
+  Result<GeometryAllocationHandle, std::string>
+  adoptPreparedGeometry(BufferHandle vertexBuffer, size_t vertexBytes,
+                        uint32_t vertexCount, BufferHandle indexBuffer,
+                        size_t indexBytes, uint32_t indexCount,
+                        std::string_view debugName = {}) override;
   void releaseGeometry(GeometryAllocationHandle h) override;
   Result<SubmissionHandle, std::string>
   submitBackgroundBufferCopies(std::span<const BufferCopyRegion> regions,

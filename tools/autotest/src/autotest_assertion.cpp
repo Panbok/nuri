@@ -108,6 +108,10 @@ void flattenAutotestRendererMetrics(std::map<std::string, double> &out,
   const RenderFrameMetrics::AssetStreamingFrameMetrics &assets = metrics.assets;
   addMetric(out, "renderer.assets.cpu_completions", assets.cpuCompletions);
   addMetric(out, "renderer.assets.cpu_workers", assets.cpuWorkers);
+  addMetric(out, "renderer.assets.cpu_active_worker_limit",
+            assets.cpuActiveWorkerLimit);
+  addMetric(out, "renderer.assets.cpu_interactive_mode",
+            assets.cpuInteractiveMode);
   addMetric(out, "renderer.assets.cpu_queued_jobs", assets.cpuQueuedJobs);
   addMetric(out, "renderer.assets.cpu_running_jobs", assets.cpuRunningJobs);
   addMetric(out, "renderer.assets.cpu_running_io", assets.cpuRunningIo);
@@ -125,6 +129,14 @@ void flattenAutotestRendererMetrics(std::map<std::string, double> &out,
   addMetric(out, "renderer.assets.failed", assets.failed);
   addMetric(out, "renderer.assets.scene_patches", assets.scenePatches);
   addMetric(out, "renderer.assets.scene_commits", assets.sceneCommits);
+  addMetric(out, "renderer.assets.deferred_cpu_completions",
+            assets.deferredCpuCompletions);
+  addMetric(out, "renderer.assets.publication_deadline_exceeded",
+            assets.publicationDeadlineExceeded);
+  addMetric(out, "renderer.assets.publication_main_thread_ms",
+            assets.publicationMainThreadMilliseconds);
+  addMetric(out, "renderer.assets.publication_max_operation_ms",
+            assets.publicationMaxOperationMilliseconds);
   addMetric(out, "renderer.assets.cpu_in_flight_bytes",
             static_cast<double>(assets.cpuInFlightBytes));
   addMetric(out, "renderer.assets.upload_bytes",

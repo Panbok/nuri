@@ -60,6 +60,9 @@ public:
          std::string_view debugName = {});
   [[nodiscard]] static Result<std::unique_ptr<Texture>, std::string>
   createPrepared(GPUDevice &gpu, PreparedTextureData data);
+  [[nodiscard]] static std::unique_ptr<Texture>
+  adoptPrepared(GPUDevice &gpu, TextureHandle handle, const TextureDesc &desc,
+                std::string debugName);
 
   [[nodiscard]] static Result<PreparedTextureData, std::string>
   prepareTexture(std::string_view filePath,

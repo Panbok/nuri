@@ -51,6 +51,11 @@ public:
   void onResize(uint32_t width, uint32_t height);
   void publishFrameData(RenderFrameContext &frame);
   Result<bool, std::string> prepareOpaqueGraphPasses(RenderFrameContext &frame);
+  Result<bool, std::string> prepareSceneCacheStep(
+      const RenderScene &scene, const ResourceManager &resources,
+      uint32_t maxOperations = 128u, const RenderSettings *settings = nullptr,
+      const Camera *camera = nullptr, float aspectRatio = 1.0f,
+      uint32_t renderWidth = 1u, uint32_t renderHeight = 1u);
   void commitSubmittedFrame(uint64_t frameIndex) noexcept;
   void abandonPreparedFrame(uint64_t frameIndex) noexcept;
   [[nodiscard]] bool hasPreparedOpaqueMainPasses() const noexcept;
@@ -433,6 +438,8 @@ private:
     size_t requiredBytes = 0;
   };
 
+  struct SceneCachePreparation;
+
   struct StaticBatchCache {
     bool valid = false;
     bool meshletRequested = false;
@@ -476,6 +483,9 @@ private:
   Result<bool, std::string> ensureRingBufferCount(uint32_t requiredCount);
   Result<bool, std::string>
   ensureInstanceMatricesRingCapacity(size_t requiredBytes);
+  Result<bool, std::string>
+  ensureInstanceMatricesRingSlotCapacity(size_t requiredBytes,
+                                         size_t slotIndex);
   Result<bool, std::string>
   ensurePreviousInstanceMatricesRingCapacity(size_t requiredBytes);
   Result<bool, std::string>
@@ -536,6 +546,10 @@ private:
                                               const ResourceManager &resources,
                                               uint32_t materialCount,
                                               bool excludeTransmission);
+  bool adoptPreparedSceneCache(const RenderScene &scene,
+                               const ResourceManager &resources,
+                               uint32_t materialCount,
+                               bool excludeTransmission);
   Result<bool, std::string>
   rebuildMaterialTextureAccessCache(const RenderScene &scene,
                                     const ResourceManager &resources,
@@ -926,7 +940,29 @@ private:
   std::pmr::vector<glm::vec4> instanceAutoLodWorldErrors_;
   std::pmr::vector<uint8_t> instanceAutoLodCounts_;
   std::pmr::vector<TextureHandle> materialTextureAccessHandles_;
+  bool materialTextureAccessCacheValid_ = false;
+  std::shared_ptr<SceneCachePreparation> sceneCachePreparation_;
+  std::vector<std::unique_ptr<Buffer>> sceneBufferRetirements_;
+  uint32_t sceneBufferRetirementCooldownFrames_ = 0u;
   std::pmr::vector<uint32_t> instanceAutoLodLevels_;
+  std::pmr::vector<uint32_t> preparedInitialInstanceRemap_;
+  const RenderScene *preparedInitialAutoLodScene_ = nullptr;
+  uint64_t preparedInitialAutoLodTransformVersion_ = 0u;
+  glm::mat4 preparedInitialAutoLodView_{1.0f};
+  ProjectionType preparedInitialAutoLodProjectionType_ =
+      ProjectionType::Perspective;
+  float preparedInitialAutoLodNearPlane_ = 0.1f;
+  float preparedInitialAutoLodProjectionScaleY_ = 1.0f;
+  float preparedInitialAutoLodTargetPixelError_ = 1.0f;
+  float preparedInitialAutoLodHysteresisRatio_ = 0.0f;
+  uint32_t preparedInitialAutoLodRenderHeight_ = 1u;
+  std::array<size_t, Submesh::kMaxLodCount>
+      preparedInitialAutoLodBucketCounts_{};
+  uint64_t preparedInitialAutoLodLod0Count_ = 0u;
+  uint64_t preparedInitialAutoLodLod1Count_ = 0u;
+  uint64_t preparedInitialRemapSignature_ =
+      std::numeric_limits<uint64_t>::max();
+  bool preparedInitialAutoLodValid_ = false;
   std::pmr::vector<uint8_t> instanceTessSelection_;
   std::pmr::vector<TessCandidate> tessCandidates_;
   std::pmr::vector<uint32_t> instanceRemap_;

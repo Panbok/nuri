@@ -83,6 +83,17 @@ struct ModelMeshletGpuBuffers {
   std::unique_ptr<Buffer> meshletLodRangeBuffer;
 };
 
+struct PreparedMeshletBufferData {
+  std::vector<std::byte> meshletDescriptors;
+  std::vector<std::byte> vertexIndices;
+  std::vector<std::byte> primitiveIndices;
+  std::vector<std::byte> lodRanges;
+  uint32_t meshletCount = 0u;
+  uint32_t vertexIndexCount = 0u;
+  uint32_t primitiveIndexCount = 0u;
+  uint32_t lodRangeCount = 0u;
+};
+
 struct MeshletDescriptorGpu {
   glm::uvec4 offsetsCounts{0u};
   glm::vec4 boundsSphere{0.0f};
@@ -494,6 +505,154 @@ Result<std::unique_ptr<Buffer>, std::string> createStaticVertexDecodeBuffer(
 
   return Result<std::unique_ptr<Buffer>, std::string>::makeResult(
       std::move(buffer));
+}
+
+template <typename T>
+std::vector<std::byte> copyPodBytes(std::span<const T> values) {
+  std::vector<std::byte> bytes(values.size_bytes());
+  if (!bytes.empty()) {
+    std::memcpy(bytes.data(), values.data(), bytes.size());
+  }
+  return bytes;
+}
+
+Result<PreparedMeshletBufferData, std::string>
+prepareMeshletBufferData(std::span<const MeshletDescriptor> meshlets,
+                         std::span<const uint32_t> meshletVertexIndices,
+                         std::span<const uint8_t> meshletPrimitiveIndices,
+                         std::span<const Submesh> submeshes) {
+  PreparedMeshletBufferData prepared{};
+  const bool hasMeshletPayload = !meshlets.empty() ||
+                                 !meshletVertexIndices.empty() ||
+                                 !meshletPrimitiveIndices.empty();
+  if (!hasMeshletPayload) {
+    return Result<PreparedMeshletBufferData, std::string>::makeResult(
+        std::move(prepared));
+  }
+  if (meshlets.empty() || meshletVertexIndices.empty() ||
+      meshletPrimitiveIndices.empty()) {
+    return Result<PreparedMeshletBufferData, std::string>::makeError(
+        "Model::create: meshlet descriptor, vertex index, and primitive "
+        "index streams must be present together");
+  }
+
+  std::vector<MeshletDescriptorGpu> descriptors;
+  descriptors.reserve(meshlets.size());
+  for (const MeshletDescriptor &meshlet : meshlets) {
+    if (meshlet.vertexCount > kMeshletShaderMaxVertices) {
+      return Result<PreparedMeshletBufferData, std::string>::makeError(
+          "Model::create: meshlet vertex count exceeds shader output limit");
+    }
+    if (meshlet.primitiveCount > kMeshletShaderMaxPrimitives) {
+      return Result<PreparedMeshletBufferData, std::string>::makeError(
+          "Model::create: meshlet primitive count exceeds shader output "
+          "limit");
+    }
+    const uint64_t vertexEnd =
+        static_cast<uint64_t>(meshlet.vertexOffset) + meshlet.vertexCount;
+    if (vertexEnd > meshletVertexIndices.size()) {
+      return Result<PreparedMeshletBufferData, std::string>::makeError(
+          "Model::create: meshlet vertex index range out of bounds");
+    }
+    const uint64_t primitiveIndexCount =
+        static_cast<uint64_t>(meshlet.primitiveCount) * 3u;
+    const uint64_t primitiveEnd =
+        static_cast<uint64_t>(meshlet.primitiveOffset) + primitiveIndexCount;
+    if (primitiveEnd > meshletPrimitiveIndices.size()) {
+      return Result<PreparedMeshletBufferData, std::string>::makeError(
+          "Model::create: meshlet primitive index range out of bounds");
+    }
+    if ((meshlet.primitiveOffset % 3u) != 0u) {
+      return Result<PreparedMeshletBufferData, std::string>::makeError(
+          "Model::create: meshlet primitive offset is not triangle-aligned");
+    }
+    for (uint64_t index = meshlet.primitiveOffset; index < primitiveEnd;
+         ++index) {
+      if (meshletPrimitiveIndices[static_cast<size_t>(index)] >=
+          meshlet.vertexCount) {
+        return Result<PreparedMeshletBufferData, std::string>::makeError(
+            "Model::create: meshlet primitive local index out of bounds");
+      }
+    }
+    descriptors.push_back(MeshletDescriptorGpu{
+        .offsetsCounts =
+            glm::uvec4(meshlet.vertexOffset, meshlet.primitiveOffset / 3u,
+                       meshlet.vertexCount, meshlet.primitiveCount),
+        .boundsSphere = meshlet.boundsSphere,
+        .coneApex = meshlet.coneApex,
+        .coneAxisCutoff = meshlet.coneAxisCutoff,
+    });
+  }
+
+  if ((meshletPrimitiveIndices.size() % 3u) != 0u) {
+    return Result<PreparedMeshletBufferData, std::string>::makeError(
+        "Model::create: meshlet primitive index stream is not "
+        "triangle-aligned");
+  }
+
+  std::vector<Model::SubmeshMeshletLodRangeGpu> lodRanges;
+  lodRanges.reserve(submeshes.size());
+  for (const Submesh &submesh : submeshes) {
+    Model::SubmeshMeshletLodRangeGpu range{};
+    range.lodCount = submesh.lodCount;
+    for (uint32_t lodIndex = 0u; lodIndex < submesh.lodCount; ++lodIndex) {
+      const SubmeshLod &lod = submesh.lods[lodIndex];
+      const uint64_t meshletEnd =
+          static_cast<uint64_t>(lod.meshletOffset) + lod.meshletCount;
+      if (meshletEnd > meshlets.size()) {
+        return Result<PreparedMeshletBufferData, std::string>::makeError(
+            "Model::create: submesh meshlet range out of bounds");
+      }
+      for (uint64_t meshletIndex = lod.meshletOffset; meshletIndex < meshletEnd;
+           ++meshletIndex) {
+        const MeshletDescriptor &meshlet =
+            meshlets[static_cast<size_t>(meshletIndex)];
+        const uint64_t vertexEnd =
+            static_cast<uint64_t>(meshlet.vertexOffset) + meshlet.vertexCount;
+        for (uint64_t vertexIndex = meshlet.vertexOffset;
+             vertexIndex < vertexEnd; ++vertexIndex) {
+          if (meshletVertexIndices[static_cast<size_t>(vertexIndex)] >=
+              submesh.vertexCount) {
+            return Result<PreparedMeshletBufferData, std::string>::makeError(
+                "Model::create: meshlet vertex local index out of submesh "
+                "bounds");
+          }
+        }
+      }
+      range.meshletOffset[lodIndex] = lod.meshletOffset;
+      range.meshletCount[lodIndex] = lod.meshletCount;
+      range.error[lodIndex] = lod.error;
+    }
+    lodRanges.push_back(range);
+  }
+
+  std::vector<uint32_t> primitiveIndices;
+  primitiveIndices.reserve(meshletPrimitiveIndices.size() / 3u);
+  for (size_t index = 0u; index < meshletPrimitiveIndices.size(); index += 3u) {
+    const uint32_t i0 = static_cast<uint32_t>(meshletPrimitiveIndices[index]);
+    const uint32_t i1 =
+        static_cast<uint32_t>(meshletPrimitiveIndices[index + 1u]);
+    const uint32_t i2 =
+        static_cast<uint32_t>(meshletPrimitiveIndices[index + 2u]);
+    primitiveIndices.push_back(i0 | (i1 << 8u) | (i2 << 16u));
+  }
+
+  prepared.meshletDescriptors =
+      copyPodBytes(std::span<const MeshletDescriptorGpu>(descriptors.data(),
+                                                         descriptors.size()));
+  prepared.vertexIndices = copyPodBytes(meshletVertexIndices);
+  prepared.primitiveIndices = copyPodBytes(std::span<const uint32_t>(
+      primitiveIndices.data(), primitiveIndices.size()));
+  prepared.lodRanges =
+      copyPodBytes(std::span<const Model::SubmeshMeshletLodRangeGpu>(
+          lodRanges.data(), lodRanges.size()));
+  prepared.meshletCount = static_cast<uint32_t>(meshlets.size());
+  prepared.vertexIndexCount =
+      static_cast<uint32_t>(meshletVertexIndices.size());
+  prepared.primitiveIndexCount = static_cast<uint32_t>(primitiveIndices.size());
+  prepared.lodRangeCount = static_cast<uint32_t>(lodRanges.size());
+  return Result<PreparedMeshletBufferData, std::string>::makeResult(
+      std::move(prepared));
 }
 
 Result<ModelMeshletGpuBuffers, std::string> createMeshletGpuBuffers(
@@ -1089,6 +1248,39 @@ tryLoadMeshCache(std::string_view sourcePath, const MeshCacheKey &cacheKey,
 
 } // namespace
 
+struct PreparedGpuModelData::Impl {
+  struct BufferSlot {
+    std::unique_ptr<PreparedGpuBuffer> prepared{};
+    size_t size = 0u;
+    BufferUsage usage = BufferUsage::None;
+    std::string debugName{};
+  };
+
+  explicit Impl(PreparedModelData sourceData) : source(std::move(sourceData)) {}
+
+  PreparedModelData source;
+  PreparedMeshletBufferData meshlets{};
+  BufferSlot vertex{};
+  BufferSlot index{};
+  BufferSlot vertexDecode{};
+  BufferSlot skinInfluences{};
+  BufferSlot morphMeta{};
+  BufferSlot morphDeltas{};
+  BufferSlot meshletDescriptors{};
+  BufferSlot meshletVertexIndices{};
+  BufferSlot meshletPrimitiveIndices{};
+  BufferSlot meshletLodRanges{};
+  BoundingBox bounds{};
+  uint32_t sourceMaterialCount = 0u;
+  uint32_t morphTargetCount = 0u;
+  uint32_t morphVertexCount = 0u;
+};
+
+PreparedGpuModelData::~PreparedGpuModelData() = default;
+
+PreparedGpuModelData::PreparedGpuModelData(std::unique_ptr<Impl> impl)
+    : impl_(std::move(impl)) {}
+
 bool ModelAsyncLoad::valid() const noexcept {
   return !sourcePath_.empty() &&
          (warmupCompleted_ || warmupFuture_.valid() || finalized_);
@@ -1357,6 +1549,374 @@ Model::createPrepared(GPUDevice &gpu, PreparedModelData data,
       std::span<const std::byte>(data.staticDecode.bytes.data(),
                                  data.staticDecode.bytes.size()),
       data.staticDecode.count, &animation, debugName);
+}
+
+Result<std::unique_ptr<PreparedGpuModelData>, std::string>
+Model::prepareGpu(GPUDevice &gpu, PreparedModelData data,
+                  std::string_view debugName) {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
+  if (!gpu.supportsBackgroundBufferPreparation() ||
+      !gpu.supportsBackgroundBufferBatchPreparation() ||
+      !gpu.supportsBackgroundGeometryPreparation()) {
+    return Result<std::unique_ptr<PreparedGpuModelData>, std::string>::
+        makeError("background model GPU preparation is unsupported");
+  }
+
+  auto sourceMaterialCountResult =
+      computeSourceMaterialCount(std::span<const Submesh>(
+          data.mesh.submeshes.data(), data.mesh.submeshes.size()));
+  if (sourceMaterialCountResult.hasError()) {
+    return Result<std::unique_ptr<PreparedGpuModelData>,
+                  std::string>::makeError(sourceMaterialCountResult.error());
+  }
+  const size_t expectedPackedByteCount =
+      data.mesh.vertices.size() *
+      packedVertexStrideBytes(data.packedVertexFormat);
+  if (data.packedVertexBytes.size() != expectedPackedByteCount) {
+    return Result<std::unique_ptr<PreparedGpuModelData>, std::string>::
+        makeError("Model::prepareGpu: packed vertex byte count mismatch");
+  }
+  if (data.packedVertexFormat == PackedVertexFormat::StaticQuantized20) {
+    const size_t expectedDecodeBytes =
+        static_cast<size_t>(data.staticDecode.count) *
+        sizeof(StaticVertexDecodeGpuData);
+    if (data.staticDecode.count != data.mesh.submeshes.size() ||
+        data.staticDecode.bytes.size() != expectedDecodeBytes) {
+      return Result<std::unique_ptr<PreparedGpuModelData>, std::string>::
+          makeError("Model::prepareGpu: static vertex decode mismatch");
+    }
+  } else if (!data.staticDecode.bytes.empty() ||
+             data.staticDecode.count != 0u) {
+    return Result<std::unique_ptr<PreparedGpuModelData>,
+                  std::string>::makeError("Model::prepareGpu: animated vertex "
+                                          "data must not carry static decode "
+                                          "metadata");
+  }
+  auto topologyValidation =
+      validateMeshTopology(std::span<const uint32_t>(data.mesh.indices.data(),
+                                                     data.mesh.indices.size()),
+                           static_cast<uint32_t>(data.mesh.vertices.size()),
+                           std::span<const Submesh>(data.mesh.submeshes.data(),
+                                                    data.mesh.submeshes.size()),
+                           "Model::prepareGpu");
+  if (topologyValidation.hasError()) {
+    return Result<std::unique_ptr<PreparedGpuModelData>,
+                  std::string>::makeError(topologyValidation.error());
+  }
+
+  const auto validateSection = [](const PreparedModelBufferData &section,
+                                  std::string_view label) {
+    return validatePackedAnimationSection(
+        std::span<const std::byte>(section.bytes.data(), section.bytes.size()),
+        section.count, section.stride, label);
+  };
+  auto validation = validateSection(data.skinInfluences, "skin influence");
+  if (validation.hasError()) {
+    return Result<std::unique_ptr<PreparedGpuModelData>,
+                  std::string>::makeError(validation.error());
+  }
+  validation = validateSection(data.morphMeta, "morph meta");
+  if (validation.hasError()) {
+    return Result<std::unique_ptr<PreparedGpuModelData>,
+                  std::string>::makeError(validation.error());
+  }
+  validation = validateSection(data.morphDeltas, "morph delta");
+  if (validation.hasError()) {
+    return Result<std::unique_ptr<PreparedGpuModelData>,
+                  std::string>::makeError(validation.error());
+  }
+  if (!data.skinInfluences.bytes.empty() &&
+      data.skinInfluences.stride != sizeof(PackedSkinInfluenceGpu)) {
+    return Result<std::unique_ptr<PreparedGpuModelData>, std::string>::
+        makeError("Model::prepareGpu: invalid skin influence stride");
+  }
+  const bool hasMorphMeta = !data.morphMeta.bytes.empty();
+  const bool hasMorphDeltas = !data.morphDeltas.bytes.empty();
+  if (hasMorphMeta != hasMorphDeltas) {
+    return Result<std::unique_ptr<PreparedGpuModelData>, std::string>::
+        makeError(
+            "Model::prepareGpu: morph meta and morph delta payload must be "
+            "present together");
+  }
+  if (hasMorphDeltas &&
+      data.morphDeltas.stride != sizeof(PackedMorphDeltaGpu)) {
+    return Result<std::unique_ptr<PreparedGpuModelData>, std::string>::
+        makeError("Model::prepareGpu: invalid morph delta stride");
+  }
+
+  MeshBinaryMorphMetaRecord morphMeta{};
+  if (hasMorphMeta) {
+    if (data.morphMeta.count != 1u ||
+        data.morphMeta.stride != sizeof(MeshBinaryMorphMetaRecord) ||
+        data.morphMeta.bytes.size() != sizeof(MeshBinaryMorphMetaRecord)) {
+      return Result<std::unique_ptr<PreparedGpuModelData>, std::string>::
+          makeError("Model::prepareGpu: invalid morph meta payload");
+    }
+    std::memcpy(&morphMeta, data.morphMeta.bytes.data(), sizeof(morphMeta));
+  }
+
+  auto meshletResult = prepareMeshletBufferData(
+      std::span<const MeshletDescriptor>(data.mesh.meshlets.data(),
+                                         data.mesh.meshlets.size()),
+      std::span<const uint32_t>(data.mesh.meshletVertexIndices.data(),
+                                data.mesh.meshletVertexIndices.size()),
+      std::span<const uint8_t>(data.mesh.meshletPrimitiveIndices.data(),
+                               data.mesh.meshletPrimitiveIndices.size()),
+      std::span<const Submesh>(data.mesh.submeshes.data(),
+                               data.mesh.submeshes.size()));
+  if (meshletResult.hasError()) {
+    return Result<std::unique_ptr<PreparedGpuModelData>,
+                  std::string>::makeError(meshletResult.error());
+  }
+
+  auto impl = std::make_unique<PreparedGpuModelData::Impl>(std::move(data));
+  impl->meshlets = std::move(meshletResult.value());
+  impl->bounds = computeModelBounds(std::span<const Vertex>(
+      impl->source.mesh.vertices.data(), impl->source.mesh.vertices.size()));
+  impl->sourceMaterialCount = sourceMaterialCountResult.value();
+  impl->morphTargetCount = morphMeta.morphTargetCount;
+  impl->morphVertexCount = morphMeta.vertexCount;
+
+  const std::string baseName =
+      debugName.empty() ? std::string("model") : std::string(debugName);
+  std::vector<PreparedBufferRequest> requests{};
+  std::vector<PreparedGpuModelData::Impl::BufferSlot *> requestSlots{};
+  requests.reserve(10u);
+  requestSlots.reserve(10u);
+  const auto appendSlot = [&baseName, &requests, &requestSlots](
+                              PreparedGpuModelData::Impl::BufferSlot &slot,
+                              std::span<const std::byte> bytes,
+                              BufferUsage usage, std::string_view suffix) {
+    if (bytes.empty()) {
+      return;
+    }
+    slot.size = bytes.size();
+    slot.usage = usage;
+    slot.debugName = baseName + std::string(suffix);
+    requests.push_back(PreparedBufferRequest{
+        .desc =
+            BufferDesc{
+                .usage = usage,
+                .storage = Storage::Device,
+                .size = bytes.size(),
+                .data = bytes,
+                .immutable = true,
+            },
+        .debugName = slot.debugName,
+    });
+    requestSlots.push_back(&slot);
+  };
+
+  const std::span<const std::byte> indexBytes{
+      reinterpret_cast<const std::byte *>(impl->source.mesh.indices.data()),
+      impl->source.mesh.indices.size() * sizeof(uint32_t)};
+  appendSlot(impl->vertex, impl->source.packedVertexBytes,
+             BufferUsage::Storage | BufferUsage::Vertex, "_vertices");
+  appendSlot(impl->index, indexBytes, BufferUsage::Index, "_indices");
+  appendSlot(impl->vertexDecode, impl->source.staticDecode.bytes,
+             BufferUsage::Storage, "_vertex_decode");
+  appendSlot(impl->skinInfluences, impl->source.skinInfluences.bytes,
+             BufferUsage::Storage, "_skin_influences");
+  appendSlot(impl->morphMeta, impl->source.morphMeta.bytes,
+             BufferUsage::Storage, "_morph_meta");
+  appendSlot(impl->morphDeltas, impl->source.morphDeltas.bytes,
+             BufferUsage::Storage, "_morph_deltas");
+  appendSlot(impl->meshletDescriptors, impl->meshlets.meshletDescriptors,
+             BufferUsage::Storage, "_meshlets");
+  appendSlot(impl->meshletVertexIndices, impl->meshlets.vertexIndices,
+             BufferUsage::Storage, "_meshlet_vertices");
+  appendSlot(impl->meshletPrimitiveIndices, impl->meshlets.primitiveIndices,
+             BufferUsage::Storage, "_meshlet_primitives");
+  appendSlot(impl->meshletLodRanges, impl->meshlets.lodRanges,
+             BufferUsage::Storage, "_meshlet_lod_ranges");
+
+  auto batch = gpu.prepareBufferBatch(requests);
+  if (batch.hasError()) {
+    return Result<std::unique_ptr<PreparedGpuModelData>,
+                  std::string>::makeError(batch.error());
+  }
+  if (batch.value().size() != requestSlots.size()) {
+    return Result<std::unique_ptr<PreparedGpuModelData>, std::string>::
+        makeError("Model::prepareGpu: buffer batch result count mismatch");
+  }
+  for (size_t index = 0u; index < requestSlots.size(); ++index) {
+    requestSlots[index]->prepared = std::move(batch.value()[index]);
+  }
+
+  return Result<std::unique_ptr<PreparedGpuModelData>, std::string>::makeResult(
+      std::unique_ptr<PreparedGpuModelData>(
+          new PreparedGpuModelData(std::move(impl))));
+}
+
+Result<std::unique_ptr<Model>, std::string>
+Model::publishPreparedGpu(GPUDevice &gpu,
+                          std::unique_ptr<PreparedGpuModelData> prepared) {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
+  if (prepared == nullptr || prepared->impl_ == nullptr) {
+    return Result<std::unique_ptr<Model>, std::string>::makeError(
+        "Model::publishPreparedGpu: prepared model is null");
+  }
+  PreparedGpuModelData::Impl &impl = *prepared->impl_;
+  if (impl.vertex.prepared == nullptr || impl.index.prepared == nullptr) {
+    return Result<std::unique_ptr<Model>, std::string>::makeError(
+        "Model::publishPreparedGpu: prepared geometry is incomplete");
+  }
+
+  auto vertexResult =
+      gpu.publishPreparedBuffer(std::move(impl.vertex.prepared));
+  if (vertexResult.hasError()) {
+    return Result<std::unique_ptr<Model>, std::string>::makeError(
+        vertexResult.error());
+  }
+  const BufferHandle vertexBuffer = vertexResult.value();
+  auto indexResult = gpu.publishPreparedBuffer(std::move(impl.index.prepared));
+  if (indexResult.hasError()) {
+    gpu.destroyBuffer(vertexBuffer);
+    return Result<std::unique_ptr<Model>, std::string>::makeError(
+        indexResult.error());
+  }
+  const BufferHandle indexBuffer = indexResult.value();
+  auto geometryResult = gpu.adoptPreparedGeometry(
+      vertexBuffer, impl.vertex.size,
+      static_cast<uint32_t>(impl.source.mesh.vertices.size()), indexBuffer,
+      impl.index.size, static_cast<uint32_t>(impl.source.mesh.indices.size()),
+      impl.vertex.debugName);
+  if (geometryResult.hasError()) {
+    gpu.destroyBuffer(vertexBuffer);
+    gpu.destroyBuffer(indexBuffer);
+    return Result<std::unique_ptr<Model>, std::string>::makeError(
+        geometryResult.error());
+  }
+  const GeometryAllocationHandle geometry = geometryResult.value();
+
+  const auto publishSlot = [&gpu](PreparedGpuModelData::Impl::BufferSlot &slot)
+      -> Result<std::unique_ptr<Buffer>, std::string> {
+    if (slot.prepared == nullptr) {
+      return Result<std::unique_ptr<Buffer>, std::string>::makeResult(nullptr);
+    }
+    const BufferDesc desc{
+        .usage = slot.usage,
+        .storage = Storage::Device,
+        .size = slot.size,
+        .immutable = true,
+    };
+    return Buffer::publishPrepared(gpu, std::move(slot.prepared), desc,
+                                   slot.debugName);
+  };
+  const auto publishOrRelease =
+      [&gpu, geometry,
+       &publishSlot](PreparedGpuModelData::Impl::BufferSlot &slot)
+      -> Result<std::unique_ptr<Buffer>, std::string> {
+    auto result = publishSlot(slot);
+    if (result.hasError()) {
+      gpu.releaseGeometry(geometry);
+    }
+    return result;
+  };
+
+  auto vertexDecode = publishOrRelease(impl.vertexDecode);
+  if (vertexDecode.hasError()) {
+    return Result<std::unique_ptr<Model>, std::string>::makeError(
+        vertexDecode.error());
+  }
+  auto skin = publishOrRelease(impl.skinInfluences);
+  if (skin.hasError()) {
+    return Result<std::unique_ptr<Model>, std::string>::makeError(skin.error());
+  }
+  auto morphMetaBuffer = publishOrRelease(impl.morphMeta);
+  if (morphMetaBuffer.hasError()) {
+    return Result<std::unique_ptr<Model>, std::string>::makeError(
+        morphMetaBuffer.error());
+  }
+  auto morphDeltas = publishOrRelease(impl.morphDeltas);
+  if (morphDeltas.hasError()) {
+    return Result<std::unique_ptr<Model>, std::string>::makeError(
+        morphDeltas.error());
+  }
+  auto meshlets = publishOrRelease(impl.meshletDescriptors);
+  if (meshlets.hasError()) {
+    return Result<std::unique_ptr<Model>, std::string>::makeError(
+        meshlets.error());
+  }
+  auto meshletVertices = publishOrRelease(impl.meshletVertexIndices);
+  if (meshletVertices.hasError()) {
+    return Result<std::unique_ptr<Model>, std::string>::makeError(
+        meshletVertices.error());
+  }
+  auto meshletPrimitives = publishOrRelease(impl.meshletPrimitiveIndices);
+  if (meshletPrimitives.hasError()) {
+    return Result<std::unique_ptr<Model>, std::string>::makeError(
+        meshletPrimitives.error());
+  }
+  auto meshletLodRanges = publishOrRelease(impl.meshletLodRanges);
+  if (meshletLodRanges.hasError()) {
+    return Result<std::unique_ptr<Model>, std::string>::makeError(
+        meshletLodRanges.error());
+  }
+
+  uint64_t vertexDecodeAddress = 0u;
+  if (vertexDecode.value() != nullptr) {
+    vertexDecodeAddress =
+        gpu.getBufferDeviceAddress(vertexDecode.value()->handle());
+    if (vertexDecodeAddress == 0u) {
+      gpu.releaseGeometry(geometry);
+      return Result<std::unique_ptr<Model>, std::string>::makeError(
+          "Model::publishPreparedGpu: invalid vertex decode buffer address");
+    }
+  }
+
+  ModelAnimationGpuView animationView{};
+  if (skin.value() != nullptr) {
+    animationView.skinInfluenceBuffer = skin.value()->handle();
+    animationView.skinInfluenceCount = impl.source.skinInfluences.count;
+  }
+  if (morphMetaBuffer.value() != nullptr) {
+    animationView.morphMetaBuffer = morphMetaBuffer.value()->handle();
+  }
+  if (morphDeltas.value() != nullptr) {
+    animationView.morphDeltaBuffer = morphDeltas.value()->handle();
+    animationView.morphTargetCount = impl.morphTargetCount;
+    animationView.morphVertexCount = impl.morphVertexCount;
+  }
+
+  ModelMeshletGpuView meshletView{};
+  if (meshlets.value() != nullptr) {
+    meshletView.meshletBuffer = meshlets.value()->handle();
+    meshletView.meshletCount = impl.meshlets.meshletCount;
+    meshletView.meshletVertexIndexBuffer = meshletVertices.value()->handle();
+    meshletView.meshletVertexIndexCount = impl.meshlets.vertexIndexCount;
+    meshletView.meshletPrimitiveIndexBuffer =
+        meshletPrimitives.value()->handle();
+    meshletView.meshletPrimitiveIndexCount = impl.meshlets.primitiveIndexCount;
+    meshletView.lodRangeBuffer = meshletLodRanges.value()->handle();
+    meshletView.lodRangeCount = impl.meshlets.lodRangeCount;
+  }
+
+  std::pmr::memory_resource *const storageMemory =
+      std::pmr::get_default_resource();
+  std::pmr::vector<Submesh> ownedSubmeshes(storageMemory);
+  ownedSubmeshes.assign(impl.source.mesh.submeshes.begin(),
+                        impl.source.mesh.submeshes.end());
+  std::pmr::vector<glm::vec4> meshletBoundsSpheres = copyMeshletBoundsSpheres(
+      std::span<const MeshletDescriptor>(impl.source.mesh.meshlets.data(),
+                                         impl.source.mesh.meshlets.size()),
+      storageMemory);
+  std::pmr::vector<uint32_t> sourceMaterialToRuntime(
+      impl.sourceMaterialCount, Model::kInvalidMaterialIndex, storageMemory);
+
+  return Result<std::unique_ptr<Model>, std::string>::makeResult(
+      std::unique_ptr<Model>(new Model(
+          gpu, geometry, std::move(ownedSubmeshes),
+          static_cast<uint32_t>(impl.source.mesh.vertices.size()),
+          static_cast<uint32_t>(impl.source.mesh.indices.size()), impl.bounds,
+          impl.source.packedVertexFormat, animationView, meshletView,
+          vertexDecodeAddress, std::move(vertexDecode.value()),
+          std::move(skin.value()), std::move(morphMetaBuffer.value()),
+          std::move(morphDeltas.value()), std::move(meshlets.value()),
+          std::move(meshletVertices.value()),
+          std::move(meshletPrimitives.value()),
+          std::move(meshletLodRanges.value()), std::move(meshletBoundsSpheres),
+          std::move(sourceMaterialToRuntime))));
 }
 
 Result<std::unique_ptr<Model>, std::string> Model::createFromPackedVertices(
