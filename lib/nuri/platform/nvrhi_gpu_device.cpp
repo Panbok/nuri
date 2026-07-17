@@ -6,7 +6,7 @@
 #include "nuri/core/log.h"
 #include "nuri/core/profiling.h"
 #include "nuri/core/window.h"
-#include "nuri/gfx/gpu_retirement_queue.h"
+#include "nuri/gfx/recording_retirement_tracker.h"
 #include "nuri/resources/gpu/geometry_pool.h"
 #include "nuri/resources/gpu/material.h"
 #include "nuri/utils/env_utils.h"
@@ -1211,9 +1211,22 @@ struct MeshletPipelineResource {
 
 template <typename NuriHandle, typename Resource> class ResourceTable {
 public:
+  struct DebugSlotInfo {
+    uint32_t generation = 0u;
+    bool inRange = false;
+    bool live = false;
+    bool retired = false;
+    std::string_view debugName{};
+  };
+
   struct ReservedSlot {
     NuriHandle handle{};
     Resource *resource = nullptr;
+  };
+
+  struct RetiredSlot {
+    uint32_t index = 0u;
+    Resource resource{};
   };
 
   ReservedSlot reserve(std::string debugName,
@@ -1251,14 +1264,25 @@ public:
     slotsMeta_.release(handle.index);
   }
 
-  [[nodiscard]] std::optional<Resource> take(NuriHandle handle) {
+  [[nodiscard]] std::optional<RetiredSlot> take(NuriHandle handle) {
     if (!isValid(handle)) {
       return std::nullopt;
     }
     Resource resource = std::move(slots_[handle.index]);
     slots_[handle.index] = Resource{};
-    slotsMeta_.release(handle.index);
-    return resource;
+    slotsMeta_.retire(handle.index);
+    return RetiredSlot{
+        .index = handle.index,
+        .resource = std::move(resource),
+    };
+  }
+
+  void recycleRetired(uint32_t index) {
+    NURI_ASSERT(index < slots_.size(),
+                "ResourceTable::recycleRetired: index out of range");
+    NURI_ASSERT(slotsMeta_.isRetired(index),
+                "ResourceTable::recycleRetired: slot is not retired");
+    slotsMeta_.recycle(index);
   }
 
   [[nodiscard]] bool replace(NuriHandle handle, Resource resource) {
@@ -1294,6 +1318,19 @@ public:
       }
     }
     return Format::RGBA8_UNORM;
+  }
+
+  [[nodiscard]] DebugSlotInfo debugSlotInfo(uint32_t index) const {
+    if (index >= slots_.size()) {
+      return {};
+    }
+    return DebugSlotInfo{
+        .generation = slotsMeta_.generation(index),
+        .inRange = true,
+        .live = slotsMeta_.isLive(index),
+        .retired = slotsMeta_.isRetired(index),
+        .debugName = slots_[index].debugName,
+    };
   }
 
 private:
@@ -1364,6 +1401,7 @@ struct ActiveGraphicsRecordingContext {
   nvrhi::CommandListHandle commandList{};
   std::vector<nvrhi::FramebufferHandle> framebuffers;
   std::vector<NvrhiTimingQuery> timingQueries;
+  uint64_t recordingSerial = 0u;
   uint32_t workerIndex = 0u;
 };
 
@@ -1372,6 +1410,7 @@ struct RecordedGraphicsCommandBuffer {
   nvrhi::CommandListHandle commandList{};
   std::vector<nvrhi::FramebufferHandle> framebuffers;
   std::vector<NvrhiTimingQuery> timingQueries;
+  uint64_t recordingSerial = 0u;
 };
 
 struct PendingGraphicsCommandList {
@@ -1391,16 +1430,23 @@ struct PendingAsyncUploadSubmission {
   uint64_t submissionInstance = 0u;
   nvrhi::CommandListHandle commandList{};
   bool containsTextureData = false;
+  nvrhi::CommandQueue queue = nvrhi::CommandQueue::Graphics;
 };
 
 struct SubmissionRecord {
   SubmissionHandle handle{};
-  uint64_t instance = 0u;
+  uint64_t graphicsInstance = 0u;
+  uint64_t copyInstance = 0u;
+  uint64_t requiredRecordingSerial = 0u;
+  bool requiresGraphicsVisibility = false;
+  bool graphicsVisibilityQueued = false;
 };
 
 struct QueueFamilySelection {
   uint32_t graphics = std::numeric_limits<uint32_t>::max();
+  uint32_t graphicsQueueCount = 0u;
   bool hasGraphics = false;
+  bool hasDedicatedCopyQueue = false;
 };
 
 [[nodiscard]] GpuMultisampleCapabilities
@@ -1459,7 +1505,9 @@ struct NvrhiGPUDeviceImpl {
   VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
   VkDevice device = VK_NULL_HANDLE;
   VkQueue graphicsQueue = VK_NULL_HANDLE;
+  VkQueue assetCopyQueue = VK_NULL_HANDLE;
   uint32_t graphicsQueueFamily = 0u;
+  bool hasDedicatedAssetCopyQueue = false;
   bool graphicsQueueTimestampsSupported = false;
   VkPhysicalDeviceProperties physicalDeviceProperties{};
   GPUAdapterInfo adapterInfo{};
@@ -1517,13 +1565,34 @@ struct NvrhiGPUDeviceImpl {
   std::vector<FramebufferTexture> framebufferTextures;
   std::vector<CachedFramebuffer> cachedFramebuffers;
   uint64_t swapchainGeneration = 1u;
-  using RetiredResource =
+  using RetiredNativeResource =
       std::variant<BufferResource, TextureResource,
                    ResourceSlot<nvrhi::SamplerHandle>, ShaderResource,
                    RenderPipelineResource, ComputePipelineResource,
                    MeshletPipelineResource>;
-  GpuRetirementQueue<RetiredResource, uint64_t> retiredResources;
+  enum class RetiredResourceTable : uint8_t {
+    Buffer,
+    Texture,
+    Sampler,
+    Shader,
+    RenderPipeline,
+    ComputePipeline,
+    MeshletPipeline,
+  };
+  struct RetiredResource {
+    RetiredNativeResource resource{};
+    RetiredResourceTable table = RetiredResourceTable::Buffer;
+    uint32_t slotIndex = 0u;
+    uint64_t requiredRecordingSerial = 0u;
+    uint64_t lastSubmittedAtDestruction = 0u;
+    uint64_t lastUseInstance = 0u;
+    bool lastUseResolved = false;
+  };
+  std::vector<RetiredResource> retiredResources;
+  RecordingRetirementTracker recordingRetirement;
   uint64_t latestSubmittedInstance = 0u;
+  uint64_t latestAsyncUploadGraphicsInstance = 0u;
+  uint64_t latestAsyncUploadCopyInstance = 0u;
 
   mutable std::mutex immediateMutex;
   std::mutex graphicsContextMutex;
@@ -1564,12 +1633,94 @@ namespace {
 using Impl = NvrhiGPUDeviceImpl;
 
 template <typename Resource>
-void retireNativeResource(Impl &impl, Resource resource) {
-  if (!impl.nvrhiDevice || impl.latestSubmittedInstance == 0u) {
-    return;
+void retireNativeResource(Impl &impl, Impl::RetiredResourceTable table,
+                          uint32_t slotIndex, Resource resource) {
+  impl.retiredResources.push_back(Impl::RetiredResource{
+      .resource = Impl::RetiredNativeResource{std::move(resource)},
+      .table = table,
+      .slotIndex = slotIndex,
+      .requiredRecordingSerial = impl.recordingRetirement.latestIssuedSerial(),
+      .lastSubmittedAtDestruction = impl.latestSubmittedInstance,
+  });
+}
+
+void recycleRetiredResourceSlot(Impl &impl,
+                                const Impl::RetiredResource &retired) {
+  switch (retired.table) {
+  case Impl::RetiredResourceTable::Buffer:
+    impl.buffers.recycleRetired(retired.slotIndex);
+    break;
+  case Impl::RetiredResourceTable::Texture:
+    impl.textures.recycleRetired(retired.slotIndex);
+    break;
+  case Impl::RetiredResourceTable::Sampler:
+    impl.samplers.recycleRetired(retired.slotIndex);
+    break;
+  case Impl::RetiredResourceTable::Shader:
+    impl.shaders.recycleRetired(retired.slotIndex);
+    break;
+  case Impl::RetiredResourceTable::RenderPipeline:
+    impl.renderPipelines.recycleRetired(retired.slotIndex);
+    break;
+  case Impl::RetiredResourceTable::ComputePipeline:
+    impl.computePipelines.recycleRetired(retired.slotIndex);
+    break;
+  case Impl::RetiredResourceTable::MeshletPipeline:
+    impl.meshletPipelines.recycleRetired(retired.slotIndex);
+    break;
   }
-  impl.retiredResources.retire(Impl::RetiredResource{std::move(resource)},
-                               impl.latestSubmittedInstance);
+}
+
+void collectRetiredResources(Impl &impl, uint64_t completedInstance) {
+  size_t writeIndex = 0u;
+  for (size_t readIndex = 0u; readIndex < impl.retiredResources.size();
+       ++readIndex) {
+    Impl::RetiredResource &retired = impl.retiredResources[readIndex];
+    if (!retired.lastUseResolved) {
+      const std::optional<uint64_t> lastUse =
+          impl.recordingRetirement.tryResolveLastUse(
+              retired.requiredRecordingSerial,
+              retired.lastSubmittedAtDestruction);
+      if (lastUse.has_value()) {
+        retired.lastUseInstance = *lastUse;
+        retired.lastUseResolved = true;
+      }
+    }
+    if (retired.lastUseResolved &&
+        retired.lastUseInstance <= completedInstance) {
+      recycleRetiredResourceSlot(impl, retired);
+      continue;
+    }
+    if (writeIndex != readIndex) {
+      impl.retiredResources[writeIndex] = std::move(retired);
+    }
+    ++writeIndex;
+  }
+  impl.retiredResources.resize(writeIndex);
+}
+
+void releaseAllRetiredResourcesAfterIdle(Impl &impl) {
+  for (const Impl::RetiredResource &retired : impl.retiredResources) {
+    recycleRetiredResourceSlot(impl, retired);
+  }
+  impl.retiredResources.clear();
+}
+
+[[nodiscard]] const BufferResource *
+retiredBufferAtSlot(const Impl &impl, uint32_t slotIndex,
+                    const Impl::RetiredResource **outRetirement = nullptr) {
+  for (auto it = impl.retiredResources.rbegin();
+       it != impl.retiredResources.rend(); ++it) {
+    if (it->table != Impl::RetiredResourceTable::Buffer ||
+        it->slotIndex != slotIndex) {
+      continue;
+    }
+    if (outRetirement != nullptr) {
+      *outRetirement = &*it;
+    }
+    return std::get_if<BufferResource>(&it->resource);
+  }
+  return nullptr;
 }
 
 void invalidateCachedFramebuffers(Impl &impl, TextureHandle texture) {
@@ -1936,20 +2087,28 @@ void collectCompletedAsyncUploadSubmissions(Impl &impl) {
     return;
   }
 
-  const uint64_t completedInstance =
+  const uint64_t completedGraphics =
       impl.nvrhiDevice->queueGetCompletedInstance(
           nvrhi::CommandQueue::Graphics);
+  const uint64_t completedCopy =
+      impl.hasDedicatedAssetCopyQueue
+          ? impl.nvrhiDevice->queueGetCompletedInstance(
+                nvrhi::CommandQueue::Copy)
+          : completedGraphics;
   size_t writeIndex = 0u;
   for (size_t readIndex = 0u;
        readIndex < impl.pendingAsyncUploadSubmissions.size(); ++readIndex) {
     PendingAsyncUploadSubmission &pending =
         impl.pendingAsyncUploadSubmissions[readIndex];
-    if (pending.submissionInstance <= completedInstance) {
+    const uint64_t completed = pending.queue == nvrhi::CommandQueue::Copy
+                                   ? completedCopy
+                                   : completedGraphics;
+    if (pending.submissionInstance <= completed) {
       impl.availableAsyncUploadCommandLists.push_back(
           std::move(pending.commandList));
       continue;
     }
-    if (pending.submissionInstance > completedInstance) {
+    if (pending.submissionInstance > completed) {
       if (writeIndex != readIndex) {
         impl.pendingAsyncUploadSubmissions[writeIndex] = std::move(pending);
       }
@@ -1967,7 +2126,10 @@ acquireAsyncUploadCommandList(Impl &impl) {
     impl.availableAsyncUploadCommandLists.pop_back();
     return commandList;
   }
-  return impl.nvrhiDevice->createCommandList();
+  return impl.nvrhiDevice->createCommandList(
+      nvrhi::CommandListParameters{}.setQueueType(
+          impl.hasDedicatedAssetCopyQueue ? nvrhi::CommandQueue::Copy
+                                          : nvrhi::CommandQueue::Graphics));
 }
 
 [[nodiscard]] nvrhi::CommandListHandle &
@@ -1999,23 +2161,40 @@ uint64_t
 submitAsyncUploadCommandList(Impl &impl,
                              const nvrhi::CommandListHandle &commandList,
                              bool containsTextureData) {
+  const nvrhi::CommandQueue queue = impl.hasDedicatedAssetCopyQueue
+                                        ? nvrhi::CommandQueue::Copy
+                                        : nvrhi::CommandQueue::Graphics;
   nvrhi::ICommandList *raw = commandList.Get();
-  const uint64_t instance = impl.nvrhiDevice->executeCommandLists(
-      &raw, 1u, nvrhi::CommandQueue::Graphics);
-  impl.latestSubmittedInstance = instance;
+  const uint64_t instance =
+      impl.nvrhiDevice->executeCommandLists(&raw, 1u, queue);
+  if (queue == nvrhi::CommandQueue::Copy) {
+    impl.latestAsyncUploadCopyInstance = instance;
+  } else {
+    impl.latestSubmittedInstance = instance;
+    impl.latestAsyncUploadGraphicsInstance = instance;
+  }
   impl.pendingAsyncUploadSubmissions.push_back(
       PendingAsyncUploadSubmission{.submissionInstance = instance,
                                    .commandList = commandList,
-                                   .containsTextureData = containsTextureData});
+                                   .containsTextureData = containsTextureData,
+                                   .queue = queue});
   return instance;
 }
 
-void flushPendingAsyncUploadCommandList(Impl &impl) {
+void flushPendingAsyncUploadCommandList(Impl &impl,
+                                        bool queueGraphicsVisibility = true) {
   const bool containsTextureData = impl.pendingAsyncUploadTextureCount != 0u;
   nvrhi::CommandListHandle commandList =
       takePendingAsyncUploadCommandList(impl);
   if (commandList) {
-    submitAsyncUploadCommandList(impl, commandList, containsTextureData);
+    const uint64_t instance =
+        submitAsyncUploadCommandList(impl, commandList, containsTextureData);
+    if (queueGraphicsVisibility && impl.hasDedicatedAssetCopyQueue) {
+      impl.nvrhiDevice->queueWaitForSemaphore(
+          nvrhi::CommandQueue::Graphics,
+          impl.nvrhiDevice->getQueueSemaphore(nvrhi::CommandQueue::Copy),
+          instance);
+    }
   }
 }
 
@@ -2268,7 +2447,14 @@ void destroyDebugMessenger(Impl &impl) {
     if ((families[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0u &&
         presentSupported == VK_TRUE) {
       selection.graphics = i;
+      selection.graphicsQueueCount = families[i].queueCount;
       selection.hasGraphics = true;
+      // NVRHI does not currently emit Vulkan queue-family ownership
+      // transfers. A second queue from the graphics-capable family is the
+      // safe asynchronous copy path: it supports the final shader-readable
+      // barriers and needs no ownership transfer. Transfer-only families
+      // deliberately remain on the graphics fallback.
+      selection.hasDedicatedCopyQueue = families[i].queueCount >= 2u;
       return selection;
     }
   }
@@ -2392,6 +2578,7 @@ void destroyDebugMessenger(Impl &impl) {
     if (properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
       impl.physicalDevice = device;
       impl.graphicsQueueFamily = queues.graphics;
+      impl.hasDedicatedAssetCopyQueue = queues.hasDedicatedCopyQueue;
       break;
     }
     if (fallback == VK_NULL_HANDLE) {
@@ -2402,6 +2589,7 @@ void destroyDebugMessenger(Impl &impl) {
   if (impl.physicalDevice == VK_NULL_HANDLE && fallback != VK_NULL_HANDLE) {
     impl.physicalDevice = fallback;
     impl.graphicsQueueFamily = fallbackQueues.graphics;
+    impl.hasDedicatedAssetCopyQueue = fallbackQueues.hasDedicatedCopyQueue;
   }
   if (impl.physicalDevice == VK_NULL_HANDLE) {
     return Result<bool, std::string>::makeError(
@@ -2435,12 +2623,12 @@ void destroyDebugMessenger(Impl &impl) {
 }
 
 [[nodiscard]] Result<bool, std::string> createLogicalDevice(Impl &impl) {
-  const float queuePriority = 1.0f;
+  const std::array queuePriorities{1.0f, 0.75f};
   const VkDeviceQueueCreateInfo queueCreateInfo{
       .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
       .queueFamilyIndex = impl.graphicsQueueFamily,
-      .queueCount = 1u,
-      .pQueuePriorities = &queuePriority,
+      .queueCount = impl.hasDedicatedAssetCopyQueue ? 2u : 1u,
+      .pQueuePriorities = queuePriorities.data(),
   };
 
   VkPhysicalDeviceVulkan13Features supported13{
@@ -2552,7 +2740,16 @@ void destroyDebugMessenger(Impl &impl) {
   }
   vkGetDeviceQueue(impl.device, impl.graphicsQueueFamily, 0u,
                    &impl.graphicsQueue);
+  if (impl.hasDedicatedAssetCopyQueue) {
+    vkGetDeviceQueue(impl.device, impl.graphicsQueueFamily, 1u,
+                     &impl.assetCopyQueue);
+  }
   volkLoadDevice(impl.device);
+
+  NURI_LOG_INFO("NvrhiGPUDevice: async asset uploads use %s",
+                impl.hasDedicatedAssetCopyQueue
+                    ? "a dedicated same-family copy queue"
+                    : "the ordered graphics-queue fallback");
 
   impl.maxSamplerAnisotropy =
       supported2.features.samplerAnisotropy == VK_TRUE
@@ -2602,6 +2799,10 @@ void destroyDebugMessenger(Impl &impl) {
   desc.device = impl.device;
   desc.graphicsQueue = impl.graphicsQueue;
   desc.graphicsQueueIndex = static_cast<int>(impl.graphicsQueueFamily);
+  if (impl.hasDedicatedAssetCopyQueue) {
+    desc.transferQueue = impl.assetCopyQueue;
+    desc.transferQueueIndex = static_cast<int>(impl.graphicsQueueFamily);
+  }
   desc.deviceExtensions = impl.deviceExtensions.data();
   desc.numDeviceExtensions = impl.deviceExtensions.size();
   desc.instanceExtensions = impl.instanceExtensions.data();
@@ -2894,7 +3095,7 @@ void destroySwapchain(Impl &impl) {
   if (oldSwapchain != VK_NULL_HANDLE && impl.nvrhiDevice) {
     impl.nvrhiDevice->waitForIdle();
     collectCompletedAsyncUploadSubmissions(impl);
-    impl.retiredResources.releaseAllAfterIdle();
+    releaseAllRetiredResourcesAfterIdle(impl);
     impl.nvrhiDevice->runGarbageCollection();
     collectCompletedGpuTimingSubmissions(impl);
   }
@@ -3026,7 +3227,7 @@ void destroyVulkan(Impl &impl) {
     flushPendingAsyncUploadCommandList(impl);
     impl.nvrhiDevice->waitForIdle();
     collectCompletedAsyncUploadSubmissions(impl);
-    impl.retiredResources.releaseAllAfterIdle();
+    releaseAllRetiredResourcesAfterIdle(impl);
     impl.nvrhiDevice->runGarbageCollection();
     collectCompletedGpuTimingSubmissions(impl);
   }
@@ -3129,18 +3330,36 @@ findActiveGraphicsContextSlot(ImplType &impl, RecordingContextHandle handle) {
 }
 
 [[nodiscard]] Result<SubmissionHandle, std::string>
-allocateSubmissionHandle(Impl &impl, uint64_t instance) {
+allocateSubmissionHandle(Impl &impl, uint64_t graphicsInstance,
+                         uint64_t copyInstance = 0u,
+                         uint64_t requiredRecordingSerial = 0u,
+                         bool requiresGraphicsVisibility = false) {
   const SlotReservation slot = impl.submissionSlots.acquire();
   SubmissionHandle handle{
       .index = slot.index,
       .generation = slot.generation,
   };
-  impl.submissions.push_back(
-      SubmissionRecord{.handle = handle, .instance = instance});
+  impl.submissions.push_back(SubmissionRecord{
+      .handle = handle,
+      .graphicsInstance = graphicsInstance,
+      .copyInstance = copyInstance,
+      .requiredRecordingSerial = requiredRecordingSerial,
+      .requiresGraphicsVisibility = requiresGraphicsVisibility,
+  });
   return Result<SubmissionHandle, std::string>::makeResult(handle);
 }
 
-void collectCompletedSubmissionRecords(Impl &impl, uint64_t completed) {
+[[nodiscard]] std::optional<uint64_t>
+resolveSubmissionInstance(const Impl &impl, const SubmissionRecord &record) {
+  if (record.requiredRecordingSerial == 0u) {
+    return record.graphicsInstance;
+  }
+  return impl.recordingRetirement.tryResolveLastUse(
+      record.requiredRecordingSerial, record.graphicsInstance);
+}
+
+void collectCompletedSubmissionRecords(Impl &impl, uint64_t completedGraphics,
+                                       uint64_t completedCopy) {
   if (impl.submissions.empty()) {
     return;
   }
@@ -3148,7 +3367,13 @@ void collectCompletedSubmissionRecords(Impl &impl, uint64_t completed) {
   for (size_t readIndex = 0u; readIndex < impl.submissions.size();
        ++readIndex) {
     SubmissionRecord &record = impl.submissions[readIndex];
-    if (record.instance <= completed) {
+    const std::optional<uint64_t> resolvedGraphics =
+        resolveSubmissionInstance(impl, record);
+    if (resolvedGraphics.has_value() &&
+        *resolvedGraphics <= completedGraphics &&
+        record.copyInstance <= completedCopy &&
+        (record.copyInstance == 0u || !record.requiresGraphicsVisibility ||
+         record.graphicsVisibilityQueued)) {
       impl.submissionSlots.release(record.handle.index);
       continue;
     }
@@ -4006,7 +4231,8 @@ textureDimensionsFromHandle(Impl &impl, const nvrhi::TextureHandle &texture) {
 [[nodiscard]] Result<bool, std::string>
 recordComputeDispatches(Impl &impl, nvrhi::ICommandList &commandList,
                         std::span<const ComputeDispatchItem> dispatches,
-                        std::string_view context) {
+                        std::string_view context,
+                        bool dependencyStatesPreplanned) {
   for (const ComputeDispatchItem &dispatch : dispatches) {
     if (!impl.computePipelines.isValid(dispatch.pipeline)) {
       return Result<bool, std::string>::makeError(
@@ -4019,17 +4245,19 @@ recordComputeDispatches(Impl &impl, nvrhi::ICommandList &commandList,
     }
     ComputePipelineResource *pipeline =
         impl.computePipelines.get(dispatch.pipeline);
-    auto dependencyBufferResult = requestBufferDependencyStates(
-        impl, commandList, dispatch.dependencyBuffers, true, context);
-    if (dependencyBufferResult.hasError()) {
-      return dependencyBufferResult;
+    if (!dependencyStatesPreplanned) {
+      auto dependencyBufferResult = requestBufferDependencyStates(
+          impl, commandList, dispatch.dependencyBuffers, true, context);
+      if (dependencyBufferResult.hasError()) {
+        return dependencyBufferResult;
+      }
+      auto dependencyTextureResult = requestTextureDependencyStates(
+          impl, commandList, dispatch.dependencyTextures, true, context);
+      if (dependencyTextureResult.hasError()) {
+        return dependencyTextureResult;
+      }
+      commandList.commitBarriers();
     }
-    auto dependencyTextureResult = requestTextureDependencyStates(
-        impl, commandList, dispatch.dependencyTextures, true, context);
-    if (dependencyTextureResult.hasError()) {
-      return dependencyTextureResult;
-    }
-    commandList.commitBarriers();
 
     nvrhi::ComputeState state{};
     state.setPipeline(pipeline->pipeline.Get());
@@ -4304,7 +4532,8 @@ recordRenderPass(Impl &impl,
   }
   auto preDispatchResult =
       recordComputeDispatches(impl, commandList, pass.preDispatches,
-                              "NvrhiGPUDevice::recordRenderPass preDispatch");
+                              "NvrhiGPUDevice::recordRenderPass preDispatch",
+                              /*dependencyStatesPreplanned=*/true);
   if (preDispatchResult.hasError()) {
     return preDispatchResult;
   }
@@ -5003,20 +5232,28 @@ NvrhiGPUDevice::createBuffer(const BufferDesc &desc,
       std::memcpy(resource.mapped, desc.data.data(), desc.data.size());
       flushMappedBufferRange(*impl_, resource, 0u, desc.data.size());
     }
-  } else if (!desc.data.empty()) {
-    std::lock_guard lock(impl_->immediateMutex);
-    impl_->immediateCommandList->open();
-    impl_->immediateCommandList->writeBuffer(buffer.Get(), desc.data.data(),
-                                             desc.data.size(), 0u);
-    if (permanentReadState) {
-      impl_->immediateCommandList->setPermanentBufferState(
-          buffer.Get(), permanentReadBufferState(desc.usage));
-    }
-    impl_->immediateCommandList->close();
-    executeCommandListAndWait(*impl_, impl_->immediateCommandList);
   }
 
   BufferHandle handle = impl_->buffers.allocate(std::move(resource));
+  if (!desc.data.empty() && desc.storage == Storage::Device) {
+    std::lock_guard lock(impl_->immediateMutex);
+    collectCompletedAsyncUploadSubmissions(*impl_);
+    nvrhi::CommandListHandle &commandList =
+        ensurePendingAsyncUploadCommandList(*impl_);
+    if (!commandList) {
+      impl_->buffers.deallocate(handle);
+      return Result<BufferHandle, std::string>::makeError(
+          "Failed to create buffer upload command list");
+    }
+    commandList->writeBuffer(buffer.Get(), desc.data.data(), desc.data.size(),
+                             0u);
+    if (permanentReadState) {
+      commandList->setPermanentBufferState(
+          buffer.Get(), permanentReadBufferState(desc.usage));
+    }
+    impl_->pendingAsyncUploadBytes += static_cast<uint64_t>(desc.data.size());
+  }
+
   return Result<BufferHandle, std::string>::makeResult(handle);
 }
 
@@ -5485,24 +5722,33 @@ NvrhiGPUDevice::createMeshletPipeline(const MeshletPipelineDesc &desc,
 
 void NvrhiGPUDevice::destroyRenderPipeline(RenderPipelineHandle pipeline) {
   if (impl_ != nullptr) {
-    if (auto resource = impl_->renderPipelines.take(pipeline)) {
-      retireNativeResource(*impl_, std::move(*resource));
+    std::scoped_lock lock(impl_->immediateMutex, impl_->graphicsContextMutex);
+    flushPendingAsyncUploadCommandList(*impl_);
+    if (auto retired = impl_->renderPipelines.take(pipeline)) {
+      retireNativeResource(*impl_, Impl::RetiredResourceTable::RenderPipeline,
+                           retired->index, std::move(retired->resource));
     }
   }
 }
 
 void NvrhiGPUDevice::destroyComputePipeline(ComputePipelineHandle pipeline) {
   if (impl_ != nullptr) {
-    if (auto resource = impl_->computePipelines.take(pipeline)) {
-      retireNativeResource(*impl_, std::move(*resource));
+    std::scoped_lock lock(impl_->immediateMutex, impl_->graphicsContextMutex);
+    flushPendingAsyncUploadCommandList(*impl_);
+    if (auto retired = impl_->computePipelines.take(pipeline)) {
+      retireNativeResource(*impl_, Impl::RetiredResourceTable::ComputePipeline,
+                           retired->index, std::move(retired->resource));
     }
   }
 }
 
 void NvrhiGPUDevice::destroyMeshletPipeline(MeshletPipelineHandle pipeline) {
   if (impl_ != nullptr) {
-    if (auto resource = impl_->meshletPipelines.take(pipeline)) {
-      retireNativeResource(*impl_, std::move(*resource));
+    std::scoped_lock lock(impl_->immediateMutex, impl_->graphicsContextMutex);
+    flushPendingAsyncUploadCommandList(*impl_);
+    if (auto retired = impl_->meshletPipelines.take(pipeline)) {
+      retireNativeResource(*impl_, Impl::RetiredResourceTable::MeshletPipeline,
+                           retired->index, std::move(retired->resource));
     }
   }
 }
@@ -5511,22 +5757,27 @@ void NvrhiGPUDevice::destroyBuffer(BufferHandle buffer) {
   if (impl_ == nullptr) {
     return;
   }
-  auto resource = impl_->buffers.take(buffer);
-  if (!resource) {
+  std::scoped_lock lock(impl_->immediateMutex, impl_->graphicsContextMutex);
+  flushPendingAsyncUploadCommandList(*impl_, false);
+  auto retired = impl_->buffers.take(buffer);
+  if (!retired) {
     return;
   }
-  if (resource->mapped != nullptr) {
-    impl_->nvrhiDevice->unmapBuffer(resource->buffer.Get());
-    resource->mapped = nullptr;
-    resource->mappedMemory = VK_NULL_HANDLE;
+  if (retired->resource.mapped != nullptr) {
+    impl_->nvrhiDevice->unmapBuffer(retired->resource.buffer.Get());
+    retired->resource.mapped = nullptr;
+    retired->resource.mappedMemory = VK_NULL_HANDLE;
   }
-  retireNativeResource(*impl_, std::move(*resource));
+  retireNativeResource(*impl_, Impl::RetiredResourceTable::Buffer,
+                       retired->index, std::move(retired->resource));
 }
 
 void NvrhiGPUDevice::destroyTexture(TextureHandle texture) {
   if (!impl_) {
     return;
   }
+  std::scoped_lock lock(impl_->immediateMutex, impl_->graphicsContextMutex);
+  flushPendingAsyncUploadCommandList(*impl_);
   invalidateCachedFramebuffers(*impl_, texture);
   impl_->framebufferTextures.erase(
       std::remove_if(impl_->framebufferTextures.begin(),
@@ -5535,23 +5786,30 @@ void NvrhiGPUDevice::destroyTexture(TextureHandle texture) {
                        return areSameHandle(entry.handle, texture);
                      }),
       impl_->framebufferTextures.end());
-  if (auto resource = impl_->textures.take(texture)) {
-    retireNativeResource(*impl_, std::move(*resource));
+  if (auto retired = impl_->textures.take(texture)) {
+    retireNativeResource(*impl_, Impl::RetiredResourceTable::Texture,
+                         retired->index, std::move(retired->resource));
   }
 }
 
 void NvrhiGPUDevice::destroySampler(SamplerHandle sampler) {
   if (impl_ != nullptr) {
-    if (auto resource = impl_->samplers.take(sampler)) {
-      retireNativeResource(*impl_, std::move(*resource));
+    std::scoped_lock lock(impl_->immediateMutex, impl_->graphicsContextMutex);
+    flushPendingAsyncUploadCommandList(*impl_);
+    if (auto retired = impl_->samplers.take(sampler)) {
+      retireNativeResource(*impl_, Impl::RetiredResourceTable::Sampler,
+                           retired->index, std::move(retired->resource));
     }
   }
 }
 
 void NvrhiGPUDevice::destroyShaderModule(ShaderHandle shader) {
   if (impl_ != nullptr) {
-    if (auto resource = impl_->shaders.take(shader)) {
-      retireNativeResource(*impl_, std::move(*resource));
+    std::scoped_lock lock(impl_->immediateMutex, impl_->graphicsContextMutex);
+    flushPendingAsyncUploadCommandList(*impl_);
+    if (auto retired = impl_->shaders.take(shader)) {
+      retireNativeResource(*impl_, Impl::RetiredResourceTable::Shader,
+                           retired->index, std::move(retired->resource));
     }
   }
 }
@@ -5810,10 +6068,15 @@ Result<bool, std::string> NvrhiGPUDevice::beginFrame(uint64_t frameIndex) {
     NURI_PROFILER_ZONE_END();
     const uint64_t completed = impl_->nvrhiDevice->queueGetCompletedInstance(
         nvrhi::CommandQueue::Graphics);
+    const uint64_t completedCopy =
+        impl_->hasDedicatedAssetCopyQueue
+            ? impl_->nvrhiDevice->queueGetCompletedInstance(
+                  nvrhi::CommandQueue::Copy)
+            : completed;
     NURI_PROFILER_ZONE("NvrhiGPUDevice.collect_retired_resources",
                        NURI_PROFILER_COLOR_DESTROY);
-    impl_->retiredResources.collectThrough(completed);
-    collectCompletedSubmissionRecords(*impl_, completed);
+    collectRetiredResources(*impl_, completed);
+    collectCompletedSubmissionRecords(*impl_, completed, completedCopy);
     collectCompletedGraphicsCommandLists(*impl_, completed);
     impl_->nvrhiDevice->runGarbageCollection();
     NURI_PROFILER_ZONE_END();
@@ -5949,6 +6212,7 @@ NvrhiGPUDevice::acquireGraphicsRecordingContext(uint32_t workerIndex) {
       .commandList = commandList,
       .framebuffers = {},
       .timingQueries = {},
+      .recordingSerial = impl_->recordingRetirement.beginRecording(),
       .workerIndex = workerIndex,
   };
   return Result<RecordingContextHandle, std::string>::makeResult(handle);
@@ -5993,8 +6257,35 @@ Result<bool, std::string> NvrhiGPUDevice::recordGraphicsBarriers(
     }
     BufferResource *buffer = impl_->buffers.get(barrier.bufferHandle());
     if (buffer == nullptr) {
-      return Result<bool, std::string>::makeError(
-          "NvrhiGPUDevice::recordGraphicsBarriers: invalid buffer handle");
+      const BufferHandle invalidHandle = barrier.bufferHandle();
+      const auto slot = impl_->buffers.debugSlotInfo(invalidHandle.index);
+      const Impl::RetiredResource *retirement = nullptr;
+      const BufferResource *retired =
+          retiredBufferAtSlot(*impl_, invalidHandle.index, &retirement);
+      const std::string_view slotState =
+          !slot.inRange  ? std::string_view("out_of_range")
+          : slot.live    ? std::string_view("live")
+          : slot.retired ? std::string_view("retired")
+                         : std::string_view("free");
+      return Result<bool, std::string>::makeError(std::format(
+          "NvrhiGPUDevice::recordGraphicsBarriers: "
+          "[DEBUG-buflife-7c2a] invalid buffer handle index={} "
+          "generation={} slot_state={} current_generation={} "
+          "current_debug_name='{}' retired_debug_name='{}' "
+          "retirement_recording_serial={} "
+          "retirement_last_submitted={} retirement_last_use={} "
+          "retirement_last_use_resolved={} latest_recording_serial={} "
+          "latest_submitted={}",
+          invalidHandle.index, invalidHandle.generation, slotState,
+          slot.generation, slot.debugName,
+          retired != nullptr ? std::string_view(retired->debugName)
+                             : std::string_view{},
+          retirement != nullptr ? retirement->requiredRecordingSerial : 0u,
+          retirement != nullptr ? retirement->lastSubmittedAtDestruction : 0u,
+          retirement != nullptr ? retirement->lastUseInstance : 0u,
+          retirement != nullptr && retirement->lastUseResolved,
+          impl_->recordingRetirement.latestIssuedSerial(),
+          impl_->latestSubmittedInstance));
     }
     if (buffer->immutable) {
       if (barrier.afterState == GraphicsBarrierState::Read) {
@@ -6053,7 +6344,8 @@ NvrhiGPUDevice::finishGraphicsRecordingContext(RecordingContextHandle ctx) {
       .handle = handle,
       .commandList = active->commandList,
       .framebuffers = std::move(active->framebuffers),
-      .timingQueries = std::move(active->timingQueries)});
+      .timingQueries = std::move(active->timingQueries),
+      .recordingSerial = active->recordingSerial});
   impl_->activeGraphicsContexts[ctx.index] = ActiveGraphicsRecordingContext{};
   impl_->recordingContextSlots.release(ctx.index);
   return Result<RecordedCommandBufferHandle, std::string>::makeResult(handle);
@@ -6069,6 +6361,10 @@ NvrhiGPUDevice::discardGraphicsRecordingContext(RecordingContextHandle ctx) {
         "NvrhiGPUDevice::discardGraphicsRecordingContext: unknown recording "
         "context");
   }
+  NURI_ASSERT(
+      impl_->recordingRetirement.resolveRecording(active->recordingSerial, 0u),
+      "NvrhiGPUDevice::discardGraphicsRecordingContext: recording serial "
+      "was already resolved");
   impl_->activeGraphicsContexts[ctx.index] = ActiveGraphicsRecordingContext{};
   impl_->recordingContextSlots.release(ctx.index);
   return Result<bool, std::string>::makeResult(true);
@@ -6082,6 +6378,8 @@ Result<bool, std::string> NvrhiGPUDevice::discardRecordedGraphicsCommandBuffer(
                        commandBuffer)) {
       continue;
     }
+    const uint64_t recordingSerial =
+        impl_->recordedGraphicsCommandBuffers[i].recordingSerial;
     nvrhi::CommandListHandle reusableCommandList =
         std::move(impl_->recordedGraphicsCommandBuffers[i].commandList);
     if (i + 1u != impl_->recordedGraphicsCommandBuffers.size()) {
@@ -6092,6 +6390,10 @@ Result<bool, std::string> NvrhiGPUDevice::discardRecordedGraphicsCommandBuffer(
         std::move(reusableCommandList));
     impl_->recordedCommandBufferSlots.release(commandBuffer.index);
     impl_->recordedGraphicsCommandBuffers.pop_back();
+    NURI_ASSERT(
+        impl_->recordingRetirement.resolveRecording(recordingSerial, 0u),
+        "NvrhiGPUDevice::discardRecordedGraphicsCommandBuffer: recording "
+        "serial was already resolved");
     return Result<bool, std::string>::makeResult(true);
   }
   return Result<bool, std::string>::makeError(
@@ -6209,11 +6511,21 @@ NvrhiGPUDevice::submitRecordedGraphicsFrame(
       impl_->pendingAsyncUploadTextureCount != 0u;
   nvrhi::CommandListHandle frameUploadCommandList =
       takePendingAsyncUploadCommandList(*impl_);
+  uint64_t frameCopyInstance = 0u;
   if (frameUploadCommandList) {
-    const size_t insertIndex =
-        wholeFrameTiming.queryPool != VK_NULL_HANDLE ? 1u : 0u;
-    nvrhiCommandLists.insert(nvrhiCommandLists.begin() + insertIndex,
-                             frameUploadCommandList.Get());
+    if (impl_->hasDedicatedAssetCopyQueue) {
+      frameCopyInstance = submitAsyncUploadCommandList(
+          *impl_, frameUploadCommandList, frameUploadContainsTextureData);
+      impl_->nvrhiDevice->queueWaitForSemaphore(
+          nvrhi::CommandQueue::Graphics,
+          impl_->nvrhiDevice->getQueueSemaphore(nvrhi::CommandQueue::Copy),
+          frameCopyInstance);
+    } else {
+      const size_t insertIndex =
+          wholeFrameTiming.queryPool != VK_NULL_HANDLE ? 1u : 0u;
+      nvrhiCommandLists.insert(nvrhiCommandLists.begin() + insertIndex,
+                               frameUploadCommandList.Get());
+    }
   }
   uint64_t instance = 0u;
   {
@@ -6225,11 +6537,21 @@ NvrhiGPUDevice::submitRecordedGraphicsFrame(
     NURI_PROFILER_ZONE_END();
   }
   impl_->latestSubmittedInstance = instance;
-  if (frameUploadCommandList) {
+  for (const size_t matchedIndex : matchedIndices) {
+    const uint64_t recordingSerial =
+        impl_->recordedGraphicsCommandBuffers[matchedIndex].recordingSerial;
+    NURI_ASSERT(
+        impl_->recordingRetirement.resolveRecording(recordingSerial, instance),
+        "NvrhiGPUDevice::submitRecordedGraphicsFrame: recording serial was "
+        "already resolved");
+  }
+  if (frameUploadCommandList && !impl_->hasDedicatedAssetCopyQueue) {
+    impl_->latestAsyncUploadGraphicsInstance = instance;
     impl_->pendingAsyncUploadSubmissions.push_back(PendingAsyncUploadSubmission{
         .submissionInstance = instance,
         .commandList = std::move(frameUploadCommandList),
         .containsTextureData = frameUploadContainsTextureData,
+        .queue = nvrhi::CommandQueue::Graphics,
     });
   }
   ++impl_->submittedFrameCount;
@@ -6311,7 +6633,7 @@ NvrhiGPUDevice::submitRecordedGraphicsFrame(
     impl_->recordedCommandBufferSlots.release(handleIndex);
   }
 
-  return allocateSubmissionHandle(*impl_, instance);
+  return allocateSubmissionHandle(*impl_, instance, frameCopyInstance);
 }
 
 bool NvrhiGPUDevice::isSubmissionComplete(SubmissionHandle handle) const {
@@ -6320,11 +6642,56 @@ bool NvrhiGPUDevice::isSubmissionComplete(SubmissionHandle handle) const {
   }
   for (const SubmissionRecord &record : impl_->submissions) {
     if (areSameHandle(record.handle, handle)) {
-      return impl_->nvrhiDevice->queueGetCompletedInstance(
-                 nvrhi::CommandQueue::Graphics) >= record.instance;
+      const std::optional<uint64_t> resolvedGraphics =
+          resolveSubmissionInstance(*impl_, record);
+      if (!resolvedGraphics.has_value() ||
+          impl_->nvrhiDevice->queueGetCompletedInstance(
+              nvrhi::CommandQueue::Graphics) < *resolvedGraphics) {
+        return false;
+      }
+      return record.copyInstance == 0u ||
+             (impl_->hasDedicatedAssetCopyQueue &&
+              impl_->nvrhiDevice->queueGetCompletedInstance(
+                  nvrhi::CommandQueue::Copy) >= record.copyInstance);
     }
   }
   return true;
+}
+
+Result<bool, std::string>
+NvrhiGPUDevice::makeSubmissionVisibleToGraphics(SubmissionHandle handle) {
+  if (impl_ == nullptr || handle.generation == 0u) {
+    return Result<bool, std::string>::makeResult(true);
+  }
+  std::lock_guard lock(impl_->immediateMutex);
+  for (SubmissionRecord &record : impl_->submissions) {
+    if (!areSameHandle(record.handle, handle)) {
+      continue;
+    }
+    if (!record.requiresGraphicsVisibility || record.copyInstance == 0u ||
+        record.graphicsVisibilityQueued) {
+      return Result<bool, std::string>::makeResult(true);
+    }
+    if (!impl_->hasDedicatedAssetCopyQueue) {
+      return Result<bool, std::string>::makeError(
+          "NvrhiGPUDevice::makeSubmissionVisibleToGraphics: copy submission "
+          "has no copy queue");
+    }
+    const uint64_t completedCopy =
+        impl_->nvrhiDevice->queueGetCompletedInstance(
+            nvrhi::CommandQueue::Copy);
+    if (completedCopy < record.copyInstance) {
+      return Result<bool, std::string>::makeResult(false);
+    }
+    impl_->nvrhiDevice->queueWaitForSemaphore(
+        nvrhi::CommandQueue::Graphics,
+        impl_->nvrhiDevice->getQueueSemaphore(nvrhi::CommandQueue::Copy),
+        record.copyInstance);
+    record.graphicsVisibilityQueued = true;
+    return Result<bool, std::string>::makeResult(true);
+  }
+  // Completed graphics-only records may already have been collected.
+  return Result<bool, std::string>::makeResult(true);
 }
 
 Result<bool, std::string> NvrhiGPUDevice::submitComputeDispatches(
@@ -6337,7 +6704,8 @@ Result<bool, std::string> NvrhiGPUDevice::submitComputeDispatches(
   impl_->immediateCommandList->open();
   auto result =
       recordComputeDispatches(*impl_, *impl_->immediateCommandList, dispatches,
-                              "NvrhiGPUDevice::submitComputeDispatches");
+                              "NvrhiGPUDevice::submitComputeDispatches",
+                              /*dependencyStatesPreplanned=*/false);
   impl_->immediateCommandList->close();
   if (result.hasError()) {
     return result;
@@ -6436,7 +6804,53 @@ NvrhiGPUDevice::submitBackgroundBufferCopies(
   commandList->close();
   const uint64_t instance =
       submitAsyncUploadCommandList(*impl_, commandList, false);
-  return allocateSubmissionHandle(*impl_, instance);
+  return impl_->hasDedicatedAssetCopyQueue
+             ? allocateSubmissionHandle(*impl_, 0u, instance, 0u, true)
+             : allocateSubmissionHandle(*impl_, instance);
+}
+
+Result<SubmissionHandle, std::string> NvrhiGPUDevice::submitPendingUploads() {
+  if (impl_ == nullptr || !impl_->nvrhiDevice) {
+    return Result<SubmissionHandle, std::string>::makeError(
+        "NVRHI device is not initialized");
+  }
+  std::lock_guard lock(impl_->immediateMutex);
+  collectCompletedAsyncUploadSubmissions(*impl_);
+  const bool containsTextureData = impl_->pendingAsyncUploadTextureCount != 0u;
+  nvrhi::CommandListHandle commandList =
+      takePendingAsyncUploadCommandList(*impl_);
+  if (!commandList) {
+    if (impl_->latestAsyncUploadGraphicsInstance == 0u &&
+        impl_->latestAsyncUploadCopyInstance == 0u) {
+      return Result<SubmissionHandle, std::string>::makeResult(
+          SubmissionHandle{});
+    }
+    return allocateSubmissionHandle(
+        *impl_, impl_->latestAsyncUploadGraphicsInstance,
+        impl_->latestAsyncUploadCopyInstance, 0u, true);
+  }
+  const uint64_t instance =
+      submitAsyncUploadCommandList(*impl_, commandList, containsTextureData);
+  return impl_->hasDedicatedAssetCopyQueue
+             ? allocateSubmissionHandle(*impl_, 0u, instance, 0u, true)
+             : allocateSubmissionHandle(*impl_, instance);
+}
+
+bool NvrhiGPUDevice::assetUploadsUseDedicatedCopyQueue() const noexcept {
+  return impl_ != nullptr && impl_->hasDedicatedAssetCopyQueue;
+}
+
+Result<SubmissionHandle, std::string> NvrhiGPUDevice::captureWorkCompletion() {
+  if (impl_ == nullptr || !impl_->nvrhiDevice) {
+    return Result<SubmissionHandle, std::string>::makeError(
+        "NVRHI device is not initialized");
+  }
+  std::scoped_lock lock(impl_->immediateMutex, impl_->graphicsContextMutex);
+  flushPendingAsyncUploadCommandList(*impl_, false);
+  return allocateSubmissionHandle(
+      *impl_, impl_->latestSubmittedInstance,
+      impl_->latestAsyncUploadCopyInstance,
+      impl_->recordingRetirement.latestIssuedSerial());
 }
 
 Result<bool, std::string>
@@ -6685,10 +7099,15 @@ void NvrhiGPUDevice::waitIdle() {
     flushPendingAsyncUploadCommandList(*impl_);
     impl_->nvrhiDevice->waitForIdle();
     collectCompletedAsyncUploadSubmissions(*impl_);
-    impl_->retiredResources.releaseAllAfterIdle();
+    releaseAllRetiredResourcesAfterIdle(*impl_);
     const uint64_t completed = impl_->nvrhiDevice->queueGetCompletedInstance(
         nvrhi::CommandQueue::Graphics);
-    collectCompletedSubmissionRecords(*impl_, completed);
+    const uint64_t completedCopy =
+        impl_->hasDedicatedAssetCopyQueue
+            ? impl_->nvrhiDevice->queueGetCompletedInstance(
+                  nvrhi::CommandQueue::Copy)
+            : completed;
+    collectCompletedSubmissionRecords(*impl_, completed, completedCopy);
     collectCompletedGraphicsCommandLists(*impl_, completed);
     impl_->nvrhiDevice->runGarbageCollection();
     collectCompletedGpuTimingSubmissions(*impl_);

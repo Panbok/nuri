@@ -78,8 +78,8 @@ struct AtomicDdsTexturePackTelemetry {
 
 AtomicDdsTexturePackTelemetry gDdsTexturePackTelemetry{};
 
-[[nodiscard]] uint64_t elapsedNanoseconds(
-    std::chrono::steady_clock::time_point begin) noexcept {
+[[nodiscard]] uint64_t
+elapsedNanoseconds(std::chrono::steady_clock::time_point begin) noexcept {
   return static_cast<uint64_t>(
       std::chrono::duration_cast<std::chrono::nanoseconds>(
           std::chrono::steady_clock::now() - begin)
@@ -165,7 +165,7 @@ public:
       return Result<bool, std::string>::makeError(
           "DdsTexturePack: failed to open '" + path.string() + "'");
     }
-    struct stat fileStat {};
+    struct stat fileStat{};
     if (::fstat(file_, &fileStat) != 0 || fileStat.st_size <= 0 ||
         static_cast<uint64_t>(fileStat.st_size) >
             std::numeric_limits<size_t>::max()) {
@@ -301,12 +301,11 @@ normalizeSources(std::span<const DdsTexturePackSource> sources) {
       std::move(normalized));
 }
 
-[[nodiscard]] bool writePadding(std::ofstream &stream,
-                                uint64_t byteCount) {
+[[nodiscard]] bool writePadding(std::ofstream &stream, uint64_t byteCount) {
   static constexpr std::array<char, 4096> kZeros{};
   while (byteCount != 0u) {
-    const size_t chunk = static_cast<size_t>(
-        std::min<uint64_t>(byteCount, kZeros.size()));
+    const size_t chunk =
+        static_cast<size_t>(std::min<uint64_t>(byteCount, kZeros.size()));
     stream.write(kZeros.data(), static_cast<std::streamsize>(chunk));
     if (!stream.good()) {
       return false;
@@ -327,8 +326,7 @@ normalizeSources(std::span<const DdsTexturePackSource> sources) {
   static std::atomic<uint64_t> retiredCounter{0u};
   std::filesystem::path retiredPath = finalPath;
   retiredPath += std::format(
-      ".retired.{}",
-      retiredCounter.fetch_add(1u, std::memory_order_relaxed));
+      ".retired.{}", retiredCounter.fetch_add(1u, std::memory_order_relaxed));
   if (MoveFileExW(finalPath.c_str(), retiredPath.c_str(),
                   MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) == 0) {
     return false;
@@ -427,8 +425,7 @@ buildPackFile(const std::filesystem::path &packPath,
         .dataOffset = source.dataOffset,
         .dataSizeBytes = source.fingerprint.sizeBytes,
         .pathOffset = pathOffset,
-        .pathSizeBytes =
-            static_cast<uint32_t>(source.canonicalPath.size()),
+        .pathSizeBytes = static_cast<uint32_t>(source.canonicalPath.size()),
         .reserved = 0u,
     });
     pathOffset += source.canonicalPath.size();
@@ -443,20 +440,17 @@ buildPackFile(const std::filesystem::path &packPath,
   }
   static std::atomic<uint64_t> tempCounter{0u};
   std::filesystem::path tempPath = packPath;
-  tempPath += std::format(".tmp.{}.{}",
-                          static_cast<unsigned long long>(
-                              std::chrono::steady_clock::now()
-                                  .time_since_epoch()
-                                  .count()),
-                          tempCounter.fetch_add(1u,
-                                                std::memory_order_relaxed));
+  tempPath += std::format(
+      ".tmp.{}.{}",
+      static_cast<unsigned long long>(
+          std::chrono::steady_clock::now().time_since_epoch().count()),
+      tempCounter.fetch_add(1u, std::memory_order_relaxed));
 
-  const auto fail = [&](std::string message)
-      -> Result<uint64_t, std::string> {
+  const auto fail = [&](std::string message) -> Result<uint64_t, std::string> {
     std::error_code removeEc;
     std::filesystem::remove(tempPath, removeEc);
-    gDdsTexturePackTelemetry.buildFailures.fetch_add(
-        1u, std::memory_order_relaxed);
+    gDdsTexturePackTelemetry.buildFailures.fetch_add(1u,
+                                                     std::memory_order_relaxed);
     gDdsTexturePackTelemetry.buildTimeNs.fetch_add(
         elapsedNanoseconds(buildBegin), std::memory_order_relaxed);
     return Result<uint64_t, std::string>::makeError(std::move(message));
@@ -472,12 +466,11 @@ buildPackFile(const std::filesystem::path &packPath,
                static_cast<std::streamsize>(diskEntries.size() *
                                             sizeof(diskEntries.front())));
   for (const size_t index : sortedIndices) {
-    output.write(sources[index].canonicalPath.data(),
-                 static_cast<std::streamsize>(
-                     sources[index].canonicalPath.size()));
+    output.write(
+        sources[index].canonicalPath.data(),
+        static_cast<std::streamsize>(sources[index].canonicalPath.size()));
   }
-  if (!output.good() ||
-      !writePadding(output, dataOffset - pathTableEnd)) {
+  if (!output.good() || !writePadding(output, dataOffset - pathTableEnd)) {
     output.close();
     return fail("DdsTexturePack: failed to write artifact index '" +
                 tempPath.string() + "'");
@@ -545,10 +538,9 @@ buildPackFile(const std::filesystem::path &packPath,
                 packPath.string() + "'");
   }
 
-  gDdsTexturePackTelemetry.builds.fetch_add(1u,
-                                             std::memory_order_relaxed);
-  gDdsTexturePackTelemetry.buildTimeNs.fetch_add(
-      elapsedNanoseconds(buildBegin), std::memory_order_relaxed);
+  gDdsTexturePackTelemetry.builds.fetch_add(1u, std::memory_order_relaxed);
+  gDdsTexturePackTelemetry.buildTimeNs.fetch_add(elapsedNanoseconds(buildBegin),
+                                                 std::memory_order_relaxed);
   return Result<uint64_t, std::string>::makeResult(fileSizeBytes);
 }
 
@@ -580,8 +572,10 @@ struct DdsTexturePack::Impl {
   [[nodiscard]] const Entry *
   findEntry(std::string_view canonicalPath) const noexcept {
     const uint64_t pathHash = hashCanonicalPath(canonicalPath);
-    auto it = std::ranges::lower_bound(
-        entries, pathHash, {}, [](const Entry &entry) { return entry.pathHash; });
+    auto it =
+        std::ranges::lower_bound(entries, pathHash, {}, [](const Entry &entry) {
+          return entry.pathHash;
+        });
     for (; it != entries.end() && it->pathHash == pathHash; ++it) {
       if (it->canonicalPath == canonicalPath) {
         return &*it;
@@ -605,8 +599,8 @@ probePack(const std::filesystem::path &packPath,
   auto impl = std::make_unique<DdsTexturePack::Impl>();
   const auto openBegin = std::chrono::steady_clock::now();
   auto openResult = impl->file.open(packPath);
-  gDdsTexturePackTelemetry.openTimeNs.fetch_add(
-      elapsedNanoseconds(openBegin), std::memory_order_relaxed);
+  gDdsTexturePackTelemetry.openTimeNs.fetch_add(elapsedNanoseconds(openBegin),
+                                                std::memory_order_relaxed);
   if (openResult.hasError()) {
     return {.status = ProbeStatus::Corrupt, .error = openResult.error()};
   }
@@ -634,8 +628,7 @@ probePack(const std::filesystem::path &packPath,
             .error = "DdsTexturePack: artifact size or entry count changed"};
   }
   if (header.sceneSourceSizeBytes != sceneFingerprint.sizeBytes ||
-      header.sceneSourceWriteTimeTicks !=
-          sceneFingerprint.writeTimeTicks) {
+      header.sceneSourceWriteTimeTicks != sceneFingerprint.writeTimeTicks) {
     return {.status = ProbeStatus::Stale,
             .error = "DdsTexturePack: scene source fingerprint changed"};
   }
@@ -663,8 +656,7 @@ probePack(const std::filesystem::path &packPath,
         header.indexOffset +
         static_cast<uint64_t>(i) * sizeof(DdsTexturePackEntryDisk);
     auto entryRead = impl->file.readAt(
-        offset,
-        {reinterpret_cast<std::byte *>(&diskEntry), sizeof(diskEntry)});
+        offset, {reinterpret_cast<std::byte *>(&diskEntry), sizeof(diskEntry)});
     if (entryRead.hasError()) {
       return {.status = ProbeStatus::Corrupt, .error = entryRead.error()};
     }
@@ -684,10 +676,10 @@ probePack(const std::filesystem::path &packPath,
     firstEntry = false;
     previousHash = diskEntry.pathHash;
     std::string canonicalPath(diskEntry.pathSizeBytes, '\0');
-    auto pathRead = impl->file.readAt(
-        diskEntry.pathOffset,
-        {reinterpret_cast<std::byte *>(canonicalPath.data()),
-         canonicalPath.size()});
+    auto pathRead =
+        impl->file.readAt(diskEntry.pathOffset,
+                          {reinterpret_cast<std::byte *>(canonicalPath.data()),
+                           canonicalPath.size()});
     if (pathRead.hasError()) {
       return {.status = ProbeStatus::Corrupt, .error = pathRead.error()};
     }
@@ -728,38 +720,49 @@ DdsTexturePack::~DdsTexturePack() = default;
 
 Result<std::span<const std::byte>, std::string>
 DdsTexturePack::read(std::string_view canonicalSourcePath) {
-  if (!impl_) {
+  auto owned = readOwned(canonicalSourcePath);
+  if (owned.hasError()) {
     return Result<std::span<const std::byte>, std::string>::makeError(
-        "DdsTexturePack::read: pack is not open");
+        owned.error());
   }
-  const Impl::Entry *entry = impl_->findEntry(canonicalSourcePath);
-  if (entry == nullptr) {
-    return Result<std::span<const std::byte>, std::string>::makeError(
-        "DdsTexturePack::read: source is not present in the pack");
-  }
-  if (entry->dataSizeBytes > std::numeric_limits<size_t>::max()) {
-    return Result<std::span<const std::byte>, std::string>::makeError(
-        "DdsTexturePack::read: source exceeds addressable memory");
-  }
-  const auto readBegin = std::chrono::steady_clock::now();
-  impl_->readBuffer.resize(static_cast<size_t>(entry->dataSizeBytes));
-  auto readResult =
-      impl_->file.readAt(entry->dataOffset, impl_->readBuffer);
-  gDdsTexturePackTelemetry.readTimeNs.fetch_add(
-      elapsedNanoseconds(readBegin), std::memory_order_relaxed);
-  if (readResult.hasError()) {
-    gDdsTexturePackTelemetry.readFailures.fetch_add(
-        1u, std::memory_order_relaxed);
-    return Result<std::span<const std::byte>, std::string>::makeError(
-        readResult.error());
-  }
-  gDdsTexturePackTelemetry.entriesServed.fetch_add(
-      1u, std::memory_order_relaxed);
-  gDdsTexturePackTelemetry.bytesServed.fetch_add(
-      entry->dataSizeBytes, std::memory_order_relaxed);
+  impl_->readBuffer = std::move(owned.value());
   return Result<std::span<const std::byte>, std::string>::makeResult(
       std::span<const std::byte>(impl_->readBuffer.data(),
                                  impl_->readBuffer.size()));
+}
+
+Result<std::vector<std::byte>, std::string>
+DdsTexturePack::readOwned(std::string_view canonicalSourcePath) const {
+  if (!impl_) {
+    return Result<std::vector<std::byte>, std::string>::makeError(
+        "DdsTexturePack::readOwned: pack is not open");
+  }
+  const Impl::Entry *entry = impl_->findEntry(canonicalSourcePath);
+  if (entry == nullptr) {
+    return Result<std::vector<std::byte>, std::string>::makeError(
+        "DdsTexturePack::readOwned: source is not present in the pack");
+  }
+  if (entry->dataSizeBytes > std::numeric_limits<size_t>::max()) {
+    return Result<std::vector<std::byte>, std::string>::makeError(
+        "DdsTexturePack::readOwned: source exceeds addressable memory");
+  }
+  const auto readBegin = std::chrono::steady_clock::now();
+  std::vector<std::byte> bytes(static_cast<size_t>(entry->dataSizeBytes));
+  auto readResult = impl_->file.readAt(entry->dataOffset, bytes);
+  gDdsTexturePackTelemetry.readTimeNs.fetch_add(elapsedNanoseconds(readBegin),
+                                                std::memory_order_relaxed);
+  if (readResult.hasError()) {
+    gDdsTexturePackTelemetry.readFailures.fetch_add(1u,
+                                                    std::memory_order_relaxed);
+    return Result<std::vector<std::byte>, std::string>::makeError(
+        readResult.error());
+  }
+  gDdsTexturePackTelemetry.entriesServed.fetch_add(1u,
+                                                   std::memory_order_relaxed);
+  gDdsTexturePackTelemetry.bytesServed.fetch_add(entry->dataSizeBytes,
+                                                 std::memory_order_relaxed);
+  return Result<std::vector<std::byte>, std::string>::makeResult(
+      std::move(bytes));
 }
 
 std::optional<TextureSourceFingerprint> DdsTexturePack::sourceFingerprint(
@@ -822,8 +825,7 @@ ensureDdsTexturePack(const std::filesystem::path &sceneSourcePath,
     return Result<DdsTexturePackOpenResult, std::string>::makeError(
         normalizedSources.error());
   }
-  auto sceneFingerprint =
-      queryTextureSourceFingerprint(sceneSourcePath);
+  auto sceneFingerprint = queryTextureSourceFingerprint(sceneSourcePath);
   if (sceneFingerprint.hasError()) {
     return Result<DdsTexturePackOpenResult, std::string>::makeError(
         sceneFingerprint.error());
@@ -833,30 +835,24 @@ ensureDdsTexturePack(const std::filesystem::path &sceneSourcePath,
                                 normalizedSources.value());
   switch (probe.status) {
   case ProbeStatus::Hit:
-    gDdsTexturePackTelemetry.hits.fetch_add(1u,
-                                            std::memory_order_relaxed);
+    gDdsTexturePackTelemetry.hits.fetch_add(1u, std::memory_order_relaxed);
     return Result<DdsTexturePackOpenResult, std::string>::makeResult(
-        DdsTexturePackOpenResult{
-            .pack = std::unique_ptr<DdsTexturePack>(
-                new DdsTexturePack(std::move(probe.impl))),
-            .built = false});
+        DdsTexturePackOpenResult{.pack = std::unique_ptr<DdsTexturePack>(
+                                     new DdsTexturePack(std::move(probe.impl))),
+                                 .built = false});
   case ProbeStatus::Missing:
-    gDdsTexturePackTelemetry.misses.fetch_add(1u,
-                                              std::memory_order_relaxed);
+    gDdsTexturePackTelemetry.misses.fetch_add(1u, std::memory_order_relaxed);
     break;
   case ProbeStatus::Stale:
-    gDdsTexturePackTelemetry.stale.fetch_add(1u,
-                                             std::memory_order_relaxed);
+    gDdsTexturePackTelemetry.stale.fetch_add(1u, std::memory_order_relaxed);
     break;
   case ProbeStatus::Corrupt:
-    gDdsTexturePackTelemetry.corrupt.fetch_add(1u,
-                                               std::memory_order_relaxed);
+    gDdsTexturePackTelemetry.corrupt.fetch_add(1u, std::memory_order_relaxed);
     break;
   }
 
-  auto buildResult =
-      buildPackFile(packPath.value(), sceneFingerprint.value(),
-                    normalizedSources.value());
+  auto buildResult = buildPackFile(packPath.value(), sceneFingerprint.value(),
+                                   normalizedSources.value());
   if (buildResult.hasError()) {
     return Result<DdsTexturePackOpenResult, std::string>::makeError(
         buildResult.error());
@@ -865,34 +861,31 @@ ensureDdsTexturePack(const std::filesystem::path &sceneSourcePath,
   ProbeResult rebuilt = probePack(packPath.value(), sceneFingerprint.value(),
                                   normalizedSources.value());
   if (rebuilt.status != ProbeStatus::Hit || !rebuilt.impl) {
-    gDdsTexturePackTelemetry.buildFailures.fetch_add(
-        1u, std::memory_order_relaxed);
+    gDdsTexturePackTelemetry.buildFailures.fetch_add(1u,
+                                                     std::memory_order_relaxed);
     return Result<DdsTexturePackOpenResult, std::string>::makeError(
         rebuilt.error.empty()
             ? "DdsTexturePack: rebuilt artifact failed validation"
             : rebuilt.error);
   }
   return Result<DdsTexturePackOpenResult, std::string>::makeResult(
-      DdsTexturePackOpenResult{
-          .pack = std::unique_ptr<DdsTexturePack>(
-              new DdsTexturePack(std::move(rebuilt.impl))),
-          .built = true});
+      DdsTexturePackOpenResult{.pack = std::unique_ptr<DdsTexturePack>(
+                                   new DdsTexturePack(std::move(rebuilt.impl))),
+                               .built = true});
 }
 
 DdsTexturePackTelemetry ddsTexturePackTelemetry() noexcept {
   return DdsTexturePackTelemetry{
       .hits = gDdsTexturePackTelemetry.hits.load(std::memory_order_relaxed),
-      .misses =
-          gDdsTexturePackTelemetry.misses.load(std::memory_order_relaxed),
+      .misses = gDdsTexturePackTelemetry.misses.load(std::memory_order_relaxed),
       .stale = gDdsTexturePackTelemetry.stale.load(std::memory_order_relaxed),
       .corrupt =
           gDdsTexturePackTelemetry.corrupt.load(std::memory_order_relaxed),
-      .builds =
-          gDdsTexturePackTelemetry.builds.load(std::memory_order_relaxed),
+      .builds = gDdsTexturePackTelemetry.builds.load(std::memory_order_relaxed),
       .buildFailures = gDdsTexturePackTelemetry.buildFailures.load(
           std::memory_order_relaxed),
-      .readFailures = gDdsTexturePackTelemetry.readFailures.load(
-          std::memory_order_relaxed),
+      .readFailures =
+          gDdsTexturePackTelemetry.readFailures.load(std::memory_order_relaxed),
       .entriesServed = gDdsTexturePackTelemetry.entriesServed.load(
           std::memory_order_relaxed),
       .bytesServed =

@@ -113,6 +113,7 @@ public:
   uint64_t getBufferDeviceAddress(BufferHandle h, size_t offset) const override;
   bool resolveGeometry(GeometryAllocationHandle h,
                        GeometryAllocationView &out) const override;
+  uint64_t geometryMutationVersion() const override;
   GpuTimingReport getLatestCompletedGpuTimingReport() const override;
   size_t drainCompletedGpuTimingReports(
       std::span<GpuTimingReport> outReports) override;
@@ -158,6 +159,8 @@ public:
   Result<SubmissionHandle, std::string>
   submitBackgroundBufferCopies(std::span<const BufferCopyRegion> regions,
                                std::string_view debugName) override;
+  Result<SubmissionHandle, std::string> submitPendingUploads() override;
+  Result<SubmissionHandle, std::string> captureWorkCompletion() override;
 
   Result<bool, std::string> updateBuffer(BufferHandle buffer,
                                          std::span<const std::byte> data,
@@ -186,6 +189,7 @@ public:
   uint32_t destroyedSamplerCount = 0u;
   uint32_t submitCount = 0u;
   uint32_t backgroundCopySubmitCount = 0u;
+  uint32_t pendingUploadSubmitCount = 0u;
   uint32_t waitIdleCallCount = 0u;
   uint32_t updateBufferCallCount = 0u;
   uint32_t updateBufferBatchCallCount = 0u;
@@ -283,17 +287,26 @@ private:
     bool live = false;
   };
 
+  struct GeometryState {
+    GeometryAllocationHandle handle{};
+    GeometryAllocationView view{};
+    bool live = false;
+  };
+
   uint32_t nextBufferIndex_ = 1u;
   uint32_t nextTextureIndex_ = 1u;
   uint32_t nextSamplerIndex_ = 1u;
   uint32_t nextRecordingContextIndex_ = 1u;
   uint32_t nextRecordedCommandBufferIndex_ = 1u;
   uint32_t nextSubmissionIndex_ = 1u;
+  uint32_t nextGeometryIndex_ = 1u;
   uint32_t finishCallCount_ = 0u;
   uint64_t currentFrameIndex_ = 0u;
+  uint64_t geometryMutationVersion_ = 1u;
   bool hasPreparedFrameOutput_ = false;
   std::vector<BufferState> buffers_{};
   std::vector<TextureState> textures_{};
+  std::vector<GeometryState> geometries_{};
   std::vector<RecordingContextState> activeRecordingContexts_{};
   std::vector<RecordedCommandBufferState> finishedCommandBuffers_{};
   std::vector<SubmissionState> submissions_{};

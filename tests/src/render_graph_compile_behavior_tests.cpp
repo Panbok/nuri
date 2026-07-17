@@ -324,6 +324,65 @@ TEST(RenderGraphCompileBehaviorTest,
 }
 
 TEST(RenderGraphCompileBehaviorTest,
+     GraphFingerprintRejectsImportedTransientBufferSlotRewire) {
+  RenderGraphBuilder builder;
+
+  const auto recordFrame =
+      [&](uint64_t frameIndex, bool importFirst,
+          BufferHandle importedHandle) -> RenderGraphBuilder::GraphFingerprint {
+    builder.beginFrame(frameIndex);
+
+    Result<RenderGraphBufferId, std::string> importedResult =
+        Result<RenderGraphBufferId, std::string>::makeError("not imported");
+    Result<RenderGraphBufferId, std::string> transientResult =
+        Result<RenderGraphBufferId, std::string>::makeError("not created");
+    if (importFirst) {
+      importedResult =
+          builder.importBuffer(importedHandle, "fingerprint_imported_buffer");
+      transientResult = builder.createTransientBuffer(
+          makeTransientBufferDesc(64u), "fingerprint_transient_buffer");
+    } else {
+      transientResult = builder.createTransientBuffer(
+          makeTransientBufferDesc(64u), "fingerprint_transient_buffer");
+      importedResult =
+          builder.importBuffer(importedHandle, "fingerprint_imported_buffer");
+    }
+    EXPECT_FALSE(importedResult.hasError());
+    EXPECT_FALSE(transientResult.hasError());
+    if (importedResult.hasError() || transientResult.hasError()) {
+      return {};
+    }
+
+    auto passResult =
+        addTestGraphicsPass(builder, makeTestPass("fingerprint_buffer_rewire"),
+                            "fingerprint_buffer_rewire");
+    EXPECT_FALSE(passResult.hasError());
+    if (passResult.hasError()) {
+      return {};
+    }
+    EXPECT_FALSE(builder
+                     .addBufferAccess(passResult.value(),
+                                      importedResult.value(),
+                                      RenderGraphAccessMode::Read)
+                     .hasError());
+    EXPECT_FALSE(builder
+                     .addBufferAccess(passResult.value(),
+                                      transientResult.value(),
+                                      RenderGraphAccessMode::Write)
+                     .hasError());
+    EXPECT_FALSE(builder.markPassSideEffect(passResult.value()).hasError());
+    return builder.computeGraphFingerprint();
+  };
+
+  const auto importedFirstFingerprint =
+      recordFrame(243u, true, BufferHandle{.index = 401u, .generation = 1u});
+  const auto transientFirstFingerprint =
+      recordFrame(244u, false, BufferHandle{.index = 402u, .generation = 2u});
+
+  EXPECT_FALSE(importedFirstFingerprint == transientFirstFingerprint);
+}
+
+TEST(RenderGraphCompileBehaviorTest,
      RefreshHandlesUpdatesBorrowedPreResolvedDrawSpan) {
   RenderGraphBuilder builder;
 
@@ -544,6 +603,47 @@ TEST(RenderGraphCompileBehaviorTest,
                 .preDispatches[0]
                 .dependencyBuffers.size(),
             1u);
+}
+
+TEST(RenderGraphCompileBehaviorTest,
+     ImplicitPreDispatchDependenciesPreserveExactAccessModes) {
+  RenderGraphBuilder builder;
+  builder.beginFrame(245u);
+
+  const std::array<BufferHandle, 2u> dependencies = {
+      BufferHandle{.index = 501u, .generation = 1u},
+      BufferHandle{.index = 502u, .generation = 1u},
+  };
+  const std::array<RenderGraphAccessMode, 2u> accessModes = {
+      RenderGraphAccessMode::Read,
+      RenderGraphAccessMode::Write,
+  };
+  ComputeDispatchItem dispatch{};
+  dispatch.pipeline = ComputePipelineHandle{.index = 91u, .generation = 1u};
+  dispatch.dispatch = {.x = 1u, .y = 1u, .z = 1u};
+  dispatch.dependencyBuffers = dependencies;
+  dispatch.dependencyBufferAccessModes = accessModes;
+  dispatch.debugLabel = "exact_access_dispatch";
+  const std::array<ComputeDispatchItem, 1u> preDispatches = {dispatch};
+
+  RenderGraphGraphicsPassDesc passDesc{};
+  passDesc.executionMode = RenderPassExecutionMode::ComputeOnly;
+  passDesc.hasColorAttachment = false;
+  passDesc.preDispatches = preDispatches;
+  passDesc.debugLabel = "exact_access_pass";
+  passDesc.markImplicitOutputSideEffect = true;
+
+  auto passResult = builder.addGraphicsPass(passDesc);
+  ASSERT_FALSE(passResult.hasError()) << passResult.error();
+
+  auto compileResult = compileBuilder(builder);
+  ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
+  const RenderGraphCompileResult &compiled = compileResult.value();
+  ASSERT_EQ(compiled.passBarrierRecords.size(), 2u);
+  EXPECT_EQ(compiled.passBarrierRecords[0].afterAccess,
+            RenderGraphAccessMode::Read);
+  EXPECT_EQ(compiled.passBarrierRecords[1].afterAccess,
+            RenderGraphAccessMode::Write);
 }
 
 TEST(RenderGraphCompileBehaviorTest,

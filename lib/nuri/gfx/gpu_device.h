@@ -213,6 +213,16 @@ public:
       std::span<const RecordedCommandBufferHandle> commandBuffers,
       std::span<const SubmitBatchMeta> batches) = 0;
   virtual bool isSubmissionComplete(SubmissionHandle handle) const = 0;
+  // Establishes the queue dependency required before resources written by a
+  // completed upload submission may be consumed by graphics. Graphics-queue
+  // submissions are already ordered and return immediately; a dedicated copy
+  // queue backend queues a non-blocking timeline wait for the next graphics
+  // submission.
+  virtual Result<bool, std::string>
+  makeSubmissionVisibleToGraphics(SubmissionHandle handle) {
+    (void)handle;
+    return Result<bool, std::string>::makeResult(true);
+  }
   virtual Result<bool, std::string>
   submitComputeDispatches(std::span<const ComputeDispatchItem> dispatches) = 0;
   virtual Result<GeometryAllocationHandle, std::string>
@@ -223,6 +233,25 @@ public:
   virtual Result<SubmissionHandle, std::string>
   submitBackgroundBufferCopies(std::span<const BufferCopyRegion> regions,
                                std::string_view debugName = {}) = 0;
+  // Submits all resource-initialization and update commands recorded by this
+  // device since the previous upload submission. The returned handle becomes
+  // complete when those uploads are resident. An invalid handle means no
+  // commands were pending.
+  virtual Result<SubmissionHandle, std::string> submitPendingUploads() {
+    return Result<SubmissionHandle, std::string>::makeResult(
+        SubmissionHandle{});
+  }
+  [[nodiscard]] virtual bool
+  assetUploadsUseDedicatedCopyQueue() const noexcept {
+    return false;
+  }
+  // Captures completion of every graphics recording or upload that already
+  // exists at this call. Work recorded later is not included. This is used to
+  // defer reuse of suballocated memory without stalling the CPU.
+  virtual Result<SubmissionHandle, std::string> captureWorkCompletion() {
+    return Result<SubmissionHandle, std::string>::makeResult(
+        SubmissionHandle{});
+  }
 
   // Data updates
   virtual Result<bool, std::string>

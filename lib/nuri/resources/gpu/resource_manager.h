@@ -17,6 +17,7 @@
 #include <limits>
 #include <memory>
 #include <memory_resource>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -168,12 +169,25 @@ struct NURI_API ModelRecord {
 // so those spans are not required to have equal lengths. Empty/missing
 // extension components use kInvalidMaterialExtensionIndex in headers. version
 // identifies the snapshot contents and changes when any table changes.
+struct NURI_API MaterialTableDirtyRange {
+  uint32_t first = 0u;
+  uint32_t count = 0u;
+
+  [[nodiscard]] bool empty() const noexcept { return count == 0u; }
+};
+
 struct NURI_API MaterialTableSnapshot {
   std::span<const MaterialHeaderGpuData> headers{};
   std::span<const MaterialClearcoatGpuData> clearcoat{};
   std::span<const MaterialSheenGpuData> sheen{};
   std::span<const MaterialTransmissionGpuData> transmission{};
   std::span<const MaterialSpecularGpuData> specular{};
+  MaterialTableDirtyRange dirtyHeaders{};
+  MaterialTableDirtyRange dirtyClearcoat{};
+  MaterialTableDirtyRange dirtySheen{};
+  MaterialTableDirtyRange dirtyTransmission{};
+  MaterialTableDirtyRange dirtySpecular{};
+  uint64_t dirtyBaseVersion = 0u;
   uint64_t version = 0;
 };
 
@@ -221,8 +235,17 @@ public:
 
   [[nodiscard]] Result<TextureRef, std::string>
   acquireTexture(const TextureRequest &request);
+  [[nodiscard]] std::optional<TextureRef>
+  tryAcquireTexture(const TextureRequest &request);
+  [[nodiscard]] Result<TextureRef, std::string>
+  adoptPreparedTexture(const TextureRequest &request,
+                       std::unique_ptr<Texture> texture);
   [[nodiscard]] Result<ModelRef, std::string>
   acquireModel(const ModelRequest &request);
+  [[nodiscard]] std::optional<ModelRef>
+  tryAcquireModel(const ModelRequest &request);
+  [[nodiscard]] Result<ModelRef, std::string>
+  adoptPreparedModel(const ModelRequest &request, std::unique_ptr<Model> model);
   [[nodiscard]] Result<ModelRef, std::string>
   acquireGeneratedModel(const MeshData &meshData,
                         std::string_view debugName = {});
@@ -261,11 +284,20 @@ public:
             materialTransmissionTable_.size()),
         .specular = std::span<const MaterialSpecularGpuData>(
             materialSpecularTable_.data(), materialSpecularTable_.size()),
+        .dirtyHeaders = materialHeaderDirtyRange_,
+        .dirtyClearcoat = materialClearcoatDirtyRange_,
+        .dirtySheen = materialSheenDirtyRange_,
+        .dirtyTransmission = materialTransmissionDirtyRange_,
+        .dirtySpecular = materialSpecularDirtyRange_,
+        .dirtyBaseVersion = materialTableDirtyBaseVersion_,
         .version = materialTableVersion_,
     };
   }
   [[nodiscard]] uint64_t materialVersion() const noexcept {
     return materialTableVersion_;
+  }
+  [[nodiscard]] uint64_t modelMaterialBindingVersion() const noexcept {
+    return modelMaterialBindingVersion_;
   }
   [[nodiscard]] GpuMultisampleCapabilities gpuMultisampleCapabilities() const {
     return gpu_.getMultisampleCapabilities();
@@ -275,6 +307,8 @@ public:
   }
 
   void beginFrame(uint64_t frameIndex);
+  void beginPublicationBatch();
+  void endPublicationBatch();
   void collectGarbage(uint64_t completedFrameIndex);
 
   [[nodiscard]] PoolStats stats() const;
@@ -341,7 +375,14 @@ private:
   void destroyMaterialSlot(uint32_t index, bool skipRebuild = false);
   void destroyModelSlot(uint32_t index);
   void rebuildPackedMaterialTables();
+  void markMaterialTablesDirty();
+  void markModelMaterialBindingsDirty();
+  void flushPublicationVersions();
 
+  [[nodiscard]] Result<TextureRef, std::string>
+  storeAcquiredTexture(const TextureKey &key, std::string_view canonicalPath,
+                       const TextureRequest &request,
+                       std::unique_ptr<Texture> texture);
   [[nodiscard]] ModelRef tryAcquireCachedModel(const ModelKey &key);
   [[nodiscard]] Result<ModelRef, std::string>
   storeAcquiredModel(const ModelKey &key, std::string_view canonicalPath,
@@ -372,7 +413,17 @@ private:
   std::pmr::vector<MaterialSheenGpuData> materialSheenTable_;
   std::pmr::vector<MaterialTransmissionGpuData> materialTransmissionTable_;
   std::pmr::vector<MaterialSpecularGpuData> materialSpecularTable_;
+  MaterialTableDirtyRange materialHeaderDirtyRange_{};
+  MaterialTableDirtyRange materialClearcoatDirtyRange_{};
+  MaterialTableDirtyRange materialSheenDirtyRange_{};
+  MaterialTableDirtyRange materialTransmissionDirtyRange_{};
+  MaterialTableDirtyRange materialSpecularDirtyRange_{};
+  uint64_t materialTableDirtyBaseVersion_ = 0u;
   uint64_t materialTableVersion_ = 0;
+  uint64_t modelMaterialBindingVersion_ = 0;
+  uint32_t publicationBatchDepth_ = 0u;
+  bool materialTablesDirty_ = false;
+  bool modelMaterialBindingsDirty_ = false;
 
   HashMap<TextureKey, TextureRef, TextureKeyHash> textureCache_;
   HashMap<MaterialKey, MaterialRef, MaterialKeyHash> materialCache_;

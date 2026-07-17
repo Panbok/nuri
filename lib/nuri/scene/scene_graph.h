@@ -139,6 +139,13 @@ public:
   }
 
   [[nodiscard]] Result<NodeId, std::string>
+  instantiatePrefabStructure(const ScenePrefab &prefab, NodeId parent,
+                             SceneInstantiationMap *outMap = nullptr);
+  [[nodiscard]] Result<RenderableId, std::string>
+  attachPrefabRenderable(const ScenePrefab &prefab,
+                         uint32_t prefabRenderableIndex, ModelRef model,
+                         MaterialRef material, SceneInstantiationMap &map);
+  [[nodiscard]] Result<NodeId, std::string>
   instantiatePrefab(const ScenePrefab &prefab, NodeId parent,
                     const ScenePrefabAssets &assets,
                     SceneInstantiationMap *outMap = nullptr);

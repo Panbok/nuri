@@ -117,6 +117,8 @@ public:
       std::span<const RecordedCommandBufferHandle> commandBuffers,
       std::span<const SubmitBatchMeta> batches) override;
   bool isSubmissionComplete(SubmissionHandle handle) const override;
+  Result<bool, std::string>
+  makeSubmissionVisibleToGraphics(SubmissionHandle handle) override;
   Result<bool, std::string> submitComputeDispatches(
       std::span<const ComputeDispatchItem> dispatches) override;
   Result<GeometryAllocationHandle, std::string>
@@ -127,6 +129,10 @@ public:
   Result<SubmissionHandle, std::string>
   submitBackgroundBufferCopies(std::span<const BufferCopyRegion> regions,
                                std::string_view debugName = {}) override;
+  Result<SubmissionHandle, std::string> submitPendingUploads() override;
+  [[nodiscard]] bool
+  assetUploadsUseDedicatedCopyQueue() const noexcept override;
+  Result<SubmissionHandle, std::string> captureWorkCompletion() override;
 
   Result<bool, std::string> updateBuffer(BufferHandle buffer,
                                          std::span<const std::byte> data,

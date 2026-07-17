@@ -57,6 +57,9 @@ set(NURI_RENDERER_SOURCES
   nuri/resources/gpu/model.cpp
   nuri/resources/gpu/resource_manager.cpp
   nuri/resources/gpu/texture.cpp
+  nuri/resources/async/asset_cpu_scheduler.cpp
+  nuri/resources/async/scene_asset_preparation.cpp
+  nuri/resources/async/asset_system.cpp
   nuri/resources/detail/gltf_buffer_utils.cpp
   nuri/resources/detail/gltf_json_utils.cpp
   nuri/resources/gltf_scene_importer.cpp

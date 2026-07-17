@@ -204,6 +204,8 @@ private:
   const RenderScene *cachedScene_ = nullptr;
   uint64_t cachedTopologyVersion_ = std::numeric_limits<uint64_t>::max();
   uint64_t cachedMaterialVersion_ = std::numeric_limits<uint64_t>::max();
+  uint64_t cachedModelMaterialBindingVersion_ =
+      std::numeric_limits<uint64_t>::max();
   uint64_t cachedTransformVersion_ = std::numeric_limits<uint64_t>::max();
   uint64_t cachedGeometryMutationVersion_ =
       std::numeric_limits<uint64_t>::max();
@@ -211,6 +213,8 @@ private:
   uint64_t cachedTransmissionContentTopologyVersion_ =
       std::numeric_limits<uint64_t>::max();
   uint64_t cachedTransmissionContentMaterialVersion_ =
+      std::numeric_limits<uint64_t>::max();
+  uint64_t cachedTransmissionContentBindingVersion_ =
       std::numeric_limits<uint64_t>::max();
   bool cachedTransmissionContentValid_ = false;
   bool cachedTransmissionContent_ = false;

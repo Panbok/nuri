@@ -1,8 +1,10 @@
 //
 #version 460 core
 
-#include "grid_calculation.sp"
+// clang-format off
 #include "grid_params.sp"
+#include "grid_calculation.sp"
+// clang-format on
 
 layout(location = 0) in vec2 uv;
 layout(location = 1) in vec2 camPos;

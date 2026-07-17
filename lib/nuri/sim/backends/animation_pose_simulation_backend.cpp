@@ -197,13 +197,28 @@ uint32_t dispatchCount(uint32_t elementCount) {
                           kComputeWorkgroupSize);
 }
 
+constexpr RenderGraphAccessMode kRead = RenderGraphAccessMode::Read;
+constexpr RenderGraphAccessMode kWrite = RenderGraphAccessMode::Write;
+constexpr std::array kSampleDependencyAccess = {kRead, kRead, kWrite, kWrite};
+constexpr std::array kBlendDependencyAccess = {kRead, kRead, kWrite,
+                                               kRead, kRead, kWrite};
+constexpr std::array kWorldDependencyAccess = {kRead, kRead, kRead, kWrite};
+constexpr std::array kScatterDependencyAccess = {kRead, kRead, kWrite};
+constexpr std::array kSkinPaletteDependencyAccess = {kRead, kRead, kRead,
+                                                     kWrite};
+constexpr std::array kMorphDependencyAccess = {kRead, kRead, kRead, kWrite};
+constexpr std::array kSkinDependencyAccess = {kRead, kRead, kRead, kWrite};
+
 template <typename T, size_t N>
 void appendComputeDispatch(std::pmr::vector<ComputeDispatchItem> &out,
                            ComputePipelineHandle pipeline, uint32_t x,
                            const T &pushConstants,
                            const std::array<BufferHandle, N> &dependencies,
-                           size_t dependencyCount, std::string_view debugLabel,
-                           uint32_t debugColor) {
+                           size_t dependencyCount,
+                           std::span<const RenderGraphAccessMode> accessModes,
+                           std::string_view debugLabel, uint32_t debugColor) {
+  NURI_ASSERT(accessModes.size() == dependencyCount,
+              "Animation compute dependency access count mismatch");
   out.push_back(ComputeDispatchItem{
       .pipeline = pipeline,
       .dispatch = {.x = x, .y = 1u, .z = 1u},
@@ -211,6 +226,7 @@ void appendComputeDispatch(std::pmr::vector<ComputeDispatchItem> &out,
           std::as_bytes(std::span<const T>(&pushConstants, size_t{1u})),
       .dependencyBuffers =
           std::span<const BufferHandle>(dependencies.data(), dependencyCount),
+      .dependencyBufferAccessModes = accessModes,
       .debugLabel = debugLabel,
       .debugColor = debugColor,
   });
@@ -1637,8 +1653,8 @@ AnimationPoseSimulationBackend::prepareSceneFrame(SceneRuntimeHost &host,
           dispatchCount(sceneFrame.samplePushConstants.back().channelCount),
           sceneFrame.samplePushConstants.back(),
           sceneFrame.sampleDependencies.back(),
-          sceneFrame.sampleDependencies.back().size(), "AnimationPose Sample",
-          0xff5599ffu);
+          sceneFrame.sampleDependencies.back().size(), kSampleDependencyAccess,
+          "AnimationPose Sample", 0xff5599ffu);
       return Result<bool, std::string>::makeResult(true);
     };
 
@@ -1720,8 +1736,8 @@ AnimationPoseSimulationBackend::prepareSceneFrame(SceneRuntimeHost &host,
                          sceneFrame.blendPushConstants.back().weightCount)),
             sceneFrame.blendPushConstants.back(),
             sceneFrame.blendDependencies.back(),
-            sceneFrame.blendDependencies.back().size(), "AnimationPose Blend",
-            0xff6688ffu);
+            sceneFrame.blendDependencies.back().size(), kBlendDependencyAccess,
+            "AnimationPose Blend", 0xff6688ffu);
 
         nodeStatesAddress = blendedNodeStatesAddress;
         sampledWeightsAddress = blendedWeightsAddress;
@@ -1756,8 +1772,8 @@ AnimationPoseSimulationBackend::prepareSceneFrame(SceneRuntimeHost &host,
           sceneFrame.preDispatches, services_->worldPipeline(),
           dispatchCount(nodeCount), sceneFrame.worldPushConstants.back(),
           sceneFrame.worldDependencies.back(),
-          sceneFrame.worldDependencies.back().size(), "AnimationPose World",
-          0xff33aa55u);
+          sceneFrame.worldDependencies.back().size(), kWorldDependencyAccess,
+          "AnimationPose World", 0xff33aa55u);
     }
 
     if (!instance.renderableBindings.empty()) {
@@ -1785,7 +1801,7 @@ AnimationPoseSimulationBackend::prepareSceneFrame(SceneRuntimeHost &host,
           dispatchCount(sceneFrame.scatterPushConstants.back().bindingCount),
           sceneFrame.scatterPushConstants.back(),
           sceneFrame.scatterDependencies.back(), size_t{3u},
-          "AnimationPose Scatter", 0xff33cc88u);
+          kScatterDependencyAccess, "AnimationPose Scatter", 0xff33cc88u);
     }
 
     for (AnimatedRenderableState &animated : instance.animatedRenderables) {
@@ -1858,7 +1874,8 @@ AnimationPoseSimulationBackend::prepareSceneFrame(SceneRuntimeHost &host,
               sceneFrame.skinPalettePushConstants.back(),
               sceneFrame.skinPaletteDependencies.back(),
               sceneFrame.skinPaletteDependencies.back().size(),
-              "AnimationPose SkinPalette", 0xffaa55ccu);
+              kSkinPaletteDependencyAccess, "AnimationPose SkinPalette",
+              0xffaa55ccu);
         }
       }
 
@@ -1886,13 +1903,13 @@ AnimationPoseSimulationBackend::prepareSceneFrame(SceneRuntimeHost &host,
           sceneFrame.morphDependencies.push_back(
               {animated.sourceVertexBuffer, animated.morphDeltaBuffer,
                sampledWeightsBuffer, currentMorphOutput->handle()});
-          appendComputeDispatch(sceneFrame.preDispatches,
-                                services_->morphPipeline(),
-                                dispatchCount(animated.vertexCount),
-                                sceneFrame.morphPushConstants.back(),
-                                sceneFrame.morphDependencies.back(),
-                                sceneFrame.morphDependencies.back().size(),
-                                "AnimationPose Morph", 0xffaa7733u);
+          appendComputeDispatch(
+              sceneFrame.preDispatches, services_->morphPipeline(),
+              dispatchCount(animated.vertexCount),
+              sceneFrame.morphPushConstants.back(),
+              sceneFrame.morphDependencies.back(),
+              sceneFrame.morphDependencies.back().size(),
+              kMorphDependencyAccess, "AnimationPose Morph", 0xffaa7733u);
           if (!animated.hasSkin) {
             overrideBuffer = currentMorphOutput->handle();
           }
@@ -1936,13 +1953,13 @@ AnimationPoseSimulationBackend::prepareSceneFrame(SceneRuntimeHost &host,
               {skinSourceBuffer, animated.skinInfluenceBuffer,
                instance.jointPaletteBuffer->handle(),
                currentSkinOutput->handle()});
-          appendComputeDispatch(sceneFrame.preDispatches,
-                                services_->skinPipeline(),
-                                dispatchCount(animated.vertexCount),
-                                sceneFrame.skinPushConstants.back(),
-                                sceneFrame.skinDependencies.back(),
-                                sceneFrame.skinDependencies.back().size(),
-                                "AnimationPose Skin", 0xffcc8844u);
+          appendComputeDispatch(
+              sceneFrame.preDispatches, services_->skinPipeline(),
+              dispatchCount(animated.vertexCount),
+              sceneFrame.skinPushConstants.back(),
+              sceneFrame.skinDependencies.back(),
+              sceneFrame.skinDependencies.back().size(), kSkinDependencyAccess,
+              "AnimationPose Skin", 0xffcc8844u);
           overrideBuffer = currentSkinOutput->handle();
         }
       }

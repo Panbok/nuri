@@ -546,8 +546,11 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
   const bool topologyDirty =
       cachedScene_ != frame.scene ||
       cachedTopologyVersion_ != frame.scene->topologyVersion();
+  const uint64_t modelMaterialBindingVersion =
+      frame.resources->modelMaterialBindingVersion();
   const bool materialDirty =
-      topologyDirty || cachedMaterialVersion_ != materialSnapshot.version;
+      topologyDirty || cachedMaterialVersion_ != materialSnapshot.version ||
+      cachedModelMaterialBindingVersion_ != modelMaterialBindingVersion;
   const bool transformDirty =
       topologyDirty ||
       cachedTransformVersion_ != frame.scene->transformVersion();
@@ -575,6 +578,7 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
     }
     drawTemplatesRebuilt = true;
     cachedMaterialVersion_ = materialSnapshot.version;
+    cachedModelMaterialBindingVersion_ = modelMaterialBindingVersion;
   } else if (geometryDirty) {
     cachedGeometryMutationVersion_ = geometryMutationVersion;
   }
@@ -768,9 +772,11 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
     std::fill(instanceDataRingUploadVersions_.begin(),
               instanceDataRingUploadVersions_.end(),
               std::numeric_limits<uint64_t>::max());
-  } else if (meshDrawTemplates_.empty()) {
-    cachedTransformVersion_ = frame.scene->transformVersion();
   }
+  // cachedTransformVersion_ describes the contents of instanceMatrices_ and
+  // instanceRemap_. Do not advance it while there are no transmission draws:
+  // progressive material publication can activate this pass later without a
+  // scene transform or topology mutation.
 
   if (!meshDrawTemplates_.empty()) {
     if (animationSceneData == nullptr) {
@@ -1791,10 +1797,13 @@ TransmissionRenderer::rebuildSceneCache(const RenderScene &scene,
   cachedScene_ = &scene;
   cachedTopologyVersion_ = scene.topologyVersion();
   cachedMaterialVersion_ = resources.materialSnapshot().version;
+  cachedModelMaterialBindingVersion_ = resources.modelMaterialBindingVersion();
   cachedTransmissionContentScene_ = &scene;
   cachedTransmissionContentTopologyVersion_ = scene.topologyVersion();
   cachedTransmissionContentMaterialVersion_ =
       resources.materialSnapshot().version;
+  cachedTransmissionContentBindingVersion_ =
+      resources.modelMaterialBindingVersion();
   cachedTransmissionContentValid_ = true;
   cachedTransmissionContent_ = hasTransmissionContent;
   cachedGeometryMutationVersion_ = gpu_.geometryMutationVersion();
@@ -1872,6 +1881,7 @@ void TransmissionRenderer::resetCachedState() {
   cachedScene_ = nullptr;
   cachedTopologyVersion_ = std::numeric_limits<uint64_t>::max();
   cachedMaterialVersion_ = std::numeric_limits<uint64_t>::max();
+  cachedModelMaterialBindingVersion_ = std::numeric_limits<uint64_t>::max();
   cachedTransformVersion_ = std::numeric_limits<uint64_t>::max();
   cachedGeometryMutationVersion_ = std::numeric_limits<uint64_t>::max();
   cachedEnvironmentHandles_ = {};
@@ -1879,6 +1889,8 @@ void TransmissionRenderer::resetCachedState() {
   cachedTransmissionContentTopologyVersion_ =
       std::numeric_limits<uint64_t>::max();
   cachedTransmissionContentMaterialVersion_ =
+      std::numeric_limits<uint64_t>::max();
+  cachedTransmissionContentBindingVersion_ =
       std::numeric_limits<uint64_t>::max();
   cachedTransmissionContentValid_ = false;
   cachedTransmissionContent_ = false;
@@ -1992,10 +2004,13 @@ bool TransmissionRenderer::hasTransmissionContent(
   const MaterialTableSnapshot materialSnapshot =
       frame.resources->materialSnapshot();
   const uint64_t topologyVersion = frame.scene->topologyVersion();
+  const uint64_t modelMaterialBindingVersion =
+      frame.resources->modelMaterialBindingVersion();
   if (cachedTransmissionContentValid_ &&
       cachedTransmissionContentScene_ == frame.scene &&
       cachedTransmissionContentTopologyVersion_ == topologyVersion &&
-      cachedTransmissionContentMaterialVersion_ == materialSnapshot.version) {
+      cachedTransmissionContentMaterialVersion_ == materialSnapshot.version &&
+      cachedTransmissionContentBindingVersion_ == modelMaterialBindingVersion) {
     return cachedTransmissionContent_;
   }
   auto rebuildResult =
@@ -2011,6 +2026,8 @@ bool TransmissionRenderer::hasTransmissionContent(
          cachedTransmissionContentTopologyVersion_ == topologyVersion &&
          cachedTransmissionContentMaterialVersion_ ==
              materialSnapshot.version &&
+         cachedTransmissionContentBindingVersion_ ==
+             modelMaterialBindingVersion &&
          cachedTransmissionContent_;
 }
 

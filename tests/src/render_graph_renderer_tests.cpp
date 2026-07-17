@@ -8,6 +8,9 @@
 #include "nuri/core/runtime_config.h"
 #include "nuri/gfx/frame/presentation_aa_plan.h"
 #include "nuri/gfx/pipeline/features/opaque_feature.h"
+#define private public
+#include "nuri/gfx/renderers/shadow_renderer.h"
+#undef private
 #include "nuri/gfx/pipeline/features/shadow_feature.h"
 #include "nuri/gfx/pipeline/features/skybox_feature.h"
 #include "nuri/gfx/pipeline/providers/frame_composition_provider.h"
@@ -150,6 +153,31 @@ RuntimeOpaqueShaderConfig makeShadowConfig(const std::filesystem::path &root) {
   return RuntimeOpaqueShaderConfig{
       .shaderBasePath = root / "assets" / "shaders",
   };
+}
+
+MeshData makeShadowTriangleMesh(std::pmr::memory_resource *memory) {
+  MeshData mesh(memory);
+  mesh.vertices.resize(3u);
+  mesh.vertices[0].position = glm::vec3(-0.5f, -0.5f, 0.0f);
+  mesh.vertices[0].normal = glm::vec3(0.0f, 0.0f, 1.0f);
+  mesh.vertices[1].position = glm::vec3(0.5f, -0.5f, 0.0f);
+  mesh.vertices[1].normal = glm::vec3(0.0f, 0.0f, 1.0f);
+  mesh.vertices[2].position = glm::vec3(0.0f, 0.5f, 0.0f);
+  mesh.vertices[2].normal = glm::vec3(0.0f, 0.0f, 1.0f);
+  mesh.indices = {0u, 1u, 2u};
+
+  Submesh submesh{};
+  submesh.vertexOffset = 0u;
+  submesh.vertexCount = 3u;
+  submesh.indexOffset = 0u;
+  submesh.indexCount = 3u;
+  submesh.bounds =
+      BoundingBox(glm::vec3(-0.5f, -0.5f, 0.0f), glm::vec3(0.5f, 0.5f, 0.0f));
+  submesh.authoredScale = glm::vec3(1.0f);
+  submesh.lodCount = 1u;
+  submesh.lods[0] = SubmeshLod{.indexOffset = 0u, .indexCount = 3u};
+  mesh.submeshes.push_back(submesh);
+  return mesh;
 }
 
 bool mat4Near(const glm::mat4 &a, const glm::mat4 &b, float epsilon) {
@@ -300,6 +328,7 @@ public:
                 .indexCount = indexCount,
             },
     });
+    ++geometryMutationVersion_;
     return Result<GeometryAllocationHandle, std::string>::makeResult(handle);
   }
 
@@ -318,6 +347,7 @@ public:
         allocation.view.indexBuffer = {};
       }
       allocation.handle = {};
+      ++geometryMutationVersion_;
       return;
     }
   }
@@ -334,6 +364,48 @@ public:
     return false;
   }
 
+  uint64_t geometryMutationVersion() const override {
+    return geometryMutationVersion_;
+  }
+
+  Result<GeometryAllocationView, std::string> relocateFirstGeometry() {
+    if (allocations_.empty() || !nuri::isValid(allocations_.front().handle)) {
+      return Result<GeometryAllocationView, std::string>::makeError(
+          "no live geometry allocation");
+    }
+
+    Allocation &allocation = allocations_.front();
+    auto vertexBufferResult = createBufferImpl(BufferDesc{
+        .usage = BufferUsage::Vertex | BufferUsage::Storage,
+        .storage = Storage::Device,
+        .size = allocation.view.vertexByteSize,
+    });
+    if (vertexBufferResult.hasError()) {
+      return Result<GeometryAllocationView, std::string>::makeError(
+          vertexBufferResult.error());
+    }
+    auto indexBufferResult = createBufferImpl(BufferDesc{
+        .usage = BufferUsage::Index,
+        .storage = Storage::Device,
+        .size = allocation.view.indexByteSize,
+    });
+    if (indexBufferResult.hasError()) {
+      destroyBuffer(vertexBufferResult.value());
+      return Result<GeometryAllocationView, std::string>::makeError(
+          indexBufferResult.error());
+    }
+
+    const BufferHandle previousVertexBuffer = allocation.view.vertexBuffer;
+    const BufferHandle previousIndexBuffer = allocation.view.indexBuffer;
+    allocation.view.vertexBuffer = vertexBufferResult.value();
+    allocation.view.indexBuffer = indexBufferResult.value();
+    destroyBuffer(previousVertexBuffer);
+    destroyBuffer(previousIndexBuffer);
+    ++geometryMutationVersion_;
+    return Result<GeometryAllocationView, std::string>::makeResult(
+        allocation.view);
+  }
+
   uint32_t forcedIndexStrideBytes = 0u;
 
 private:
@@ -343,6 +415,7 @@ private:
   };
 
   std::vector<Allocation> allocations_{};
+  uint64_t geometryMutationVersion_ = 1u;
 };
 
 class FakeMeshletPipelineGpuDevice final : public FakeFullscreenGpuDevice {
@@ -1826,6 +1899,82 @@ TEST(RenderGraphRendererTest, ShadowFeatureBuildsNoGraphPassesWhenDisabled) {
   EXPECT_TRUE(frameContext.sharedResources.shadowFrameGpuData.has_value());
   EXPECT_EQ(frameContext.sharedResources.shadowRawSamplerId, 1u);
   EXPECT_EQ(frameContext.sharedResources.shadowCompareSamplerId, 2u);
+}
+
+TEST(RenderGraphRendererTest,
+     ShadowRendererRefreshesCachedGeometryAfterPoolMutation) {
+  std::array<std::byte, 256 * 1024> scratchBytes{};
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeShadowSceneGpuDevice gpu;
+  ResourceManager resources(gpu, &memory);
+  RenderScene scene(&memory);
+  scene.bindResources(&resources);
+
+  MeshData mesh = makeShadowTriangleMesh(&memory);
+  auto modelResult =
+      resources.acquireGeneratedModel(mesh, "shadow_geometry_refresh");
+  ASSERT_FALSE(modelResult.hasError()) << modelResult.error();
+  auto materialResult = resources.acquireMaterial(MaterialRequest{});
+  ASSERT_FALSE(materialResult.hasError()) << materialResult.error();
+  auto renderableResult = scene.graph().addRenderable(
+      scene.graph().rootNode(), modelResult.value(), materialResult.value());
+  ASSERT_FALSE(renderableResult.hasError()) << renderableResult.error();
+  addDirectionalLightToScene(scene);
+
+  RenderSettings settings{};
+  settings.shadow.enabled = true;
+  settings.shadow.cascadeCount = 1u;
+  settings.shadow.shadowMapSize = 128u;
+  settings.shadow.maxDistance = 20.0f;
+
+  RenderFrameContext frame{};
+  frame.frameIndex = 1u;
+  frame.scene = &scene;
+  frame.resources = &resources;
+  frame.settings = &settings;
+  frame.camera.view = glm::lookAt(glm::vec3(0.0f, 1.0f, 4.0f), glm::vec3(0.0f),
+                                  glm::vec3(0.0f, 1.0f, 0.0f));
+  frame.camera.proj = glm::perspective(glm::radians(60.0f), 1.0f, 0.1f, 20.0f);
+  frame.camera.cameraPos = glm::vec4(0.0f, 1.0f, 4.0f, 1.0f);
+  frame.camera.aspectRatio = 1.0f;
+  frame.camera.projectionType = ProjectionType::Perspective;
+  frame.camera.nearPlane = 0.1f;
+  frame.camera.farPlane = 20.0f;
+  frame.camera.fovYRadians = glm::radians(60.0f);
+
+  ShadowRenderer shadow(
+      gpu, makeOpaqueConfig(std::filesystem::path(PROJECT_SOURCE_DIR)),
+      &memory);
+  auto publishResult = shadow.publishFrameData(frame);
+  ASSERT_FALSE(publishResult.hasError()) << publishResult.error();
+  auto prepareResult = shadow.prepareShadowGraphPasses(frame);
+  ASSERT_FALSE(prepareResult.hasError()) << prepareResult.error();
+  ASSERT_EQ(shadow.meshDrawTemplates_.size(), 1u);
+
+  const BufferHandle previousVertexBuffer =
+      shadow.meshDrawTemplates_.front().baseVertexBuffer;
+  const BufferHandle previousIndexBuffer =
+      shadow.meshDrawTemplates_.front().indexBuffer;
+  auto relocationResult = gpu.relocateFirstGeometry();
+  ASSERT_FALSE(relocationResult.hasError()) << relocationResult.error();
+  ASSERT_FALSE(
+      sameHandle(previousVertexBuffer, relocationResult.value().vertexBuffer));
+  ASSERT_FALSE(
+      sameHandle(previousIndexBuffer, relocationResult.value().indexBuffer));
+
+  frame.frameIndex = 2u;
+  publishResult = shadow.publishFrameData(frame);
+  ASSERT_FALSE(publishResult.hasError()) << publishResult.error();
+  prepareResult = shadow.prepareShadowGraphPasses(frame);
+  ASSERT_FALSE(prepareResult.hasError()) << prepareResult.error();
+  ASSERT_EQ(shadow.meshDrawTemplates_.size(), 1u);
+  EXPECT_TRUE(sameHandle(shadow.meshDrawTemplates_.front().baseVertexBuffer,
+                         relocationResult.value().vertexBuffer));
+  EXPECT_TRUE(sameHandle(shadow.meshDrawTemplates_.front().indexBuffer,
+                         relocationResult.value().indexBuffer));
+  EXPECT_EQ(shadow.cachedGeometryMutationVersion_,
+            gpu.geometryMutationVersion());
 }
 
 TEST(RenderGraphRendererTest,

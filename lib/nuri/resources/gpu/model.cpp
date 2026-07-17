@@ -1259,6 +1259,106 @@ Model::create(GPUDevice &gpu, const MeshData &data,
       packedVertices.staticDecode.count, nullptr, debugName);
 }
 
+Result<PreparedModelData, std::string> Model::prepare(MeshData data) {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
+  if (data.vertices.empty() || data.indices.empty()) {
+    return Result<PreparedModelData, std::string>::makeError(
+        "Model::prepare: mesh has no vertices or indices");
+  }
+
+  ModelPackedVertexData packedVertices = packVerticesForModel(data);
+  if (packedVertices.vertexBytes.empty()) {
+    return Result<PreparedModelData, std::string>::makeError(
+        "Model::prepare: packed vertex payload is empty");
+  }
+  auto animationResult = packAnimationData(data);
+  if (animationResult.hasError()) {
+    return Result<PreparedModelData, std::string>::makeError(
+        animationResult.error());
+  }
+  ModelAnimationPackedData animation = std::move(animationResult.value());
+
+  PreparedModelData prepared{};
+  prepared.mesh = std::move(data);
+  prepared.packedVertexBytes = std::move(packedVertices.vertexBytes);
+  prepared.packedVertexFormat = packedVertices.format;
+  prepared.staticDecode = PreparedModelBufferData{
+      .bytes = std::move(packedVertices.staticDecode.data),
+      .count = packedVertices.staticDecode.count,
+      .stride = packedVertices.staticDecode.strideBytes,
+  };
+  prepared.skinInfluences = PreparedModelBufferData{
+      .bytes = std::move(animation.skinInfluences.data),
+      .count = animation.skinInfluences.count,
+      .stride = animation.skinInfluences.strideBytes,
+  };
+  prepared.morphMeta = PreparedModelBufferData{
+      .bytes = std::move(animation.morphMeta.data),
+      .count = animation.morphMeta.count,
+      .stride = animation.morphMeta.strideBytes,
+  };
+  prepared.morphDeltas = PreparedModelBufferData{
+      .bytes = std::move(animation.morphDeltas.data),
+      .count = animation.morphDeltas.count,
+      .stride = animation.morphDeltas.strideBytes,
+  };
+  return Result<PreparedModelData, std::string>::makeResult(
+      std::move(prepared));
+}
+
+Result<PreparedModelData, std::string>
+Model::prepareFromFile(std::string_view path, const MeshImportOptions &options,
+                       std::pmr::memory_resource *memory) {
+  auto meshResult = MeshImporter::loadFromFile(path, options, memory);
+  if (meshResult.hasError()) {
+    return Result<PreparedModelData, std::string>::makeError(
+        meshResult.error());
+  }
+  return prepare(std::move(meshResult.value()));
+}
+
+Result<PreparedModelData, std::string>
+Model::prepareSceneMeshFromFile(std::string_view path, uint32_t sceneMeshIndex,
+                                const MeshImportOptions &options,
+                                std::pmr::memory_resource *memory) {
+  auto meshResult = MeshImporter::loadSceneMeshFromFile(path, sceneMeshIndex,
+                                                        options, memory);
+  if (meshResult.hasError()) {
+    return Result<PreparedModelData, std::string>::makeError(
+        meshResult.error());
+  }
+  return prepare(std::move(meshResult.value()));
+}
+
+Result<std::unique_ptr<Model>, std::string>
+Model::createPrepared(GPUDevice &gpu, PreparedModelData data,
+                      std::string_view debugName) {
+  ModelAnimationPackedData animation{};
+  animation.skinInfluences = BufferLayout<std::vector<std::byte>>{
+      .data = std::move(data.skinInfluences.bytes),
+      .count = data.skinInfluences.count,
+      .strideBytes = data.skinInfluences.stride,
+  };
+  animation.morphMeta = BufferLayout<std::vector<std::byte>>{
+      .data = std::move(data.morphMeta.bytes),
+      .count = data.morphMeta.count,
+      .strideBytes = data.morphMeta.stride,
+  };
+  animation.morphDeltas = BufferLayout<std::vector<std::byte>>{
+      .data = std::move(data.morphDeltas.bytes),
+      .count = data.morphDeltas.count,
+      .strideBytes = data.morphDeltas.stride,
+  };
+  return createFromPackedVertices(
+      gpu, data.mesh,
+      std::span<const std::byte>(data.packedVertexBytes.data(),
+                                 data.packedVertexBytes.size()),
+      data.packedVertexFormat,
+      std::span<const std::byte>(data.staticDecode.bytes.data(),
+                                 data.staticDecode.bytes.size()),
+      data.staticDecode.count, &animation, debugName);
+}
+
 Result<std::unique_ptr<Model>, std::string> Model::createFromPackedVertices(
     GPUDevice &gpu, const MeshData &data,
     std::span<const std::byte> packedVertexBytes,

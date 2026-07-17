@@ -6,7 +6,9 @@
 #include "nuri/resources/storage/texture/texture_processing.h"
 
 #include <cstdint>
+#include <string>
 #include <string_view>
+#include <vector>
 
 namespace nuri {
 
@@ -25,6 +27,25 @@ struct TextureCacheTelemetry {
   uint64_t ddsReadTimeNs = 0u;
 };
 
+// Immutable CPU-side texture payload. The descriptor never retains a span into
+// caller memory; descriptor() binds it to this object's owned bytes only for
+// the duration of GPU materialization.
+struct NURI_API PreparedTextureData {
+  TextureDesc createDesc{};
+  std::vector<std::byte> bytes{};
+  std::string debugName{};
+
+  [[nodiscard]] TextureDesc descriptor() const noexcept {
+    TextureDesc desc = createDesc;
+    desc.data = std::span<const std::byte>(bytes.data(), bytes.size());
+    return desc;
+  }
+
+  [[nodiscard]] uint64_t uploadBytes() const noexcept {
+    return static_cast<uint64_t>(bytes.size());
+  }
+};
+
 class NURI_API Texture final {
 public:
   ~Texture() = default;
@@ -37,6 +58,26 @@ public:
   [[nodiscard]] static Result<std::unique_ptr<Texture>, std::string>
   create(GPUDevice &gpu, const TextureDesc &desc,
          std::string_view debugName = {});
+  [[nodiscard]] static Result<std::unique_ptr<Texture>, std::string>
+  createPrepared(GPUDevice &gpu, PreparedTextureData data);
+
+  [[nodiscard]] static Result<PreparedTextureData, std::string>
+  prepareTexture(std::string_view filePath,
+                 const TextureLoadOptions &options = {},
+                 std::string_view debugName = {});
+  [[nodiscard]] static Result<PreparedTextureData, std::string>
+  prepareDdsTexture(std::span<const std::byte> fileBytes,
+                    std::string_view sourceName,
+                    std::string_view debugName = {});
+  [[nodiscard]] static Result<PreparedTextureData, std::string>
+  prepareCubemapFromEquirectangularHDR(std::string_view filePath,
+                                       std::string_view debugName = {});
+  [[nodiscard]] static Result<PreparedTextureData, std::string>
+  prepareTextureKtx2(std::string_view filePath,
+                     std::string_view debugName = {});
+  [[nodiscard]] static Result<PreparedTextureData, std::string>
+  prepareCubemapKtx2(std::string_view filePath,
+                     std::string_view debugName = {});
 
   [[nodiscard]] static Result<std::unique_ptr<Texture>, std::string>
   loadTexture(GPUDevice &gpu, std::string_view filePath,

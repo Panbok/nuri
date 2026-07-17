@@ -853,10 +853,16 @@ loadDdsPayload(std::string_view filePath, std::string_view debugName) {
   return Result<KtxLoadPayload, std::string>::makeResult(std::move(payload));
 }
 
-[[nodiscard]] Result<std::unique_ptr<Texture>, std::string>
-createTextureFromPayload(GPUDevice &gpu, KtxLoadPayload payload) {
+[[nodiscard]] Result<PreparedTextureData, std::string>
+prepareTextureFromPayload(KtxLoadPayload payload) {
   payload.bindData();
-  return Texture::create(gpu, payload.desc, payload.debugName);
+  PreparedTextureData prepared{};
+  prepared.createDesc = payload.desc;
+  prepared.createDesc.data = {};
+  prepared.bytes.assign(payload.desc.data.begin(), payload.desc.data.end());
+  prepared.debugName = std::move(payload.debugName);
+  return Result<PreparedTextureData, std::string>::makeResult(
+      std::move(prepared));
 }
 
 } // namespace
@@ -877,6 +883,12 @@ Texture::create(GPUDevice &gpu, const TextureDesc &desc,
 }
 
 Result<std::unique_ptr<Texture>, std::string>
+Texture::createPrepared(GPUDevice &gpu, PreparedTextureData data) {
+  const TextureDesc desc = data.descriptor();
+  return create(gpu, desc, data.debugName);
+}
+
+Result<std::unique_ptr<Texture>, std::string>
 Texture::loadTexture(GPUDevice &gpu, std::string_view filePath,
                      std::string_view debugName) {
   return loadTexture(gpu, filePath, TextureLoadOptions{}, debugName);
@@ -886,14 +898,26 @@ Result<std::unique_ptr<Texture>, std::string>
 Texture::loadTexture(GPUDevice &gpu, std::string_view filePath,
                      const TextureLoadOptions &options,
                      std::string_view debugName) {
+  auto prepared = prepareTexture(filePath, options, debugName);
+  if (prepared.hasError()) {
+    return Result<std::unique_ptr<Texture>, std::string>::makeError(
+        prepared.error());
+  }
+  return createPrepared(gpu, std::move(prepared.value()));
+}
+
+Result<PreparedTextureData, std::string>
+Texture::prepareTexture(std::string_view filePath,
+                        const TextureLoadOptions &options,
+                        std::string_view debugName) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
   if (hasExtension(filePath, ".dds")) {
     auto payloadResult = loadDdsPayload(filePath, debugName);
     if (payloadResult.hasError()) {
-      return Result<std::unique_ptr<Texture>, std::string>::makeError(
+      return Result<PreparedTextureData, std::string>::makeError(
           payloadResult.error());
     }
-    return createTextureFromPayload(gpu, std::move(payloadResult.value()));
+    return prepareTextureFromPayload(std::move(payloadResult.value()));
   }
 
   const std::string filePathStr(filePath);
@@ -904,7 +928,7 @@ Texture::loadTexture(GPUDevice &gpu, std::string_view filePath,
   if (!pixels) {
     NURI_LOG_WARNING("Texture::loadTexture: Failed to load texture '%s': %s",
                      filePathStr.c_str(), stbi_failure_reason());
-    return Result<std::unique_ptr<Texture>, std::string>::makeError(
+    return Result<PreparedTextureData, std::string>::makeError(
         "Failed to load texture from file: " + filePathStr + " " +
         stbi_failure_reason());
   }
@@ -927,7 +951,7 @@ Texture::loadTexture(GPUDevice &gpu, std::string_view filePath,
         initialData, widthU32, heightU32, mipLevels, options);
     if (mipResult.hasError()) {
       stbi_image_free(pixels);
-      return Result<std::unique_ptr<Texture>, std::string>::makeError(
+      return Result<PreparedTextureData, std::string>::makeError(
           mipResult.error());
     }
     semanticMipData = std::move(mipResult).value();
@@ -950,42 +974,65 @@ Texture::loadTexture(GPUDevice &gpu, std::string_view filePath,
       .dataNumMipLevels = dataMipLevels,
       .generateMipmaps = generateMipmaps,
   };
-  auto result = gpu.createTexture(desc, debugName);
-  if (result.hasError()) {
-    NURI_LOG_WARNING("Texture::loadTexture: Failed to create texture '%s': %s",
-                     filePathStr.c_str(), result.error().c_str());
-    stbi_image_free(pixels);
-    return Result<std::unique_ptr<Texture>, std::string>::makeError(
-        result.error());
+  PreparedTextureData prepared{};
+  prepared.createDesc = desc;
+  prepared.createDesc.data = {};
+  prepared.debugName = debugName.empty() ? filePathStr : std::string(debugName);
+  if (!semanticMipData.empty()) {
+    prepared.bytes = std::move(semanticMipData);
+  } else {
+    prepared.bytes.assign(initialData.begin(), initialData.end());
   }
 
   stbi_image_free(pixels);
 
-  NURI_LOG_DEBUG("Texture::loadTexture: Created texture from file '%s'",
+  NURI_LOG_DEBUG("Texture::prepareTexture: Prepared texture from file '%s'",
                  filePathStr.c_str());
 
-  return Result<std::unique_ptr<Texture>, std::string>::makeResult(
-      std::unique_ptr<Texture>(
-          new Texture(gpu, result.value(), desc, std::string(debugName))));
+  return Result<PreparedTextureData, std::string>::makeResult(
+      std::move(prepared));
 }
 
 Result<std::unique_ptr<Texture>, std::string>
 Texture::loadDdsTexture(GPUDevice &gpu, std::span<const std::byte> fileBytes,
                         std::string_view sourceName,
                         std::string_view debugName) {
+  auto prepared = prepareDdsTexture(fileBytes, sourceName, debugName);
+  if (prepared.hasError()) {
+    return Result<std::unique_ptr<Texture>, std::string>::makeError(
+        prepared.error());
+  }
+  return createPrepared(gpu, std::move(prepared.value()));
+}
+
+Result<PreparedTextureData, std::string>
+Texture::prepareDdsTexture(std::span<const std::byte> fileBytes,
+                           std::string_view sourceName,
+                           std::string_view debugName) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
   auto payloadResult = parseDdsPayload(fileBytes, sourceName, debugName);
   if (payloadResult.hasError()) {
-    return Result<std::unique_ptr<Texture>, std::string>::makeError(
+    return Result<PreparedTextureData, std::string>::makeError(
         payloadResult.error());
   }
-  return createTextureFromPayload(gpu, std::move(payloadResult.value()));
+  return prepareTextureFromPayload(std::move(payloadResult.value()));
 }
 
 Result<std::unique_ptr<Texture>, std::string>
 Texture::loadCubemapFromEquirectangularHDR(GPUDevice &gpu,
                                            std::string_view filePath,
                                            std::string_view debugName) {
+  auto prepared = prepareCubemapFromEquirectangularHDR(filePath, debugName);
+  if (prepared.hasError()) {
+    return Result<std::unique_ptr<Texture>, std::string>::makeError(
+        prepared.error());
+  }
+  return createPrepared(gpu, std::move(prepared.value()));
+}
+
+Result<PreparedTextureData, std::string>
+Texture::prepareCubemapFromEquirectangularHDR(std::string_view filePath,
+                                              std::string_view debugName) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
   const std::string filePathStr(filePath);
   int32_t width = 0;
@@ -998,7 +1045,7 @@ Texture::loadCubemapFromEquirectangularHDR(GPUDevice &gpu,
     NURI_LOG_WARNING(
         "Texture::loadCubemapFromEquirectangularHDR: Failed to load '%s': %s",
         filePathStr.c_str(), reason ? reason : "unknown error");
-    return Result<std::unique_ptr<Texture>, std::string>::makeError(
+    return Result<PreparedTextureData, std::string>::makeError(
         "Failed to load HDR texture from file: " + filePathStr + " " +
         (reason ? std::string(reason) : std::string("unknown error")));
   }
@@ -1012,7 +1059,7 @@ Texture::loadCubemapFromEquirectangularHDR(GPUDevice &gpu,
     NURI_LOG_WARNING("Texture::loadCubemapFromEquirectangularHDR: Failed to "
                      "convert equirectangular HDR to cubemap faces '%s'",
                      filePathStr.c_str());
-    return Result<std::unique_ptr<Texture>, std::string>::makeError(
+    return Result<PreparedTextureData, std::string>::makeError(
         "Failed to convert HDR texture to cubemap faces: " + filePathStr);
   }
 
@@ -1022,7 +1069,7 @@ Texture::loadCubemapFromEquirectangularHDR(GPUDevice &gpu,
     NURI_LOG_WARNING("Texture::loadCubemapFromEquirectangularHDR: Failed to "
                      "convert cubemap data to RGBA16F '%s'",
                      filePathStr.c_str());
-    return Result<std::unique_ptr<Texture>, std::string>::makeError(
+    return Result<PreparedTextureData, std::string>::makeError(
         "Failed to convert cubemap face data to RGBA16F: " + filePathStr);
   }
 
@@ -1045,48 +1092,67 @@ Texture::loadCubemapFromEquirectangularHDR(GPUDevice &gpu,
   };
   const std::string resolvedDebugName =
       debugName.empty() ? filePathStr : std::string(debugName);
-  auto result = gpu.createTexture(desc, resolvedDebugName);
-  if (result.hasError()) {
-    NURI_LOG_WARNING("Texture::loadCubemapFromEquirectangularHDR: Failed to "
-                     "create cubemap texture '%s': %s",
-                     filePathStr.c_str(), result.error().c_str());
-    return Result<std::unique_ptr<Texture>, std::string>::makeError(
-        result.error());
-  }
 
-  NURI_LOG_DEBUG("Texture::loadCubemapFromEquirectangularHDR: Created cubemap "
-                 "from file '%s'",
-                 filePathStr.c_str());
+  NURI_LOG_DEBUG(
+      "Texture::prepareCubemapFromEquirectangularHDR: Prepared cubemap "
+      "from file '%s'",
+      filePathStr.c_str());
 
-  return Result<std::unique_ptr<Texture>, std::string>::makeResult(
-      std::unique_ptr<Texture>(
-          new Texture(gpu, result.value(), desc, resolvedDebugName)));
+  desc.data = {};
+  return Result<PreparedTextureData, std::string>::makeResult(
+      PreparedTextureData{
+          .createDesc = desc,
+          .bytes = std::move(halfBytes),
+          .debugName = resolvedDebugName,
+      });
 }
 
 Result<std::unique_ptr<Texture>, std::string>
 Texture::loadTextureKtx2(GPUDevice &gpu, std::string_view filePath,
                          std::string_view debugName) {
+  auto prepared = prepareTextureKtx2(filePath, debugName);
+  if (prepared.hasError()) {
+    return Result<std::unique_ptr<Texture>, std::string>::makeError(
+        prepared.error());
+  }
+  return createPrepared(gpu, std::move(prepared.value()));
+}
+
+Result<PreparedTextureData, std::string>
+Texture::prepareTextureKtx2(std::string_view filePath,
+                            std::string_view debugName) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
   auto payloadResult =
       loadKtxPayload(filePath, debugName, TextureType::Texture2D);
   if (payloadResult.hasError()) {
-    return Result<std::unique_ptr<Texture>, std::string>::makeError(
+    return Result<PreparedTextureData, std::string>::makeError(
         payloadResult.error());
   }
-  return createTextureFromPayload(gpu, std::move(payloadResult.value()));
+  return prepareTextureFromPayload(std::move(payloadResult.value()));
 }
 
 Result<std::unique_ptr<Texture>, std::string>
 Texture::loadCubemapKtx2(GPUDevice &gpu, std::string_view filePath,
                          std::string_view debugName) {
+  auto prepared = prepareCubemapKtx2(filePath, debugName);
+  if (prepared.hasError()) {
+    return Result<std::unique_ptr<Texture>, std::string>::makeError(
+        prepared.error());
+  }
+  return createPrepared(gpu, std::move(prepared.value()));
+}
+
+Result<PreparedTextureData, std::string>
+Texture::prepareCubemapKtx2(std::string_view filePath,
+                            std::string_view debugName) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
   auto payloadResult =
       loadKtxPayload(filePath, debugName, TextureType::TextureCube);
   if (payloadResult.hasError()) {
-    return Result<std::unique_ptr<Texture>, std::string>::makeError(
+    return Result<PreparedTextureData, std::string>::makeError(
         payloadResult.error());
   }
-  return createTextureFromPayload(gpu, std::move(payloadResult.value()));
+  return prepareTextureFromPayload(std::move(payloadResult.value()));
 }
 
 TextureCacheTelemetry Texture::cacheTelemetry() noexcept {

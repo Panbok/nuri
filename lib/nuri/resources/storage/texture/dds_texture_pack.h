@@ -54,6 +54,10 @@ public:
 
   [[nodiscard]] Result<std::span<const std::byte>, std::string>
   read(std::string_view canonicalSourcePath);
+  // Thread-safe owned read for asynchronous workers. The returned bytes do not
+  // alias the pack's legacy reusable read buffer.
+  [[nodiscard]] Result<std::vector<std::byte>, std::string>
+  readOwned(std::string_view canonicalSourcePath) const;
   [[nodiscard]] std::optional<TextureSourceFingerprint>
   sourceFingerprint(std::string_view canonicalSourcePath) const noexcept;
   [[nodiscard]] uint32_t entryCount() const noexcept;
@@ -65,7 +69,7 @@ private:
 
   std::unique_ptr<Impl> impl_;
 
-  friend Result<DdsTexturePackOpenResult, std::string>
+  friend NURI_API Result<DdsTexturePackOpenResult, std::string>
   ensureDdsTexturePack(const std::filesystem::path &,
                        std::span<const DdsTexturePackSource>);
 };

@@ -35,6 +35,7 @@ namespace nuri::tools::autotest {
 namespace {
 
 constexpr uint32_t kMaxPreFrameSleepMs = 60000u;
+constexpr auto kAssetReadinessTimeout = std::chrono::seconds(120);
 
 struct PendingReadout {
   uint64_t requestId = 0u;
@@ -53,6 +54,71 @@ struct ResolvedWindowMode {
   std::string value{};
   std::string source{};
 };
+
+[[nodiscard]] Result<bool, std::string> waitForDeterministicToolAssets(
+    nuri::tools::runtime::ToolRendererRuntime &runtime) {
+  const auto deadline =
+      std::chrono::steady_clock::now() + kAssetReadinessTimeout;
+  for (;;) {
+    const nuri::tools::runtime::ToolAssetLoadStatus status =
+        runtime.assetLoadStatus();
+    if (status.terminal()) {
+      if (status.successful()) {
+        return Result<bool, std::string>::makeResult(true);
+      }
+      std::ostringstream message;
+      message << "async asset readiness failed";
+      if (status.sceneRequested) {
+        message << "; scene state=" << static_cast<uint32_t>(status.scene.state)
+                << " progress=" << status.scene.progress
+                << " models=" << status.scene.models.published << "/"
+                << status.scene.models.total
+                << " materials=" << status.scene.materials.published << "/"
+                << status.scene.materials.total
+                << " textures=" << status.scene.textures.published << "/"
+                << status.scene.textures.total;
+        if (!status.scene.error.empty()) {
+          message << " error=" << status.scene.error;
+        }
+      }
+      if (status.environmentRequested) {
+        message << "; environment state="
+                << static_cast<uint32_t>(status.environment.state)
+                << " progress=" << status.environment.progress;
+        if (!status.environment.error.empty()) {
+          message << " error=" << status.environment.error;
+        }
+      }
+      return Result<bool, std::string>::makeError(message.str());
+    }
+
+    runtime.window().pollEvents();
+    auto pumped = runtime.pumpAssetLoads();
+    if (pumped.hasError()) {
+      return Result<bool, std::string>::makeError(pumped.error());
+    }
+    if (std::chrono::steady_clock::now() >= deadline) {
+      const nuri::tools::runtime::ToolAssetLoadStatus timedOut =
+          runtime.assetLoadStatus();
+      std::ostringstream message;
+      message << "async asset readiness timed out";
+      if (timedOut.sceneRequested) {
+        message << "; scene state="
+                << static_cast<uint32_t>(timedOut.scene.state)
+                << " progress=" << timedOut.scene.progress << " hierarchy="
+                << (timedOut.scene.hierarchyPublished ? "published" : "pending")
+                << " models=" << timedOut.scene.models.published << "/"
+                << timedOut.scene.models.total
+                << " materials=" << timedOut.scene.materials.published << "/"
+                << timedOut.scene.materials.total
+                << " textures=" << timedOut.scene.textures.published << "/"
+                << timedOut.scene.textures.total;
+      }
+      return Result<bool, std::string>::makeError(message.str());
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+}
 
 void evaluateAutotestBaselineProfile(AutotestReport &report) {
   auto profile = nuri::tools::core::loadBaselineProfile(
@@ -1549,6 +1615,16 @@ AutotestRunResult runAutotestCase(AutotestCase testCase,
       report.errors.insert(report.errors.end(),
                            report.baselineProfileIncompatibilityReasons.begin(),
                            report.baselineProfileIncompatibilityReasons.end());
+      writeReports(result, report, reportPath, htmlPath);
+      result.report = std::move(report);
+      return result;
+    }
+
+    auto assetsReady = waitForDeterministicToolAssets(*runtime);
+    if (assetsReady.hasError()) {
+      result.exitCode = AutotestExitCode::RuntimeError;
+      result.message = assetsReady.error();
+      report.errors.push_back(result.message);
       writeReports(result, report, reportPath, htmlPath);
       result.report = std::move(report);
       return result;

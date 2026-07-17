@@ -8,6 +8,7 @@
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/gfx/render_graph/render_graph.h"
 #include "nuri/gfx/render_graph/render_graph_telemetry.h"
+#include "nuri/resources/async/asset_system.h"
 #include "nuri/resources/gpu/resource_manager.h"
 
 #include <cstdint>
@@ -42,6 +43,8 @@ public:
   [[nodiscard]] const ResourceManager &resources() const noexcept {
     return resources_;
   }
+  [[nodiscard]] AssetSystem &assets() noexcept { return assets_; }
+  [[nodiscard]] const AssetSystem &assets() const noexcept { return assets_; }
   [[nodiscard]] RenderGraphTelemetryService &renderGraphTelemetry() noexcept {
     return renderGraphTelemetry_;
   }
@@ -52,7 +55,7 @@ public:
 
 private:
   [[nodiscard]] Result<bool, std::string>
-  beginFrameSequence(uint64_t frameIndex);
+  beginFrameSequence(uint64_t frameIndex, RenderScene *scene = nullptr);
   void renderGraphBeginFrame(uint64_t frameIndex);
   [[nodiscard]] Result<bool, std::string> endFrameSequence(uint64_t frameIndex);
   [[nodiscard]] Result<bool, std::string>
@@ -61,12 +64,18 @@ private:
 
   GPUDevice &gpu_;
   ResourceManager resources_;
+  AssetSystem assets_;
+  // Parallel render-graph compilation allocates nested payload storage from
+  // worker threads. Isolate it on a thread-safe pool without imposing locking
+  // on main-thread renderer and resource-manager allocations.
+  std::pmr::synchronized_pool_resource renderGraphMemory_;
   RenderGraphRuntime renderGraphRuntime_;
   RenderGraphBuilder renderGraphBuilder_;
   RenderGraphExecutor renderGraphExecutor_;
   RenderGraphTelemetryService renderGraphTelemetry_;
   bool suppressInferredSideEffects_ = false;
   uint64_t standaloneFrameIndex_ = 0;
+  AssetPublicationStats lastAssetPublicationStats_{};
 
   std::optional<RenderGraphCompileResult> cachedCompileResult_;
   RenderGraphBuilder::GraphFingerprint cachedFingerprint_{};

@@ -30,6 +30,43 @@ enum class PackedVertexFormat : uint8_t {
   AnimatedFloat32 = 2,
 };
 
+struct PreparedModelBufferData {
+  std::vector<std::byte> bytes{};
+  uint32_t count = 0u;
+  uint32_t stride = 0u;
+};
+
+// Immutable CPU-side model payload. All import, packing, animation cooking,
+// meshlet preparation, and validation inputs are owned before the payload
+// crosses to the GPU owner.
+struct NURI_API PreparedModelData {
+  explicit PreparedModelData(
+      std::pmr::memory_resource *memory = std::pmr::get_default_resource())
+      : mesh(memory) {}
+
+  MeshData mesh;
+  std::vector<std::byte> packedVertexBytes{};
+  PackedVertexFormat packedVertexFormat = PackedVertexFormat::StaticQuantized20;
+  PreparedModelBufferData staticDecode{};
+  PreparedModelBufferData skinInfluences{};
+  PreparedModelBufferData morphMeta{};
+  PreparedModelBufferData morphDeltas{};
+
+  [[nodiscard]] uint64_t uploadBytes() const noexcept {
+    return static_cast<uint64_t>(packedVertexBytes.size()) +
+           static_cast<uint64_t>(mesh.indices.size()) * sizeof(uint32_t) +
+           static_cast<uint64_t>(staticDecode.bytes.size()) +
+           static_cast<uint64_t>(skinInfluences.bytes.size()) +
+           static_cast<uint64_t>(morphMeta.bytes.size()) +
+           static_cast<uint64_t>(morphDeltas.bytes.size()) +
+           static_cast<uint64_t>(mesh.meshlets.size()) *
+               sizeof(MeshletDescriptor) +
+           static_cast<uint64_t>(mesh.meshletVertexIndices.size()) *
+               sizeof(uint32_t) +
+           static_cast<uint64_t>(mesh.meshletPrimitiveIndices.size());
+  }
+};
+
 struct StaticVertexDecodeGpuData {
   glm::vec4 offset{0.0f, 0.0f, 0.0f, 0.0f};
   glm::vec4 scale{1.0f, 1.0f, 1.0f, 0.0f};
@@ -127,6 +164,19 @@ public:
 
   [[nodiscard]] static Result<std::unique_ptr<Model>, std::string>
   create(GPUDevice &gpu, const MeshData &data, std::string_view debugName = {});
+  [[nodiscard]] static Result<PreparedModelData, std::string>
+  prepare(MeshData data);
+  [[nodiscard]] static Result<PreparedModelData, std::string> prepareFromFile(
+      std::string_view path, const MeshImportOptions &options = {},
+      std::pmr::memory_resource *memory = std::pmr::get_default_resource());
+  [[nodiscard]] static Result<PreparedModelData, std::string>
+  prepareSceneMeshFromFile(
+      std::string_view path, uint32_t sceneMeshIndex,
+      const MeshImportOptions &options = {},
+      std::pmr::memory_resource *memory = std::pmr::get_default_resource());
+  [[nodiscard]] static Result<std::unique_ptr<Model>, std::string>
+  createPrepared(GPUDevice &gpu, PreparedModelData data,
+                 std::string_view debugName = {});
 
   [[nodiscard]] static Result<std::unique_ptr<Model>, std::string>
   createFromFile(

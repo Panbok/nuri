@@ -175,6 +175,17 @@ countDispatches(const nuri::AnimationSceneFrameData &frameData,
       }));
 }
 
+[[nodiscard]] const nuri::ComputeDispatchItem *
+findDispatch(const nuri::AnimationSceneFrameData &frameData,
+             std::string_view label) {
+  const auto it = std::find_if(
+      frameData.preDispatches.begin(), frameData.preDispatches.end(),
+      [label](const nuri::ComputeDispatchItem &dispatch) {
+        return dispatch.debugLabel == label;
+      });
+  return it != frameData.preDispatches.end() ? &*it : nullptr;
+}
+
 [[nodiscard]] bool
 allDependencyBuffersValid(const FakeAnimationGpuDevice &gpu,
                           const nuri::AnimationSceneFrameData &frameData) {
@@ -647,6 +658,20 @@ TEST(AnimationPoseSimulationTests,
   EXPECT_GT(countDispatches(*frameData, "AnimationPose Morph"), 0u);
   EXPECT_EQ(countDispatches(*frameData, "AnimationPose Skin"), 0u);
   EXPECT_EQ(countDispatches(*frameData, "AnimationPose Blend"), 0u);
+
+  const nuri::ComputeDispatchItem *morphDispatch =
+      findDispatch(*frameData, "AnimationPose Morph");
+  ASSERT_NE(morphDispatch, nullptr);
+  ASSERT_EQ(morphDispatch->dependencyBuffers.size(), 4u);
+  ASSERT_EQ(morphDispatch->dependencyBufferAccessModes.size(), 4u);
+  EXPECT_EQ(morphDispatch->dependencyBufferAccessModes[0],
+            nuri::RenderGraphAccessMode::Read);
+  EXPECT_EQ(morphDispatch->dependencyBufferAccessModes[1],
+            nuri::RenderGraphAccessMode::Read);
+  EXPECT_EQ(morphDispatch->dependencyBufferAccessModes[2],
+            nuri::RenderGraphAccessMode::Read);
+  EXPECT_EQ(morphDispatch->dependencyBufferAccessModes[3],
+            nuri::RenderGraphAccessMode::Write);
 
   const bool hasGeometryOverride = std::any_of(
       frameData->geometryOverridesByRenderable.begin(),

@@ -372,20 +372,10 @@ void persistFrameRenderSettings(RenderSettings &persistent,
   }
 }
 
-void loadSharedEnvironment(EditorRuntime &runtime) {
-  ResourceManager &resources = runtime.resources();
+EnvironmentAssetHandle loadSharedEnvironment(EditorRuntime &runtime) {
   const RuntimeConfig &config = runtime.config();
   const std::string environmentHdrPath =
       (config.roots.textures / kSampleEnvironmentHdrRelativePath).string();
-
-  auto cubemapResult = resources.acquireTexture(TextureRequest{
-      .path = environmentHdrPath,
-      .loadOptions = TextureLoadOptions{},
-      .kind = TextureRequestKind::EquirectHdrCubemap,
-      .debugName = "editor_cubemap",
-  });
-  NURI_ASSERT(!cubemapResult.hasError(), "Failed to create cubemap texture: %s",
-              cubemapResult.error().c_str());
 
   const std::filesystem::path environmentHdrFile{environmentHdrPath};
   const std::string environmentStem = environmentHdrFile.stem().string();
@@ -425,73 +415,54 @@ void loadSharedEnvironment(EditorRuntime &runtime) {
     return candidates.empty() ? std::filesystem::path{} : candidates.front();
   };
 
-  const auto tryLoadKtxCubemap =
-      [&resources, &resolveFirstExistingIblAssetPath](
+  const auto optionalKtxRequest =
+      [&resolveFirstExistingIblAssetPath](
           std::span<const std::filesystem::path> candidates,
-          std::string_view debugName) -> TextureRef {
+          TextureRequestKind kind,
+          std::string_view debugName) -> std::optional<TextureRequest> {
     const std::filesystem::path resolvedPath =
         resolveFirstExistingIblAssetPath(candidates);
     std::error_code ec;
     if (resolvedPath.empty() || !std::filesystem::exists(resolvedPath, ec) ||
         !std::filesystem::is_regular_file(resolvedPath, ec)) {
-      return kInvalidTextureRef;
+      return std::nullopt;
     }
-    auto result = resources.acquireTexture(TextureRequest{
+    return TextureRequest{
         .path = resolvedPath.string(),
-        .kind = TextureRequestKind::Ktx2Cubemap,
+        .kind = kind,
         .debugName = std::string(debugName),
-    });
-    return result.hasError() ? kInvalidTextureRef : result.value();
+    };
   };
 
-  const auto tryLoadKtxTexture2D =
-      [&resources, &resolveFirstExistingIblAssetPath](
-          std::span<const std::filesystem::path> candidates,
-          std::string_view debugName) -> TextureRef {
-    const std::filesystem::path resolvedPath =
-        resolveFirstExistingIblAssetPath(candidates);
-    std::error_code ec;
-    if (resolvedPath.empty() || !std::filesystem::exists(resolvedPath, ec) ||
-        !std::filesystem::is_regular_file(resolvedPath, ec)) {
-      return kInvalidTextureRef;
-    }
-    auto result = resources.acquireTexture(TextureRequest{
-        .path = resolvedPath.string(),
-        .kind = TextureRequestKind::Ktx2Texture2D,
-        .debugName = std::string(debugName),
-    });
-    return result.hasError() ? kInvalidTextureRef : result.value();
-  };
-
-  TextureRef irradianceCubemap =
-      tryLoadKtxCubemap(irradianceCandidates, "ibl_irradiance");
-  TextureRef prefilteredGgxCubemap =
-      tryLoadKtxCubemap(prefilteredGgxCandidates, "ibl_prefilter_ggx");
-  TextureRef prefilteredCharlieCubemap =
-      tryLoadKtxCubemap(prefilteredCharlieCandidates, "ibl_prefilter_charlie");
-  TextureRef brdfLutTexture =
-      tryLoadKtxTexture2D(brdfLutCandidates, "ibl_brdf_lut");
-
-  runtime.scene().setEnvironment(EnvironmentHandles{
-      .cubemap = cubemapResult.value(),
-      .irradiance = irradianceCubemap,
-      .prefilteredGgx = prefilteredGgxCubemap,
-      .prefilteredCharlie = prefilteredCharlieCubemap,
-      .brdfLut = brdfLutTexture,
+  auto requested = runtime.assets().requestEnvironment(EnvironmentAssetRequest{
+      .cubemap =
+          TextureRequest{
+              .path = environmentHdrPath,
+              .loadOptions = TextureLoadOptions{},
+              .kind = TextureRequestKind::EquirectHdrCubemap,
+              .debugName = "editor_cubemap",
+          },
+      .irradiance =
+          optionalKtxRequest(irradianceCandidates,
+                             TextureRequestKind::Ktx2Cubemap, "ibl_irradiance"),
+      .prefilteredGgx = optionalKtxRequest(prefilteredGgxCandidates,
+                                           TextureRequestKind::Ktx2Cubemap,
+                                           "ibl_prefilter_ggx"),
+      .prefilteredCharlie = optionalKtxRequest(prefilteredCharlieCandidates,
+                                               TextureRequestKind::Ktx2Cubemap,
+                                               "ibl_prefilter_charlie"),
+      .brdfLut = optionalKtxRequest(
+          brdfLutCandidates, TextureRequestKind::Ktx2Texture2D, "ibl_brdf_lut"),
+      .priority = AssetPriority::Visible,
+      .prefilteredCharlieOptional = true,
+      .debugName = "editor_shared_environment",
   });
-  resources.release(cubemapResult.value());
-  if (isValid(irradianceCubemap)) {
-    resources.release(irradianceCubemap);
+  if (requested.hasError()) {
+    NURI_LOG_ERROR("EditorRuntime: failed to request shared environment: %s",
+                   requested.error().c_str());
+    return {};
   }
-  if (isValid(prefilteredGgxCubemap)) {
-    resources.release(prefilteredGgxCubemap);
-  }
-  if (isValid(prefilteredCharlieCubemap)) {
-    resources.release(prefilteredCharlieCubemap);
-  }
-  if (isValid(brdfLutTexture)) {
-    resources.release(brdfLutTexture);
-  }
+  return requested.value();
 }
 
 } // namespace
@@ -542,7 +513,7 @@ void EditorRuntime::initialize() {
   } else {
     textOverlayEnabled_ = false;
   }
-  loadSharedEnvironment(*this);
+  sharedEnvironmentLoad_ = loadSharedEnvironment(*this);
 }
 
 void EditorRuntime::update(double deltaTime) {
@@ -602,6 +573,10 @@ void EditorRuntime::shutdown() {
   sceneRuntime_.reset();
   sceneRuntime_.bindScene(nullptr);
   scene_.graph().clear();
+  if (isValidAssetHandle(sharedEnvironmentLoad_)) {
+    assets().cancel(sharedEnvironmentLoad_);
+    sharedEnvironmentLoad_ = {};
+  }
   scene_.setEnvironment(EnvironmentHandles{});
   scene_.bindResources(nullptr);
   app_.getWindow().setCursorMode(CursorMode::Normal);
@@ -610,6 +585,8 @@ void EditorRuntime::shutdown() {
 ResourceManager &EditorRuntime::resources() {
   return app_.getRenderer().resources();
 }
+
+AssetSystem &EditorRuntime::assets() { return app_.getRenderer().assets(); }
 
 Camera *EditorRuntime::mainCamera() {
   return cameraSystem_.camera(mainCameraHandle_);
@@ -956,6 +933,9 @@ void EditorRuntime::startAnimatedPrefabSceneSimulation(
   });
 
   if (animationPlayerService_ != nullptr) {
+    animationPlayerService_->registerPrefabInstance(
+        sceneName, resourcesIn.prefab, instance.instantiationMap,
+        instance.rootNode);
     const bool started = animationPlayerService_->startPrefabInstancePlayback(
         instance.rootNode, params, simulationDebugName);
     NURI_ASSERT(started,

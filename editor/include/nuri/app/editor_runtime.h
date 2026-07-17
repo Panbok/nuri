@@ -60,6 +60,7 @@ public:
   [[nodiscard]] Application &app() noexcept { return app_; }
   [[nodiscard]] const Application &app() const noexcept { return app_; }
   [[nodiscard]] ResourceManager &resources();
+  [[nodiscard]] AssetSystem &assets();
   [[nodiscard]] RenderScene &scene() noexcept { return scene_; }
   [[nodiscard]] SceneRuntimeHost &sceneRuntime() noexcept {
     return sceneRuntime_;
@@ -215,6 +216,7 @@ private:
   bool text3DEnabled_ = false;
   bool textOverlayEnabled_ = false;
   bool sceneHasAuthoredLights_ = false;
+  EnvironmentAssetHandle sharedEnvironmentLoad_{};
 };
 
 } // namespace nuri

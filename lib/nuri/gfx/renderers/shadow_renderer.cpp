@@ -5837,7 +5837,9 @@ void ShadowRenderer::resetCachedState() {
   cachedScene_ = nullptr;
   cachedTopologyVersion_ = std::numeric_limits<uint64_t>::max();
   cachedMaterialVersion_ = std::numeric_limits<uint64_t>::max();
+  cachedModelMaterialBindingVersion_ = std::numeric_limits<uint64_t>::max();
   cachedTransformVersion_ = std::numeric_limits<uint64_t>::max();
+  cachedDeformationVersion_ = std::numeric_limits<uint64_t>::max();
   cachedGeometryMutationVersion_ = std::numeric_limits<uint64_t>::max();
   meshDrawTemplates_.clear();
   staticShadowTemplateIndices_.clear();
@@ -6107,7 +6109,10 @@ ShadowRenderer::prepareShadowGraphPasses(RenderFrameContext &frame) {
         cachedScene_ != frame.scene ||
         cachedTopologyVersion_ != frame.scene->topologyVersion() ||
         cachedMaterialVersion_ != materialSnapshot.version ||
-        cachedGeometryMutationVersion_ != frame.scene->deformationVersion();
+        cachedModelMaterialBindingVersion_ !=
+            frame.resources->modelMaterialBindingVersion() ||
+        cachedDeformationVersion_ != frame.scene->deformationVersion() ||
+        cachedGeometryMutationVersion_ != gpu_.geometryMutationVersion();
     if (topologyDirty) {
       auto cacheResult = rebuildSceneCache(
           *frame.scene, *frame.resources,
@@ -6118,7 +6123,10 @@ ShadowRenderer::prepareShadowGraphPasses(RenderFrameContext &frame) {
       cachedScene_ = frame.scene;
       cachedTopologyVersion_ = frame.scene->topologyVersion();
       cachedMaterialVersion_ = materialSnapshot.version;
-      cachedGeometryMutationVersion_ = frame.scene->deformationVersion();
+      cachedModelMaterialBindingVersion_ =
+          frame.resources->modelMaterialBindingVersion();
+      cachedDeformationVersion_ = frame.scene->deformationVersion();
+      cachedGeometryMutationVersion_ = gpu_.geometryMutationVersion();
     }
   } else {
     meshDrawTemplates_.clear();

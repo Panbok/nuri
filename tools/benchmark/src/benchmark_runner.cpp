@@ -1668,6 +1668,48 @@ void addPmrMemoryMetrics(BenchmarkFrameMeasurements &measurements,
 
 void addRendererFrameMetrics(BenchmarkFrameMeasurements &measurements,
                              const RenderFrameMetrics &metrics) {
+  const RenderFrameMetrics::AssetStreamingFrameMetrics &assets = metrics.assets;
+  addIfNonzero(measurements, "renderer.assets.cpu_completions",
+               assets.cpuCompletions);
+  addIfNonzero(measurements, "renderer.assets.cpu_workers", assets.cpuWorkers);
+  addIfNonzero(measurements, "renderer.assets.cpu_queued_jobs",
+               assets.cpuQueuedJobs);
+  addIfNonzero(measurements, "renderer.assets.cpu_running_jobs",
+               assets.cpuRunningJobs);
+  addIfNonzero(measurements, "renderer.assets.cpu_running_io",
+               assets.cpuRunningIo);
+  addIfNonzero(measurements, "renderer.assets.cpu_running_decode",
+               assets.cpuRunningDecode);
+  addIfNonzero(measurements, "renderer.assets.cpu_running_cook",
+               assets.cpuRunningCook);
+  addIfNonzero(measurements, "renderer.assets.cpu_running_transcode",
+               assets.cpuRunningTranscode);
+  addIfNonzero(measurements, "renderer.assets.cpu_running_metadata",
+               assets.cpuRunningMetadata);
+  addIfNonzero(measurements, "renderer.assets.dedicated_copy_queue",
+               assets.dedicatedCopyQueue);
+  addIfNonzero(measurements, "renderer.assets.gpu_materialized",
+               assets.gpuMaterialized);
+  addIfNonzero(measurements, "renderer.assets.published", assets.published);
+  addIfNonzero(measurements, "renderer.assets.cancelled", assets.cancelled);
+  addIfNonzero(measurements, "renderer.assets.failed", assets.failed);
+  addIfNonzero(measurements, "renderer.assets.scene_patches",
+               assets.scenePatches);
+  addIfNonzero(measurements, "renderer.assets.scene_commits",
+               assets.sceneCommits);
+  addIfNonzero(measurements, "renderer.assets.cpu_in_flight_bytes",
+               assets.cpuInFlightBytes);
+  addIfNonzero(measurements, "renderer.assets.upload_bytes",
+               assets.uploadBytes);
+  addIfNonzero(measurements, "renderer.assets.submitted_jobs",
+               assets.submittedJobs);
+  addIfNonzero(measurements, "renderer.assets.completed_jobs",
+               assets.completedJobs);
+  addIfNonzero(measurements, "renderer.assets.cancelled_jobs",
+               assets.cancelledJobs);
+  addIfNonzero(measurements, "renderer.assets.rejected_jobs",
+               assets.rejectedJobs);
+
   const OpaqueFrameMetrics &opaque = metrics.opaque;
   addIfNonzero(measurements, "renderer.opaque.total_instances",
                opaque.totalInstances);
@@ -2338,8 +2380,8 @@ void drainGpuTimings(GPUDevice &gpu, BenchmarkReport &report,
 [[nodiscard]] Result<bool, std::string>
 populateScene(const BenchmarkCase &benchmarkCase, Renderer &renderer,
               RenderScene &scene, std::pmr::memory_resource *memory,
-              std::optional<ScenePrefab> &prefab,
-              std::optional<ScenePrefabAssets> &prefabAssets) {
+              SceneLoadHandle &sceneLoad) {
+  (void)memory;
   scene.bindResources(&renderer.resources());
   auto lightResult = scene.graph().addLight(scene.graph().rootNode(),
                                             LightDesc{
@@ -2378,22 +2420,18 @@ populateScene(const BenchmarkCase &benchmarkCase, Renderer &renderer,
         benchmarkCase.scene.meshletMaxPrimitives;
     importOptions.assetBuildOptions.meshletConeWeight =
         benchmarkCase.scene.meshletConeWeight;
-    auto prefabResult = SceneImporter::loadScenePrefabFromFile(
-        path.value().string(), importOptions, memory);
-    if (prefabResult.hasError()) {
-      return Result<bool, std::string>::makeError(prefabResult.error());
+    auto requested = renderer.assets().requestScene(SceneLoadRequest{
+        .path = path.value().string(),
+        .importOptions = importOptions,
+        .priority = AssetPriority::Critical,
+        .publication = ScenePublicationPolicy::CompleteOnly,
+        .failurePolicy = SceneFailurePolicy::BestEffort,
+        .debugName = benchmarkCase.scene.path.string(),
+    });
+    if (requested.hasError()) {
+      return Result<bool, std::string>::makeError(requested.error());
     }
-    prefab.emplace(std::move(prefabResult.value()));
-    auto assetsResult = renderer.resources().acquireScenePrefabAssets(*prefab);
-    if (assetsResult.hasError()) {
-      return Result<bool, std::string>::makeError(assetsResult.error());
-    }
-    prefabAssets.emplace(std::move(assetsResult.value()));
-    auto instantiateResult = scene.graph().instantiatePrefab(
-        *prefab, scene.graph().rootNode(), *prefabAssets);
-    if (instantiateResult.hasError()) {
-      return Result<bool, std::string>::makeError(instantiateResult.error());
-    }
+    sceneLoad = requested.value();
   }
 
   auto syncResult = scene.graph().syncWorldTransforms();
@@ -2403,6 +2441,54 @@ populateScene(const BenchmarkCase &benchmarkCase, Renderer &renderer,
     return Result<bool, std::string>::makeError(commitResult.error());
   }
   return Result<bool, std::string>::makeResult(true);
+}
+
+[[nodiscard]] Result<bool, std::string>
+waitForBenchmarkAssets(Renderer &renderer, RenderScene &scene,
+                       SceneLoadHandle sceneLoad) {
+  if (!isValidAssetHandle(sceneLoad)) {
+    return Result<bool, std::string>::makeResult(true);
+  }
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(120);
+  for (;;) {
+    const SceneLoadSnapshot status = renderer.assets().query(sceneLoad);
+    if (status.terminal()) {
+      if (status.state == SceneLoadState::Complete ||
+          status.state == SceneLoadState::CompleteWithErrors) {
+        return Result<bool, std::string>::makeResult(true);
+      }
+      std::ostringstream message;
+      message << "benchmark async scene load failed: state="
+              << static_cast<uint32_t>(status.state)
+              << " progress=" << status.progress;
+      if (!status.error.empty()) {
+        message << " error=" << status.error;
+      }
+      return Result<bool, std::string>::makeError(message.str());
+    }
+    auto pumped = renderer.assets().prepareFrame(AssetPublicationContext{
+        .scene = &scene,
+    });
+    if (pumped.hasError()) {
+      return Result<bool, std::string>::makeError(pumped.error());
+    }
+    if (std::chrono::steady_clock::now() >= deadline) {
+      const SceneLoadSnapshot timedOut = renderer.assets().query(sceneLoad);
+      std::ostringstream message;
+      message << "benchmark async scene load timed out: state="
+              << static_cast<uint32_t>(timedOut.state)
+              << " progress=" << timedOut.progress
+              << " models=" << timedOut.models.published << "/"
+              << timedOut.models.total
+              << " materials=" << timedOut.materials.published << "/"
+              << timedOut.materials.total
+              << " textures=" << timedOut.textures.published << "/"
+              << timedOut.textures.total;
+      return Result<bool, std::string>::makeError(message.str());
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
 }
 
 [[nodiscard]] glm::vec3 normalizedOrDefault(const glm::vec3 &value,
@@ -3557,15 +3643,23 @@ BenchmarkRunResult runBenchmarkCase(BenchmarkCase benchmarkCase,
     }
 
     RenderScene scene(&sceneMemory);
-    std::optional<ScenePrefab> prefab;
-    std::optional<ScenePrefabAssets> prefabAssets;
+    SceneLoadHandle sceneLoad{};
     const auto sceneResourcePrepareBegin = std::chrono::steady_clock::now();
-    auto sceneResult = populateScene(benchmarkCase, *renderer, scene,
-                                     &sceneMemory, prefab, prefabAssets);
-    const double sceneResourcePrepareMs = elapsedMs(sceneResourcePrepareBegin);
+    auto sceneResult =
+        populateScene(benchmarkCase, *renderer, scene, &sceneMemory, sceneLoad);
     if (sceneResult.hasError()) {
       result.exitCode = BenchmarkExitCode::EnvironmentUnavailable;
       result.message = sceneResult.error();
+      report.run.validForComparison = false;
+      report.warnings.push_back(result.message);
+      computeBenchmarkReportStats(report);
+      return finalizeResult();
+    }
+    auto assetsReady = waitForBenchmarkAssets(*renderer, scene, sceneLoad);
+    const double sceneResourcePrepareMs = elapsedMs(sceneResourcePrepareBegin);
+    if (assetsReady.hasError()) {
+      result.exitCode = BenchmarkExitCode::RuntimeError;
+      result.message = assetsReady.error();
       report.run.validForComparison = false;
       report.warnings.push_back(result.message);
       computeBenchmarkReportStats(report);

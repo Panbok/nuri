@@ -299,6 +299,18 @@ nuri_add_gtest_suite(
 )
 
 nuri_add_gtest_suite(
+  nuri_asset_cpu_scheduler_tests
+  src/asset_cpu_scheduler_tests.cpp
+  "asset_cpu_scheduler::"
+)
+
+nuri_add_gtest_suite(
+  nuri_asset_system_tests
+  src/asset_system_tests.cpp
+  "asset_system::"
+)
+
+nuri_add_gtest_suite(
   nuri_renderable_material_resolution_tests
   src/renderable_material_resolution_tests.cpp
   "renderable_material_resolution::"

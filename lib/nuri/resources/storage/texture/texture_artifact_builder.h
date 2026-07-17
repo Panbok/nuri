@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <span>
 
 namespace nuri {
 
@@ -58,6 +59,9 @@ public:
 
   [[nodiscard]] static Result<SceneTextureArtifactBuilder, std::string>
   create(const std::filesystem::path &sceneSourcePath);
+  [[nodiscard]] static Result<SceneTextureArtifactBuilder, std::string>
+  create(const std::filesystem::path &sceneSourcePath,
+         std::span<const EmbeddedSceneTextureData> embeddedTextures);
 
   [[nodiscard]] Result<TextureArtifactBuildResult, std::string>
   ensure(const MaterialTextureSlotData &source, uint64_t sourceIdentityHash,
@@ -73,10 +77,10 @@ private:
 };
 
 [[nodiscard]] NURI_API Result<TextureArtifactBuildResult, std::string>
-ensureTextureArtifactFromFile(
-    const std::filesystem::path &sourcePath, uint64_t sourceIdentityHash,
-    Format targetFormat, const TextureArtifactBuildOptions &options,
-    bool forceRebuild = false);
+ensureTextureArtifactFromFile(const std::filesystem::path &sourcePath,
+                              uint64_t sourceIdentityHash, Format targetFormat,
+                              const TextureArtifactBuildOptions &options,
+                              bool forceRebuild = false);
 
 [[nodiscard]] NURI_API uint32_t textureArtifactProcessingTag(
     const TextureArtifactBuildOptions &options) noexcept;

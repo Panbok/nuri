@@ -357,6 +357,31 @@ TEST(MeshBinaryCacheTests, ModelUploadPacksMeshletGpuBuffersForShaders) {
   EXPECT_EQ(primitiveWords[1], 0x00000102u);
 }
 
+TEST(MeshBinaryCacheTests, PreparedModelOwnsCpuPayloadUntilGpuCreation) {
+  FakeMeshletUploadGpuDevice gpu;
+  nuri::MeshData mesh = makeMeshletUploadMesh();
+  const uint32_t expectedVertexCount =
+      static_cast<uint32_t>(mesh.vertices.size());
+  const uint32_t expectedIndexCount =
+      static_cast<uint32_t>(mesh.indices.size());
+  const uint32_t expectedMeshletCount =
+      static_cast<uint32_t>(mesh.meshlets.size());
+
+  auto preparedResult = nuri::Model::prepare(std::move(mesh));
+  ASSERT_FALSE(preparedResult.hasError()) << preparedResult.error();
+  EXPECT_GT(preparedResult.value().uploadBytes(), 0u);
+
+  auto modelResult = nuri::Model::createPrepared(
+      gpu, std::move(preparedResult.value()), "prepared_model");
+  ASSERT_FALSE(modelResult.hasError()) << modelResult.error();
+  ASSERT_NE(modelResult.value(), nullptr);
+  EXPECT_EQ(modelResult.value()->vertexCount(), expectedVertexCount);
+  EXPECT_EQ(modelResult.value()->indexCount(), expectedIndexCount);
+  EXPECT_EQ(modelResult.value()->meshletGpuView().meshletCount,
+            expectedMeshletCount);
+  EXPECT_EQ(gpu.waitIdleCallCount, 0u);
+}
+
 TEST(MeshBinaryCacheTests, ModelUploadRejectsMeshletsAboveShaderLimits) {
   {
     FakeMeshletUploadGpuDevice gpu;

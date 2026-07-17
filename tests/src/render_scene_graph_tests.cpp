@@ -213,4 +213,50 @@ TEST(RenderSceneGraphTests,
       graph.getRenderableMaterial(instantiated.renderables[0], material));
 }
 
+TEST(RenderSceneGraphTests,
+     PrefabStructureCanPublishBeforeRenderableDependenciesResolve) {
+  nuri::RenderScene scene;
+  nuri::SceneGraph &graph = scene.graph();
+
+  nuri::ScenePrefab prefab;
+  prefab.nodes.resize(2u);
+  prefab.nodes[0].name = "ProgressiveRoot";
+  prefab.nodes[1].name = "ProgressiveMesh";
+  prefab.nodes[1].parentIndex = 0u;
+  prefab.nodes[1].morphWeights = {0.25f, 0.75f};
+  prefab.renderables.push_back(nuri::ScenePrefabRenderable{
+      .nodeIndex = 1u,
+      .meshIndex = 0u,
+      .materialIndex = 0u,
+  });
+
+  nuri::SceneInstantiationMap instantiated;
+  auto structure =
+      graph.instantiatePrefabStructure(prefab, graph.rootNode(), &instantiated);
+  ASSERT_FALSE(structure.hasError()) << structure.error();
+  ASSERT_EQ(instantiated.nodes.size(), 2u);
+  ASSERT_EQ(instantiated.renderables.size(), 1u);
+  EXPECT_FALSE(nuri::isValid(instantiated.renderables[0]));
+
+  auto commit = scene.commit();
+  ASSERT_FALSE(commit.hasError()) << commit.error();
+  EXPECT_TRUE(scene.renderables().empty());
+
+  constexpr nuri::ModelRef kModel = nuri::makeModelRef(1u, 1u);
+  constexpr nuri::MaterialRef kMaterial = nuri::makeMaterialRef(2u, 1u);
+  auto attached =
+      graph.attachPrefabRenderable(prefab, 0u, kModel, kMaterial, instantiated);
+  ASSERT_FALSE(attached.hasError()) << attached.error();
+  EXPECT_EQ(instantiated.renderables[0], attached.value());
+
+  commit = scene.commit();
+  ASSERT_FALSE(commit.hasError()) << commit.error();
+  ASSERT_EQ(scene.renderables().size(), 1u);
+  EXPECT_EQ(scene.renderables()[0].model.value, kModel.value);
+  EXPECT_EQ(scene.renderables()[0].material.value, kMaterial.value);
+  ASSERT_EQ(scene.renderables()[0].morphWeights.size(), 2u);
+  EXPECT_FLOAT_EQ(scene.renderables()[0].morphWeights[0], 0.25f);
+  EXPECT_FLOAT_EQ(scene.renderables()[0].morphWeights[1], 0.75f);
+}
+
 } // namespace

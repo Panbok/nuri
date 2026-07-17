@@ -20,6 +20,30 @@ namespace nuri {
 
 namespace {
 
+template <typename T>
+[[nodiscard]] MaterialTableDirtyRange
+calculateDirtyRange(std::span<const T> previous, std::span<const T> current) {
+  static_assert(std::is_trivially_copyable_v<T>);
+  const size_t commonSize = std::min(previous.size(), current.size());
+  size_t first = commonSize;
+  for (size_t index = 0u; index < commonSize; ++index) {
+    if (std::memcmp(&previous[index], &current[index], sizeof(T)) != 0) {
+      first = index;
+      break;
+    }
+  }
+  if (first == commonSize) {
+    if (current.size() <= previous.size()) {
+      return {};
+    }
+    first = previous.size();
+  }
+  return MaterialTableDirtyRange{
+      .first = static_cast<uint32_t>(first),
+      .count = static_cast<uint32_t>(current.size() - first),
+  };
+}
+
 [[nodiscard]] bool hasTextureExtension(std::string_view path,
                                        std::string_view extension) {
   if (path.size() < extension.size()) {
@@ -693,10 +717,11 @@ void ResourceManager::destroyMaterialSlot(uint32_t index, bool skipRebuild) {
     materialHeaderTable_[index] = MaterialHeaderGpuData{};
   }
   materialSlotsMeta_.release(index);
-  if (!skipRebuild) {
-    rebuildPackedMaterialTables();
+  if (skipRebuild) {
+    materialTablesDirty_ = true;
+  } else {
+    markMaterialTablesDirty();
   }
-  ++materialTableVersion_;
 }
 
 void ResourceManager::destroyModelSlot(uint32_t index) {
@@ -722,17 +747,16 @@ void ResourceManager::destroyModelSlot(uint32_t index) {
   slot.retireAfterFrame = kRetireFrameUnset;
   slot.record = ModelRecord(memory_);
   modelSlotsMeta_.release(index);
+  markModelMaterialBindingsDirty();
 }
 
 void ResourceManager::rebuildPackedMaterialTables() {
-  materialClearcoatTable_.clear();
-  materialSheenTable_.clear();
-  materialTransmissionTable_.clear();
-  materialSpecularTable_.clear();
-
-  if (materialHeaderTable_.size() < materialSlots_.size()) {
-    materialHeaderTable_.resize(materialSlots_.size());
-  }
+  std::pmr::vector<MaterialHeaderGpuData> nextHeaders(memory_);
+  std::pmr::vector<MaterialClearcoatGpuData> nextClearcoat(memory_);
+  std::pmr::vector<MaterialSheenGpuData> nextSheen(memory_);
+  std::pmr::vector<MaterialTransmissionGpuData> nextTransmission(memory_);
+  std::pmr::vector<MaterialSpecularGpuData> nextSpecular(memory_);
+  nextHeaders.resize(materialSlots_.size());
 
   const auto textureIndex = [this](TextureRef ref) -> uint32_t {
     const TextureRecord *record = tryGet(ref);
@@ -742,7 +766,7 @@ void ResourceManager::rebuildPackedMaterialTables() {
 
   for (uint32_t index = 0; index < materialSlots_.size(); ++index) {
     if (!materialSlotsMeta_.isLive(index)) {
-      materialHeaderTable_[index] = MaterialHeaderGpuData{};
+      nextHeaders[index] = MaterialHeaderGpuData{};
       continue;
     }
 
@@ -777,36 +801,76 @@ void ResourceManager::rebuildPackedMaterialTables() {
 
     if (packed.hasClearcoat) {
       header.clearcoatExtensionIndex =
-          static_cast<uint32_t>(materialClearcoatTable_.size());
-      materialClearcoatTable_.push_back(packed.clearcoat);
+          static_cast<uint32_t>(nextClearcoat.size());
+      nextClearcoat.push_back(packed.clearcoat);
     }
     if (packed.hasSheen) {
-      header.sheenExtensionIndex =
-          static_cast<uint32_t>(materialSheenTable_.size());
-      materialSheenTable_.push_back(packed.sheen);
+      header.sheenExtensionIndex = static_cast<uint32_t>(nextSheen.size());
+      nextSheen.push_back(packed.sheen);
     }
     if (packed.hasTransmissionOrVolume) {
       header.transmissionExtensionIndex =
-          static_cast<uint32_t>(materialTransmissionTable_.size());
-      materialTransmissionTable_.push_back(packed.transmission);
+          static_cast<uint32_t>(nextTransmission.size());
+      nextTransmission.push_back(packed.transmission);
     }
     if (packed.hasSpecular) {
       header.specularExtensionIndex =
-          static_cast<uint32_t>(materialSpecularTable_.size());
-      materialSpecularTable_.push_back(packed.specular);
+          static_cast<uint32_t>(nextSpecular.size());
+      nextSpecular.push_back(packed.specular);
     }
 
     packed.header = header;
-    materialHeaderTable_[index] = header;
+    nextHeaders[index] = header;
+  }
+
+  materialHeaderDirtyRange_ = calculateDirtyRange<MaterialHeaderGpuData>(
+      materialHeaderTable_, nextHeaders);
+  materialClearcoatDirtyRange_ = calculateDirtyRange<MaterialClearcoatGpuData>(
+      materialClearcoatTable_, nextClearcoat);
+  materialSheenDirtyRange_ =
+      calculateDirtyRange<MaterialSheenGpuData>(materialSheenTable_, nextSheen);
+  materialTransmissionDirtyRange_ =
+      calculateDirtyRange<MaterialTransmissionGpuData>(
+          materialTransmissionTable_, nextTransmission);
+  materialSpecularDirtyRange_ = calculateDirtyRange<MaterialSpecularGpuData>(
+      materialSpecularTable_, nextSpecular);
+  materialHeaderTable_.swap(nextHeaders);
+  materialClearcoatTable_.swap(nextClearcoat);
+  materialSheenTable_.swap(nextSheen);
+  materialTransmissionTable_.swap(nextTransmission);
+  materialSpecularTable_.swap(nextSpecular);
+}
+
+void ResourceManager::markMaterialTablesDirty() {
+  materialTablesDirty_ = true;
+  flushPublicationVersions();
+}
+
+void ResourceManager::markModelMaterialBindingsDirty() {
+  modelMaterialBindingsDirty_ = true;
+  flushPublicationVersions();
+}
+
+void ResourceManager::flushPublicationVersions() {
+  if (publicationBatchDepth_ != 0u) {
+    return;
+  }
+  if (materialTablesDirty_) {
+    materialTableDirtyBaseVersion_ = materialTableVersion_;
+    rebuildPackedMaterialTables();
+    ++materialTableVersion_;
+    materialTablesDirty_ = false;
+  }
+  if (modelMaterialBindingsDirty_) {
+    ++modelMaterialBindingVersion_;
+    modelMaterialBindingsDirty_ = false;
   }
 }
 
-Result<TextureRef, std::string>
-ResourceManager::acquireTexture(const TextureRequest &request) {
-  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
+std::optional<TextureRef>
+ResourceManager::tryAcquireTexture(const TextureRequest &request) {
   if (request.path.empty()) {
-    return Result<TextureRef, std::string>::makeError(
-        "ResourceManager::acquireTexture: path is empty");
+    return std::nullopt;
   }
 
   const std::string canonicalPath = canonicalizeResourcePath(request.path);
@@ -820,12 +884,33 @@ ResourceManager::acquireTexture(const TextureRequest &request) {
     if (TextureSlot *cached = tryGetSlot(it->second)) {
       ++cached->refCount;
       cached->retireAfterFrame = kRetireFrameUnset;
-      ++telemetry_.textureAcquireHits;
-      return Result<TextureRef, std::string>::makeResult(it->second);
+      return it->second;
     }
     textureCache_.erase(it);
   }
+  return std::nullopt;
+}
+
+Result<TextureRef, std::string>
+ResourceManager::acquireTexture(const TextureRequest &request) {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
+  if (request.path.empty()) {
+    return Result<TextureRef, std::string>::makeError(
+        "ResourceManager::acquireTexture: path is empty");
+  }
+  if (const std::optional<TextureRef> cached = tryAcquireTexture(request);
+      cached.has_value()) {
+    ++telemetry_.textureAcquireHits;
+    return Result<TextureRef, std::string>::makeResult(*cached);
+  }
   ++telemetry_.textureAcquireMisses;
+
+  const std::string canonicalPath = canonicalizeResourcePath(request.path);
+  TextureKey key{
+      .canonicalPath = canonicalPath,
+      .optionsHash = hashTextureLoadOptions(request.loadOptions),
+      .kind = request.kind,
+  };
 
   Result<std::unique_ptr<Texture>, std::string> textureResult =
       Result<std::unique_ptr<Texture>, std::string>::makeError(
@@ -886,11 +971,16 @@ ResourceManager::acquireTexture(const TextureRequest &request) {
   if (textureResult.hasError()) {
     return Result<TextureRef, std::string>::makeError(textureResult.error());
   }
+  return storeAcquiredTexture(key, canonicalPath, request,
+                              std::move(textureResult.value()));
+}
 
-  std::unique_ptr<Texture> texture = std::move(textureResult.value());
+Result<TextureRef, std::string> ResourceManager::storeAcquiredTexture(
+    const TextureKey &key, std::string_view canonicalPath,
+    const TextureRequest &request, std::unique_ptr<Texture> texture) {
   if (!texture || !texture->valid()) {
     return Result<TextureRef, std::string>::makeError(
-        "ResourceManager::acquireTexture: loaded texture is invalid");
+        "ResourceManager::storeAcquiredTexture: loaded texture is invalid");
   }
 
   auto slotResult = allocateTextureSlot();
@@ -928,6 +1018,26 @@ ResourceManager::acquireTexture(const TextureRequest &request) {
   return Result<TextureRef, std::string>::makeResult(ref);
 }
 
+Result<TextureRef, std::string>
+ResourceManager::adoptPreparedTexture(const TextureRequest &request,
+                                      std::unique_ptr<Texture> texture) {
+  if (request.path.empty()) {
+    return Result<TextureRef, std::string>::makeError(
+        "ResourceManager::adoptPreparedTexture: path is empty");
+  }
+  if (const std::optional<TextureRef> cached = tryAcquireTexture(request);
+      cached.has_value()) {
+    return Result<TextureRef, std::string>::makeResult(*cached);
+  }
+  const std::string canonicalPath = canonicalizeResourcePath(request.path);
+  const TextureKey key{
+      .canonicalPath = canonicalPath,
+      .optionsHash = hashTextureLoadOptions(request.loadOptions),
+      .kind = request.kind,
+  };
+  return storeAcquiredTexture(key, canonicalPath, request, std::move(texture));
+}
+
 ModelRef ResourceManager::tryAcquireCachedModel(const ModelKey &key) {
   if (auto it = modelCache_.find(key); it != modelCache_.end()) {
     if (ModelSlot *cached = tryGetSlot(it->second)) {
@@ -938,6 +1048,21 @@ ModelRef ResourceManager::tryAcquireCachedModel(const ModelKey &key) {
     modelCache_.erase(it);
   }
   return kInvalidModelRef;
+}
+
+std::optional<ModelRef>
+ResourceManager::tryAcquireModel(const ModelRequest &request) {
+  if (request.path.empty()) {
+    return std::nullopt;
+  }
+  const std::string canonicalPath = canonicalizeResourcePath(request.path);
+  const ModelKey key{
+      .canonicalPath = canonicalPath,
+      .importOptionsHash = hashModelImportOptions(request.importOptions),
+      .sceneMeshIndex = request.sceneMeshIndex,
+  };
+  const ModelRef ref = tryAcquireCachedModel(key);
+  return isValid(ref) ? std::optional<ModelRef>(ref) : std::nullopt;
 }
 
 Result<ModelRef, std::string> ResourceManager::storeAcquiredModel(
@@ -968,6 +1093,7 @@ Result<ModelRef, std::string> ResourceManager::storeAcquiredModel(
       slot.record.model->sourceMaterialCount(), kInvalidMaterialRef);
 
   modelCache_.emplace(key, ref);
+  markModelMaterialBindingsDirty();
   return Result<ModelRef, std::string>::makeResult(ref);
 }
 
@@ -979,18 +1105,18 @@ ResourceManager::acquireModel(const ModelRequest &request) {
         "ResourceManager::acquireModel: path is empty");
   }
 
+  if (const std::optional<ModelRef> cached = tryAcquireModel(request);
+      cached.has_value()) {
+    ++telemetry_.modelAcquireHits;
+    return Result<ModelRef, std::string>::makeResult(*cached);
+  }
+  ++telemetry_.modelAcquireMisses;
+
   const std::string canonicalPath = canonicalizeResourcePath(request.path);
   const uint64_t optionsHash = hashModelImportOptions(request.importOptions);
   ModelKey key{.canonicalPath = canonicalPath,
                .importOptionsHash = optionsHash,
                .sceneMeshIndex = request.sceneMeshIndex};
-
-  if (const ModelRef cachedRef = tryAcquireCachedModel(key);
-      isValid(cachedRef)) {
-    ++telemetry_.modelAcquireHits;
-    return Result<ModelRef, std::string>::makeResult(cachedRef);
-  }
-  ++telemetry_.modelAcquireMisses;
 
   Result<std::unique_ptr<Model>, std::string> modelResult =
       Result<std::unique_ptr<Model>, std::string>::makeError(
@@ -1013,6 +1139,28 @@ ResourceManager::acquireModel(const ModelRequest &request) {
 
   return storeAcquiredModel(key, canonicalPath, optionsHash, request,
                             std::move(modelResult.value()));
+}
+
+Result<ModelRef, std::string>
+ResourceManager::adoptPreparedModel(const ModelRequest &request,
+                                    std::unique_ptr<Model> model) {
+  if (request.path.empty()) {
+    return Result<ModelRef, std::string>::makeError(
+        "ResourceManager::adoptPreparedModel: path is empty");
+  }
+  if (const std::optional<ModelRef> cached = tryAcquireModel(request);
+      cached.has_value()) {
+    return Result<ModelRef, std::string>::makeResult(*cached);
+  }
+  const std::string canonicalPath = canonicalizeResourcePath(request.path);
+  const uint64_t optionsHash = hashModelImportOptions(request.importOptions);
+  const ModelKey key{
+      .canonicalPath = canonicalPath,
+      .importOptionsHash = optionsHash,
+      .sceneMeshIndex = request.sceneMeshIndex,
+  };
+  return storeAcquiredModel(key, canonicalPath, optionsHash, request,
+                            std::move(model));
 }
 
 Result<ModelRef, std::string>
@@ -1133,8 +1281,7 @@ ResourceManager::acquireMaterial(const MaterialRequest &request) {
   if (slotIndex >= materialHeaderTable_.size()) {
     materialHeaderTable_.resize(slotIndex + 1u);
   }
-  rebuildPackedMaterialTables();
-  ++materialTableVersion_;
+  markMaterialTablesDirty();
 
   materialCache_.emplace(std::move(key), ref);
   return Result<MaterialRef, std::string>::makeResult(ref);
@@ -1801,6 +1948,18 @@ void ResourceManager::beginFrame(uint64_t frameIndex) {
   currentFrameIndex_ = frameIndex;
 }
 
+void ResourceManager::beginPublicationBatch() { ++publicationBatchDepth_; }
+
+void ResourceManager::endPublicationBatch() {
+  NURI_ASSERT(publicationBatchDepth_ > 0u,
+              "ResourceManager::endPublicationBatch: no batch is active");
+  if (publicationBatchDepth_ == 0u) {
+    return;
+  }
+  --publicationBatchDepth_;
+  flushPublicationVersions();
+}
+
 void ResourceManager::collectGarbage(uint64_t completedFrameIndex) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
 
@@ -1855,7 +2014,7 @@ void ResourceManager::collectGarbage(uint64_t completedFrameIndex) {
       pendingRetireMaterials_.pop_back();
     }
     if (materialTablesDirty) {
-      rebuildPackedMaterialTables();
+      flushPublicationVersions();
     }
   }
 
@@ -1981,6 +2140,7 @@ bool ResourceManager::setModelMaterialForSource(ModelRef model,
     release(mappedMaterial);
   }
   mappedMaterial = material;
+  markModelMaterialBindingsDirty();
   return true;
 }
 

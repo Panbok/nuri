@@ -1275,6 +1275,7 @@ void OpaqueRenderer::onDetach() {
   cachedTopologyVersion_ = std::numeric_limits<uint64_t>::max();
   cachedTransformVersion_ = std::numeric_limits<uint64_t>::max();
   cachedMaterialVersion_ = std::numeric_limits<uint64_t>::max();
+  cachedModelMaterialBindingVersion_ = std::numeric_limits<uint64_t>::max();
   cachedGeometryMutationVersion_ = std::numeric_limits<uint64_t>::max();
   cachedVisibilityCandidateTopologyVersion_ =
       std::numeric_limits<uint64_t>::max();
@@ -2292,8 +2293,12 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   const bool topologyDirty =
       cachedScene_ != frame.scene ||
       cachedTopologyVersion_ != frame.scene->topologyVersion();
-  const bool materialDirty = topologyDirty || cachedScene_ != frame.scene ||
-                             cachedMaterialVersion_ != materialSnapshot.version;
+  const uint64_t modelMaterialBindingVersion =
+      frame.resources->modelMaterialBindingVersion();
+  const bool materialDirty =
+      topologyDirty || cachedScene_ != frame.scene ||
+      cachedMaterialVersion_ != materialSnapshot.version ||
+      cachedModelMaterialBindingVersion_ != modelMaterialBindingVersion;
   const bool excludeTransmission = true;
   const bool transmissionPolicyDirty =
       cachedExcludeTransmission_ != excludeTransmission;
@@ -2696,6 +2701,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
 
   if (materialDirty) {
     cachedMaterialVersion_ = materialSnapshot.version;
+    cachedModelMaterialBindingVersion_ = modelMaterialBindingVersion;
   }
   if (materialDirty || transmissionPolicyDirty ||
       materialTextureAccessHandles_.empty()) {
@@ -8769,6 +8775,13 @@ Result<bool, std::string> OpaqueRenderer::appendPreparedGraphPass(
        ++dispatchIndex) {
     const ComputeDispatchItem &dispatch =
         pass.desc.preDispatches[dispatchIndex];
+    if (!dispatch.dependencyBufferAccessModes.empty() &&
+        dispatch.dependencyBufferAccessModes.size() !=
+            dispatch.dependencyBuffers.size()) {
+      return Result<bool, std::string>::makeError(
+          "OpaqueRenderer::appendPreparedPass: pre-dispatch dependency access "
+          "mode count does not match dependency buffer count");
+    }
     for (size_t dependencyIndex = 0;
          dependencyIndex < dispatch.dependencyBuffers.size();
          ++dependencyIndex) {
@@ -8788,7 +8801,10 @@ Result<bool, std::string> OpaqueRenderer::appendPreparedGraphPass(
               .dependencyIndex = static_cast<uint32_t>(dependencyIndex),
               .buffer = importResult.value(),
               .mode =
-                  RenderGraphAccessMode::Read | RenderGraphAccessMode::Write,
+                  dispatch.dependencyBufferAccessModes.empty()
+                      ? (RenderGraphAccessMode::Read |
+                         RenderGraphAccessMode::Write)
+                      : dispatch.dependencyBufferAccessModes[dependencyIndex],
           });
     }
   }

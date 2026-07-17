@@ -36,9 +36,11 @@ namespace {
 } // namespace
 
 Renderer::Renderer(GPUDevice &gpu, std::pmr::memory_resource &memory)
-    : gpu_(gpu), resources_(gpu, &memory), renderGraphRuntime_(&memory),
-      renderGraphBuilder_(&memory), renderGraphExecutor_(&memory),
-      renderGraphTelemetry_(&memory),
+    : gpu_(gpu), resources_(gpu, &memory), assets_(gpu, resources_),
+      renderGraphRuntime_(&renderGraphMemory_),
+      renderGraphBuilder_(&renderGraphMemory_),
+      renderGraphExecutor_(&renderGraphMemory_),
+      renderGraphTelemetry_(&renderGraphMemory_),
       suppressInferredSideEffects_(resolveSuppressInferredSideEffectsFlag()) {
   renderGraphBuilder_.setInferredSideEffectSuppression(
       suppressInferredSideEffects_);
@@ -67,7 +69,7 @@ Result<bool, std::string> Renderer::render(RenderPipeline &pipeline,
   resolveRenderSettingsForFrame(frameContext);
   resetFrameSharedResources(frameContext);
   Result<bool, std::string> frameResult =
-      beginFrameSequence(frameContext.frameIndex);
+      beginFrameSequence(frameContext.frameIndex, frameContext.scene);
   if (frameResult.hasError()) {
     if (frameContext.temporalFrameService != nullptr) {
       frameContext.temporalFrameService->abandonFrame(frameContext.frameIndex);
@@ -75,6 +77,38 @@ Result<bool, std::string> Renderer::render(RenderPipeline &pipeline,
     return frameResult;
   }
 
+  const AssetCpuSchedulerStats cpuStats = assets_.cpuStats();
+  frameContext.metrics.assets = {
+      .cpuCompletions = lastAssetPublicationStats_.cpuCompletions,
+      .cpuWorkers = cpuStats.workerCount,
+      .cpuQueuedJobs = cpuStats.queuedJobs,
+      .cpuRunningJobs = cpuStats.runningJobs,
+      .cpuRunningIo =
+          cpuStats.runningByClass[static_cast<size_t>(AssetWorkClass::Io)],
+      .cpuRunningDecode =
+          cpuStats.runningByClass[static_cast<size_t>(AssetWorkClass::Decode)],
+      .cpuRunningCook =
+          cpuStats.runningByClass[static_cast<size_t>(AssetWorkClass::Cook)],
+      .cpuRunningTranscode =
+          cpuStats
+              .runningByClass[static_cast<size_t>(AssetWorkClass::Transcode)],
+      .cpuRunningMetadata =
+          cpuStats
+              .runningByClass[static_cast<size_t>(AssetWorkClass::Metadata)],
+      .dedicatedCopyQueue = gpu_.assetUploadsUseDedicatedCopyQueue() ? 1u : 0u,
+      .gpuMaterialized = lastAssetPublicationStats_.gpuMaterialized,
+      .published = lastAssetPublicationStats_.published,
+      .cancelled = lastAssetPublicationStats_.cancelled,
+      .failed = lastAssetPublicationStats_.failed,
+      .scenePatches = lastAssetPublicationStats_.scenePatches,
+      .sceneCommits = lastAssetPublicationStats_.sceneCommits,
+      .cpuInFlightBytes = cpuStats.inFlightBytes,
+      .uploadBytes = lastAssetPublicationStats_.uploadBytes,
+      .submittedJobs = cpuStats.submittedJobs,
+      .completedJobs = cpuStats.completedJobs,
+      .cancelledJobs = cpuStats.cancelledJobs,
+      .rejectedJobs = cpuStats.rejectedJobs,
+  };
   frameContext.gpuTiming = gpu_.getLatestCompletedGpuTimingReport();
 
   renderGraphBeginFrame(frameContext.frameIndex);
@@ -108,13 +142,8 @@ Result<bool, std::string> Renderer::render(RenderPipeline &pipeline,
   return submitResult;
 }
 
-Result<bool, std::string> Renderer::beginFrameSequence(uint64_t frameIndex) {
-  {
-    NURI_PROFILER_ZONE("Renderer.begin_frame", NURI_PROFILER_COLOR_CMD_COPY);
-    resources_.beginFrame(frameIndex);
-    NURI_PROFILER_ZONE_END();
-  }
-
+Result<bool, std::string> Renderer::beginFrameSequence(uint64_t frameIndex,
+                                                       RenderScene *scene) {
   Result<bool, std::string> frameResult =
       Result<bool, std::string>::makeResult(true);
   {
@@ -122,6 +151,23 @@ Result<bool, std::string> Renderer::beginFrameSequence(uint64_t frameIndex) {
     frameResult = gpu_.beginFrame(frameIndex);
     NURI_PROFILER_ZONE_END();
   }
+  if (frameResult.hasError()) {
+    return frameResult;
+  }
+  Result<AssetPublicationStats, std::string> assetResult =
+      Result<AssetPublicationStats, std::string>::makeResult({});
+  {
+    NURI_PROFILER_ZONE("Renderer.begin_frame", NURI_PROFILER_COLOR_CMD_COPY);
+    resources_.beginFrame(frameIndex);
+    assetResult = assets_.prepareFrame(AssetPublicationContext{
+        .scene = scene,
+    });
+    NURI_PROFILER_ZONE_END();
+  }
+  if (assetResult.hasError()) {
+    return Result<bool, std::string>::makeError(assetResult.error());
+  }
+  lastAssetPublicationStats_ = assetResult.value();
   return frameResult;
 }
 

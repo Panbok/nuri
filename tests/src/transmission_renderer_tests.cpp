@@ -215,6 +215,13 @@ MaterialRequest makeTransmissionMaterialRequest(float transmissionFactor,
   return request;
 }
 
+MaterialRequest makeOpaqueMaterialRequest() {
+  MaterialRequest request{};
+  request.desc.featureMask = kMaterialFeatureMetallicRoughness;
+  request.desc.alphaMode = MaterialAlphaMode::Opaque;
+  return request;
+}
+
 BufferHandle createStorageBuffer(GPUDevice &gpu,
                                  std::span<const std::byte> data,
                                  std::string_view debugName) {
@@ -420,6 +427,90 @@ TEST(TransmissionRendererTest,
   EXPECT_GT(gpu.bufferDeviceAddressCallCount, 2u);
   EXPECT_EQ(renderer.cachedGeometryMutationVersion_,
             gpu.geometryMutationVersion());
+}
+
+TEST(TransmissionRendererTest,
+     MaterialBindingTransitionBuildsInstanceDataWithoutSceneMutation) {
+  std::array<std::byte, 256 * 1024> scratchBytes{};
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeTransmissionPrepareGpuDevice gpu;
+  ResourceManager resources(gpu, &memory);
+  RenderScene scene(&memory);
+
+  MeshData mesh = makeTransmissionTriangleMesh(&memory);
+  auto modelResult =
+      resources.acquireGeneratedModel(mesh, "transmission_binding_triangle");
+  ASSERT_FALSE(modelResult.hasError()) << modelResult.error();
+  auto opaqueMaterialResult =
+      resources.acquireMaterial(makeOpaqueMaterialRequest());
+  ASSERT_FALSE(opaqueMaterialResult.hasError()) << opaqueMaterialResult.error();
+  auto transmissionMaterialResult =
+      resources.acquireMaterial(makeTransmissionMaterialRequest(0.65f));
+  ASSERT_FALSE(transmissionMaterialResult.hasError())
+      << transmissionMaterialResult.error();
+  resources.setModelMaterialForAllSources(modelResult.value(),
+                                          opaqueMaterialResult.value());
+
+  constexpr uint32_t kRenderableCount = 3u;
+  for (uint32_t i = 0u; i < kRenderableCount; ++i) {
+    const glm::mat4 transform = glm::translate(
+        glm::mat4(1.0f), glm::vec3(static_cast<float>(i), 0.0f, 0.0f));
+    auto nodeResult = scene.graph().createNode(
+        scene.graph().rootNode(), "transmission_binding_node", transform);
+    ASSERT_FALSE(nodeResult.hasError()) << nodeResult.error();
+    auto renderableResult = scene.graph().addRenderable(
+        nodeResult.value(), modelResult.value(), opaqueMaterialResult.value());
+    ASSERT_FALSE(renderableResult.hasError()) << renderableResult.error();
+  }
+  auto commitResult = scene.commit();
+  ASSERT_FALSE(commitResult.hasError()) << commitResult.error();
+
+  auto sceneColorTexture = createTestTexture(
+      gpu, Format::RGBA16_FLOAT, TextureUsage::AttachmentSampled,
+      "transmission_binding_scene_color");
+  auto frameColorTexture = createTestTexture(
+      gpu, Format::RGBA16_FLOAT, TextureUsage::AttachmentSampled,
+      "transmission_binding_frame_color");
+  ASSERT_NE(sceneColorTexture, nullptr);
+  ASSERT_NE(frameColorTexture, nullptr);
+
+  RenderSettings settings{};
+  MaterialTableGpuData materialGpu =
+      createMaterialTableGpuData(gpu, resources.materialSnapshot());
+  ForwardSceneGpuData sceneGpu =
+      createForwardSceneGpuData(gpu, materialGpu, sceneColorTexture->handle());
+
+  RenderFrameContext frame{};
+  frame.scene = &scene;
+  frame.resources = &resources;
+  frame.settings = &settings;
+  frame.sharedResources.sceneColorTexture = sceneColorTexture->handle();
+  frame.sharedResources.frameColorTexture = frameColorTexture->handle();
+  frame.sharedResources.materialTableGpuData = materialGpu;
+  frame.sharedResources.forwardSceneGpuData = sceneGpu;
+
+  TransmissionRenderer renderer(gpu, makeTransmissionConfig(), &memory);
+  auto fallbackPrepare = renderer.prepareTransmissionPasses(frame);
+  ASSERT_FALSE(fallbackPrepare.hasError()) << fallbackPrepare.error();
+  ASSERT_TRUE(fallbackPrepare.value());
+  EXPECT_TRUE(renderer.meshDrawTemplates_.empty());
+  EXPECT_TRUE(renderer.instanceRemap_.empty());
+
+  const uint64_t topologyVersion = scene.topologyVersion();
+  const uint64_t transformVersion = scene.transformVersion();
+  resources.setModelMaterialForAllSources(modelResult.value(),
+                                          transmissionMaterialResult.value());
+  ASSERT_EQ(scene.topologyVersion(), topologyVersion);
+  ASSERT_EQ(scene.transformVersion(), transformVersion);
+
+  frame.frameIndex = 1u;
+  auto transmissionPrepare = renderer.prepareTransmissionPasses(frame);
+  ASSERT_FALSE(transmissionPrepare.hasError()) << transmissionPrepare.error();
+  ASSERT_TRUE(transmissionPrepare.value());
+  EXPECT_EQ(renderer.meshDrawTemplates_.size(), kRenderableCount);
+  EXPECT_EQ(renderer.instanceMatrices_.size(), kRenderableCount);
+  EXPECT_EQ(renderer.instanceRemap_.size(), kRenderableCount);
 }
 
 TEST(TransmissionRendererTest, StableSortedTransmissionRecomputesSortDepths) {

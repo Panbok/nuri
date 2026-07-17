@@ -2600,6 +2600,30 @@ makeAntiAliasingFrameMetrics(const CameraFrameState &camera) noexcept {
 }
 
 struct RenderFrameMetrics {
+  struct AssetStreamingFrameMetrics {
+    uint32_t cpuCompletions = 0u;
+    uint32_t cpuWorkers = 0u;
+    uint32_t cpuQueuedJobs = 0u;
+    uint32_t cpuRunningJobs = 0u;
+    uint32_t cpuRunningIo = 0u;
+    uint32_t cpuRunningDecode = 0u;
+    uint32_t cpuRunningCook = 0u;
+    uint32_t cpuRunningTranscode = 0u;
+    uint32_t cpuRunningMetadata = 0u;
+    uint32_t dedicatedCopyQueue = 0u;
+    uint32_t gpuMaterialized = 0u;
+    uint32_t published = 0u;
+    uint32_t cancelled = 0u;
+    uint32_t failed = 0u;
+    uint32_t scenePatches = 0u;
+    uint32_t sceneCommits = 0u;
+    uint64_t cpuInFlightBytes = 0u;
+    uint64_t uploadBytes = 0u;
+    uint64_t submittedJobs = 0u;
+    uint64_t completedJobs = 0u;
+    uint64_t cancelledJobs = 0u;
+    uint64_t rejectedJobs = 0u;
+  } assets{};
   uint64_t frameIndex = 0u;
   OpaqueFrameMetrics opaque{};
   ShadowFrameMetrics shadow{};
@@ -3004,7 +3028,7 @@ private:
 };
 
 struct RenderFrameContext {
-  const RenderScene *scene = nullptr;
+  RenderScene *scene = nullptr;
   CameraFrameState camera{};
   PresentationAAPlan presentationAA{};
   // Immutable snapshot fetched once after GPU beginFrame collects completed

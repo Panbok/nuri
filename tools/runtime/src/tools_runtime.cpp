@@ -109,90 +109,99 @@ parseToolTextureKind(std::string_view kind) {
       "unsupported tool environment texture kind '" + std::string(kind) + "'");
 }
 
-[[nodiscard]] Result<TextureRef, std::string>
-loadToolEnvironmentTexture(const ToolRuntimeDesc &runtime,
-                           ResourceManager &resources,
-                           const ToolEnvironmentTextureDesc &desc,
-                           std::string_view fallbackDebugName) {
+[[nodiscard]] Result<std::optional<TextureRequest>, std::string>
+makeToolEnvironmentTextureRequest(const ToolRuntimeDesc &runtime,
+                                  const ToolEnvironmentTextureDesc &desc,
+                                  std::string_view fallbackDebugName) {
   if (!desc.enabled) {
-    return Result<TextureRef, std::string>::makeResult(kInvalidTextureRef);
+    return Result<std::optional<TextureRequest>, std::string>::makeResult(
+        std::nullopt);
   }
   auto path = resolveToolPath(runtime, desc.pathBase, desc.path);
   if (path.hasError()) {
-    return Result<TextureRef, std::string>::makeError(path.error());
+    return Result<std::optional<TextureRequest>, std::string>::makeError(
+        path.error());
   }
   if (!std::filesystem::exists(path.value())) {
     if (desc.required) {
-      return Result<TextureRef, std::string>::makeError(
+      return Result<std::optional<TextureRequest>, std::string>::makeError(
           "missing required environment texture: " + path.value().string());
     }
-    return Result<TextureRef, std::string>::makeResult(kInvalidTextureRef);
+    return Result<std::optional<TextureRequest>, std::string>::makeResult(
+        std::nullopt);
   }
   auto kind = parseToolTextureKind(desc.kind);
   if (kind.hasError()) {
-    return Result<TextureRef, std::string>::makeError(kind.error());
+    return Result<std::optional<TextureRequest>, std::string>::makeError(
+        kind.error());
   }
-  auto texture = resources.acquireTexture(TextureRequest{
-      .path = path.value().string(),
-      .kind = kind.value(),
-      .debugName = desc.debugName.empty() ? std::string(fallbackDebugName)
-                                          : desc.debugName,
-  });
-  if (texture.hasError()) {
-    return Result<TextureRef, std::string>::makeError(texture.error());
-  }
-  return Result<TextureRef, std::string>::makeResult(texture.value());
+  return Result<std::optional<TextureRequest>, std::string>::makeResult(
+      TextureRequest{
+          .path = path.value().string(),
+          .kind = kind.value(),
+          .debugName = desc.debugName.empty() ? std::string(fallbackDebugName)
+                                              : desc.debugName,
+      });
 }
 
 [[nodiscard]] Result<bool, std::string>
-loadToolEnvironment(const ToolRuntimeDesc &runtime, Renderer &renderer,
-                    RenderScene &scene) {
-  ResourceManager &resources = renderer.resources();
-  auto cubemap = loadToolEnvironmentTexture(runtime, resources,
-                                            runtime.environment.cubemap,
-                                            "tool_environment_cubemap");
+requestToolEnvironment(const ToolRuntimeDesc &runtime, Renderer &renderer,
+                       RenderScene &scene,
+                       EnvironmentAssetHandle &outEnvironment) {
+  auto cubemap = makeToolEnvironmentTextureRequest(
+      runtime, runtime.environment.cubemap, "tool_environment_cubemap");
   if (cubemap.hasError()) {
     return Result<bool, std::string>::makeError(cubemap.error());
   }
-  auto irradiance = loadToolEnvironmentTexture(runtime, resources,
-                                               runtime.environment.irradiance,
-                                               "tool_environment_irradiance");
+  auto irradiance = makeToolEnvironmentTextureRequest(
+      runtime, runtime.environment.irradiance, "tool_environment_irradiance");
   if (irradiance.hasError()) {
     return Result<bool, std::string>::makeError(irradiance.error());
   }
-  auto prefilteredGgx = loadToolEnvironmentTexture(
-      runtime, resources, runtime.environment.prefilteredGgx,
+  auto prefilteredGgx = makeToolEnvironmentTextureRequest(
+      runtime, runtime.environment.prefilteredGgx,
       "tool_environment_prefiltered_ggx");
   if (prefilteredGgx.hasError()) {
     return Result<bool, std::string>::makeError(prefilteredGgx.error());
   }
-  auto prefilteredCharlie = loadToolEnvironmentTexture(
-      runtime, resources, runtime.environment.prefilteredCharlie,
+  auto prefilteredCharlie = makeToolEnvironmentTextureRequest(
+      runtime, runtime.environment.prefilteredCharlie,
       "tool_environment_prefiltered_charlie");
   if (prefilteredCharlie.hasError()) {
     return Result<bool, std::string>::makeError(prefilteredCharlie.error());
   }
-  auto brdfLut = loadToolEnvironmentTexture(runtime, resources,
-                                            runtime.environment.brdfLut,
-                                            "tool_environment_brdf_lut");
+  auto brdfLut = makeToolEnvironmentTextureRequest(
+      runtime, runtime.environment.brdfLut, "tool_environment_brdf_lut");
   if (brdfLut.hasError()) {
     return Result<bool, std::string>::makeError(brdfLut.error());
   }
 
-  scene.setEnvironment(EnvironmentHandles{
-      .cubemap = cubemap.value(),
-      .irradiance = irradiance.value(),
-      .prefilteredGgx = prefilteredGgx.value(),
-      .prefilteredCharlie = prefilteredCharlie.value(),
-      .brdfLut = brdfLut.value(),
-  });
-  for (const TextureRef texture :
-       {cubemap.value(), irradiance.value(), prefilteredGgx.value(),
-        prefilteredCharlie.value(), brdfLut.value()}) {
-    if (isValid(texture)) {
-      resources.release(texture);
-    }
+  if (!cubemap.value().has_value() && !irradiance.value().has_value() &&
+      !prefilteredGgx.value().has_value() &&
+      !prefilteredCharlie.value().has_value() && !brdfLut.value().has_value()) {
+    scene.setEnvironment(EnvironmentHandles{});
+    outEnvironment = {};
+    return Result<bool, std::string>::makeResult(true);
   }
+  auto requested = renderer.assets().requestEnvironment(EnvironmentAssetRequest{
+      .cubemap = std::move(cubemap.value()),
+      .irradiance = std::move(irradiance.value()),
+      .prefilteredGgx = std::move(prefilteredGgx.value()),
+      .prefilteredCharlie = std::move(prefilteredCharlie.value()),
+      .brdfLut = std::move(brdfLut.value()),
+      .priority = AssetPriority::Critical,
+      .cubemapOptional = !runtime.environment.cubemap.required,
+      .irradianceOptional = !runtime.environment.irradiance.required,
+      .prefilteredGgxOptional = !runtime.environment.prefilteredGgx.required,
+      .prefilteredCharlieOptional =
+          !runtime.environment.prefilteredCharlie.required,
+      .brdfLutOptional = !runtime.environment.brdfLut.required,
+      .debugName = "tool_environment",
+  });
+  if (requested.hasError()) {
+    return Result<bool, std::string>::makeError(requested.error());
+  }
+  outEnvironment = requested.value();
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -565,8 +574,9 @@ populateShadowPlanesScene(const ToolRuntimeDesc &runtime, Renderer &renderer,
 [[nodiscard]] Result<bool, std::string>
 populateToolScene(const ToolRuntimeDesc &runtime, Renderer &renderer,
                   RenderScene &scene, std::pmr::memory_resource *memory,
-                  std::optional<ScenePrefab> &prefab,
-                  std::optional<ScenePrefabAssets> &prefabAssets) {
+                  SceneLoadHandle &sceneLoad,
+                  EnvironmentAssetHandle &environmentLoad) {
+  (void)memory;
   scene.bindResources(&renderer.resources());
   LightDesc keyLight{.type = LightType::Directional,
                      .name = "tool_key",
@@ -608,22 +618,18 @@ populateToolScene(const ToolRuntimeDesc &runtime, Renderer &renderer,
         runtime.scene.meshletMaxPrimitives;
     importOptions.assetBuildOptions.meshletConeWeight =
         runtime.scene.meshletConeWeight;
-    auto prefabResult = SceneImporter::loadScenePrefabFromFile(
-        path.value().string(), importOptions, memory);
-    if (prefabResult.hasError()) {
-      return Result<bool, std::string>::makeError(prefabResult.error());
+    auto requested = renderer.assets().requestScene(SceneLoadRequest{
+        .path = path.value().string(),
+        .importOptions = importOptions,
+        .priority = AssetPriority::Critical,
+        .publication = ScenePublicationPolicy::Progressive,
+        .failurePolicy = SceneFailurePolicy::BestEffort,
+        .debugName = runtime.scene.path.string(),
+    });
+    if (requested.hasError()) {
+      return Result<bool, std::string>::makeError(requested.error());
     }
-    prefab.emplace(std::move(prefabResult.value()));
-    auto assetsResult = renderer.resources().acquireScenePrefabAssets(*prefab);
-    if (assetsResult.hasError()) {
-      return Result<bool, std::string>::makeError(assetsResult.error());
-    }
-    prefabAssets.emplace(std::move(assetsResult.value()));
-    auto instantiateResult = scene.graph().instantiatePrefab(
-        *prefab, scene.graph().rootNode(), *prefabAssets);
-    if (instantiateResult.hasError()) {
-      return Result<bool, std::string>::makeError(instantiateResult.error());
-    }
+    sceneLoad = requested.value();
   } else if (runtime.scene.kind == "procedural") {
     auto proceduralResult =
         populateTransmissionTransparencyScene(runtime, renderer, scene);
@@ -644,7 +650,8 @@ populateToolScene(const ToolRuntimeDesc &runtime, Renderer &renderer,
     }
   }
 
-  auto environmentResult = loadToolEnvironment(runtime, renderer, scene);
+  auto environmentResult =
+      requestToolEnvironment(runtime, renderer, scene, environmentLoad);
   if (environmentResult.hasError()) {
     return environmentResult;
   }
@@ -683,8 +690,8 @@ struct ToolRendererRuntime::Impl {
   std::unique_ptr<Renderer> renderer{};
   RenderPipeline pipeline;
   RenderScene scene;
-  std::optional<ScenePrefab> prefab{};
-  std::optional<ScenePrefabAssets> prefabAssets{};
+  SceneLoadHandle sceneLoad{};
+  EnvironmentAssetHandle environmentLoad{};
   TemporalFrameService temporalFrameService{};
   RenderFrameContext frameContext{};
 };
@@ -709,6 +716,25 @@ TemporalFrameService &ToolRendererRuntime::temporalFrameService() noexcept {
 }
 uint32_t ToolRendererRuntime::swapchainImageCount() const noexcept {
   return impl_->gpu != nullptr ? impl_->gpu->getSwapchainImageCount() : 0u;
+}
+ToolAssetLoadStatus ToolRendererRuntime::assetLoadStatus() const {
+  ToolAssetLoadStatus status{};
+  status.sceneRequested = isValidAssetHandle(impl_->sceneLoad);
+  if (status.sceneRequested) {
+    status.scene = impl_->renderer->assets().query(impl_->sceneLoad);
+  }
+  status.environmentRequested = isValidAssetHandle(impl_->environmentLoad);
+  if (status.environmentRequested) {
+    status.environment =
+        impl_->renderer->assets().query(impl_->environmentLoad);
+  }
+  return status;
+}
+Result<AssetPublicationStats, std::string>
+ToolRendererRuntime::pumpAssetLoads() {
+  return impl_->renderer->assets().prepareFrame(AssetPublicationContext{
+      .scene = &impl_->scene,
+  });
 }
 Result<bool, std::string> ToolRendererRuntime::commitScene() {
   return impl_->scene.commit();
@@ -750,7 +776,7 @@ createToolRendererRuntime(const ToolRuntimeDesc &desc) {
   }
   auto sceneResult =
       populateToolScene(desc, *impl->renderer, impl->scene, &impl->sceneMemory,
-                        impl->prefab, impl->prefabAssets);
+                        impl->sceneLoad, impl->environmentLoad);
   if (sceneResult.hasError()) {
     return Result<std::unique_ptr<ToolRendererRuntime>, std::string>::makeError(
         sceneResult.error());

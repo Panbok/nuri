@@ -26,6 +26,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <format>
@@ -35,6 +36,7 @@
 #include <memory_resource>
 #include <optional>
 #include <sstream>
+#include <thread>
 #include <utility>
 
 #if defined(_WIN32)
@@ -738,8 +740,8 @@ populateShadowPlanesScene(const SnapshotCase &snapshotCase, Renderer &renderer,
 [[nodiscard]] Result<bool, std::string>
 populateScene(const SnapshotCase &snapshotCase, Renderer &renderer,
               RenderScene &scene, std::pmr::memory_resource *memory,
-              std::optional<ScenePrefab> &prefab,
-              std::optional<ScenePrefabAssets> &prefabAssets) {
+              SceneLoadHandle &sceneLoad) {
+  (void)memory;
   scene.bindResources(&renderer.resources());
   LightDesc keyLight{.type = LightType::Directional,
                      .name = "snapshot_key",
@@ -782,22 +784,18 @@ populateScene(const SnapshotCase &snapshotCase, Renderer &renderer,
         snapshotCase.scene.meshletMaxPrimitives;
     importOptions.assetBuildOptions.meshletConeWeight =
         snapshotCase.scene.meshletConeWeight;
-    auto prefabResult = SceneImporter::loadScenePrefabFromFile(
-        path.value().string(), importOptions, memory);
-    if (prefabResult.hasError()) {
-      return Result<bool, std::string>::makeError(prefabResult.error());
+    auto requested = renderer.assets().requestScene(SceneLoadRequest{
+        .path = path.value().string(),
+        .importOptions = importOptions,
+        .priority = AssetPriority::Critical,
+        .publication = ScenePublicationPolicy::CompleteOnly,
+        .failurePolicy = SceneFailurePolicy::BestEffort,
+        .debugName = snapshotCase.scene.path.string(),
+    });
+    if (requested.hasError()) {
+      return Result<bool, std::string>::makeError(requested.error());
     }
-    prefab.emplace(std::move(prefabResult.value()));
-    auto assetsResult = renderer.resources().acquireScenePrefabAssets(*prefab);
-    if (assetsResult.hasError()) {
-      return Result<bool, std::string>::makeError(assetsResult.error());
-    }
-    prefabAssets.emplace(std::move(assetsResult.value()));
-    auto instantiateResult = scene.graph().instantiatePrefab(
-        *prefab, scene.graph().rootNode(), *prefabAssets);
-    if (instantiateResult.hasError()) {
-      return Result<bool, std::string>::makeError(instantiateResult.error());
-    }
+    sceneLoad = requested.value();
   } else if (snapshotCase.scene.kind == "procedural") {
     auto proceduralResult =
         populateTransmissionTransparencyScene(snapshotCase, renderer, scene);
@@ -821,6 +819,54 @@ populateScene(const SnapshotCase &snapshotCase, Renderer &renderer,
     return Result<bool, std::string>::makeError(commitResult.error());
   }
   return Result<bool, std::string>::makeResult(true);
+}
+
+[[nodiscard]] Result<bool, std::string>
+waitForSnapshotAssets(Renderer &renderer, RenderScene &scene,
+                      SceneLoadHandle sceneLoad) {
+  if (!isValidAssetHandle(sceneLoad)) {
+    return Result<bool, std::string>::makeResult(true);
+  }
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(120);
+  for (;;) {
+    const SceneLoadSnapshot status = renderer.assets().query(sceneLoad);
+    if (status.terminal()) {
+      if (status.state == SceneLoadState::Complete ||
+          status.state == SceneLoadState::CompleteWithErrors) {
+        return Result<bool, std::string>::makeResult(true);
+      }
+      std::ostringstream message;
+      message << "snapshot async scene load failed: state="
+              << static_cast<uint32_t>(status.state)
+              << " progress=" << status.progress;
+      if (!status.error.empty()) {
+        message << " error=" << status.error;
+      }
+      return Result<bool, std::string>::makeError(message.str());
+    }
+    auto pumped = renderer.assets().prepareFrame(AssetPublicationContext{
+        .scene = &scene,
+    });
+    if (pumped.hasError()) {
+      return Result<bool, std::string>::makeError(pumped.error());
+    }
+    if (std::chrono::steady_clock::now() >= deadline) {
+      const SceneLoadSnapshot timedOut = renderer.assets().query(sceneLoad);
+      std::ostringstream message;
+      message << "snapshot async scene load timed out: state="
+              << static_cast<uint32_t>(timedOut.state)
+              << " progress=" << timedOut.progress
+              << " models=" << timedOut.models.published << "/"
+              << timedOut.models.total
+              << " materials=" << timedOut.materials.published << "/"
+              << timedOut.materials.total
+              << " textures=" << timedOut.textures.published << "/"
+              << timedOut.textures.total;
+      return Result<bool, std::string>::makeError(message.str());
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
 }
 
 [[nodiscard]] Camera makeSnapshotCamera(const SnapshotCase &snapshotCase,
@@ -1344,14 +1390,22 @@ SnapshotRunResult captureSnapshotCase(SnapshotCase snapshotCase,
     }
 
     RenderScene scene(&sceneMemory);
-    std::optional<ScenePrefab> prefab;
-    std::optional<ScenePrefabAssets> prefabAssets;
-    auto sceneResult = populateScene(snapshotCase, *renderer, scene,
-                                     &sceneMemory, prefab, prefabAssets);
+    SceneLoadHandle sceneLoad{};
+    auto sceneResult =
+        populateScene(snapshotCase, *renderer, scene, &sceneMemory, sceneLoad);
     if (sceneResult.hasError()) {
       result.exitCode = SnapshotExitCode::EnvironmentUnavailable;
       result.message = sceneResult.error();
       report.warnings.push_back(result.message);
+      writeReports(result, report, reportPath, htmlPath);
+      result.report = std::move(report);
+      return result;
+    }
+    auto assetsReady = waitForSnapshotAssets(*renderer, scene, sceneLoad);
+    if (assetsReady.hasError()) {
+      result.exitCode = SnapshotExitCode::RuntimeError;
+      result.message = assetsReady.error();
+      report.errors.push_back(result.message);
       writeReports(result, report, reportPath, htmlPath);
       result.report = std::move(report);
       return result;

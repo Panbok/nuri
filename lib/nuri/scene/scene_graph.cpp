@@ -1357,22 +1357,21 @@ bool SceneGraph::setLightNode(LightId id, NodeId node,
 }
 
 Result<NodeId, std::string>
-SceneGraph::instantiatePrefab(const ScenePrefab &prefab, NodeId parent,
-                              const ScenePrefabAssets &assets,
-                              SceneInstantiationMap *outMap) {
+SceneGraph::instantiatePrefabStructure(const ScenePrefab &prefab, NodeId parent,
+                                       SceneInstantiationMap *outMap) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
   if (!nodeSlotValid(parent)) {
     return Result<NodeId, std::string>::makeError(
-        "SceneGraph::instantiatePrefab: parent node is invalid");
+        "SceneGraph::instantiatePrefabStructure: parent node is invalid");
   }
   if (prefab.nodes.empty()) {
     return Result<NodeId, std::string>::makeError(
-        "SceneGraph::instantiatePrefab: prefab has no nodes");
+        "SceneGraph::instantiatePrefabStructure: prefab has no nodes");
   }
 
   SceneInstantiationMap localMap(memory_);
   localMap.nodes.resize(prefab.nodes.size(), kInvalidNodeId);
-  localMap.renderables.reserve(prefab.renderables.size());
+  localMap.renderables.resize(prefab.renderables.size(), kInvalidRenderableId);
   localMap.lights.reserve(prefab.lights.size());
   std::pmr::vector<NodeId> createdRoots(memory_);
 
@@ -1407,6 +1406,104 @@ SceneGraph::instantiatePrefab(const ScenePrefab &prefab, NodeId parent,
     }
   }
 
+  for (const ScenePrefabLight &prefabLight : prefab.lights) {
+    if (prefabLight.nodeIndex >= localMap.nodes.size()) {
+      return rollbackAndReturnError(
+          "SceneGraph::instantiatePrefabStructure: prefab light node index is "
+          "invalid");
+    }
+    auto lightResult =
+        addLight(localMap.nodes[prefabLight.nodeIndex], prefabLight.light);
+    if (lightResult.hasError()) {
+      return rollbackAndReturnError(lightResult.error());
+    }
+    localMap.lights.push_back(lightResult.value());
+  }
+
+  if (outMap != nullptr) {
+    *outMap = std::move(localMap);
+  }
+  return Result<NodeId, std::string>::makeResult(firstRoot);
+}
+
+Result<RenderableId, std::string> SceneGraph::attachPrefabRenderable(
+    const ScenePrefab &prefab, uint32_t prefabRenderableIndex, ModelRef model,
+    MaterialRef material, SceneInstantiationMap &map) {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
+  if (prefabRenderableIndex >= prefab.renderables.size()) {
+    return Result<RenderableId, std::string>::makeError(
+        "SceneGraph::attachPrefabRenderable: prefab renderable index is "
+        "invalid");
+  }
+  if (!isValid(model) || !isValid(material)) {
+    return Result<RenderableId, std::string>::makeError(
+        "SceneGraph::attachPrefabRenderable: model and material must be "
+        "resolved");
+  }
+  const ScenePrefabRenderable &prefabRenderable =
+      prefab.renderables[prefabRenderableIndex];
+  if (prefabRenderable.nodeIndex >= map.nodes.size() ||
+      !nodeSlotValid(map.nodes[prefabRenderable.nodeIndex])) {
+    return Result<RenderableId, std::string>::makeError(
+        "SceneGraph::attachPrefabRenderable: prefab node is not instantiated");
+  }
+  if (map.renderables.size() != prefab.renderables.size()) {
+    return Result<RenderableId, std::string>::makeError(
+        "SceneGraph::attachPrefabRenderable: instantiation map does not match "
+        "the prefab");
+  }
+  if (isValid(map.renderables[prefabRenderableIndex])) {
+    return Result<RenderableId, std::string>::makeError(
+        "SceneGraph::attachPrefabRenderable: renderable is already attached");
+  }
+
+  auto renderableResult =
+      addRenderable(map.nodes[prefabRenderable.nodeIndex], model, material);
+  if (renderableResult.hasError()) {
+    return renderableResult;
+  }
+  const ScenePrefabNode &prefabNode = prefab.nodes[prefabRenderable.nodeIndex];
+  if (!prefabNode.morphWeights.empty()) {
+    (void)setRenderableMorphWeights(
+        renderableResult.value(),
+        std::span<const float>(prefabNode.morphWeights.data(),
+                               prefabNode.morphWeights.size()));
+  }
+  map.renderables[prefabRenderableIndex] = renderableResult.value();
+  return renderableResult;
+}
+
+Result<NodeId, std::string>
+SceneGraph::instantiatePrefab(const ScenePrefab &prefab, NodeId parent,
+                              const ScenePrefabAssets &assets,
+                              SceneInstantiationMap *outMap) {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
+  SceneInstantiationMap localMap(memory_);
+  auto structureResult = instantiatePrefabStructure(prefab, parent, &localMap);
+  if (structureResult.hasError()) {
+    if (outMap != nullptr) {
+      *outMap = std::move(localMap);
+    }
+    return structureResult;
+  }
+
+  const auto rollbackAndReturnError = [&](std::string error) {
+    for (uint32_t prefabNodeIndex = 0u; prefabNodeIndex < prefab.nodes.size();
+         ++prefabNodeIndex) {
+      if (prefab.nodes[prefabNodeIndex].parentIndex !=
+              kInvalidScenePrefabIndex ||
+          prefabNodeIndex >= localMap.nodes.size() ||
+          !isValid(localMap.nodes[prefabNodeIndex])) {
+        continue;
+      }
+      (void)destroyNodeSubtree(localMap.nodes[prefabNodeIndex]);
+    }
+    if (outMap != nullptr) {
+      *outMap = std::move(localMap);
+    }
+    return Result<NodeId, std::string>::makeError(std::move(error));
+  };
+
   MaterialRef fallbackMaterial = kInvalidMaterialRef;
   for (const MaterialRef material : assets.materials) {
     if (isValid(material)) {
@@ -1415,12 +1512,10 @@ SceneGraph::instantiatePrefab(const ScenePrefab &prefab, NodeId parent,
     }
   }
 
-  for (const ScenePrefabRenderable &prefabRenderable : prefab.renderables) {
-    if (prefabRenderable.nodeIndex >= localMap.nodes.size()) {
-      return rollbackAndReturnError(
-          "SceneGraph::instantiatePrefab: prefab renderable node index is "
-          "invalid");
-    }
+  for (uint32_t renderableIndex = 0u;
+       renderableIndex < prefab.renderables.size(); ++renderableIndex) {
+    const ScenePrefabRenderable &prefabRenderable =
+        prefab.renderables[renderableIndex];
     if (prefabRenderable.meshIndex >= assets.models.size() ||
         !isValid(assets.models[prefabRenderable.meshIndex])) {
       return rollbackAndReturnError(
@@ -1435,40 +1530,18 @@ SceneGraph::instantiatePrefab(const ScenePrefab &prefab, NodeId parent,
       return rollbackAndReturnError(
           "SceneGraph::instantiatePrefab: prefab material asset is unresolved");
     }
-    auto renderableResult =
-        addRenderable(localMap.nodes[prefabRenderable.nodeIndex],
-                      assets.models[prefabRenderable.meshIndex], material);
+    auto renderableResult = attachPrefabRenderable(
+        prefab, renderableIndex, assets.models[prefabRenderable.meshIndex],
+        material, localMap);
     if (renderableResult.hasError()) {
       return rollbackAndReturnError(renderableResult.error());
     }
-    const ScenePrefabNode &prefabNode =
-        prefab.nodes[prefabRenderable.nodeIndex];
-    if (!prefabNode.morphWeights.empty()) {
-      (void)setRenderableMorphWeights(
-          renderableResult.value(),
-          std::span<const float>(prefabNode.morphWeights.data(),
-                                 prefabNode.morphWeights.size()));
-    }
-    localMap.renderables.push_back(renderableResult.value());
-  }
-
-  for (const ScenePrefabLight &prefabLight : prefab.lights) {
-    if (prefabLight.nodeIndex >= localMap.nodes.size()) {
-      return rollbackAndReturnError(
-          "SceneGraph::instantiatePrefab: prefab light node index is invalid");
-    }
-    auto lightResult =
-        addLight(localMap.nodes[prefabLight.nodeIndex], prefabLight.light);
-    if (lightResult.hasError()) {
-      return rollbackAndReturnError(lightResult.error());
-    }
-    localMap.lights.push_back(lightResult.value());
   }
 
   if (outMap != nullptr) {
     *outMap = std::move(localMap);
   }
-  return Result<NodeId, std::string>::makeResult(firstRoot);
+  return structureResult;
 }
 
 void SceneGraph::clearRenderables() {

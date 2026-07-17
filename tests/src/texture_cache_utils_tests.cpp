@@ -437,6 +437,22 @@ TEST(TextureCacheUtilsTests, DdsScenePackBuildsHitsAndRebuildsWhenStale) {
             std::vector<std::byte>(firstBytes.begin() + 148u,
                                    firstBytes.begin() + 164u));
 
+  const std::vector<std::byte> secondBytes = readBinaryBytes(secondPath);
+  const std::string secondCanonical =
+      nuri::canonicalizeResourcePath(secondPath.string());
+  auto firstOwned = std::async(std::launch::async, [&] {
+    return cold.value().pack->readOwned(firstCanonical);
+  });
+  auto secondOwned = std::async(std::launch::async, [&] {
+    return cold.value().pack->readOwned(secondCanonical);
+  });
+  auto firstOwnedResult = firstOwned.get();
+  auto secondOwnedResult = secondOwned.get();
+  ASSERT_FALSE(firstOwnedResult.hasError()) << firstOwnedResult.error();
+  ASSERT_FALSE(secondOwnedResult.hasError()) << secondOwnedResult.error();
+  EXPECT_EQ(firstOwnedResult.value(), firstBytes);
+  EXPECT_EQ(secondOwnedResult.value(), secondBytes);
+
   const nuri::DdsTexturePackTelemetry afterCold =
       nuri::ddsTexturePackTelemetry();
   EXPECT_EQ(afterCold.misses, before.misses + 1u);

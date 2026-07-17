@@ -73,7 +73,10 @@ if(NURI_WITH_ASAN AND WIN32 AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
         add_compile_options(-fms-runtime-lib=dll)
         add_link_options(-fms-runtime-lib=dll)
     endif()
-    add_compile_definitions(_ITERATOR_DEBUG_LEVEL=0)
+    add_compile_definitions(
+        _ITERATOR_DEBUG_LEVEL=0
+        _DISABLE_STL_ANNOTATION
+    )
     add_compile_options($<$<CONFIG:Debug>:-U_DEBUG>)
     set(CMAKE_MAP_IMPORTED_CONFIG_DEBUG Release)
 

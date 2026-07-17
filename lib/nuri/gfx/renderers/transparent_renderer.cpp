@@ -361,8 +361,11 @@ TransparentRenderer::prepareTransparentPasses(RenderFrameContext &frame) {
   const bool topologyDirty =
       cachedScene_ != frame.scene ||
       cachedTopologyVersion_ != frame.scene->topologyVersion();
+  const uint64_t modelMaterialBindingVersion =
+      frame.resources->modelMaterialBindingVersion();
   const bool materialDirty =
-      topologyDirty || cachedMaterialVersion_ != materialSnapshot.version;
+      topologyDirty || cachedMaterialVersion_ != materialSnapshot.version ||
+      cachedModelMaterialBindingVersion_ != modelMaterialBindingVersion;
   const bool transformDirty =
       topologyDirty ||
       cachedTransformVersion_ != frame.scene->transformVersion();
@@ -386,6 +389,7 @@ TransparentRenderer::prepareTransparentPasses(RenderFrameContext &frame) {
       return rebuildResult;
     }
     cachedMaterialVersion_ = materialSnapshot.version;
+    cachedModelMaterialBindingVersion_ = modelMaterialBindingVersion;
   } else if (geometryDirty) {
     cachedGeometryMutationVersion_ = geometryMutationVersion;
   }
@@ -396,7 +400,9 @@ TransparentRenderer::prepareTransparentPasses(RenderFrameContext &frame) {
   }
 
   if (meshDrawTemplates_.empty()) {
-    cachedTransformVersion_ = frame.scene->transformVersion();
+    // cachedTransformVersion_ describes the contents of instanceMatrices_ and
+    // instanceRemap_. Keep it stale while this pass has no mesh draws so a
+    // later material-only transition to alpha blending rebuilds both arrays.
     sortableDraws_.clear();
     fixedDraws_.clear();
     passTextureReads_.clear();
@@ -1798,6 +1804,7 @@ void TransparentRenderer::resetCachedState() {
   cachedScene_ = nullptr;
   cachedTopologyVersion_ = std::numeric_limits<uint64_t>::max();
   cachedMaterialVersion_ = std::numeric_limits<uint64_t>::max();
+  cachedModelMaterialBindingVersion_ = std::numeric_limits<uint64_t>::max();
   cachedTransformVersion_ = std::numeric_limits<uint64_t>::max();
   cachedGeometryMutationVersion_ = std::numeric_limits<uint64_t>::max();
   cachedExcludeTransmissionBlend_ = true;

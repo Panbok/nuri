@@ -58,23 +58,6 @@ struct NURI_API PersistentTextureId {
   return id.value != UINT32_MAX;
 }
 
-enum class RenderGraphAccessMode : uint8_t {
-  None = 0,
-  Read = 1u << 0u,
-  Write = 1u << 1u,
-};
-
-[[nodiscard]] constexpr RenderGraphAccessMode
-operator|(RenderGraphAccessMode lhs, RenderGraphAccessMode rhs) {
-  return static_cast<RenderGraphAccessMode>(static_cast<uint8_t>(lhs) |
-                                            static_cast<uint8_t>(rhs));
-}
-
-[[nodiscard]] constexpr bool hasAccessFlag(RenderGraphAccessMode mode,
-                                           RenderGraphAccessMode flag) {
-  return (static_cast<uint8_t>(mode) & static_cast<uint8_t>(flag)) != 0u;
-}
-
 struct NURI_API RenderGraphGraphicsPassDesc {
   RenderPassExecutionMode executionMode = RenderPassExecutionMode::Graphics;
   AttachmentColor color{};
@@ -590,6 +573,9 @@ private:
 
 class NURI_API RenderGraphBuilder {
 public:
+  // Parallel compilation may allocate compile-result payloads on worker
+  // threads. Callers that enable it must provide a thread-safe memory resource
+  // such as std::pmr::synchronized_pool_resource.
   explicit RenderGraphBuilder(
       std::pmr::memory_resource *memory = std::pmr::get_default_resource());
 
@@ -691,6 +677,11 @@ public:
     // Combined hash over pass payload layout metadata that affects compile
     // result shape, such as dependency/pre-dispatch/draw counts.
     uint64_t payloadLayoutHash = 0;
+    // Exact structural identity for resource slot kinds, dependency endpoints,
+    // access identities/modes, pass attachment bindings, graph roots, and
+    // payload-to-resource bindings. Imported handle values are deliberately
+    // excluded so stable graphs can refresh them without recompiling.
+    uint64_t structuralIdentityHash = 0;
     // Combined hash over transient texture/buffer descriptors recorded by
     // createTransientTexture()/createTransientBuffer() for this frame.
     uint64_t transientResourceDescriptorsHash = 0;
@@ -708,6 +699,7 @@ public:
              sideEffectMarkCount == o.sideEffectMarkCount &&
              allPassesBorrowPayload == o.allPassesBorrowPayload &&
              payloadLayoutHash == o.payloadLayoutHash &&
+             structuralIdentityHash == o.structuralIdentityHash &&
              transientResourceDescriptorsHash ==
                  o.transientResourceDescriptorsHash &&
              persistentHandlesVersion == o.persistentHandlesVersion;
@@ -796,6 +788,8 @@ private:
     std::pmr::vector<std::pmr::vector<std::byte>> preDispatchPushConstants;
     std::pmr::vector<std::pmr::vector<BufferHandle>>
         preDispatchDependencyBuffers;
+    std::pmr::vector<std::pmr::vector<RenderGraphAccessMode>>
+        preDispatchDependencyBufferAccessModes;
     std::pmr::vector<std::pmr::vector<TextureHandle>>
         preDispatchDependencyTextures;
     std::pmr::vector<BufferHandle> dependencyBuffers;
@@ -817,6 +811,7 @@ private:
         : debugLabel(memory), preDispatches(memory),
           preDispatchDebugLabels(memory), preDispatchPushConstants(memory),
           preDispatchDependencyBuffers(memory),
+          preDispatchDependencyBufferAccessModes(memory),
           preDispatchDependencyTextures(memory), dependencyBuffers(memory),
           dependencyTextures(memory), draws(memory), drawDebugLabels(memory),
           drawPushConstants(memory), meshDispatches(memory),

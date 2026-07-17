@@ -591,9 +591,22 @@ uint64_t FakeGPUDeviceBase::getBufferDeviceAddress(BufferHandle h,
          (static_cast<uint64_t>(h.index) << 12u) + offset;
 }
 
-bool FakeGPUDeviceBase::resolveGeometry(GeometryAllocationHandle,
-                                        GeometryAllocationView &) const {
-  return false;
+bool FakeGPUDeviceBase::resolveGeometry(GeometryAllocationHandle handle,
+                                        GeometryAllocationView &out) const {
+  const auto it =
+      std::ranges::find_if(geometries_, [handle](const GeometryState &state) {
+        return state.live && state.handle.index == handle.index &&
+               state.handle.generation == handle.generation;
+      });
+  if (it == geometries_.end()) {
+    return false;
+  }
+  out = it->view;
+  return true;
+}
+
+uint64_t FakeGPUDeviceBase::geometryMutationVersion() const {
+  return geometryMutationVersion_;
 }
 
 GpuTimingReport FakeGPUDeviceBase::getLatestCompletedGpuTimingReport() const {
@@ -933,14 +946,69 @@ Result<bool, std::string> FakeGPUDeviceBase::submitComputeDispatches(
 }
 
 Result<GeometryAllocationHandle, std::string>
-FakeGPUDeviceBase::allocateGeometry(std::span<const std::byte>, uint32_t,
-                                    std::span<const std::byte>, uint32_t,
-                                    std::string_view) {
-  return Result<GeometryAllocationHandle, std::string>::makeError(
-      "not implemented in fake device");
+FakeGPUDeviceBase::allocateGeometry(std::span<const std::byte> vertexBytes,
+                                    uint32_t vertexCount,
+                                    std::span<const std::byte> indexBytes,
+                                    uint32_t indexCount, std::string_view) {
+  auto vertexBuffer = createBufferImpl(BufferDesc{
+      .usage = BufferUsage::Vertex,
+      .storage = Storage::Device,
+      .size = vertexBytes.size(),
+      .data = vertexBytes,
+  });
+  if (vertexBuffer.hasError()) {
+    return Result<GeometryAllocationHandle, std::string>::makeError(
+        vertexBuffer.error());
+  }
+  auto indexBuffer = createBufferImpl(BufferDesc{
+      .usage = BufferUsage::Index,
+      .storage = Storage::Device,
+      .size = indexBytes.size(),
+      .data = indexBytes,
+  });
+  if (indexBuffer.hasError()) {
+    destroyBufferImpl(vertexBuffer.value());
+    return Result<GeometryAllocationHandle, std::string>::makeError(
+        indexBuffer.error());
+  }
+
+  const GeometryAllocationHandle handle{
+      .index = nextGeometryIndex_++,
+      .generation = 1u,
+  };
+  geometries_.push_back(GeometryState{
+      .handle = handle,
+      .view =
+          GeometryAllocationView{
+              .vertexBuffer = vertexBuffer.value(),
+              .vertexByteOffset = 0u,
+              .vertexByteSize = vertexBytes.size(),
+              .indexBuffer = indexBuffer.value(),
+              .indexByteOffset = 0u,
+              .indexByteSize = indexBytes.size(),
+              .vertexCount = vertexCount,
+              .indexCount = indexCount,
+          },
+      .live = true,
+  });
+  ++geometryMutationVersion_;
+  return Result<GeometryAllocationHandle, std::string>::makeResult(handle);
 }
 
-void FakeGPUDeviceBase::releaseGeometry(GeometryAllocationHandle) {}
+void FakeGPUDeviceBase::releaseGeometry(GeometryAllocationHandle handle) {
+  auto it =
+      std::ranges::find_if(geometries_, [handle](const GeometryState &state) {
+        return state.live && state.handle.index == handle.index &&
+               state.handle.generation == handle.generation;
+      });
+  if (it == geometries_.end()) {
+    return;
+  }
+  destroyBufferImpl(it->view.vertexBuffer);
+  destroyBufferImpl(it->view.indexBuffer);
+  it->live = false;
+  ++geometryMutationVersion_;
+}
 
 Result<SubmissionHandle, std::string>
 FakeGPUDeviceBase::submitBackgroundBufferCopies(
@@ -993,6 +1061,39 @@ FakeGPUDeviceBase::submitBackgroundBufferCopies(
   });
   return Result<SubmissionHandle, std::string>::makeResult(
       lastBackgroundCopyHandle);
+}
+
+Result<SubmissionHandle, std::string>
+FakeGPUDeviceBase::captureWorkCompletion() {
+  const std::lock_guard<std::mutex> lock(recordingStateMutex_);
+  const SubmissionHandle handle{
+      .index = nextSubmissionIndex_++,
+      .generation = 1u,
+  };
+  const uint64_t retireLag =
+      static_cast<uint64_t>(std::max(1u, swapchainImageCount)) + 1ull;
+  submissions_.push_back(SubmissionState{
+      .handle = handle,
+      .readyFrameIndex = currentFrameIndex_ + retireLag,
+  });
+  return Result<SubmissionHandle, std::string>::makeResult(handle);
+}
+
+Result<SubmissionHandle, std::string>
+FakeGPUDeviceBase::submitPendingUploads() {
+  const std::lock_guard<std::mutex> lock(recordingStateMutex_);
+  ++pendingUploadSubmitCount;
+  const SubmissionHandle handle{
+      .index = nextSubmissionIndex_++,
+      .generation = 1u,
+  };
+  const uint64_t retireLag =
+      static_cast<uint64_t>(std::max(1u, swapchainImageCount)) + 1ull;
+  submissions_.push_back(SubmissionState{
+      .handle = handle,
+      .readyFrameIndex = currentFrameIndex_ + retireLag,
+  });
+  return Result<SubmissionHandle, std::string>::makeResult(handle);
 }
 
 Result<bool, std::string> FakeGPUDeviceBase::updateBuffer(

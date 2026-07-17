@@ -861,6 +861,8 @@ private:
   uint64_t cachedTopologyVersion_ = std::numeric_limits<uint64_t>::max();
   uint64_t cachedTransformVersion_ = std::numeric_limits<uint64_t>::max();
   uint64_t cachedMaterialVersion_ = std::numeric_limits<uint64_t>::max();
+  uint64_t cachedModelMaterialBindingVersion_ =
+      std::numeric_limits<uint64_t>::max();
   uint64_t cachedGeometryMutationVersion_ =
       std::numeric_limits<uint64_t>::max();
   uint64_t cachedVisibilityCandidateTopologyVersion_ =

@@ -2,6 +2,7 @@
 
 #include "nuri/core/containers/slot_pool.h"
 #include "nuri/gfx/gpu_retirement_queue.h"
+#include "nuri/gfx/recording_retirement_tracker.h"
 
 #include <memory>
 
@@ -35,6 +36,27 @@ TEST(SlotPoolTests, ClearResetsCountsAndNextAcquireRestarts) {
   EXPECT_EQ(next.index, 0u);
   EXPECT_EQ(next.generation, 1u);
   EXPECT_TRUE(next.appended);
+}
+
+TEST(SlotPoolTests, RetiredIndexIsInvalidButUnavailableUntilRecycled) {
+  nuri::SlotPool<> pool;
+
+  const nuri::SlotReservation first = pool.acquire();
+  pool.retire(first.index);
+
+  EXPECT_FALSE(pool.isValid(first.index, first.generation));
+  EXPECT_TRUE(pool.isRetired(first.index));
+  EXPECT_EQ(pool.liveCount(), 0u);
+
+  const nuri::SlotReservation appended = pool.acquire();
+  EXPECT_NE(appended.index, first.index);
+  EXPECT_TRUE(appended.appended);
+
+  pool.recycle(first.index);
+  const nuri::SlotReservation recycled = pool.acquire();
+  EXPECT_EQ(recycled.index, first.index);
+  EXPECT_NE(recycled.generation, first.generation);
+  EXPECT_FALSE(recycled.appended);
 }
 
 TEST(SlotPoolTests, MaskedGenerationPolicyWrapsAndSkipsZero) {
@@ -108,6 +130,34 @@ TEST(GpuRetirementQueueTests, PredicateSupportsOpaqueCompletionTokens) {
       queue.collectIf([](uint32_t token) { return token == 17u; });
   EXPECT_EQ(collected, 1u);
   EXPECT_TRUE(queue.empty());
+}
+
+TEST(RecordingRetirementTrackerTests,
+     OutOfOrderResolutionDoesNotAdvancePastUnresolvedRecording) {
+  nuri::RecordingRetirementTracker tracker;
+  const uint64_t first = tracker.beginRecording();
+  const uint64_t second = tracker.beginRecording();
+
+  EXPECT_TRUE(tracker.resolveRecording(second, 8u));
+  EXPECT_EQ(tracker.resolvedThroughSerial(), 0u);
+  EXPECT_FALSE(tracker.tryResolveLastUse(second, 3u).has_value());
+
+  EXPECT_TRUE(tracker.resolveRecording(first, 5u));
+  EXPECT_EQ(tracker.resolvedThroughSerial(), second);
+  EXPECT_EQ(tracker.resolvedSubmissionMax(), 8u);
+  ASSERT_TRUE(tracker.tryResolveLastUse(second, 3u).has_value());
+  EXPECT_EQ(*tracker.tryResolveLastUse(second, 3u), 8u);
+}
+
+TEST(RecordingRetirementTrackerTests,
+     AbandonedRecordingResolvesWithoutInventingSubmission) {
+  nuri::RecordingRetirementTracker tracker;
+  const uint64_t serial = tracker.beginRecording();
+
+  EXPECT_TRUE(tracker.resolveRecording(serial, 0u));
+  ASSERT_TRUE(tracker.tryResolveLastUse(serial, 11u).has_value());
+  EXPECT_EQ(*tracker.tryResolveLastUse(serial, 11u), 11u);
+  EXPECT_FALSE(tracker.resolveRecording(serial, 12u));
 }
 
 } // namespace

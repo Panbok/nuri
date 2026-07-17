@@ -88,6 +88,44 @@ TEST(GeometryPoolTests, CompactionSnapshotsOnlyLiveAllocations) {
   EXPECT_EQ(gpu.backgroundCopyBatchBytes[0], vertexA.size() + indexA.size());
 }
 
+TEST(GeometryPoolTests, ReleasedRangesWaitForCapturedGpuCompletionBeforeReuse) {
+  FakeExecutorGPUDevice gpu;
+  GeometryPoolConfig config = makeConfig();
+  config.compactionCooldownFrames = 1000u;
+  GeometryPool pool(gpu, config);
+  uint64_t frameIndex = 1u;
+
+  const std::vector<std::byte> vertices = makeBytes(0x10u, 16u);
+  const std::vector<std::byte> indices = makeBytes(0x20u, 8u);
+
+  advanceFrame(gpu, pool, frameIndex);
+  auto first = pool.allocate(vertices, 2u, indices, 3u, "first");
+  ASSERT_FALSE(first.hasError()) << first.error();
+  GeometryAllocationView firstView{};
+  ASSERT_TRUE(pool.resolve(first.value(), firstView));
+  pool.release(first.value());
+
+  auto beforeCompletion =
+      pool.allocate(vertices, 2u, indices, 3u, "before_completion");
+  ASSERT_FALSE(beforeCompletion.hasError()) << beforeCompletion.error();
+  GeometryAllocationView beforeCompletionView{};
+  ASSERT_TRUE(pool.resolve(beforeCompletion.value(), beforeCompletionView));
+  EXPECT_NE(beforeCompletionView.vertexByteOffset, firstView.vertexByteOffset);
+  EXPECT_NE(beforeCompletionView.indexByteOffset, firstView.indexByteOffset);
+
+  advanceFrame(gpu, pool, ++frameIndex);
+  advanceFrame(gpu, pool, ++frameIndex);
+  advanceFrame(gpu, pool, ++frameIndex);
+
+  auto afterCompletion =
+      pool.allocate(vertices, 2u, indices, 3u, "after_completion");
+  ASSERT_FALSE(afterCompletion.hasError()) << afterCompletion.error();
+  GeometryAllocationView afterCompletionView{};
+  ASSERT_TRUE(pool.resolve(afterCompletion.value(), afterCompletionView));
+  EXPECT_EQ(afterCompletionView.vertexByteOffset, firstView.vertexByteOffset);
+  EXPECT_EQ(afterCompletionView.indexByteOffset, firstView.indexByteOffset);
+}
+
 TEST(GeometryPoolTests, AllocationsCreatedDuringCompactionRemainValid) {
   FakeExecutorGPUDevice gpu;
   GeometryPool pool(gpu, makeConfig());

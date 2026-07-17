@@ -148,23 +148,59 @@ MaterialTableGpuProvider::prepare(FrameBuildContext &ctx) {
     const MaterialSheenGpuData defaultSheen{};
     const MaterialTransmissionGpuData defaultTransmission{};
     const MaterialSpecularGpuData defaultSpecular{};
-
-    const std::array updates{
-        BufferUpdate{.buffer = headerBuffer_.buffer->handle(),
-                     .data = tableBytes(snapshot.headers, defaultHeader)},
-        BufferUpdate{.buffer = clearcoatBuffer_.buffer->handle(),
-                     .data = tableBytes(snapshot.clearcoat, defaultClearcoat)},
-        BufferUpdate{.buffer = sheenBuffer_.buffer->handle(),
-                     .data = tableBytes(snapshot.sheen, defaultSheen)},
-        BufferUpdate{
-            .buffer = transmissionBuffer_.buffer->handle(),
-            .data = tableBytes(snapshot.transmission, defaultTransmission)},
-        BufferUpdate{.buffer = specularBuffer_.buffer->handle(),
-                     .data = tableBytes(snapshot.specular, defaultSpecular)},
+    const bool fullUpload = uploadedVersion_ == kNoVersionUploaded ||
+                            uploadedVersion_ != snapshot.dirtyBaseVersion;
+    std::vector<BufferUpdate> updates;
+    updates.reserve(5u);
+    const auto appendUpdate = [&updates, fullUpload]<typename T>(
+                                  BufferHandle buffer,
+                                  std::span<const T> values, const T &fallback,
+                                  MaterialTableDirtyRange dirty) -> bool {
+      if (fullUpload) {
+        updates.push_back(BufferUpdate{
+            .buffer = buffer,
+            .data = tableBytes(values, fallback),
+        });
+        return true;
+      }
+      if (dirty.empty()) {
+        return true;
+      }
+      if (dirty.first > values.size() ||
+          dirty.count > values.size() - dirty.first) {
+        return false;
+      }
+      const std::span<const T> changed =
+          values.subspan(dirty.first, dirty.count);
+      updates.push_back(BufferUpdate{
+          .buffer = buffer,
+          .data = std::as_bytes(changed),
+          .offset = static_cast<size_t>(dirty.first) * sizeof(T),
+      });
+      return true;
     };
-    auto updateResult = gpu_.updateBuffers(updates);
-    if (updateResult.hasError()) {
-      return updateResult;
+    const bool rangesValid =
+        appendUpdate(headerBuffer_.buffer->handle(), snapshot.headers,
+                     defaultHeader, snapshot.dirtyHeaders) &&
+        appendUpdate(clearcoatBuffer_.buffer->handle(), snapshot.clearcoat,
+                     defaultClearcoat, snapshot.dirtyClearcoat) &&
+        appendUpdate(sheenBuffer_.buffer->handle(), snapshot.sheen,
+                     defaultSheen, snapshot.dirtySheen) &&
+        appendUpdate(transmissionBuffer_.buffer->handle(),
+                     snapshot.transmission, defaultTransmission,
+                     snapshot.dirtyTransmission) &&
+        appendUpdate(specularBuffer_.buffer->handle(), snapshot.specular,
+                     defaultSpecular, snapshot.dirtySpecular);
+    if (!rangesValid) {
+      return Result<bool, std::string>::makeError(
+          "MaterialTableGpuProvider::prepare: material dirty range is out "
+          "of bounds");
+    }
+    if (!updates.empty()) {
+      auto updateResult = gpu_.updateBuffers(updates);
+      if (updateResult.hasError()) {
+        return updateResult;
+      }
     }
     uploadedVersion_ = snapshot.version;
   }

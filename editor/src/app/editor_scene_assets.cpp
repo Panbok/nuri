@@ -34,7 +34,9 @@ ImportedPrefabSceneResources &ImportedPrefabSceneResources::operator=(
   }
   release();
   resources = std::exchange(other.resources, nullptr);
+  assetSystem = std::exchange(other.assetSystem, nullptr);
   sourcePath = std::move(other.sourcePath);
+  sceneLoad = std::exchange(other.sceneLoad, {});
   prefab = std::move(other.prefab);
   assets = std::move(other.assets);
   fallbackLights = std::move(other.fallbackLights);
@@ -45,18 +47,11 @@ ImportedPrefabSceneResources &ImportedPrefabSceneResources::operator=(
 }
 
 void ImportedPrefabSceneResources::release() noexcept {
-  if (resources != nullptr) {
-    for (ModelRef model : assets.models) {
-      if (isValid(model)) {
-        resources->release(model);
-      }
-    }
-    for (MaterialRef material : assets.materials) {
-      if (isValid(material)) {
-        resources->release(material);
-      }
-    }
+  if (assetSystem != nullptr && isValidAssetHandle(sceneLoad)) {
+    assetSystem->cancel(sceneLoad);
   }
+  sceneLoad = {};
+  assetSystem = nullptr;
   assets = ScenePrefabAssets{};
   prefab = ScenePrefab{};
   sourcePath.clear();
@@ -112,14 +107,13 @@ StreamingSceneState::operator=(StreamingSceneState &&other) noexcept {
     return *this;
   }
   release();
-  resources = std::exchange(other.resources, nullptr);
+  assets = std::exchange(other.assets, nullptr);
   sourcePath = std::move(other.sourcePath);
-  prefab = std::move(other.prefab);
+  sceneLoad = std::exchange(other.sceneLoad, {});
   model = std::exchange(other.model, kInvalidModelRef);
-  material = std::exchange(other.material, kInvalidMaterialRef);
-  asyncLoad = std::move(other.asyncLoad);
   renderableId = std::exchange(other.renderableId, kInvalidRenderableId);
   baseModel = other.baseModel;
+  configured = std::exchange(other.configured, false);
   loadFailed = std::exchange(other.loadFailed, false);
   loadError = std::move(other.loadError);
   textureArtifactBakeQueued =
@@ -132,16 +126,18 @@ StreamingSceneState::operator=(StreamingSceneState &&other) noexcept {
 }
 
 void StreamingSceneState::release() noexcept {
-  asyncLoad.reset();
-  prefab.release();
-  releaseResourceRef(resources, model, kInvalidModelRef);
-  releaseResourceRef(resources, material, kInvalidMaterialRef);
+  if (assets != nullptr && isValidAssetHandle(sceneLoad)) {
+    assets->cancel(sceneLoad);
+  }
+  sceneLoad = {};
+  model = kInvalidModelRef;
   sourcePath.clear();
   renderableId = kInvalidRenderableId;
   baseModel = glm::mat4(1.0f);
+  configured = false;
   loadFailed = false;
   loadError.clear();
-  resources = nullptr;
+  assets = nullptr;
   textureArtifactBakeQueued = false;
   loadStartTimeSeconds = 0.0;
   lastProgressLogTimeSeconds = 0.0;
@@ -151,45 +147,65 @@ Result<void, std::string> prepareImportedPrefabSceneResources(
     EditorRuntime &runtime, std::string_view sceneName,
     const std::filesystem::path &modelPath,
     const MeshImportOptions &importOptions, ImportedPrefabSceneResources &out) {
-  if (out.ready) {
+  if (isValidAssetHandle(out.sceneLoad)) {
     return Result<void, std::string>::makeResult();
   }
 
   out.release();
   out.resources = &runtime.resources();
+  out.assetSystem = &runtime.assets();
   out.sourcePath = modelPath;
-
-  auto sceneResult = SceneImporter::loadSceneFromFile(
-      modelPath.string(),
-      SceneImportOptions{.assetBuildOptions = importOptions});
-  if (sceneResult.hasError()) {
-    return Result<void, std::string>::makeError(sceneResult.error());
+  auto requested = runtime.assets().requestScene(SceneLoadRequest{
+      .path = modelPath.string(),
+      .importOptions = SceneImportOptions{.assetBuildOptions = importOptions},
+      .priority = AssetPriority::Critical,
+      .publication = ScenePublicationPolicy::Progressive,
+      .failurePolicy = SceneFailurePolicy::BestEffort,
+      .debugName = std::string(sceneName),
+  });
+  if (requested.hasError()) {
+    out.release();
+    return Result<void, std::string>::makeError(requested.error());
   }
+  out.sceneLoad = requested.value();
+  return Result<void, std::string>::makeResult();
+}
 
-  ImportedScene importedScene = std::move(sceneResult.value());
-  out.fallbackLights.assign(importedScene.lights.begin(),
-                            importedScene.lights.end());
-
-  auto prefabResult = SceneImporter::buildScenePrefab(importedScene);
-  if (prefabResult.hasError()) {
-    return Result<void, std::string>::makeError(prefabResult.error());
+Result<bool, std::string>
+refreshImportedPrefabSceneResources(EditorRuntime &runtime,
+                                    std::string_view sceneName,
+                                    ImportedPrefabSceneResources &out) {
+  if (out.ready) {
+    return Result<bool, std::string>::makeResult(true);
   }
-
-  auto assetsResult =
-      runtime.resources().acquireScenePrefabAssets(prefabResult.value());
-  if (assetsResult.hasError()) {
-    return Result<void, std::string>::makeError(assetsResult.error());
+  if (!isValidAssetHandle(out.sceneLoad)) {
+    return Result<bool, std::string>::makeError(
+        "async prefab scene request is invalid");
   }
-
-  out.prefab = std::move(prefabResult.value());
-  out.assets = std::move(assetsResult.value());
+  const SceneLoadSnapshot status = runtime.assets().query(out.sceneLoad);
+  if (status.state == SceneLoadState::Failed ||
+      status.state == SceneLoadState::Cancelled) {
+    return Result<bool, std::string>::makeError(
+        status.error.empty() ? "async prefab scene load failed" : status.error);
+  }
+  if (!status.terminal()) {
+    return Result<bool, std::string>::makeResult(false);
+  }
+  const ScenePrefab *prefab = runtime.assets().tryGetScenePrefab(out.sceneLoad);
+  auto assets = runtime.assets().tryGetSceneAssets(out.sceneLoad);
+  if (prefab == nullptr || !assets.has_value()) {
+    return Result<bool, std::string>::makeError(
+        "async prefab scene completed without publication data");
+  }
+  out.prefab = *prefab;
+  out.assets = std::move(*assets);
   out.ready = true;
   NURI_LOG_INFO("prepareImportedPrefabSceneResources: %s loaded (nodes=%zu "
                 "renderables=%zu lights=%zu meshes=%zu)",
                 std::string(sceneName).c_str(), out.prefab.nodes.size(),
                 out.prefab.renderables.size(), out.prefab.lights.size(),
                 out.prefab.meshAssets.size());
-  return Result<void, std::string>::makeResult();
+  return Result<bool, std::string>::makeResult(true);
 }
 
 Result<void, std::string> prepareSimpleImportedModelSceneAssets(

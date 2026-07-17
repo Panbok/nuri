@@ -99,6 +99,8 @@ private:
     uint32_t vertexCount = 0;
     uint32_t indexCount = 0;
     uint64_t retireFrame = 0;
+    SubmissionHandle retirementSubmission{};
+    bool retirementCaptureFailed = false;
     std::pmr::string debugName;
 
     explicit AllocationEntry(std::pmr::memory_resource *memory)

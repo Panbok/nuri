@@ -21,6 +21,17 @@ namespace nuri {
 
 struct NURI_API SceneImportOptions {
   MeshImportOptions assetBuildOptions{};
+  bool adaptAssetSources = false;
+};
+
+struct NURI_API AdaptedSceneMesh {
+  explicit AdaptedSceneMesh(
+      std::pmr::memory_resource *memory = std::pmr::get_default_resource())
+      : mesh(memory) {}
+
+  uint32_t sourceSceneMeshIndex = kInvalidScenePrefabIndex;
+  uint32_t sourceMaterialIndex = kInvalidScenePrefabIndex;
+  MeshData mesh;
 };
 
 struct NURI_API ImportedSceneNode {
@@ -125,8 +136,8 @@ struct NURI_API ImportedScene {
       std::pmr::memory_resource *memory = std::pmr::get_default_resource())
       : nodes(memory), renderables(memory), meshAssets(memory),
         materialAssets(memory), lights(memory), skins(memory),
-        animations(memory), rootNodes(memory), sourcePath(memory),
-        sourceSceneName(memory) {}
+        animations(memory), rootNodes(memory), adaptedMeshes(memory),
+        sourcePath(memory), sourceSceneName(memory) {}
 
   std::pmr::vector<ImportedSceneNode> nodes;
   std::pmr::vector<ImportedSceneRenderable> renderables;
@@ -136,6 +147,9 @@ struct NURI_API ImportedScene {
   std::pmr::vector<SkinData> skins;
   std::pmr::vector<AnimationClipData> animations;
   std::pmr::vector<uint32_t> rootNodes;
+  std::pmr::vector<AdaptedSceneMesh> adaptedMeshes;
+  ImportedMaterialSet adaptedMaterials{};
+  std::vector<EmbeddedSceneTextureData> embeddedTextures{};
   std::pmr::string sourcePath;
   std::pmr::string sourceSceneName;
   MeshImportOptions importOptions{};

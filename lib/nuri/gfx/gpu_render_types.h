@@ -13,6 +13,23 @@
 
 namespace nuri {
 
+enum class RenderGraphAccessMode : uint8_t {
+  None = 0,
+  Read = 1u << 0u,
+  Write = 1u << 1u,
+};
+
+[[nodiscard]] constexpr RenderGraphAccessMode
+operator|(RenderGraphAccessMode lhs, RenderGraphAccessMode rhs) {
+  return static_cast<RenderGraphAccessMode>(static_cast<uint8_t>(lhs) |
+                                            static_cast<uint8_t>(rhs));
+}
+
+[[nodiscard]] constexpr bool hasAccessFlag(RenderGraphAccessMode mode,
+                                           RenderGraphAccessMode flag) {
+  return (static_cast<uint8_t>(mode) & static_cast<uint8_t>(flag)) != 0u;
+}
+
 // Buffer dependency spans are capped to keep graph payloads bounded. The device
 // consumes these as state-transition spans.
 constexpr size_t kMaxDependencyResources = 32;
@@ -69,6 +86,10 @@ struct ComputeDispatchItem {
   DispatchSize dispatch{};
   std::span<const std::byte> pushConstants{};
   std::span<const BufferHandle> dependencyBuffers{};
+  // Empty preserves the conservative legacy behavior: every dependency is
+  // treated as read/write. Otherwise this span is parallel to
+  // dependencyBuffers and states the exact graph access for each slot.
+  std::span<const RenderGraphAccessMode> dependencyBufferAccessModes{};
   std::span<const TextureHandle> dependencyTextures{};
   std::string_view debugLabel{};
   uint32_t debugColor = 0xffffffffu;

@@ -105,6 +105,39 @@ void flattenAutotestRendererMetrics(std::map<std::string, double> &out,
   addMetric(out, "renderer.frame_index",
             static_cast<double>(metrics.frameIndex));
 
+  const RenderFrameMetrics::AssetStreamingFrameMetrics &assets = metrics.assets;
+  addMetric(out, "renderer.assets.cpu_completions", assets.cpuCompletions);
+  addMetric(out, "renderer.assets.cpu_workers", assets.cpuWorkers);
+  addMetric(out, "renderer.assets.cpu_queued_jobs", assets.cpuQueuedJobs);
+  addMetric(out, "renderer.assets.cpu_running_jobs", assets.cpuRunningJobs);
+  addMetric(out, "renderer.assets.cpu_running_io", assets.cpuRunningIo);
+  addMetric(out, "renderer.assets.cpu_running_decode", assets.cpuRunningDecode);
+  addMetric(out, "renderer.assets.cpu_running_cook", assets.cpuRunningCook);
+  addMetric(out, "renderer.assets.cpu_running_transcode",
+            assets.cpuRunningTranscode);
+  addMetric(out, "renderer.assets.cpu_running_metadata",
+            assets.cpuRunningMetadata);
+  addMetric(out, "renderer.assets.dedicated_copy_queue",
+            assets.dedicatedCopyQueue);
+  addMetric(out, "renderer.assets.gpu_materialized", assets.gpuMaterialized);
+  addMetric(out, "renderer.assets.published", assets.published);
+  addMetric(out, "renderer.assets.cancelled", assets.cancelled);
+  addMetric(out, "renderer.assets.failed", assets.failed);
+  addMetric(out, "renderer.assets.scene_patches", assets.scenePatches);
+  addMetric(out, "renderer.assets.scene_commits", assets.sceneCommits);
+  addMetric(out, "renderer.assets.cpu_in_flight_bytes",
+            static_cast<double>(assets.cpuInFlightBytes));
+  addMetric(out, "renderer.assets.upload_bytes",
+            static_cast<double>(assets.uploadBytes));
+  addMetric(out, "renderer.assets.submitted_jobs",
+            static_cast<double>(assets.submittedJobs));
+  addMetric(out, "renderer.assets.completed_jobs",
+            static_cast<double>(assets.completedJobs));
+  addMetric(out, "renderer.assets.cancelled_jobs",
+            static_cast<double>(assets.cancelledJobs));
+  addMetric(out, "renderer.assets.rejected_jobs",
+            static_cast<double>(assets.rejectedJobs));
+
   const OpaqueFrameMetrics &opaque = metrics.opaque;
   addMetric(out, "renderer.opaque.total_instances", opaque.totalInstances);
   addMetric(out, "renderer.opaque.visible_instances", opaque.visibleInstances);

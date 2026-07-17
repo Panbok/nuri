@@ -1564,8 +1564,11 @@ SceneImporter::loadSceneFromFile(std::string_view path,
 
   Assimp::Importer importer;
   const std::string pathString(path);
-  const aiScene *scene =
-      importer.ReadFile(pathString, structuralSceneAssimpFlags());
+  const unsigned int assimpFlags =
+      options.adaptAssetSources
+          ? detail::sceneMeshImportFlags(options.assetBuildOptions)
+          : structuralSceneAssimpFlags();
+  const aiScene *scene = importer.ReadFile(pathString, assimpFlags);
   if (scene == nullptr || scene->mRootNode == nullptr) {
     return Result<ImportedScene, std::string>::makeError(
         std::string("SceneImporter::loadSceneFromFile: Assimp error: ") +
@@ -1653,8 +1656,78 @@ SceneImporter::loadSceneFromFile(std::string_view path,
   appendRemainingSceneAssets(imported, *scene, meshOrdinalToAsset,
                              materialOrdinalToAsset);
 
-  if (!detail::isGltfJsonAssetPath(path)) {
+  const auto finalizeImported = [&]() -> Result<ImportedScene, std::string> {
+    if (!options.adaptAssetSources) {
+      return Result<ImportedScene, std::string>::makeResult(
+          std::move(imported));
+    }
+    std::pmr::vector<uint32_t> sourceMeshIndices(memory);
+    sourceMeshIndices.reserve(imported.meshAssets.size());
+    for (const ImportedSceneMeshAsset &asset : imported.meshAssets) {
+      sourceMeshIndices.push_back(asset.sourceSceneMeshIndex);
+    }
+    auto adaptedMeshes = detail::adaptSceneMeshes(
+        *scene,
+        std::span<const uint32_t>(sourceMeshIndices.data(),
+                                  sourceMeshIndices.size()),
+        imported.sourcePath, options.assetBuildOptions, memory);
+    if (adaptedMeshes.hasError()) {
+      return Result<ImportedScene, std::string>::makeError(
+          "SceneImporter::loadSceneFromFile: failed to adapt mesh sources: " +
+          adaptedMeshes.error());
+    }
+    auto adaptedMaterials =
+        detail::adaptMaterialInfo(*scene, imported.sourcePath);
+    if (adaptedMaterials.hasError()) {
+      return Result<ImportedScene, std::string>::makeError(
+          "SceneImporter::loadSceneFromFile: failed to adapt material "
+          "sources: " +
+          adaptedMaterials.error());
+    }
+    imported.adaptedMeshes = std::move(adaptedMeshes.value());
+    imported.adaptedMaterials = std::move(adaptedMaterials.value());
+    imported.embeddedTextures.reserve(scene->mNumTextures);
+    for (uint32_t textureIndex = 0u; textureIndex < scene->mNumTextures;
+         ++textureIndex) {
+      const aiTexture *texture = scene->mTextures[textureIndex];
+      if (texture == nullptr) {
+        imported.embeddedTextures.emplace_back();
+        continue;
+      }
+      EmbeddedSceneTextureData adaptedTexture{
+          .width = texture->mWidth,
+          .height = texture->mHeight,
+          .compressed = texture->mHeight == 0u,
+      };
+      if (adaptedTexture.compressed) {
+        const std::byte *begin =
+            reinterpret_cast<const std::byte *>(texture->pcData);
+        adaptedTexture.bytes.assign(begin, begin + texture->mWidth);
+      } else {
+        adaptedTexture.bytes.resize(static_cast<size_t>(texture->mWidth) *
+                                    static_cast<size_t>(texture->mHeight) * 4u);
+        for (size_t texelIndex = 0u;
+             texelIndex < static_cast<size_t>(texture->mWidth) *
+                              static_cast<size_t>(texture->mHeight);
+             ++texelIndex) {
+          const aiTexel &source = texture->pcData[texelIndex];
+          adaptedTexture.bytes[texelIndex * 4u + 0u] =
+              static_cast<std::byte>(source.r);
+          adaptedTexture.bytes[texelIndex * 4u + 1u] =
+              static_cast<std::byte>(source.g);
+          adaptedTexture.bytes[texelIndex * 4u + 2u] =
+              static_cast<std::byte>(source.b);
+          adaptedTexture.bytes[texelIndex * 4u + 3u] =
+              static_cast<std::byte>(source.a);
+        }
+      }
+      imported.embeddedTextures.push_back(std::move(adaptedTexture));
+    }
     return Result<ImportedScene, std::string>::makeResult(std::move(imported));
+  };
+
+  if (!detail::isGltfJsonAssetPath(path)) {
+    return finalizeImported();
   }
 
   const std::filesystem::path scenePath{std::string(path)};
@@ -1711,7 +1784,7 @@ SceneImporter::loadSceneFromFile(std::string_view path,
   }
   imported.animations = std::move(animationsResult.value());
   if (parsedNodes.empty()) {
-    return Result<ImportedScene, std::string>::makeResult(std::move(imported));
+    return finalizeImported();
   }
 
   auto rootsResult = resolveSceneRootNodes(root, parsedNodes.size());
@@ -1747,7 +1820,7 @@ SceneImporter::loadSceneFromFile(std::string_view path,
   } else if (rebuildResult.value()) {
     remapSkinAndAnimationNodeIndices(imported.skins, imported.animations,
                                      parsedToImportedNodeIndex);
-    return Result<ImportedScene, std::string>::makeResult(std::move(imported));
+    return finalizeImported();
   }
 
   parsedToImportedNodeIndex.assign(parsedNodes.size(),
@@ -1823,7 +1896,7 @@ SceneImporter::loadSceneFromFile(std::string_view path,
   remapSkinAndAnimationNodeIndices(imported.skins, imported.animations,
                                    parsedToImportedNodeIndex);
 
-  return Result<ImportedScene, std::string>::makeResult(std::move(imported));
+  return finalizeImported();
 }
 
 Result<ScenePrefab, std::string>

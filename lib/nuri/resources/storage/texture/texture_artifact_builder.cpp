@@ -107,8 +107,7 @@ struct FileCloser {
 
 using FilePtr = std::unique_ptr<std::FILE, FileCloser>;
 
-[[nodiscard]] FilePtr openFile(const std::filesystem::path &path,
-                               bool write) {
+[[nodiscard]] FilePtr openFile(const std::filesystem::path &path, bool write) {
   std::FILE *file = nullptr;
 #ifdef _WIN32
   if (_wfopen_s(&file, path.c_str(), write ? L"wb" : L"rb") != 0) {
@@ -238,9 +237,8 @@ generateNextMipLevel(std::span<const std::byte> srcBytes, int32_t srcWidth,
       glm::vec3 normal(byteToUnit(srcBytes[offset + 0u]) * 2.0f - 1.0f,
                        byteToUnit(srcBytes[offset + 1u]) * 2.0f - 1.0f,
                        byteToUnit(srcBytes[offset + 2u]) * 2.0f - 1.0f);
-      normal = glm::dot(normal, normal) > 1.0e-8f
-                   ? glm::normalize(normal)
-                   : glm::vec3(0.0f, 0.0f, 1.0f);
+      normal = glm::dot(normal, normal) > 1.0e-8f ? glm::normalize(normal)
+                                                  : glm::vec3(0.0f, 0.0f, 1.0f);
       srcFloats[offset + 0u] = normal.x;
       srcFloats[offset + 1u] = normal.y;
       srcFloats[offset + 2u] = normal.z;
@@ -258,15 +256,14 @@ generateNextMipLevel(std::span<const std::byte> srcBytes, int32_t srcWidth,
       const size_t offset = i * 4u;
       glm::vec3 normal(dstFloats[offset + 0u], dstFloats[offset + 1u],
                        dstFloats[offset + 2u]);
-      normal = glm::dot(normal, normal) > 1.0e-8f
-                   ? glm::normalize(normal)
-                   : glm::vec3(0.0f, 0.0f, 1.0f);
-      out[offset + 0u] = static_cast<std::byte>(
-          clampByteFromUnit(normal.x * 0.5f + 0.5f));
-      out[offset + 1u] = static_cast<std::byte>(
-          clampByteFromUnit(normal.y * 0.5f + 0.5f));
-      out[offset + 2u] = static_cast<std::byte>(
-          clampByteFromUnit(normal.z * 0.5f + 0.5f));
+      normal = glm::dot(normal, normal) > 1.0e-8f ? glm::normalize(normal)
+                                                  : glm::vec3(0.0f, 0.0f, 1.0f);
+      out[offset + 0u] =
+          static_cast<std::byte>(clampByteFromUnit(normal.x * 0.5f + 0.5f));
+      out[offset + 1u] =
+          static_cast<std::byte>(clampByteFromUnit(normal.y * 0.5f + 0.5f));
+      out[offset + 2u] =
+          static_cast<std::byte>(clampByteFromUnit(normal.z * 0.5f + 0.5f));
       out[offset + 3u] =
           static_cast<std::byte>(clampByteFromUnit(dstFloats[offset + 3u]));
     }
@@ -288,7 +285,8 @@ generateNextMipLevel(std::span<const std::byte> srcBytes, int32_t srcWidth,
   }
 
   if (options.mipSemantic == TextureMipSemantic::AlphaCoverage) {
-    const float cutoff = sanitizeAlphaCoverageCutoff(options.alphaCoverageCutoff);
+    const float cutoff =
+        sanitizeAlphaCoverageCutoff(options.alphaCoverageCutoff);
     preserveAlphaCoverage(out, cutoff, alphaCoverage(srcBytes, cutoff));
   } else if (options.mipSemantic == TextureMipSemantic::RoughnessG ||
              options.mipSemantic == TextureMipSemantic::RoughnessA) {
@@ -319,9 +317,8 @@ generateNextMipLevel(std::span<const std::byte> srcBytes, int32_t srcWidth,
           }
         }
         const float roughness =
-            count == 0u
-                ? 1.0f
-                : std::sqrt(roughnessSqSum / static_cast<float>(count));
+            count == 0u ? 1.0f
+                        : std::sqrt(roughnessSqSum / static_cast<float>(count));
         const size_t dstOffset =
             (static_cast<size_t>(y) * static_cast<size_t>(dstWidth) +
              static_cast<size_t>(x)) *
@@ -341,8 +338,7 @@ loadKtxRgba(const std::filesystem::path &path,
             std::pmr::memory_resource *memory) {
   auto textureResult = loadKtxTextureFile(path);
   if (textureResult.hasError()) {
-    return Result<ImageRgba8, std::string>::makeError(
-        textureResult.error());
+    return Result<ImageRgba8, std::string>::makeError(textureResult.error());
   }
   KtxTexturePtr texturePtr = std::move(textureResult.value());
   ktxTexture *texture = texturePtr.get();
@@ -411,8 +407,7 @@ loadExternalRgba(const std::filesystem::path &path,
   ImageRgba8 out(memory);
   out.width = width;
   out.height = height;
-  out.sourceComponentCount =
-      static_cast<uint32_t>(std::clamp(channels, 1, 4));
+  out.sourceComponentCount = static_cast<uint32_t>(std::clamp(channels, 1, 4));
   const size_t byteCount =
       static_cast<size_t>(width) * static_cast<size_t>(height) * 4u;
   out.bytes.assign(reinterpret_cast<std::byte *>(pixels),
@@ -463,9 +458,9 @@ loadEmbeddedRgba(const aiScene &scene, uint32_t embeddedIndex,
   for (int32_t y = 0; y < out.height; ++y) {
     for (int32_t x = 0; x < out.width; ++x) {
       const aiTexel &src =
-          texture.pcData[static_cast<size_t>(y) *
-                             static_cast<size_t>(out.width) +
-                         static_cast<size_t>(x)];
+          texture
+              .pcData[static_cast<size_t>(y) * static_cast<size_t>(out.width) +
+                      static_cast<size_t>(x)];
       const size_t offset =
           (static_cast<size_t>(y) * static_cast<size_t>(out.width) +
            static_cast<size_t>(x)) *
@@ -476,6 +471,62 @@ loadEmbeddedRgba(const aiScene &scene, uint32_t embeddedIndex,
       out.bytes[offset + 3u] = static_cast<std::byte>(src.a);
     }
   }
+  return Result<ImageRgba8, std::string>::makeResult(std::move(out));
+}
+
+[[nodiscard]] Result<ImageRgba8, std::string>
+loadEmbeddedRgba(std::span<const EmbeddedSceneTextureData> textures,
+                 uint32_t embeddedIndex, std::pmr::memory_resource *memory) {
+  if (embeddedIndex >= textures.size()) {
+    return Result<ImageRgba8, std::string>::makeError(
+        "Texture artifact builder: adapted embedded texture index is invalid");
+  }
+  const EmbeddedSceneTextureData &texture = textures[embeddedIndex];
+  if (texture.compressed) {
+    if (texture.bytes.empty() ||
+        texture.bytes.size() >
+            static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
+      return Result<ImageRgba8, std::string>::makeError(
+          "Texture artifact builder: adapted embedded texture is empty or "
+          "too large");
+    }
+    int32_t width = 0;
+    int32_t height = 0;
+    int32_t channels = 0;
+    stbi_uc *pixels = stbi_load_from_memory(
+        reinterpret_cast<const stbi_uc *>(texture.bytes.data()),
+        static_cast<int32_t>(texture.bytes.size()), &width, &height, &channels,
+        4);
+    if (pixels == nullptr) {
+      return Result<ImageRgba8, std::string>::makeError(
+          "Texture artifact builder: failed to decode adapted embedded "
+          "texture");
+    }
+    ImageRgba8 out(memory);
+    out.width = width;
+    out.height = height;
+    out.sourceComponentCount =
+        static_cast<uint32_t>(std::clamp(channels, 1, 4));
+    const size_t byteCount =
+        static_cast<size_t>(width) * static_cast<size_t>(height) * 4u;
+    out.bytes.assign(reinterpret_cast<std::byte *>(pixels),
+                     reinterpret_cast<std::byte *>(pixels) + byteCount);
+    stbi_image_free(pixels);
+    return Result<ImageRgba8, std::string>::makeResult(std::move(out));
+  }
+
+  const size_t expectedBytes = static_cast<size_t>(texture.width) *
+                               static_cast<size_t>(texture.height) * 4u;
+  if (texture.width == 0u || texture.height == 0u ||
+      texture.bytes.size() != expectedBytes) {
+    return Result<ImageRgba8, std::string>::makeError(
+        "Texture artifact builder: adapted embedded RGBA payload is invalid");
+  }
+  ImageRgba8 out(memory);
+  out.width = static_cast<int32_t>(texture.width);
+  out.height = static_cast<int32_t>(texture.height);
+  out.sourceComponentCount = 4u;
+  out.bytes.assign(texture.bytes.begin(), texture.bytes.end());
   return Result<ImageRgba8, std::string>::makeResult(std::move(out));
 }
 
@@ -550,14 +601,14 @@ createNativeCopy(const ktxTexture &source, Format targetFormat) {
     return Result<KtxTexture2Ptr, std::string>::makeError(
         "Texture artifact builder: failed to copy native KTX2");
   }
-  return Result<KtxTexture2Ptr, std::string>::makeResult(
-      KtxTexture2Ptr(copy));
+  return Result<KtxTexture2Ptr, std::string>::makeResult(KtxTexture2Ptr(copy));
 }
 
 [[nodiscard]] Result<KtxTexture2Ptr, std::string>
 transcodeBasisToNative(ktxTexture2 &source, Format targetFormat) {
   ktxTexture2 *copy = nullptr;
-  if (ktxTexture2_CreateCopy(&source, &copy) != KTX_SUCCESS || copy == nullptr) {
+  if (ktxTexture2_CreateCopy(&source, &copy) != KTX_SUCCESS ||
+      copy == nullptr) {
     return Result<KtxTexture2Ptr, std::string>::makeError(
         "Texture artifact builder: failed to copy Basis KTX2");
   }
@@ -567,9 +618,9 @@ transcodeBasisToNative(ktxTexture2 &source, Format targetFormat) {
     return Result<KtxTexture2Ptr, std::string>::makeError(
         transcodeFormat.error());
   }
-  const khr_df_transfer_e transferFunction =
-      textureFormatIsSrgb(targetFormat) ? KHR_DF_TRANSFER_SRGB
-                                        : KHR_DF_TRANSFER_LINEAR;
+  const khr_df_transfer_e transferFunction = textureFormatIsSrgb(targetFormat)
+                                                 ? KHR_DF_TRANSFER_SRGB
+                                                 : KHR_DF_TRANSFER_LINEAR;
   if (ktxTexture2_SetTransferFunction(copyPtr.get(), transferFunction) !=
       KTX_SUCCESS) {
     return Result<KtxTexture2Ptr, std::string>::makeError(
@@ -608,7 +659,7 @@ createRgbaSourceTexture(const ImageRgba8 &image,
   const ktxTextureCreateInfo createInfo{
       .glInternalformat = 0u,
       .vkFormat = options.loadOptions.srgb ? kKtxVkFormatR8G8B8A8Srgb
-                                          : kKtxVkFormatR8G8B8A8Unorm,
+                                           : kKtxVkFormatR8G8B8A8Unorm,
       .pDfd = nullptr,
       .baseWidth = static_cast<ktx_uint32_t>(image.width),
       .baseHeight = static_cast<ktx_uint32_t>(image.height),
@@ -655,8 +706,7 @@ createRgbaSourceTexture(const ImageRgba8 &image,
     width = nextWidth;
     height = nextHeight;
   }
-  return Result<KtxTexture2Ptr, std::string>::makeResult(
-      std::move(texturePtr));
+  return Result<KtxTexture2Ptr, std::string>::makeResult(std::move(texturePtr));
 }
 
 [[nodiscard]] Result<KtxTexture2Ptr, std::string>
@@ -730,8 +780,7 @@ tryBuildDirectlyFromAuthoredKtx(const std::filesystem::path &sourcePath,
 }
 
 [[nodiscard]] Result<uint64_t, std::string>
-writeKtxTextureAtomic(const std::filesystem::path &path,
-                      ktxTexture2 &texture) {
+writeKtxTextureAtomic(const std::filesystem::path &path, ktxTexture2 &texture) {
   if (path.empty()) {
     return Result<uint64_t, std::string>::makeError(
         "Texture artifact builder: artifact path is empty");
@@ -807,10 +856,10 @@ writeKtxTextureAtomic(const std::filesystem::path &path,
   uint64_t size = 0u;
   ktxTexture *mutableTexture = const_cast<ktxTexture *>(&texture);
   for (uint32_t level = 0u; level < std::max(1u, texture.numLevels); ++level) {
-    size += static_cast<uint64_t>(
-                ktxTexture_GetImageSize(mutableTexture, level)) *
-            static_cast<uint64_t>(std::max(1u, texture.numLayers)) *
-            static_cast<uint64_t>(std::max(1u, texture.numFaces));
+    size +=
+        static_cast<uint64_t>(ktxTexture_GetImageSize(mutableTexture, level)) *
+        static_cast<uint64_t>(std::max(1u, texture.numLayers)) *
+        static_cast<uint64_t>(std::max(1u, texture.numFaces));
   }
   return size;
 }
@@ -835,6 +884,7 @@ void recordProbeStatus(NativeTextureCacheProbeStatus status) noexcept {
 
 struct SceneTextureArtifactBuilder::Impl {
   std::filesystem::path sceneSourcePath{};
+  std::span<const EmbeddedSceneTextureData> embeddedTextures{};
   Assimp::Importer importer{};
   const aiScene *scene = nullptr;
   ScratchArena scratch{};
@@ -844,8 +894,8 @@ struct SceneTextureArtifactBuilder::Impl {
       return Result<const aiScene *, std::string>::makeResult(scene);
     }
     const std::string path = sceneSourcePath.string();
-    scene = importer.ReadFile(path,
-                              aiProcess_SortByPType | aiProcess_FindInvalidData);
+    scene = importer.ReadFile(path, aiProcess_SortByPType |
+                                        aiProcess_FindInvalidData);
     if (scene == nullptr) {
       return Result<const aiScene *, std::string>::makeError(
           std::string("Texture artifact builder: Assimp error: ") +
@@ -861,13 +911,19 @@ SceneTextureArtifactBuilder::SceneTextureArtifactBuilder(
     : impl_(std::move(impl)) {}
 SceneTextureArtifactBuilder::SceneTextureArtifactBuilder(
     SceneTextureArtifactBuilder &&) noexcept = default;
-SceneTextureArtifactBuilder &
-SceneTextureArtifactBuilder::operator=(SceneTextureArtifactBuilder &&) noexcept =
-    default;
+SceneTextureArtifactBuilder &SceneTextureArtifactBuilder::operator=(
+    SceneTextureArtifactBuilder &&) noexcept = default;
 
 Result<SceneTextureArtifactBuilder, std::string>
 SceneTextureArtifactBuilder::create(
     const std::filesystem::path &sceneSourcePath) {
+  return create(sceneSourcePath, {});
+}
+
+Result<SceneTextureArtifactBuilder, std::string>
+SceneTextureArtifactBuilder::create(
+    const std::filesystem::path &sceneSourcePath,
+    std::span<const EmbeddedSceneTextureData> embeddedTextures) {
   const std::filesystem::path normalized =
       normalizeMeshSourcePath(sceneSourcePath);
   if (normalized.empty()) {
@@ -876,15 +932,17 @@ SceneTextureArtifactBuilder::create(
   }
   auto impl = std::make_unique<Impl>();
   impl->sceneSourcePath = normalized;
+  impl->embeddedTextures = embeddedTextures;
   return Result<SceneTextureArtifactBuilder, std::string>::makeResult(
       SceneTextureArtifactBuilder(std::move(impl)));
 }
 
 Result<TextureArtifactBuildResult, std::string>
-SceneTextureArtifactBuilder::ensure(
-    const MaterialTextureSlotData &source, uint64_t sourceIdentityHash,
-    Format targetFormat, const TextureArtifactBuildOptions &options,
-    bool forceRebuild) {
+SceneTextureArtifactBuilder::ensure(const MaterialTextureSlotData &source,
+                                    uint64_t sourceIdentityHash,
+                                    Format targetFormat,
+                                    const TextureArtifactBuildOptions &options,
+                                    bool forceRebuild) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
   if (impl_ == nullptr || sourceIdentityHash == 0u) {
     return Result<TextureArtifactBuildResult, std::string>::makeError(
@@ -972,12 +1030,17 @@ SceneTextureArtifactBuilder::ensure(
     if (source.sourceKind == MaterialTextureSourceKind::ExternalFile) {
       image = loadExternalRgba(freshnessPath, memory);
     } else {
-      auto scene = impl_->ensureScene();
-      if (scene.hasError()) {
-        return Result<TextureArtifactBuildResult, std::string>::makeError(
-            scene.error());
+      if (!impl_->embeddedTextures.empty()) {
+        image = loadEmbeddedRgba(impl_->embeddedTextures, source.embeddedIndex,
+                                 memory);
+      } else {
+        auto scene = impl_->ensureScene();
+        if (scene.hasError()) {
+          return Result<TextureArtifactBuildResult, std::string>::makeError(
+              scene.error());
+        }
+        image = loadEmbeddedRgba(*scene.value(), source.embeddedIndex, memory);
       }
-      image = loadEmbeddedRgba(*scene.value(), source.embeddedIndex, memory);
     }
     if (image.hasError()) {
       return Result<TextureArtifactBuildResult, std::string>::makeError(
@@ -1048,10 +1111,11 @@ SceneTextureArtifactBuilder::ensure(
       });
 }
 
-Result<TextureArtifactBuildResult, std::string> ensureTextureArtifactFromFile(
-    const std::filesystem::path &sourcePath, uint64_t sourceIdentityHash,
-    Format targetFormat, const TextureArtifactBuildOptions &options,
-    bool forceRebuild) {
+Result<TextureArtifactBuildResult, std::string>
+ensureTextureArtifactFromFile(const std::filesystem::path &sourcePath,
+                              uint64_t sourceIdentityHash, Format targetFormat,
+                              const TextureArtifactBuildOptions &options,
+                              bool forceRebuild) {
   auto builder = SceneTextureArtifactBuilder::create(sourcePath);
   if (builder.hasError()) {
     return Result<TextureArtifactBuildResult, std::string>::makeError(

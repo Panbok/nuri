@@ -4,6 +4,7 @@
 #include "nuri/core/result.h"
 #include "nuri/defines.h"
 #include "nuri/math/types.h"
+#include "nuri/resources/async/asset_system.h"
 #include "nuri/resources/gpu/model.h"
 #include "nuri/resources/gpu/resource_handles.h"
 #include "nuri/resources/mesh_importer.h"
@@ -54,7 +55,9 @@ struct EditorSceneSpec {
 
 struct ImportedPrefabSceneResources {
   ResourceManager *resources = nullptr;
+  AssetSystem *assetSystem = nullptr;
   std::filesystem::path sourcePath{};
+  SceneLoadHandle sceneLoad{};
   ScenePrefab prefab{};
   ScenePrefabAssets assets{};
   std::vector<ImportedSceneLight> fallbackLights{};
@@ -112,14 +115,13 @@ struct AnimatedPrefabSceneState {
 };
 
 struct StreamingSceneState {
-  ResourceManager *resources = nullptr;
+  AssetSystem *assets = nullptr;
   std::filesystem::path sourcePath{};
-  ImportedPrefabSceneResources prefab{};
+  SceneLoadHandle sceneLoad{};
   ModelRef model = kInvalidModelRef;
-  MaterialRef material = kInvalidMaterialRef;
-  std::optional<ModelAsyncLoad> asyncLoad{};
   RenderableId renderableId = kInvalidRenderableId;
   glm::mat4 baseModel{1.0f};
+  bool configured = false;
   bool loadFailed = false;
   std::string loadError{};
   bool textureArtifactBakeQueued = false;

@@ -685,6 +685,88 @@ RenderGraphBuilder::computeGraphFingerprint() const noexcept {
       mixPayload(hasIndirectCount ? 1u : 0u);
     }
   }
+
+  uint64_t structuralIdentityHash = 0xcbf29ce484222325ull;
+  const auto mixStructure = [&structuralIdentityHash](uint64_t value) noexcept {
+    structuralIdentityHash ^= value;
+    structuralIdentityHash *= 0x100000001b3ull;
+  };
+  const auto mixU32Range = [&mixStructure](const auto &values) noexcept {
+    mixStructure(static_cast<uint64_t>(values.size()));
+    for (const uint32_t value : values) {
+      mixStructure(value);
+    }
+  };
+
+  mixStructure(0x7465787475726573ull);
+  mixStructure(static_cast<uint64_t>(textures_.size()));
+  for (const TextureResource &texture : textures_) {
+    mixStructure(texture.imported ? 1u : 0u);
+  }
+  mixStructure(0x6275666665727300ull);
+  mixStructure(static_cast<uint64_t>(buffers_.size()));
+  for (const BufferResource &buffer : buffers_) {
+    mixStructure(buffer.imported ? 1u : 0u);
+  }
+
+  mixStructure(static_cast<uint64_t>(passes_.size()));
+  for (const RenderPass &pass : passes_) {
+    mixStructure(static_cast<uint64_t>(pass.executionMode));
+    mixStructure(pass.hasColorAttachment ? 1u : 0u);
+    mixStructure(pass.drawBuffersPreResolved ? 1u : 0u);
+  }
+
+  mixStructure(static_cast<uint64_t>(dependencies_.size()));
+  for (const DependencyEdge &dependency : dependencies_) {
+    mixStructure(dependency.before);
+    mixStructure(dependency.after);
+  }
+  mixStructure(static_cast<uint64_t>(passResourceAccesses_.size()));
+  for (const PassResourceAccess &access : passResourceAccesses_) {
+    mixStructure(access.passIndex);
+    mixStructure(static_cast<uint64_t>(access.resourceKind));
+    mixStructure(access.resourceIndex);
+    mixStructure(static_cast<uint64_t>(access.mode));
+    mixStructure(access.inferred ? 1u : 0u);
+  }
+  mixU32Range(frameOutputTextureIndices_);
+  mixStructure(static_cast<uint64_t>(sideEffectPassMarks_.size()));
+  for (const SideEffectPassMark &mark : sideEffectPassMarks_) {
+    mixStructure(mark.passIndex);
+    mixStructure(mark.inferred ? 1u : 0u);
+  }
+  mixStructure(suppressInferredSideEffectsWhenExplicitOutputs_ ? 1u : 0u);
+
+  mixU32Range(passColorTextureBindings_);
+  mixU32Range(passColorResolveTextureBindings_);
+  mixU32Range(passDepthTextureBindings_);
+  mixU32Range(passDepthResolveTextureBindings_);
+  mixU32Range(passDependencyBufferBindingOffsets_);
+  mixU32Range(passDependencyBufferBindingCounts_);
+  mixU32Range(passDependencyBufferBindingResourceIndices_);
+  mixU32Range(passDependencyTextureBindingOffsets_);
+  mixU32Range(passDependencyTextureBindingCounts_);
+  mixU32Range(passDependencyTextureBindingResourceIndices_);
+  mixU32Range(passPreDispatchBindingOffsets_);
+  mixU32Range(passPreDispatchBindingCounts_);
+  mixU32Range(preDispatchDependencyBindingOffsets_);
+  mixU32Range(preDispatchDependencyBindingCounts_);
+  mixU32Range(preDispatchDependencyBindingResourceIndices_);
+  mixU32Range(passDrawBindingOffsets_);
+  mixU32Range(passDrawBindingCounts_);
+  mixU32Range(drawVertexBindingResourceIndices_);
+  mixU32Range(drawIndexBindingResourceIndices_);
+  mixU32Range(drawIndirectBindingResourceIndices_);
+  mixU32Range(drawIndirectCountBindingResourceIndices_);
+  mixU32Range(passMeshDispatchBindingOffsets_);
+  mixU32Range(passMeshDispatchBindingCounts_);
+  mixU32Range(meshDispatchIndirectBindingResourceIndices_);
+  mixU32Range(meshDispatchIndirectCountBindingResourceIndices_);
+  mixU32Range(passTextureCopyBindingOffsets_);
+  mixU32Range(passTextureCopyBindingCounts_);
+  mixU32Range(textureCopySourceBindingResourceIndices_);
+  mixU32Range(textureCopyDestinationBindingResourceIndices_);
+
   return GraphFingerprint{
       .passCount = passes_.size(),
       .totalTextureCount = textures_.size(),
@@ -695,6 +777,7 @@ RenderGraphBuilder::computeGraphFingerprint() const noexcept {
       .sideEffectMarkCount = sideEffectPassMarks_.size(),
       .allPassesBorrowPayload = allPassesBorrowPayload_,
       .payloadLayoutHash = payloadLayoutHash,
+      .structuralIdentityHash = structuralIdentityHash,
       .transientResourceDescriptorsHash = transientResourceDescriptorsHash_,
       .persistentHandlesVersion = persistentHandlesVersion_,
   };
@@ -894,6 +977,7 @@ void RenderGraphBuilder::refreshHandlesInCompileResult(
           } else {
             refreshedDispatch.dependencyBuffers = {};
           }
+          refreshedDispatch.dependencyBufferAccessModes = {};
           result.ownedPreDispatches[globalDispatchIndex] = refreshedDispatch;
         }
         refreshedPass.preDispatches = std::span<const ComputeDispatchItem>(
@@ -1357,6 +1441,8 @@ RenderGraphBuilder::OwnedPassPayload RenderGraphBuilder::clonePassPayload(
   ownedPayload.preDispatchDebugLabels.reserve(desc.preDispatches.size());
   ownedPayload.preDispatchPushConstants.reserve(desc.preDispatches.size());
   ownedPayload.preDispatchDependencyBuffers.reserve(desc.preDispatches.size());
+  ownedPayload.preDispatchDependencyBufferAccessModes.reserve(
+      desc.preDispatches.size());
   ownedPayload.preDispatchDependencyTextures.reserve(desc.preDispatches.size());
   ownedPayload.preDispatches.reserve(desc.preDispatches.size());
   for (const ComputeDispatchItem &sourceDispatch : desc.preDispatches) {
@@ -1377,6 +1463,14 @@ RenderGraphBuilder::OwnedPassPayload RenderGraphBuilder::clonePassPayload(
     dependencyBuffers.assign(sourceDispatch.dependencyBuffers.begin(),
                              sourceDispatch.dependencyBuffers.end());
 
+    ownedPayload.preDispatchDependencyBufferAccessModes.push_back(
+        std::pmr::vector<RenderGraphAccessMode>(memory_));
+    auto &dependencyBufferAccessModes =
+        ownedPayload.preDispatchDependencyBufferAccessModes.back();
+    dependencyBufferAccessModes.assign(
+        sourceDispatch.dependencyBufferAccessModes.begin(),
+        sourceDispatch.dependencyBufferAccessModes.end());
+
     ownedPayload.preDispatchDependencyTextures.push_back(
         std::pmr::vector<TextureHandle>(memory_));
     auto &dependencyTextures =
@@ -1395,6 +1489,10 @@ RenderGraphBuilder::OwnedPassPayload RenderGraphBuilder::clonePassPayload(
     dispatch.dependencyBuffers = std::span<const BufferHandle>(
         ownedPayload.preDispatchDependencyBuffers[i].data(),
         ownedPayload.preDispatchDependencyBuffers[i].size());
+    dispatch.dependencyBufferAccessModes =
+        std::span<const RenderGraphAccessMode>(
+            ownedPayload.preDispatchDependencyBufferAccessModes[i].data(),
+            ownedPayload.preDispatchDependencyBufferAccessModes[i].size());
     dispatch.dependencyTextures = std::span<const TextureHandle>(
         ownedPayload.preDispatchDependencyTextures[i].data(),
         ownedPayload.preDispatchDependencyTextures[i].size());
@@ -1652,6 +1750,14 @@ Result<bool, std::string> RenderGraphBuilder::bindImplicitPassResources(
   for (size_t dispatchIndex = 0; dispatchIndex < desc.preDispatches.size();
        ++dispatchIndex) {
     const ComputeDispatchItem &dispatch = desc.preDispatches[dispatchIndex];
+    if (!dispatch.dependencyBufferAccessModes.empty() &&
+        dispatch.dependencyBufferAccessModes.size() !=
+            dispatch.dependencyBuffers.size()) {
+      return Result<bool, std::string>::makeError(
+          "RenderGraphBuilder::bindImplicitPassResources: pre-dispatch "
+          "dependency buffer access mode count does not match dependency "
+          "buffer count");
+    }
     for (size_t dependencyIndex = 0;
          dependencyIndex < dispatch.dependencyBuffers.size();
          ++dependencyIndex) {
@@ -1670,7 +1776,9 @@ Result<bool, std::string> RenderGraphBuilder::bindImplicitPassResources(
       auto bindResult = bindPreDispatchDependencyBuffer(
           pass, static_cast<uint32_t>(dispatchIndex),
           static_cast<uint32_t>(dependencyIndex), importResult.value(),
-          RenderGraphAccessMode::Read | RenderGraphAccessMode::Write);
+          dispatch.dependencyBufferAccessModes.empty()
+              ? (RenderGraphAccessMode::Read | RenderGraphAccessMode::Write)
+              : dispatch.dependencyBufferAccessModes[dependencyIndex]);
       if (bindResult.hasError()) {
         return bindResult;
       }
@@ -2277,6 +2385,13 @@ RenderGraphBuilder::addPassRecord(RenderPass pass, std::string_view debugName) {
         "uint32_t");
   }
   for (const ComputeDispatchItem &dispatch : pass.preDispatches) {
+    if (!dispatch.dependencyBufferAccessModes.empty() &&
+        dispatch.dependencyBufferAccessModes.size() !=
+            dispatch.dependencyBuffers.size()) {
+      return Result<RenderGraphPassId, std::string>::makeError(
+          "RenderGraphBuilder::addPassRecord: pre-dispatch dependency buffer "
+          "access mode count does not match dependency buffer count");
+    }
     if (dispatch.dependencyBuffers.size() > UINT32_MAX) {
       return Result<RenderGraphPassId, std::string>::makeError(
           "RenderGraphBuilder::addPassRecord: pre-dispatch dependency "
@@ -4821,6 +4936,7 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
         } else {
           resolvedDispatch.dependencyBuffers = {};
         }
+        resolvedDispatch.dependencyBufferAccessModes = {};
         compiled
             .ownedPreDispatches[plan.preDispatchOutputOffset + dispatchIndex] =
             resolvedDispatch;
@@ -7743,11 +7859,16 @@ RenderGraphExecutor::executeInternal(RenderGraphRuntime *runtime,
                     .subspan(barrierPlan.barrierOffset,
                              barrierPlan.barrierCount));
             if (barrierResult.hasError()) {
+              const std::string_view passLabel =
+                  orderedPassIndex < executablePasses.size()
+                      ? executablePasses[orderedPassIndex].debugLabel
+                      : std::string_view{};
               setRecordingFailure(makeExecutionStageError(
                   RenderGraphExecutionFailureStage::RecordGraphicsBarriers,
                   "RenderGraphExecutor::execute: failed to record graphics "
-                  "barriers: " +
-                      barrierResult.error()));
+                  "barriers for ordered pass " +
+                      std::to_string(orderedPassIndex) + " ('" +
+                      std::string(passLabel) + "'): " + barrierResult.error()));
               return;
             }
           }

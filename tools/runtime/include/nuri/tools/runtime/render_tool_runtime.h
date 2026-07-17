@@ -95,6 +95,27 @@ struct ToolRuntimeDesc {
   ToolResolvePathFn resolvePath = nullptr;
 };
 
+struct ToolAssetLoadStatus {
+  bool sceneRequested = false;
+  SceneLoadSnapshot scene{};
+  bool environmentRequested = false;
+  AssetLoadSnapshot environment{};
+
+  [[nodiscard]] bool terminal() const noexcept {
+    return (!sceneRequested || scene.terminal()) &&
+           (!environmentRequested || environment.terminal());
+  }
+
+  [[nodiscard]] bool successful() const noexcept {
+    const bool sceneSucceeded =
+        !sceneRequested || scene.state == SceneLoadState::Complete ||
+        scene.state == SceneLoadState::CompleteWithErrors;
+    const bool environmentSucceeded =
+        !environmentRequested || environment.state == AssetState::Published;
+    return sceneSucceeded && environmentSucceeded;
+  }
+};
+
 class ToolRendererRuntime {
 public:
   ~ToolRendererRuntime();
@@ -112,6 +133,8 @@ public:
   [[nodiscard]] RenderFrameContext &frameContext() noexcept;
   [[nodiscard]] TemporalFrameService &temporalFrameService() noexcept;
   [[nodiscard]] uint32_t swapchainImageCount() const noexcept;
+  [[nodiscard]] ToolAssetLoadStatus assetLoadStatus() const;
+  [[nodiscard]] Result<AssetPublicationStats, std::string> pumpAssetLoads();
   [[nodiscard]] Result<bool, std::string> commitScene();
 
 private:

@@ -13,6 +13,10 @@ namespace nuri {
     EditorRuntime &runtime, std::string_view sceneName,
     const std::filesystem::path &modelPath,
     const MeshImportOptions &importOptions, ImportedPrefabSceneResources &out);
+[[nodiscard]] Result<bool, std::string>
+refreshImportedPrefabSceneResources(EditorRuntime &runtime,
+                                    std::string_view sceneName,
+                                    ImportedPrefabSceneResources &out);
 
 [[nodiscard]] Result<void, std::string> prepareSimpleImportedModelSceneAssets(
     EditorRuntime &runtime, std::string_view sceneName,

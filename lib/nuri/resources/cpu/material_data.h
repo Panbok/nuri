@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <string>
@@ -51,6 +52,13 @@ struct MaterialTextureSlotData {
   uint32_t samplerIndex = 0;
   float scale = 1.0f;
   MaterialTextureTransformData transform{};
+};
+
+struct EmbeddedSceneTextureData {
+  uint32_t width = 0u;
+  uint32_t height = 0u;
+  bool compressed = false;
+  std::vector<std::byte> bytes{};
 };
 
 struct MaterialData {

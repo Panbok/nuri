@@ -35,17 +35,17 @@ class SlotPool {
 public:
   explicit SlotPool(
       std::pmr::memory_resource *memory = std::pmr::get_default_resource())
-      : generations_(memory), live_(memory), freeSlots_(memory) {}
+      : generations_(memory), states_(memory), freeSlots_(memory) {}
 
   void reserve(uint32_t capacity) {
     generations_.reserve(capacity);
-    live_.reserve(capacity);
+    states_.reserve(capacity);
     freeSlots_.reserve(capacity);
   }
 
   void clear() {
     generations_.clear();
-    live_.clear();
+    states_.clear();
     freeSlots_.clear();
     liveCount_ = 0;
   }
@@ -64,30 +64,54 @@ public:
     } else {
       reservation.index = static_cast<uint32_t>(generations_.size());
       generations_.push_back(0u);
-      live_.push_back(0u);
+      states_.push_back(SlotState::Free);
       reservation.appended = true;
     }
 
+    NURI_ASSERT(states_[reservation.index] == SlotState::Free,
+                "SlotPool::acquire: free list contains unavailable slot");
     generations_[reservation.index] =
         GenerationPolicy::next(generations_[reservation.index]);
-    live_[reservation.index] = 1u;
+    states_[reservation.index] = SlotState::Live;
     reservation.generation = generations_[reservation.index];
     ++liveCount_;
     return reservation;
   }
 
   void release(uint32_t index) {
+    retire(index);
+    recycle(index);
+  }
+
+  // Invalidates the live slot immediately without making its index reusable.
+  // Call recycle() only after the physical lifetime associated with the slot is
+  // proven complete.
+  void retire(uint32_t index) {
     NURI_ASSERT(index < generations_.size(),
-                "SlotPool::release: index out of range");
-    NURI_ASSERT(live_[index] != 0u, "SlotPool::release: slot is not live");
-    NURI_ASSERT(liveCount_ > 0u, "SlotPool::release: live count underflow");
-    live_[index] = 0u;
-    freeSlots_.push_back(index);
+                "SlotPool::retire: index out of range");
+    NURI_ASSERT(states_[index] == SlotState::Live,
+                "SlotPool::retire: slot is not live");
+    NURI_ASSERT(liveCount_ > 0u, "SlotPool::retire: live count underflow");
+    states_[index] = SlotState::Retired;
     --liveCount_;
   }
 
+  // Makes a previously retired slot available for a future acquire().
+  void recycle(uint32_t index) {
+    NURI_ASSERT(index < generations_.size(),
+                "SlotPool::recycle: index out of range");
+    NURI_ASSERT(states_[index] == SlotState::Retired,
+                "SlotPool::recycle: slot is not retired");
+    states_[index] = SlotState::Free;
+    freeSlots_.push_back(index);
+  }
+
   [[nodiscard]] bool isLive(uint32_t index) const noexcept {
-    return index < live_.size() && live_[index] != 0u;
+    return index < states_.size() && states_[index] == SlotState::Live;
+  }
+
+  [[nodiscard]] bool isRetired(uint32_t index) const noexcept {
+    return index < states_.size() && states_[index] == SlotState::Retired;
   }
 
   [[nodiscard]] uint32_t generation(uint32_t index) const noexcept {
@@ -100,8 +124,14 @@ public:
   }
 
 private:
+  enum class SlotState : uint8_t {
+    Free,
+    Live,
+    Retired,
+  };
+
   std::pmr::vector<uint32_t> generations_;
-  std::pmr::vector<uint8_t> live_;
+  std::pmr::vector<SlotState> states_;
   std::pmr::vector<uint32_t> freeSlots_;
   uint32_t liveCount_ = 0;
 };

@@ -6894,6 +6894,17 @@ struct ImGuiEditor::Impl {
   Result<RenderGraphGraphicsPassDesc, std::string> endFrame() {
     NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CMD_DRAW);
 
+    if (renderGraphTelemetry != nullptr) {
+      if (showRenderGraphTelemetryWindow) {
+        renderGraphTelemetry->requestCapture(
+            RenderGraphTelemetryLevel::Metadata);
+      }
+      if (showPassMetricsWindow || passMetricsState.recording) {
+        renderGraphTelemetry->requestCapture(
+            RenderGraphTelemetryLevel::PassTimings);
+      }
+    }
+
     if (telemetryOverlayState.showImGuiMetricsWindow) {
       NURI_PROFILER_ZONE("ImGuiEditor::ShowMetricsWindow",
                          NURI_PROFILER_COLOR_CMD_DRAW);

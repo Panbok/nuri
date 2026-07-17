@@ -2,6 +2,7 @@
 
 #include "nuri/resources/gpu/geometry_pool.h"
 
+#include "nuri/core/log.h"
 #include "nuri/core/profiling.h"
 #include "nuri/gfx/gpu_descriptors.h"
 #include "nuri/gfx/gpu_device.h"
@@ -225,13 +226,13 @@ uint64_t GeometryPool::reclaimLagFrames() const {
 }
 
 void GeometryPool::reclaimRetiredAllocations() {
-  const uint64_t lag = reclaimLagFrames();
   for (uint32_t index = 0; index < allocations_.size(); ++index) {
     AllocationEntry &entry = allocations_[index];
     if (entry.state != AllocationEntry::State::PendingFree) {
       continue;
     }
-    if (currentFrameIndex_ < entry.retireFrame + lag) {
+    if (entry.retirementCaptureFailed ||
+        !gpu_.isSubmissionComplete(entry.retirementSubmission)) {
       continue;
     }
 
@@ -244,6 +245,8 @@ void GeometryPool::reclaimRetiredAllocations() {
     entry.vertexCount = 0;
     entry.indexCount = 0;
     entry.retireFrame = 0;
+    entry.retirementSubmission = {};
+    entry.retirementCaptureFailed = false;
     entry.debugName.clear();
     allocationSlots_.release(index);
   }
@@ -817,6 +820,15 @@ Result<bool, std::string> GeometryPool::pollCompactionJob() {
     if (!gpu_.isSubmissionComplete(compactionJob_.inFlightSubmission)) {
       return Result<bool, std::string>::makeResult(true);
     }
+    auto visibility =
+        gpu_.makeSubmissionVisibleToGraphics(compactionJob_.inFlightSubmission);
+    if (visibility.hasError()) {
+      abortCompactionJob();
+      return Result<bool, std::string>::makeError(visibility.error());
+    }
+    if (!visibility.value()) {
+      return Result<bool, std::string>::makeResult(true);
+    }
     compactionJob_.inFlightSubmission = {};
     compactionJob_.state = (compactionJob_.preparedPlan.has_value() &&
                             compactionJob_.nextCopyIndex <
@@ -1052,6 +1064,8 @@ GeometryPool::allocate(std::span<const std::byte> vertexBytes,
   entry.vertexCount = vertexCount;
   entry.indexCount = indexCount;
   entry.retireFrame = 0u;
+  entry.retirementSubmission = {};
+  entry.retirementCaptureFailed = false;
   entry.debugName.assign(debugName.data(), debugName.size());
   bumpMutationVersion();
 
@@ -1070,6 +1084,16 @@ void GeometryPool::release(GeometryAllocationHandle handle) {
   AllocationEntry &entry = allocations_[handle.index];
   entry.state = AllocationEntry::State::PendingFree;
   entry.retireFrame = currentFrameIndex_;
+  auto captureResult = gpu_.captureWorkCompletion();
+  if (captureResult.hasError()) {
+    entry.retirementCaptureFailed = true;
+    NURI_LOG_ERROR(
+        "GeometryPool::release: failed to capture GPU completion for '%s': %s",
+        entry.debugName.c_str(), captureResult.error().c_str());
+  } else {
+    entry.retirementSubmission = captureResult.value();
+    entry.retirementCaptureFailed = false;
+  }
   bumpMutationVersion();
 }
 
