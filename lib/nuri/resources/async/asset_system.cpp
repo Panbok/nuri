@@ -2919,10 +2919,21 @@ AssetSystem::prepareSceneNode(SceneNode &node, AssetPublicationContext &context,
       }
       continue;
     }
-    (void)resources_.setModelMaterialForSource(
-        *model,
-        prefab.materialAssets[binding.materialIndex].sourceMaterialIndex,
-        *material);
+    bool mappedModelSubmesh = false;
+    if (const ModelRecord *record = resources_.tryGet(*model);
+        record != nullptr && record->model != nullptr) {
+      for (const Submesh &submesh : record->model->submeshes()) {
+        mappedModelSubmesh = resources_.setModelMaterialForSource(
+                                 *model, submesh.materialIndex, *material) ||
+                             mappedModelSubmesh;
+      }
+    }
+    if (!mappedModelSubmesh) {
+      (void)resources_.setModelMaterialForSource(
+          *model,
+          prefab.materialAssets[binding.materialIndex].sourceMaterialIndex,
+          *material);
+    }
     node.renderableMaterialMapped[materialBindingIndex] = 1u;
     --scenePatchBudget;
     ++stats.scenePatches;

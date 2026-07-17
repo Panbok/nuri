@@ -4,6 +4,7 @@
 #include "nuri/scene/render_scene.h"
 #include "render_graph_test_support.h"
 
+#include <array>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -13,6 +14,11 @@
 namespace {
 
 using namespace std::chrono_literals;
+
+[[nodiscard]] std::filesystem::path orreyPath() {
+  return std::filesystem::path(PROJECT_SOURCE_DIR) / "assets" / "models" /
+         "Orrey" / "scene.gltf";
+}
 
 class ScopedAssetTempDir {
 public:
@@ -421,6 +427,123 @@ TEST(AssetSystemTests, CompleteOnlyScenePublishesAsOneGraphTransaction) {
   ASSERT_EQ(scene.renderables().size(), 1u);
   EXPECT_TRUE(nuri::isValid(scene.renderables()[0].model));
   EXPECT_TRUE(nuri::isValid(scene.renderables()[0].material));
+}
+
+TEST(AssetSystemTests, OrreyPublishesDiffuseTexturesForSpecGlossMaterials) {
+  const std::filesystem::path path = orreyPath();
+  ASSERT_TRUE(std::filesystem::exists(path)) << path.string();
+
+  nuri::test_support::FakeExecutorGPUDevice gpu;
+  std::pmr::monotonic_buffer_resource memory;
+  nuri::ResourceManager resources(gpu, &memory);
+  nuri::AssetSystem assets(
+      gpu, resources,
+      nuri::AssetSystemConfig{
+          .cpu =
+              nuri::AssetCpuSchedulerConfig{
+                  .workerCount = 4u,
+                  .maxInFlightJobs = 64u,
+                  .maxInFlightBytes = 256ull * 1024ull * 1024ull,
+              },
+          .maxGpuMaterializationsPerFrame = 16u,
+          .maxGpuUploadBytesPerFrame = 256ull * 1024ull * 1024ull,
+      });
+  nuri::RenderScene scene(&memory);
+  scene.bindResources(&resources);
+  auto requested = assets.requestScene(nuri::SceneLoadRequest{
+      .path = path.string(),
+      .importOptions =
+          nuri::SceneImportOptions{
+              .assetBuildOptions =
+                  nuri::MeshImportOptions{
+                      .optimize = false,
+                      .generateLods = false,
+                      .lodCount = 1u,
+                  },
+          },
+      .publication = nuri::ScenePublicationPolicy::CompleteOnly,
+  });
+  ASSERT_FALSE(requested.hasError()) << requested.error();
+
+  uint64_t frameIndex = 1u;
+  for (uint32_t attempt = 0u; attempt < 1000u; ++attempt) {
+    ASSERT_FALSE(gpu.beginFrame(frameIndex).hasError());
+    resources.beginFrame(frameIndex);
+    auto prepared = assets.prepareFrame(nuri::AssetPublicationContext{
+        .scene = &scene,
+    });
+    ASSERT_FALSE(prepared.hasError()) << prepared.error();
+    if (assets.query(requested.value()).terminal()) {
+      break;
+    }
+    ++frameIndex;
+    std::this_thread::sleep_for(2ms);
+  }
+
+  const nuri::SceneLoadSnapshot snapshot = assets.query(requested.value());
+  ASSERT_EQ(snapshot.state, nuri::SceneLoadState::Complete)
+      << snapshot.error << " optional failures=" << snapshot.optionalFailures;
+  auto sceneAssets = assets.tryGetSceneAssets(requested.value());
+  ASSERT_TRUE(sceneAssets.has_value());
+  ASSERT_EQ(sceneAssets->materials.size(), 13u);
+  uint32_t texturedMaterialCount = 0u;
+  for (uint32_t materialIndex = 0u; materialIndex < 13u; ++materialIndex) {
+    const nuri::MaterialRecord *material =
+        resources.tryGet(sceneAssets->materials[materialIndex]);
+    ASSERT_NE(material, nullptr) << materialIndex;
+    if (material->debugName == "async_scene_Gold001") {
+      continue;
+    }
+    EXPECT_TRUE(nuri::isValid(material->textureRefs.baseColor))
+        << material->debugName;
+    EXPECT_NE(material->packedGpuData.header.commonTextureIndices.x,
+              nuri::kInvalidTextureBindlessIndex)
+        << material->debugName;
+    if (nuri::isValid(material->textureRefs.baseColor)) {
+      ++texturedMaterialCount;
+    }
+  }
+  EXPECT_EQ(texturedMaterialCount, 12u);
+
+  const nuri::ScenePrefab *prefab = assets.tryGetScenePrefab(requested.value());
+  ASSERT_NE(prefab, nullptr);
+  auto instantiation = assets.tryGetSceneInstantiation(requested.value());
+  ASSERT_TRUE(instantiation.has_value());
+  ASSERT_EQ(instantiation->renderables.size(), prefab->renderables.size());
+  std::array<uint32_t, 13u> sourceMaterialUsage{};
+  for (size_t renderableIndex = 0u;
+       renderableIndex < prefab->renderables.size(); ++renderableIndex) {
+    const nuri::ScenePrefabRenderable &prefabRenderable =
+        prefab->renderables[renderableIndex];
+    ASSERT_LT(prefabRenderable.materialIndex, sceneAssets->materials.size());
+    ASSERT_LT(prefabRenderable.meshIndex, sceneAssets->models.size());
+    ASSERT_LT(prefabRenderable.materialIndex, prefab->materialAssets.size());
+    const uint32_t sourceMaterialIndex =
+        prefab->materialAssets[prefabRenderable.materialIndex]
+            .sourceMaterialIndex;
+    ASSERT_LT(sourceMaterialIndex, sourceMaterialUsage.size());
+    ++sourceMaterialUsage[sourceMaterialIndex];
+    const nuri::ModelRecord *model =
+        resources.tryGet(sceneAssets->models[prefabRenderable.meshIndex]);
+    ASSERT_NE(model, nullptr);
+    ASSERT_NE(model->model, nullptr);
+    ASSERT_EQ(model->model->submeshes().size(), 1u);
+    EXPECT_EQ(model->materialForSubmesh(0u).value,
+              sceneAssets->materials[prefabRenderable.materialIndex].value)
+        << renderableIndex;
+    auto sceneRenderableIndex =
+        scene.findRenderableIndex(instantiation->renderables[renderableIndex]);
+    ASSERT_TRUE(sceneRenderableIndex.has_value()) << renderableIndex;
+    EXPECT_EQ(scene.renderables()[*sceneRenderableIndex].material.value,
+              sceneAssets->materials[prefabRenderable.materialIndex].value)
+        << renderableIndex;
+  }
+  EXPECT_EQ(sourceMaterialUsage[0], 12u);
+  for (uint32_t sourceMaterialIndex = 1u; sourceMaterialIndex < 13u;
+       ++sourceMaterialIndex) {
+    EXPECT_EQ(sourceMaterialUsage[sourceMaterialIndex], 1u)
+        << sourceMaterialIndex;
+  }
 }
 
 TEST(AssetSystemTests, ExplicitPublicationTargetKeepsActiveSceneIsolated) {

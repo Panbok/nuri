@@ -23,6 +23,16 @@ struct TestPackedMorphDeltaGpu {
 };
 static_assert(sizeof(TestPackedMorphDeltaGpu) == 48);
 
+struct TestWorldPushConstants {
+  uint64_t nodeStatesAddress = 0u;
+  uint64_t nodeMetaAddress = 0u;
+  uint64_t depthOrderedNodesAddress = 0u;
+  uint64_t worldMatricesAddress = 0u;
+  glm::mat4 rootTransform{1.0f};
+  uint32_t nodeStart = 0u;
+  uint32_t nodeCount = 0u;
+};
+
 [[nodiscard]] std::filesystem::path foxPath() {
   return std::filesystem::path(PROJECT_SOURCE_DIR) / "assets" / "models" /
          "Fox" / "Fox.gltf";
@@ -221,6 +231,18 @@ collectDependencyBuffers(const nuri::AnimationSceneFrameData &frameData) {
   return std::numeric_limits<uint32_t>::max();
 }
 
+[[nodiscard]] bool mat4Near(const glm::mat4 &lhs, const glm::mat4 &rhs,
+                            float epsilon = 1.0e-5f) {
+  for (uint32_t column = 0u; column < 4u; ++column) {
+    for (uint32_t row = 0u; row < 4u; ++row) {
+      if (std::abs(lhs[column][row] - rhs[column][row]) > epsilon) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
 TEST(AnimationGpuServicesTests,
      PartialCreationFailuresRetireResourcesAndAllowCleanRetry) {
   FakeAnimationGpuDevice gpu;
@@ -404,6 +426,73 @@ TEST(AnimationPoseSimulationTests, RuntimeCreationFailsWithoutGpuServices) {
 
   EXPECT_TRUE(createResult.hasError());
   EXPECT_NE(createResult.error().find("GPU services"), std::string::npos);
+}
+
+TEST(AnimationPoseSimulationTests,
+     MappedPrefabRootContributesItsAuthoredTransformOnlyOnce) {
+  nuri::ScenePrefab prefab;
+  prefab.nodes.resize(1u);
+  prefab.nodes[0].name = "AnimatedRoot";
+  prefab.nodes[0].localFromParent = glm::rotate(
+      glm::mat4(1.0f), glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+  prefab.animations.emplace_back();
+  prefab.animations[0].name = "Move";
+  prefab.animations[0].durationSeconds = 1.0f;
+  prefab.animations[0].samplers.emplace_back();
+  prefab.animations[0].samplers[0].keyTimes = {0.0f, 1.0f};
+  prefab.animations[0].samplers[0].values = {0.0f, 0.0f, 0.0f,
+                                             1.0f, 0.0f, 0.0f};
+  prefab.animations[0].samplers[0].valueArity = 3u;
+  prefab.animations[0].channels.push_back(nuri::AnimationChannelData{
+      .samplerIndex = 0u,
+      .targetNodeIndex = 0u,
+      .path = nuri::AnimationTargetPath::Translation,
+  });
+
+  FakeAnimationGpuDevice gpu;
+  nuri::ResourceManager resources(gpu);
+  nuri::RenderScene scene;
+  scene.bindResources(&resources);
+  nuri::SceneInstantiationMap instantiation;
+  auto instantiateResult = scene.graph().instantiatePrefab(
+      prefab, scene.graph().rootNode(), nuri::ScenePrefabAssets{},
+      &instantiation);
+  ASSERT_FALSE(instantiateResult.hasError()) << instantiateResult.error();
+
+  const glm::mat4 baseModel =
+      glm::translate(glm::mat4(1.0f), glm::vec3(2.0f, 3.0f, 4.0f));
+  ASSERT_TRUE(scene.graph().setNodeLocalTransform(
+      instantiateResult.value(), baseModel * prefab.nodes[0].localFromParent));
+  auto commitResult = scene.commit();
+  ASSERT_FALSE(commitResult.hasError()) << commitResult.error();
+
+  nuri::SceneRuntimeHost runtime;
+  runtime.bindScene(&scene);
+  nuri::AnimationGpuServices services(gpu, shaderRootPath());
+  runtime.attachAnimationGpuServices(&services);
+  auto createResult = runtime.createAnimationPoseSimulation(
+      nuri::AnimationPoseSimulationCreateInfo{
+          .prefab = &prefab,
+          .instantiationMap = &instantiation,
+          .rootNode = instantiateResult.value(),
+          .debugName = "RootTransform",
+      });
+  ASSERT_FALSE(createResult.hasError()) << createResult.error();
+
+  auto prepareResult = runtime.prepareAnimationSceneFrame(0u);
+  ASSERT_FALSE(prepareResult.hasError()) << prepareResult.error();
+  const nuri::AnimationSceneFrameData *frameData =
+      runtime.animationSceneFrameData();
+  ASSERT_NE(frameData, nullptr);
+  const nuri::ComputeDispatchItem *worldDispatch =
+      findDispatch(*frameData, "AnimationPose World");
+  ASSERT_NE(worldDispatch, nullptr);
+  ASSERT_EQ(worldDispatch->pushConstants.size(),
+            sizeof(TestWorldPushConstants));
+  TestWorldPushConstants pushConstants{};
+  std::memcpy(&pushConstants, worldDispatch->pushConstants.data(),
+              sizeof(pushConstants));
+  EXPECT_TRUE(mat4Near(pushConstants.rootTransform, baseModel));
 }
 
 TEST(AnimationPoseSimulationTests,

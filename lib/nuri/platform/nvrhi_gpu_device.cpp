@@ -19,6 +19,7 @@
 #include <GLFW/glfw3.h>
 #include <glslang/Include/glslang_c_interface.h>
 #include <nvrhi/nvrhi.h>
+#include <nvrhi/utils.h>
 #include <nvrhi/vulkan.h>
 #define VULKAN_HPP_DISPATCH_LOADER_DYNAMIC 1
 #include <vulkan/vulkan.hpp>
@@ -4270,7 +4271,17 @@ recordComputeDispatches(Impl &impl, nvrhi::ICommandList &commandList,
                         std::span<const ComputeDispatchItem> dispatches,
                         std::string_view context,
                         bool dependencyStatesPreplanned) {
-  for (const ComputeDispatchItem &dispatch : dispatches) {
+  const auto dependencyAccessMode = [](const ComputeDispatchItem &dispatch,
+                                       size_t index) {
+    return dispatch.dependencyBufferAccessModes.empty() ||
+                   index >= dispatch.dependencyBufferAccessModes.size()
+               ? (RenderGraphAccessMode::Read | RenderGraphAccessMode::Write)
+               : dispatch.dependencyBufferAccessModes[index];
+  };
+
+  for (size_t dispatchIndex = 0u; dispatchIndex < dispatches.size();
+       ++dispatchIndex) {
+    const ComputeDispatchItem &dispatch = dispatches[dispatchIndex];
     if (!impl.computePipelines.isValid(dispatch.pipeline)) {
       return Result<bool, std::string>::makeError(
           std::string(context) + ": invalid compute pipeline handle");
@@ -4294,6 +4305,67 @@ recordComputeDispatches(Impl &impl, nvrhi::ICommandList &commandList,
         return dependencyTextureResult;
       }
       commandList.commitBarriers();
+    }
+
+    for (size_t i = 0u; i < dispatch.dependencyBuffers.size(); ++i) {
+      const BufferHandle handle = dispatch.dependencyBuffers[i];
+      if (!nuri::isValid(handle)) {
+        continue;
+      }
+
+      bool firstCurrentUse = true;
+      for (size_t priorIndex = 0u; priorIndex < i; ++priorIndex) {
+        if (areSameHandle(dispatch.dependencyBuffers[priorIndex], handle)) {
+          firstCurrentUse = false;
+          break;
+        }
+      }
+      if (!firstCurrentUse) {
+        continue;
+      }
+
+      RenderGraphAccessMode currentMode = dependencyAccessMode(dispatch, i);
+      for (size_t duplicateIndex = i + 1u;
+           duplicateIndex < dispatch.dependencyBuffers.size();
+           ++duplicateIndex) {
+        if (areSameHandle(dispatch.dependencyBuffers[duplicateIndex], handle)) {
+          currentMode =
+              currentMode | dependencyAccessMode(dispatch, duplicateIndex);
+        }
+      }
+
+      RenderGraphAccessMode previousMode = RenderGraphAccessMode::None;
+      bool foundPreviousUse = false;
+      for (size_t previousDispatchIndex = dispatchIndex;
+           previousDispatchIndex > 0u && !foundPreviousUse;
+           --previousDispatchIndex) {
+        const ComputeDispatchItem &previousDispatch =
+            dispatches[previousDispatchIndex - 1u];
+        for (size_t previousBufferIndex = 0u;
+             previousBufferIndex < previousDispatch.dependencyBuffers.size();
+             ++previousBufferIndex) {
+          if (!areSameHandle(
+                  previousDispatch.dependencyBuffers[previousBufferIndex],
+                  handle)) {
+            continue;
+          }
+          previousMode =
+              previousMode |
+              dependencyAccessMode(previousDispatch, previousBufferIndex);
+          foundPreviousUse = true;
+        }
+      }
+      if (!foundPreviousUse ||
+          (!hasAccessFlag(previousMode, RenderGraphAccessMode::Write) &&
+           !hasAccessFlag(currentMode, RenderGraphAccessMode::Write))) {
+        continue;
+      }
+      BufferResource *buffer = impl.buffers.get(handle);
+      if (buffer == nullptr || !buffer->buffer) {
+        return Result<bool, std::string>::makeError(
+            std::string(context) + ": invalid dependency buffer");
+      }
+      nvrhi::utils::BufferUavBarrier(&commandList, buffer->buffer.Get());
     }
 
     nvrhi::ComputeState state{};

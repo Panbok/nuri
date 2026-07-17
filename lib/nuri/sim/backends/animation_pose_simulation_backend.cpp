@@ -1616,6 +1616,20 @@ AnimationPoseSimulationBackend::prepareSceneFrame(SceneRuntimeHost &host,
     glm::mat4 rootTransform(1.0f);
     (void)scene.graph().getCachedNodeWorldTransform(instance.rootNode,
                                                     rootTransform);
+    const size_t mappedNodeCount = std::min(
+        instance.prefab.nodes.size(), instance.instantiationMap.nodes.size());
+    for (size_t nodeIndex = 0u; nodeIndex < mappedNodeCount; ++nodeIndex) {
+      const ScenePrefabNode &prefabNode = instance.prefab.nodes[nodeIndex];
+      if (instance.instantiationMap.nodes[nodeIndex] != instance.rootNode ||
+          prefabNode.parentIndex != kInvalidScenePrefabIndex) {
+        continue;
+      }
+      const float determinant = glm::determinant(prefabNode.localFromParent);
+      if (std::abs(determinant) > std::numeric_limits<float>::epsilon()) {
+        rootTransform *= glm::inverse(prefabNode.localFromParent);
+      }
+      break;
+    }
     const uint64_t worldMatricesAddress =
         services_->gpu().getBufferDeviceAddress(
             instance.worldMatricesBuffer->handle());

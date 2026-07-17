@@ -126,6 +126,59 @@ TEST(GeometryPoolTests, ReleasedRangesWaitForCapturedGpuCompletionBeforeReuse) {
   EXPECT_EQ(afterCompletionView.indexByteOffset, firstView.indexByteOffset);
 }
 
+TEST(GeometryPoolTests, ReleasedAdoptedBuffersAreNeverUsedForMutableUploads) {
+  FakeExecutorGPUDevice gpu;
+  GeometryPoolConfig config = makeConfig();
+  config.compactionCooldownFrames = 1000u;
+  GeometryPool pool(gpu, config);
+  uint64_t frameIndex = 1u;
+
+  const std::vector<std::byte> vertices = makeBytes(0x10u, 16u);
+  const std::vector<std::byte> indices = makeBytes(0x20u, 8u);
+  auto vertexBuffer = gpu.createBuffer(
+      nuri::BufferDesc{
+          .usage = nuri::BufferUsage::Storage | nuri::BufferUsage::Vertex,
+          .storage = nuri::Storage::Device,
+          .size = vertices.size(),
+          .data = vertices,
+          .immutable = true,
+      },
+      "prepared_vertices");
+  ASSERT_FALSE(vertexBuffer.hasError()) << vertexBuffer.error();
+  auto indexBuffer = gpu.createBuffer(
+      nuri::BufferDesc{
+          .usage = nuri::BufferUsage::Index,
+          .storage = nuri::Storage::Device,
+          .size = indices.size(),
+          .data = indices,
+          .immutable = true,
+      },
+      "prepared_indices");
+  ASSERT_FALSE(indexBuffer.hasError()) << indexBuffer.error();
+
+  advanceFrame(gpu, pool, frameIndex);
+  auto adopted =
+      pool.adoptPrepared(vertexBuffer.value(), vertices.size(), 2u,
+                         indexBuffer.value(), indices.size(), 3u, "prepared");
+  ASSERT_FALSE(adopted.hasError()) << adopted.error();
+  pool.release(adopted.value());
+
+  advanceFrame(gpu, pool, ++frameIndex);
+  advanceFrame(gpu, pool, ++frameIndex);
+  advanceFrame(gpu, pool, ++frameIndex);
+
+  auto generated = pool.allocate(vertices, 2u, indices, 3u, "generated");
+  ASSERT_FALSE(generated.hasError()) << generated.error();
+  GeometryAllocationView generatedView{};
+  ASSERT_TRUE(pool.resolve(generated.value(), generatedView));
+  EXPECT_FALSE(sameHandle(generatedView.vertexBuffer, vertexBuffer.value()));
+  EXPECT_FALSE(sameHandle(generatedView.indexBuffer, indexBuffer.value()));
+
+  advanceFramesUntil(gpu, pool, frameIndex, 8u,
+                     [&gpu] { return gpu.destroyedBufferCount >= 2u; });
+  EXPECT_EQ(gpu.destroyedBufferCount, 2u);
+}
+
 TEST(GeometryPoolTests, AllocationsCreatedDuringCompactionRemainValid) {
   FakeExecutorGPUDevice gpu;
   GeometryPool pool(gpu, makeConfig());

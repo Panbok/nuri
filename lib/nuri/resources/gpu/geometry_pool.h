@@ -74,6 +74,7 @@ private:
     size_t freeBytes = 0;
     uint64_t retireFrame = 0;
     ChunkRole role = ChunkRole::Dead;
+    bool mutableSuballocations = true;
     std::pmr::vector<Block> freeBlocks;
 
     explicit Chunk(std::pmr::memory_resource *memory)
@@ -85,6 +86,7 @@ private:
       freeBytes = 0;
       retireFrame = 0;
       role = ChunkRole::Dead;
+      mutableSuballocations = true;
       freeBlocks.clear();
     }
   };

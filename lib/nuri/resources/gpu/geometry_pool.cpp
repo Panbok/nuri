@@ -97,7 +97,8 @@ Result<GeometryPool::SubAllocation, std::string> GeometryPool::allocateFromPool(
   const auto tryAllocateInChunk =
       [sizeBytes, alignment](
           Chunk &chunk, ChunkHandle handle) -> std::optional<SubAllocation> {
-    if (chunk.role != ChunkRole::ActiveAllocatable) {
+    if (chunk.role != ChunkRole::ActiveAllocatable ||
+        !chunk.mutableSuballocations) {
       return std::nullopt;
     }
 
@@ -148,7 +149,8 @@ Result<GeometryPool::SubAllocation, std::string> GeometryPool::allocateFromPool(
 
   for (uint32_t chunkIndex = 0; chunkIndex < chunks.size(); ++chunkIndex) {
     Chunk &chunk = chunks[chunkIndex];
-    if (chunk.role != ChunkRole::ActiveAllocatable) {
+    if (chunk.role != ChunkRole::ActiveAllocatable ||
+        !chunk.mutableSuballocations) {
       continue;
     }
     const ChunkHandle handle{
@@ -187,6 +189,15 @@ void GeometryPool::freeInPool(
     const SubAllocation &allocation) {
   Chunk *chunk = findChunk(chunks, chunkSlots, allocation.chunk);
   if (chunk == nullptr || allocation.size == 0u) {
+    return;
+  }
+  if (!chunk->mutableSuballocations) {
+    chunk->freeBlocks.clear();
+    chunk->freeBytes = chunk->sizeBytes;
+    if (chunk->role == ChunkRole::ActiveAllocatable) {
+      chunk->role = ChunkRole::Retired;
+      chunk->retireFrame = currentFrameIndex_;
+    }
     return;
   }
   if (chunk->role != ChunkRole::ActiveAllocatable &&
@@ -329,7 +340,13 @@ void GeometryPool::restoreFrozenChunks(
   for (ChunkHandle handle : handles) {
     Chunk *chunk = findChunk(chunks, chunkSlots, handle);
     if (chunk != nullptr && chunk->role == ChunkRole::FrozenSource) {
-      chunk->role = ChunkRole::ActiveAllocatable;
+      if (!chunk->mutableSuballocations &&
+          chunk->freeBytes == chunk->sizeBytes) {
+        chunk->role = ChunkRole::Retired;
+        chunk->retireFrame = currentFrameIndex_;
+      } else {
+        chunk->role = ChunkRole::ActiveAllocatable;
+      }
     }
   }
 }
@@ -1116,6 +1133,7 @@ GeometryPool::adoptPrepared(BufferHandle vertexBuffer, size_t vertexBytes,
     chunk.freeBytes = 0u;
     chunk.retireFrame = 0u;
     chunk.role = ChunkRole::ActiveAllocatable;
+    chunk.mutableSuballocations = false;
     chunk.freeBlocks.clear();
     return ChunkHandle{.index = slot.index, .generation = slot.generation};
   };
