@@ -1,14 +1,9 @@
 #pragma once
-
-#include <glm/glm.hpp>
-
 #include <cmath>
+#include <glm/glm.hpp>
 #include <limits>
-
 namespace nuri {
 
-// Canonical temporal-motion convention used by every color/AO consumer:
-// historyUv = currentUv + velocityUv. Matrices must be unjittered.
 struct TemporalMotionEndpoint {
   glm::vec2 currentUv{0.0f};
   glm::vec2 previousUv{0.0f};
@@ -36,7 +31,6 @@ temporalScreenUvFromClipNdc(glm::vec2 ndc) noexcept {
       std::abs(previousClip.w) <= kMinimumClipW) {
     return {};
   }
-
   const glm::vec2 currentUv =
       temporalScreenUvFromClipNdc(glm::vec2(currentClip) / currentClip.w);
   const glm::vec2 previousUv =

@@ -1,12 +1,11 @@
 #pragma once
-
 #include "nuri/core/result.h"
 #include "nuri/defines.h"
 #include "nuri/resources/gpu/resource_handles.h"
 #include "nuri/scene/light.h"
 #include "nuri/scene/scene_graph.h"
-
 #include <cstdint>
+#include <glm/glm.hpp>
 #include <limits>
 #include <memory>
 #include <memory_resource>
@@ -15,9 +14,6 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
-
-#include <glm/glm.hpp>
-
 namespace nuri {
 class ResourceManager;
 
@@ -38,47 +34,33 @@ struct NURI_API EnvironmentHandles {
   TextureRef prefilteredGgx = kInvalidTextureRef;
   TextureRef prefilteredCharlie = kInvalidTextureRef;
   TextureRef brdfLut = kInvalidTextureRef;
+  constexpr bool operator==(const EnvironmentHandles &) const = default;
 };
 
 class NURI_API RenderScene {
 public:
-  // RenderScene owns the committed renderer-facing caches derived from the
-  // authored SceneGraph plus scene-global environment bindings.
   explicit RenderScene(
       std::pmr::memory_resource *memory = std::pmr::get_default_resource());
   ~RenderScene();
-
   RenderScene(const RenderScene &) = delete;
   RenderScene &operator=(const RenderScene &) = delete;
   RenderScene(RenderScene &&) = delete;
   RenderScene &operator=(RenderScene &&) = delete;
-
   [[nodiscard]] SceneGraph &graph() noexcept { return sceneGraph_; }
   [[nodiscard]] const SceneGraph &graph() const noexcept { return sceneGraph_; }
-
-  // commit() returns true when derived renderer-facing caches changed and false
-  // when the authored scene state was already up to date.
   [[nodiscard]] Result<bool, std::string> commit();
-  // Incrementally prepares the derived caches of an inactive, freshly built
-  // scene. Returns true once the scene is ready to activate. The scene must not
-  // be rendered or mutated while this operation is in progress.
   [[nodiscard]] Result<bool, std::string>
   commitInactiveStep(uint32_t maxOperations);
-  // Releases resource ownership from a retired, non-rendered scene in bounded
-  // slices. Returns true when no renderer resource references remain.
   [[nodiscard]] bool retireInactiveStep(uint32_t maxOperations) noexcept;
-
   [[nodiscard]] const Renderable *renderable(uint32_t index) const;
   [[nodiscard]] std::optional<uint32_t>
   findRenderableIndex(RenderableId id) const;
   [[nodiscard]] std::span<const Renderable> renderables() const {
     return renderables_;
   }
-
   template <typename Fn> void forEachLightId(Fn &&fn) const {
     sceneGraph_.forEachLightId(std::forward<Fn>(fn));
   }
-
   [[nodiscard]] uint64_t topologyVersion() const noexcept {
     return topologyVersion_;
   }
@@ -110,12 +92,10 @@ public:
   [[nodiscard]] uint64_t lightTransformVersion() const noexcept {
     return lightTransformVersion_;
   }
-
   void bindResources(ResourceManager *resources);
   [[nodiscard]] const ResourceManager *resources() const noexcept {
     return resources_;
   }
-
   void setEnvironment(EnvironmentHandles handles);
   [[nodiscard]] const EnvironmentHandles &environment() const noexcept {
     return environment_;
@@ -128,10 +108,10 @@ private:
   struct IncrementalCommitState;
   static constexpr uint32_t kInvalidIndex =
       std::numeric_limits<uint32_t>::max();
-
   void rebuildFlatRenderables();
   void rebuildPackedDirectionalLights();
   void rebuildPackedLocalLights();
+  bool commitPackedLights();
   void sanitizeGraphRenderableRefs();
   void noteLightTopologyChanged() noexcept;
   void noteLightTransformChanged() noexcept;
@@ -142,7 +122,6 @@ private:
   void retainEnvironment(const EnvironmentHandles &handles);
   void releaseEnvironment(const EnvironmentHandles &handles);
   void discardIncrementalCommit() noexcept;
-
   std::pmr::memory_resource *memory_ = std::pmr::get_default_resource();
   SceneGraph sceneGraph_;
   std::pmr::vector<Renderable> renderables_;

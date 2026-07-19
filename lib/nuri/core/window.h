@@ -1,9 +1,9 @@
 #pragma once
-
 #include "nuri/core/event_manager.h"
 #include "nuri/defines.h"
-#include "nuri/pch.h"
-
+#include <cstdint>
+#include <memory>
+#include <string_view>
 namespace nuri {
 
 enum class WindowMode : uint8_t {
@@ -25,12 +25,10 @@ public:
                                         int32_t height,
                                         WindowMode mode = WindowMode::Windowed);
   virtual ~Window() = default;
-
   Window(const Window &) = delete;
   Window &operator=(const Window &) = delete;
   Window(Window &&) = delete;
   Window &operator=(Window &&) = delete;
-
   virtual void pollEvents() = 0;
   virtual bool shouldClose() const = 0;
   virtual void getWindowSize(int32_t &outWidth, int32_t &outHeight) const = 0;
@@ -41,12 +39,6 @@ public:
   virtual void requestClose() = 0;
   virtual void setCursorMode(CursorMode mode) = 0;
   [[nodiscard]] virtual CursorMode getCursorMode() const = 0;
-
-  /** Binds an event manager to receive window events.
-   * @param events Non-owning pointer to the event manager; must outlive this
-   * window.
-   * Pass nullptr to unbind.
-   */
   virtual void bindEventManager(EventManager *events) = 0;
 
 protected:

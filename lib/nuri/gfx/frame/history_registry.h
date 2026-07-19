@@ -1,11 +1,8 @@
 #pragma once
-
 #include "nuri/core/result.h"
 #include "nuri/defines.h"
-
 #include <cstdint>
 #include <string>
-
 namespace nuri {
 
 enum class HistoryInvalidationReason : uint8_t {
@@ -32,7 +29,6 @@ public:
   void abandonFrame(uint64_t frameIndex) noexcept;
   void invalidate(HistoryInvalidationReason reason) noexcept;
   void reset() noexcept;
-
   [[nodiscard]] const HistoryLease &lease() const noexcept { return lease_; }
   [[nodiscard]] uint64_t committedFrameIndex() const noexcept {
     return committedFrameIndex_;

@@ -20,20 +20,14 @@ set(NURI_RENDERER_SOURCES
   nuri/gfx/frame/history_registry.cpp
   nuri/gfx/renderers/debug_renderer.cpp
   nuri/gfx/renderers/opaque_renderer.cpp
+  nuri/gfx/renderers/scene_draw_database.cpp
   nuri/gfx/renderers/shadow_renderer.cpp
   nuri/gfx/pipeline/features/composite_feature.cpp
-  nuri/gfx/pipeline/features/debug_feature.cpp
   nuri/gfx/pipeline/features/gtao_feature.cpp
-  nuri/gfx/pipeline/features/msaa_resolve_feature.cpp
-  nuri/gfx/pipeline/features/opaque_feature.cpp
-  nuri/gfx/pipeline/features/shadow_feature.cpp
   nuri/gfx/pipeline/features/spatial_aa_feature.cpp
   nuri/gfx/pipeline/features/skybox_feature.cpp
   nuri/gfx/pipeline/features/temporal_aa_feature.cpp
   nuri/gfx/pipeline/features/reference_taa_feature.cpp
-  nuri/gfx/pipeline/features/text_feature.cpp
-  nuri/gfx/pipeline/features/transmission_feature.cpp
-  nuri/gfx/pipeline/features/transparent_feature.cpp
   nuri/gfx/pipeline/default_render_pipeline.cpp
   nuri/gfx/pipeline/render_pipeline.cpp
   nuri/gfx/pipeline/providers/frame_composition_provider.cpp
@@ -50,7 +44,6 @@ set(NURI_RENDERER_SOURCES
   nuri/gfx/visibility/visibility.cpp
   nuri/gfx/renderer.cpp
   nuri/gfx/shader.cpp
-  nuri/platform/gpu_device_factory.cpp
   nuri/platform/glfw_window.cpp
   nuri/platform/stdio_log.cpp
   nuri/resources/gpu/geometry_pool.cpp
@@ -63,23 +56,21 @@ set(NURI_RENDERER_SOURCES
   nuri/resources/async/asset_system.cpp
   nuri/resources/detail/gltf_buffer_utils.cpp
   nuri/resources/detail/gltf_json_utils.cpp
-  nuri/resources/gltf_scene_importer.cpp
   nuri/resources/mesh_importer_assimp.cpp
   nuri/resources/scene_importer.cpp
-  nuri/resources/stb_image.cpp
-  nuri/resources/stb_image_resize.cpp
-  nuri/resources/storage/font/nfont_binary_codec.cpp
-  nuri/resources/storage/material/material_binary_codec.cpp
-  nuri/resources/storage/material/material_binary_schema_codec.cpp
+    nuri/resources/stb_image.cpp
+    nuri/resources/stb_image_resize.cpp
+    nuri/resources/storage/cache_utils.cpp
+    nuri/resources/storage/font/nfont_binary_codec.cpp
   nuri/resources/storage/material/material_binary_serializer.cpp
   nuri/resources/storage/material/material_cache_utils.cpp
-  nuri/resources/storage/mesh/mesh_binary_codec.cpp
   nuri/resources/storage/mesh/mesh_binary_serializer.cpp
   nuri/resources/storage/mesh/mesh_cache_utils.cpp
   nuri/resources/storage/mesh/mesh_cache_writer.cpp
   nuri/resources/storage/texture/dds_texture_pack.cpp
-  nuri/resources/storage/texture/texture_artifact_builder.cpp
-  nuri/resources/storage/texture/texture_cache_utils.cpp
+    nuri/resources/storage/texture/texture_artifact_builder.cpp
+    nuri/resources/storage/texture/texture_cache_utils.cpp
+    nuri/resources/storage/texture/texture_processing.cpp
   nuri/scene_runtime/scene_runtime_bindings.cpp
   nuri/scene_runtime/scene_runtime_host.cpp
   nuri/scene/camera.cpp
@@ -91,8 +82,6 @@ set(NURI_RENDERER_SOURCES
   nuri/sim/fixed_step_clock.cpp
   nuri/sim/animation_pose_simulation.cpp
   nuri/sim/backends/animation_pose_simulation_backend.cpp
-  nuri/sim/backends/null_simulation_backend.cpp
-  nuri/sim/simulation_controller.cpp
   nuri/sim/simulation_registry.cpp
   nuri/sim/simulation_scheduler.cpp
   nuri/text/detail/font_manager.cpp
@@ -100,10 +89,7 @@ set(NURI_RENDERER_SOURCES
   nuri/text/detail/text_renderer.cpp
   nuri/text/detail/text_shaper.cpp
   nuri/text/detail/text_system.cpp
-  nuri/math/utils.cpp
   nuri/utils/env_utils.cpp
-  nuri/utils/fsp_counter.cpp
-  nuri/utils/utils.cpp
 )
 
 add_library(nuri_renderer ${NURI_LIBRARY_TYPE}

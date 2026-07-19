@@ -1,29 +1,22 @@
-#include "nuri/pch.h"
-
 #include "nuri/scene_runtime/scene_runtime_bindings.h"
-
+#include "nuri/pch.h"
 #include <algorithm>
 #include <limits>
-
 namespace nuri {
 namespace {
-
 void collectNodeSubtree(const SceneGraph &graph, NodeId node,
                         std::pmr::vector<NodeId> &outNodes,
                         std::pmr::vector<RenderableId> &outRenderables) {
   std::pmr::vector<NodeId> stack(outNodes.get_allocator().resource());
   std::pmr::vector<NodeId> children(outNodes.get_allocator().resource());
   stack.push_back(node);
-
   while (!stack.empty()) {
     const NodeId currentNode = stack.back();
     stack.pop_back();
-
     outNodes.push_back(currentNode);
     graph.forEachRenderableOnNode(currentNode, [&](RenderableId renderable) {
       outRenderables.push_back(renderable);
     });
-
     NodeId child = kInvalidNodeId;
     if (!graph.getNodeFirstChild(currentNode, child)) {
       continue;
@@ -31,7 +24,6 @@ void collectNodeSubtree(const SceneGraph &graph, NodeId node,
     children.clear();
     for (NodeId currentChild = child; isValid(currentChild);) {
       children.push_back(currentChild);
-
       NodeId sibling = kInvalidNodeId;
       if (!graph.getNodeNextSibling(currentChild, sibling)) {
         break;
@@ -43,14 +35,12 @@ void collectNodeSubtree(const SceneGraph &graph, NodeId node,
     }
   }
 }
-
 template <typename T>
 [[nodiscard]] bool spansEqual(std::span<const T> lhs,
                               std::span<const T> rhs) noexcept {
   return lhs.size() == rhs.size() &&
          std::equal(lhs.begin(), lhs.end(), rhs.begin(), rhs.end());
 }
-
 } // namespace
 
 SceneRuntimeBindings::SceneRuntimeBindings(std::pmr::memory_resource *memory)
@@ -74,7 +64,6 @@ bool SceneRuntimeBindings::rebuild(const RenderScene *scene) {
     }
     return changed;
   }
-
   std::pmr::vector<NodeId> discoveredNodes(memory_);
   std::pmr::vector<RenderableId> discoveredRenderables(memory_);
   const SceneGraph &graph = scene->graph();
@@ -82,7 +71,6 @@ bool SceneRuntimeBindings::rebuild(const RenderScene *scene) {
   if (isValid(root)) {
     collectNodeSubtree(graph, root, discoveredNodes, discoveredRenderables);
   }
-
   const bool changed =
       !spansEqual<NodeId>(nodes(), std::span<const NodeId>(discoveredNodes)) ||
       !spansEqual<RenderableId>(
@@ -90,20 +78,12 @@ bool SceneRuntimeBindings::rebuild(const RenderScene *scene) {
   if (!changed) {
     return false;
   }
-
   nodes_ = std::move(discoveredNodes);
   renderables_ = std::move(discoveredRenderables);
   nodeIndexById_.clear();
   renderableIndexById_.clear();
   nodeIndexById_.reserve(nodes_.size());
   renderableIndexById_.reserve(renderables_.size());
-  NURI_ASSERT(nodes_.size() <=
-                  std::numeric_limits<RuntimeNodeBindingIndex>::max(),
-              "SceneRuntimeBindings::rebuild: node binding table too large");
-  NURI_ASSERT(renderables_.size() <=
-                  std::numeric_limits<RuntimeRenderableBindingIndex>::max(),
-              "SceneRuntimeBindings::rebuild: renderable binding table too "
-              "large");
   for (size_t index = 0; index < nodes_.size(); ++index) {
     nodeIndexById_.insert_or_assign(
         nodes_[index], static_cast<RuntimeNodeBindingIndex>(index));

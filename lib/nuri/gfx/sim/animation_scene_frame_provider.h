@@ -1,17 +1,14 @@
 #pragma once
-
 #include "nuri/core/result.h"
 #include "nuri/defines.h"
-#include "nuri/gfx/pipeline/frame_data_provider.h"
-
+#include "nuri/gfx/pipeline/render_pipeline.h"
 #include <string>
 #include <string_view>
-
 namespace nuri {
 
 class SceneRuntimeHost;
 
-class NURI_API AnimationSceneFrameProvider final : public FrameDataProvider {
+class NURI_API AnimationSceneFrameProvider final {
 public:
   explicit AnimationSceneFrameProvider(SceneRuntimeHost &runtime)
       : runtime_(&runtime) {}
@@ -21,13 +18,9 @@ public:
   AnimationSceneFrameProvider(AnimationSceneFrameProvider &&) = delete;
   AnimationSceneFrameProvider &
   operator=(AnimationSceneFrameProvider &&) = delete;
-
-  [[nodiscard]] std::string_view name() const noexcept override {
-    return "AnimationSceneFrameProvider";
-  }
-  Result<bool, std::string> prepare(FrameBuildContext &ctx) override;
-  void onFrameSubmitted(const RenderFrameContext &frame) noexcept override;
-  void onFrameAbandoned(const RenderFrameContext &frame) noexcept override;
+  Result<bool, std::string> prepare(FrameBuildContext &ctx);
+  void onFrameSubmitted(const RenderFrameContext &frame) noexcept;
+  void onFrameAbandoned(const RenderFrameContext &frame) noexcept;
   void bindRuntime(SceneRuntimeHost &runtime) noexcept { runtime_ = &runtime; }
 
 private:

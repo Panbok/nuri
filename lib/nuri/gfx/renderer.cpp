@@ -1,38 +1,23 @@
-#include "nuri/pch.h"
-
 #include "nuri/gfx/renderer.h"
-
 #include "nuri/core/log.h"
 #include "nuri/core/profiling.h"
 #include "nuri/gfx/frame/temporal_frame_service.h"
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/gfx/render_graph/render_graph_telemetry.h"
+#include "nuri/pch.h"
 #include "nuri/utils/env_utils.h"
-
 namespace nuri {
 
 namespace {
-
 [[nodiscard]] bool resolveSuppressInferredSideEffectsFlag() {
   const std::optional<std::string> env =
       readEnvVar("NURI_RENDER_GRAPH_SUPPRESS_INFERRED_SIDE_EFFECTS");
   if (!env.has_value()) {
     return false;
   }
-
   const std::string &value = *env;
   return value == "1" || value == "true" || value == "TRUE";
 }
-
-[[nodiscard]] uint64_t estimateCompletedFrameIndex(const GPUDevice &gpu,
-                                                   uint64_t frameIndex) {
-  const uint64_t lag = std::max<uint64_t>(1u, gpu.getSwapchainImageCount());
-  if (frameIndex <= lag) {
-    return 0u;
-  }
-  return frameIndex - lag;
-}
-
 } // namespace
 
 Renderer::Renderer(GPUDevice &gpu, std::pmr::memory_resource &memory)
@@ -119,7 +104,6 @@ Result<bool, std::string> Renderer::render(RenderPipeline &pipeline,
       .rejectedJobs = cpuStats.rejectedJobs,
   };
   frameContext.gpuTiming = gpu_.getLatestCompletedGpuTimingReport();
-
   renderGraphBeginFrame(frameContext.frameIndex);
   auto pipelineResult =
       pipeline.buildRenderGraph(frameContext, resources_, renderGraphBuilder_);
@@ -140,8 +124,6 @@ Result<bool, std::string> Renderer::render(RenderPipeline &pipeline,
       pipeline.onFrameSubmitted(frameContext);
       const bool committed = frameContext.temporalFrameService->commitFrame(
           frameContext.frameIndex);
-      NURI_ASSERT(committed,
-                  "Temporal frame commit did not match submitted frame");
     }
   } else if (submitResult.hasError()) {
     pipeline.onFrameAbandoned(frameContext);
@@ -167,7 +149,6 @@ Result<bool, std::string> Renderer::beginFrameSequence(uint64_t frameIndex,
       Result<AssetPublicationStats, std::string>::makeResult({});
   {
     NURI_PROFILER_ZONE("Renderer.begin_frame", NURI_PROFILER_COLOR_CMD_COPY);
-    resources_.beginFrame(frameIndex);
     assetResult = assets_.prepareFrame(AssetPublicationContext{
         .scene = scene,
     });
@@ -197,7 +178,7 @@ Result<bool, std::string> Renderer::endFrameSequence(uint64_t frameIndex) {
   }
   {
     NURI_PROFILER_ZONE("Renderer.resource_gc", NURI_PROFILER_COLOR_DESTROY);
-    resources_.collectGarbage(estimateCompletedFrameIndex(gpu_, frameIndex));
+    resources_.collectGarbage();
     NURI_PROFILER_ZONE_END();
   }
   return submitResult;
@@ -206,10 +187,8 @@ Result<bool, std::string> Renderer::endFrameSequence(uint64_t frameIndex) {
 Result<bool, std::string>
 Renderer::compileAndExecuteRenderGraph(uint64_t frameIndex) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_SUBMIT);
-
   const RenderGraphBuilder::GraphFingerprint fingerprint =
       renderGraphBuilder_.computeGraphFingerprint();
-
   if (cachedCompileResult_.has_value() && fingerprint == cachedFingerprint_) {
     NURI_PROFILER_ZONE("Renderer.render_graph_compile_cache_hit",
                        NURI_PROFILER_COLOR_BARRIER);
@@ -235,7 +214,6 @@ Renderer::compileAndExecuteRenderGraph(uint64_t frameIndex) {
       return Result<bool, std::string>::makeError(std::move(compileError));
     }
   }
-
   const RenderGraphTelemetryLevel telemetryLevel =
       renderGraphTelemetry_.requestedCaptureLevel();
   const auto executeResult =

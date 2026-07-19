@@ -1,16 +1,12 @@
 #pragma once
-
 #include "nuri/core/result.h"
 #include "nuri/defines.h"
 #include "nuri/resources/cpu/material_data.h"
-#include "nuri/resources/gpu/material.h"
-
 #include <array>
 #include <cstdint>
 #include <span>
 #include <string>
 #include <vector>
-
 namespace nuri {
 
 struct SceneMaterialTextureCacheRecord {
@@ -46,7 +42,6 @@ struct MaterialBinaryDeserializeContext {
 struct MaterialBinaryDeserializeError {
   std::string message{};
   bool stale = false;
-
   [[nodiscard]] bool isStale() const noexcept { return stale; }
 };
 

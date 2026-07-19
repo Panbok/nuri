@@ -1,18 +1,13 @@
-#include "nuri/pch.h"
-
 #include "nuri/gfx/frame/external_temporal_provider.h"
-
+#include "nuri/pch.h"
 namespace nuri {
 namespace {
-
 #ifndef NURI_WITH_FSR31
 #define NURI_WITH_FSR31 0
 #endif
-
 #ifndef NURI_FSR31_DEPENDENCY_PRESENT
 #define NURI_FSR31_DEPENDENCY_PRESENT 0
 #endif
-
 class FidelityFxExternalTemporalProvider final
     : public ExternalTemporalProvider {
 public:
@@ -21,22 +16,18 @@ public:
       : desc_(desc) {
     refreshProbe();
   }
-
   ~FidelityFxExternalTemporalProvider() override {
     if (desc_.backend != nullptr) {
       desc_.backend->reset();
     }
   }
-
   [[nodiscard]] ExternalTemporalProviderProbe probe() const noexcept override {
     return probe_;
   }
-
   [[nodiscard]] ExternalTemporalProviderCapabilities
   capabilities() const noexcept override {
     return fidelityFxFsr31Capabilities(probe_);
   }
-
   [[nodiscard]] Result<ExternalTemporalProviderFramePlan, std::string>
   prepareFrame(
       const ExternalTemporalProviderPrepareDesc &prepareDesc) override {
@@ -80,7 +71,6 @@ public:
         .configurationEpoch = prepareDesc.configurationEpoch,
     });
   }
-
   [[nodiscard]] Result<TextureHandle, std::string>
   execute(RecordingContextHandle recordingContext,
           const ExternalTemporalProviderExecuteDesc &executeDesc) override {
@@ -117,7 +107,6 @@ private:
         .reportedProviderVersion = backend.reportedProviderVersion,
     });
   }
-
   void refreshProbe(const ExternalTemporalProviderBackendFramePlan &plan) {
     ExternalTemporalProviderBackendProbe backend{};
     if (desc_.backend != nullptr) {
@@ -131,15 +120,12 @@ private:
         .reportedProviderVersion = plan.reportedProviderVersion,
     });
   }
-
   ExternalTemporalProviderCreateDesc desc_{};
   ExternalTemporalProviderProbe probe_{};
 };
-
 [[nodiscard]] bool finitePositive(float value) noexcept {
   return std::isfinite(value) && value > 0.0f;
 }
-
 } // namespace
 
 ExternalTemporalProviderProbe

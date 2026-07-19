@@ -1,8 +1,6 @@
 #pragma once
-
 #include "nuri/gfx/frame/external_temporal_provider.h"
 #include "nuri/gfx/gpu_types.h"
-
 #include <array>
 #include <cstddef>
 #include <limits>
@@ -10,7 +8,6 @@
 #include <string>
 #include <string_view>
 #include <vector>
-
 namespace nuri {
 
 enum class RenderGraphAccessMode : uint8_t {
@@ -30,8 +27,6 @@ operator|(RenderGraphAccessMode lhs, RenderGraphAccessMode rhs) {
   return (static_cast<uint8_t>(mode) & static_cast<uint8_t>(flag)) != 0u;
 }
 
-// Buffer dependency spans are capped to keep graph payloads bounded. The device
-// consumes these as state-transition spans.
 constexpr size_t kMaxDependencyResources = 32;
 constexpr size_t kMaxDependencyBuffers = kMaxDependencyResources;
 constexpr size_t kMaxMeshDispatchDependencyResources = 4096;
@@ -86,9 +81,6 @@ struct ComputeDispatchItem {
   DispatchSize dispatch{};
   std::span<const std::byte> pushConstants{};
   std::span<const BufferHandle> dependencyBuffers{};
-  // Empty preserves the conservative legacy behavior: every dependency is
-  // treated as read/write. Otherwise this span is parallel to
-  // dependencyBuffers and states the exact graph access for each slot.
   std::span<const RenderGraphAccessMode> dependencyBufferAccessModes{};
   std::span<const TextureHandle> dependencyTextures{};
   std::string_view debugLabel{};
@@ -202,8 +194,6 @@ struct GpuTimingReport {
   uint64_t temporalAACopyBackSourceFrameIndex =
       std::numeric_limits<uint64_t>::max();
   uint64_t gtaoTemporalSourceFrameIndex = std::numeric_limits<uint64_t>::max();
-  // Remains unavailable unless a backend brackets the complete frame's queue
-  // work, including every submission, rather than summing pass timers.
   uint64_t wholeFrameSourceFrameIndex = std::numeric_limits<uint64_t>::max();
   float shadowTimeMs = 0.0f;
   float shadowDepthTimeMs = 0.0f;
@@ -224,13 +214,11 @@ struct GpuTimingReport {
   float gtaoTemporalTimeMs = 0.0f;
   float wholeFrameTimeMs = 0.0f;
   uint32_t availableScopeMask = 0u;
-
   struct PassTiming {
     std::string debugName{};
     uint64_t sourceFrameIndex = std::numeric_limits<uint64_t>::max();
     float timeMs = 0.0f;
   };
-
   std::vector<PassTiming> passTimings{};
 };
 
@@ -359,34 +347,12 @@ enum class GraphicsBarrierResourceKind : uint8_t {
   Buffer = 1,
 };
 
-enum class GraphicsBarrierAccessMode : uint8_t {
-  None = 0,
-  Read = 1u << 0u,
-  Write = 1u << 1u,
-};
-
-[[nodiscard]] constexpr GraphicsBarrierAccessMode
-operator|(GraphicsBarrierAccessMode lhs, GraphicsBarrierAccessMode rhs) {
-  return static_cast<GraphicsBarrierAccessMode>(static_cast<uint8_t>(lhs) |
-                                                static_cast<uint8_t>(rhs));
-}
-
-[[nodiscard]] constexpr GraphicsBarrierAccessMode
-operator&(GraphicsBarrierAccessMode lhs, GraphicsBarrierAccessMode rhs) {
-  return static_cast<GraphicsBarrierAccessMode>(static_cast<uint8_t>(lhs) &
-                                                static_cast<uint8_t>(rhs));
-}
-
-constexpr GraphicsBarrierAccessMode &operator|=(GraphicsBarrierAccessMode &lhs,
-                                                GraphicsBarrierAccessMode rhs) {
-  lhs = lhs | rhs;
-  return lhs;
-}
+using GraphicsBarrierAccessMode = RenderGraphAccessMode;
 
 [[nodiscard]] constexpr bool
 hasGraphicsBarrierAccessFlag(GraphicsBarrierAccessMode mode,
                              GraphicsBarrierAccessMode flag) {
-  return (static_cast<uint8_t>(mode) & static_cast<uint8_t>(flag)) != 0u;
+  return hasAccessFlag(mode, flag);
 }
 
 enum class GraphicsBarrierState : uint8_t {
@@ -399,7 +365,6 @@ enum class GraphicsBarrierState : uint8_t {
 
 union GraphicsBarrierResourceStorage {
   constexpr GraphicsBarrierResourceStorage() noexcept : texture{} {}
-
   TextureHandle texture;
   BufferHandle buffer;
 };
@@ -412,7 +377,6 @@ struct GraphicsBarrierRecord {
   GraphicsBarrierAccessMode afterAccess = GraphicsBarrierAccessMode::None;
   GraphicsBarrierState beforeState = GraphicsBarrierState::Unknown;
   GraphicsBarrierState afterState = GraphicsBarrierState::Unknown;
-
   [[nodiscard]] static constexpr GraphicsBarrierRecord ForTexture(
       TextureHandle textureHandle,
       GraphicsBarrierAccessMode beforeAccessMode =
@@ -430,7 +394,6 @@ struct GraphicsBarrierRecord {
     record.afterState = afterBarrierState;
     return record;
   }
-
   [[nodiscard]] static constexpr GraphicsBarrierRecord ForBuffer(
       BufferHandle bufferHandle,
       GraphicsBarrierAccessMode beforeAccessMode =
@@ -448,25 +411,20 @@ struct GraphicsBarrierRecord {
     record.afterState = afterBarrierState;
     return record;
   }
-
   constexpr void setTextureHandle(TextureHandle textureHandle) noexcept {
     resourceKind = GraphicsBarrierResourceKind::Texture;
     resource.texture = textureHandle;
   }
-
   constexpr void setBufferHandle(BufferHandle bufferHandle) noexcept {
     resourceKind = GraphicsBarrierResourceKind::Buffer;
     resource.buffer = bufferHandle;
   }
-
   [[nodiscard]] constexpr bool isTexture() const noexcept {
     return resourceKind == GraphicsBarrierResourceKind::Texture;
   }
-
   [[nodiscard]] constexpr TextureHandle textureHandle() const noexcept {
     return isTexture() ? resource.texture : TextureHandle{};
   }
-
   [[nodiscard]] constexpr BufferHandle bufferHandle() const noexcept {
     return isTexture() ? BufferHandle{} : resource.buffer;
   }
@@ -596,6 +554,11 @@ struct SubmitBatchMeta {
   uint32_t commandBufferOffset = 0u;
   uint32_t commandBufferCount = 0u;
   bool presentsFrameOutput = false;
+};
+
+struct SubmittedGraphicsFrame {
+  SubmissionHandle submission{};
+  std::string presentationError{};
 };
 
 struct RenderFrame {

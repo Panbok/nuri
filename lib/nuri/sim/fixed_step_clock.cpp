@@ -1,10 +1,7 @@
-#include "nuri/pch.h"
-
 #include "nuri/sim/fixed_step_clock.h"
-
+#include "nuri/pch.h"
 #include <algorithm>
 #include <cmath>
-
 namespace nuri {
 
 FixedStepAdvanceResult
@@ -17,14 +14,12 @@ FixedStepClock::advance(double frameDeltaSeconds, double fixedDeltaSeconds,
     result.remainingAccumulatorSeconds = accumulatorSeconds_;
     return result;
   }
-
   accumulatorSeconds_ += frameDeltaSeconds;
   if (maxAccumulatedSeconds > 0.0 &&
       accumulatorSeconds_ > maxAccumulatedSeconds) {
     accumulatorSeconds_ = maxAccumulatedSeconds;
     result.clamped = true;
   }
-
   const uint32_t maxSteps = std::max(1u, maxStepsPerFrame);
   while (accumulatorSeconds_ + 1.0e-12 >= fixedDeltaSeconds &&
          result.stepCount < maxSteps) {
@@ -35,14 +30,12 @@ FixedStepClock::advance(double frameDeltaSeconds, double fixedDeltaSeconds,
   if (accumulatorSeconds_ < 0.0) {
     accumulatorSeconds_ = 0.0;
   }
-
   if (allowFrameDropping && accumulatorSeconds_ >= fixedDeltaSeconds &&
       result.stepCount == maxSteps) {
     const double remainder = std::fmod(accumulatorSeconds_, fixedDeltaSeconds);
     accumulatorSeconds_ = remainder;
     result.clamped = true;
   }
-
   result.remainingAccumulatorSeconds = accumulatorSeconds_;
   return result;
 }

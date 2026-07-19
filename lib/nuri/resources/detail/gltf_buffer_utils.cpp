@@ -1,115 +1,62 @@
-#include "nuri/pch.h"
-
 #include "nuri/resources/detail/gltf_buffer_utils.h"
-
+#include "nuri/pch.h"
 #include "nuri/resources/detail/gltf_json_utils.h"
-#include "nuri/resources/storage/mesh/mesh_cache_utils.h"
-
+#include "nuri/resources/storage/cache_utils.h"
 namespace nuri::detail {
 namespace {
-
 constexpr uint32_t kGlbMagic = 0x46546C67u;
 constexpr uint32_t kGlbChunkTypeBin = 0x004E4942u;
-
 template <typename T> [[nodiscard]] T loadUnaligned(const std::byte *ptr) {
   static_assert(std::is_trivially_copyable_v<T>);
   T value{};
   std::memcpy(&value, ptr, sizeof(T));
   return value;
 }
-
 [[nodiscard]] bool readU32(std::span<const std::byte> bytes, size_t offset,
                            uint32_t &out) {
   if (offset + sizeof(uint32_t) > bytes.size()) {
     return false;
   }
-  const auto *data = reinterpret_cast<const uint8_t *>(
-      bytes.data() + static_cast<ptrdiff_t>(offset));
-  out = static_cast<uint32_t>(data[0]) |
-        (static_cast<uint32_t>(data[1]) << 8u) |
-        (static_cast<uint32_t>(data[2]) << 16u) |
-        (static_cast<uint32_t>(data[3]) << 24u);
+  out = loadUnaligned<uint32_t>(bytes.data() + offset);
   return true;
 }
-
 [[nodiscard]] uint32_t gltfComponentTypeSize(uint32_t componentType) {
-  switch (componentType) {
-  case 5120:
-  case 5121:
-    return 1u;
-  case 5122:
-  case 5123:
-    return 2u;
-  case 5125:
-  case 5126:
-    return 4u;
-  default:
-    return 0u;
-  }
-}
-
-[[nodiscard]] uint32_t gltfAccessorComponentCount(std::string_view type) {
-  if (type == "SCALAR") {
-    return 1u;
-  }
-  if (type == "VEC2") {
-    return 2u;
-  }
-  if (type == "VEC3") {
-    return 3u;
-  }
-  if (type == "VEC4") {
-    return 4u;
-  }
-  if (type == "MAT2") {
-    return 4u;
-  }
-  if (type == "MAT3") {
-    return 9u;
-  }
-  if (type == "MAT4") {
-    return 16u;
+  static constexpr std::array sizes{1u, 1u, 2u, 2u, 4u, 4u};
+  static constexpr std::array types{5120u, 5121u, 5122u, 5123u, 5125u, 5126u};
+  for (size_t i = 0; i < types.size(); ++i) {
+    if (componentType == types[i]) {
+      return sizes[i];
+    }
   }
   return 0u;
 }
-
+[[nodiscard]] uint32_t gltfAccessorComponentCount(std::string_view type) {
+  static constexpr std::array names{"SCALAR", "VEC2", "VEC3", "VEC4",
+                                    "MAT2",   "MAT3", "MAT4"};
+  static constexpr std::array counts{1u, 2u, 3u, 4u, 4u, 9u, 16u};
+  for (size_t i = 0; i < names.size(); ++i) {
+    if (type == names[i]) {
+      return counts[i];
+    }
+  }
+  return 0u;
+}
 [[nodiscard]] bool
 isPathWithinDirectory(const std::filesystem::path &path,
                       const std::filesystem::path &directory) {
   std::error_code ec;
-  const std::filesystem::path canonicalPath =
-      std::filesystem::weakly_canonical(path, ec);
+  const auto canonicalPath = std::filesystem::weakly_canonical(path, ec);
   if (ec) {
     return false;
   }
-  ec.clear();
-  const std::filesystem::path canonicalDirectory =
+  const auto canonicalDirectory =
       std::filesystem::weakly_canonical(directory, ec);
   if (ec) {
     return false;
   }
-
-  auto normalizeForCompare = [](const std::filesystem::path &value) {
-    std::string normalized = value.generic_string();
-#if defined(_WIN32)
-    std::transform(
-        normalized.begin(), normalized.end(), normalized.begin(),
-        [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
-#endif
-    return normalized;
-  };
-
-  std::string pathString = normalizeForCompare(canonicalPath);
-  std::string directoryString = normalizeForCompare(canonicalDirectory);
-  if (pathString == directoryString) {
-    return true;
-  }
-  if (!directoryString.empty() && directoryString.back() != '/') {
-    directoryString.push_back('/');
-  }
-  return pathString.starts_with(directoryString);
+  const auto relative = canonicalPath.lexically_relative(canonicalDirectory);
+  return relative.empty() || *relative.begin() != "..";
 }
-
 struct AccessorResolvedView {
   std::span<const std::byte> bytes{};
   uint32_t count = 0;
@@ -118,50 +65,30 @@ struct AccessorResolvedView {
   bool normalized = false;
   uint32_t elementStride = 0;
 };
-
 [[nodiscard]] Result<std::vector<std::byte>, std::string>
 loadGlbBinaryChunk(std::span<const std::byte> fileBytes) {
-  if (fileBytes.size() < 20u) {
-    return Result<std::vector<std::byte>, std::string>::makeError(
-        "glTF GLB file is too small");
-  }
   uint32_t magic = 0u;
-  if (!readU32(fileBytes, 0u, magic) || magic != kGlbMagic) {
+  uint32_t jsonLength = 0u;
+  if (fileBytes.size() < 28u || !readU32(fileBytes, 0u, magic) ||
+      magic != kGlbMagic || !readU32(fileBytes, 12u, jsonLength)) {
     return Result<std::vector<std::byte>, std::string>::makeError(
-        "glTF GLB magic mismatch");
+        "glTF GLB header is invalid");
   }
-
-  size_t offset = 12u;
-  while (offset + 8u <= fileBytes.size()) {
-    uint32_t chunkLength = 0u;
-    uint32_t chunkType = 0u;
-    if (!readU32(fileBytes, offset, chunkLength) ||
-        !readU32(fileBytes, offset + 4u, chunkType)) {
-      return Result<std::vector<std::byte>, std::string>::makeError(
-          "Failed to read GLB chunk header");
-    }
-    offset += 8u;
-    if (offset + chunkLength > fileBytes.size()) {
-      return Result<std::vector<std::byte>, std::string>::makeError(
-          "GLB chunk exceeds file bounds");
-    }
-    if (chunkType == kGlbChunkTypeBin) {
-      std::vector<std::byte> chunk(chunkLength);
-      if (chunkLength > 0u) {
-        std::memcpy(chunk.data(),
-                    fileBytes.data() + static_cast<ptrdiff_t>(offset),
-                    chunkLength);
-      }
-      return Result<std::vector<std::byte>, std::string>::makeResult(
-          std::move(chunk));
-    }
-    offset += chunkLength;
+  const size_t header = 20u + jsonLength;
+  uint32_t chunkLength = 0u;
+  uint32_t chunkType = 0u;
+  if (!readU32(fileBytes, header, chunkLength) ||
+      !readU32(fileBytes, header + 4u, chunkType) ||
+      chunkType != kGlbChunkTypeBin ||
+      header + 8u + chunkLength > fileBytes.size()) {
+    return Result<std::vector<std::byte>, std::string>::makeError(
+        "GLB binary chunk is missing or invalid");
   }
-
-  return Result<std::vector<std::byte>, std::string>::makeError(
-      "GLB binary chunk is missing");
+  std::vector<std::byte> chunk(chunkLength);
+  std::memcpy(chunk.data(), fileBytes.data() + header + 8u, chunkLength);
+  return Result<std::vector<std::byte>, std::string>::makeResult(
+      std::move(chunk));
 }
-
 [[nodiscard]] Result<AccessorResolvedView, std::string>
 resolveAccessor(yyjson_val *root,
                 std::span<const std::pmr::vector<std::byte>> buffers,
@@ -181,32 +108,19 @@ resolveAccessor(yyjson_val *root,
     return Result<AccessorResolvedView, std::string>::makeError(
         "glTF sparse accessors are not supported");
   }
-
   uint32_t bufferViewIndex = 0u;
   if (!tryReadJsonUint32(yyjson_obj_get(accessorValue, "bufferView"),
                          bufferViewIndex)) {
     return Result<AccessorResolvedView, std::string>::makeError(
         "glTF accessor bufferView is invalid");
   }
-  uint32_t count = 0u;
-  if (!tryReadJsonUint32(yyjson_obj_get(accessorValue, "count"), count)) {
+  auto infoResult = describeGltfAccessor(root, accessorIndex);
+  if (infoResult.hasError()) {
     return Result<AccessorResolvedView, std::string>::makeError(
-        "glTF accessor count is invalid");
+        infoResult.error());
   }
-  uint32_t componentType = 0u;
-  if (!tryReadJsonUint32(yyjson_obj_get(accessorValue, "componentType"),
-                         componentType)) {
-    return Result<AccessorResolvedView, std::string>::makeError(
-        "glTF accessor componentType is invalid");
-  }
-  const std::string_view type = readJsonStringView(accessorValue, "type");
-  const uint32_t componentCount = gltfAccessorComponentCount(type);
-  const uint32_t componentSize = gltfComponentTypeSize(componentType);
-  if (componentCount == 0u || componentSize == 0u) {
-    return Result<AccessorResolvedView, std::string>::makeError(
-        "glTF accessor layout is unsupported");
-  }
-
+  const GltfAccessorInfo info = infoResult.value();
+  const uint32_t componentSize = gltfComponentTypeSize(info.componentType);
   yyjson_val *bufferViewsValue = yyjson_obj_get(root, "bufferViews");
   if (!yyjson_is_arr(bufferViewsValue) ||
       bufferViewIndex >= yyjson_arr_size(bufferViewsValue)) {
@@ -219,7 +133,6 @@ resolveAccessor(yyjson_val *root,
     return Result<AccessorResolvedView, std::string>::makeError(
         "glTF bufferView entry is invalid");
   }
-
   uint32_t bufferIndex = 0u;
   if (!tryReadJsonUint32(yyjson_obj_get(bufferViewValue, "buffer"),
                          bufferIndex) ||
@@ -242,18 +155,18 @@ resolveAccessor(yyjson_val *root,
   uint32_t byteStride = 0u;
   (void)tryReadJsonUint32(yyjson_obj_get(bufferViewValue, "byteStride"),
                           byteStride);
-  const uint32_t packedStride = componentCount * componentSize;
+  const uint32_t packedStride = info.componentCount * componentSize;
   const uint32_t elementStride = byteStride != 0u ? byteStride : packedStride;
   if (elementStride < packedStride) {
     return Result<AccessorResolvedView, std::string>::makeError(
         "glTF accessor byteStride is smaller than packed element size");
   }
-
   const uint64_t start = static_cast<uint64_t>(byteOffset) + accessorByteOffset;
   const uint64_t extent =
-      count == 0u
+      info.count == 0u
           ? 0u
-          : static_cast<uint64_t>(elementStride) * (count - 1u) + packedStride;
+          : static_cast<uint64_t>(elementStride) * (info.count - 1u) +
+                packedStride;
   if (start + extent > buffers[bufferIndex].size() ||
       start > buffers[bufferIndex].size() ||
       static_cast<uint64_t>(byteOffset) + byteLength >
@@ -261,23 +174,18 @@ resolveAccessor(yyjson_val *root,
     return Result<AccessorResolvedView, std::string>::makeError(
         "glTF accessor range exceeds buffer size");
   }
-
-  bool normalized = false;
-  (void)tryReadJsonBool(yyjson_obj_get(accessorValue, "normalized"),
-                        normalized);
   return Result<AccessorResolvedView, std::string>::makeResult(
       AccessorResolvedView{
           .bytes = std::span<const std::byte>(buffers[bufferIndex].data() +
                                                   static_cast<ptrdiff_t>(start),
                                               static_cast<size_t>(extent)),
-          .count = count,
-          .componentType = componentType,
-          .componentCount = componentCount,
-          .normalized = normalized,
+          .count = info.count,
+          .componentType = info.componentType,
+          .componentCount = info.componentCount,
+          .normalized = info.normalized,
           .elementStride = elementStride,
       });
 }
-
 [[nodiscard]] float normalizedComponentValue(uint32_t componentType,
                                              bool normalized,
                                              const std::byte *ptr) {
@@ -318,7 +226,6 @@ resolveAccessor(yyjson_val *root,
     return 0.0f;
   }
 }
-
 [[nodiscard]] uint16_t u16ComponentValue(uint32_t componentType,
                                          const std::byte *ptr) {
   switch (componentType) {
@@ -330,7 +237,39 @@ resolveAccessor(yyjson_val *root,
     return 0u;
   }
 }
-
+template <typename T, typename Read>
+[[nodiscard]] Result<std::pmr::vector<T>, std::string>
+readAccessorValues(yyjson_val *root,
+                   std::span<const std::pmr::vector<std::byte>> buffers,
+                   uint32_t accessorIndex, std::pmr::memory_resource *memory,
+                   std::string_view conversionError, Read &&read) {
+  memory = memory ? memory : std::pmr::get_default_resource();
+  auto resolvedResult = resolveAccessor(root, buffers, accessorIndex);
+  if (resolvedResult.hasError()) {
+    return Result<std::pmr::vector<T>, std::string>::makeError(
+        resolvedResult.error());
+  }
+  const AccessorResolvedView resolved = resolvedResult.value();
+  const uint32_t componentSize = gltfComponentTypeSize(resolved.componentType);
+  std::pmr::vector<T> values(memory);
+  values.resize(static_cast<size_t>(resolved.count) * resolved.componentCount);
+  for (uint32_t element = 0; element < resolved.count; ++element) {
+    const std::byte *source =
+        resolved.bytes.data() + element * resolved.elementStride;
+    for (uint32_t component = 0; component < resolved.componentCount;
+         ++component) {
+      T &value = values[static_cast<size_t>(element) * resolved.componentCount +
+                        component];
+      if (!read(resolved.componentType, resolved.normalized,
+                source + component * componentSize, value)) {
+        return Result<std::pmr::vector<T>, std::string>::makeError(
+            std::string(conversionError));
+      }
+    }
+  }
+  return Result<std::pmr::vector<T>, std::string>::makeResult(
+      std::move(values));
+}
 } // namespace
 
 Result<std::pmr::vector<std::pmr::vector<std::byte>>, std::string>
@@ -346,7 +285,6 @@ loadGltfBuffers(const std::filesystem::path &path, yyjson_val *root,
     return Result<std::pmr::vector<std::pmr::vector<std::byte>>,
                   std::string>::makeResult(std::move(buffers));
   }
-
   std::vector<std::byte> glbBinaryChunk;
   const bool isGlb = hasExtensionCaseInsensitive(path, ".glb");
   if (isGlb) {
@@ -357,7 +295,6 @@ loadGltfBuffers(const std::filesystem::path &path, yyjson_val *root,
     }
     glbBinaryChunk = std::move(glbChunkResult.value());
   }
-
   buffers.reserve(yyjson_arr_size(buffersValue));
   const std::filesystem::path directory = path.parent_path();
   yyjson_arr_iter iter = yyjson_arr_iter_with(buffersValue);
@@ -374,7 +311,6 @@ loadGltfBuffers(const std::filesystem::path &path, yyjson_val *root,
           std::pmr::vector<std::pmr::vector<std::byte>>,
           std::string>::makeError("glTF buffer byteLength is invalid");
     }
-
     std::pmr::vector<std::byte> bytes(memory);
     const std::string_view uri = readJsonStringView(bufferValue, "uri");
     if (uri.empty()) {
@@ -426,7 +362,6 @@ loadGltfBuffers(const std::filesystem::path &path, yyjson_val *root,
     }
     buffers.push_back(std::move(bytes));
   }
-
   return Result<std::pmr::vector<std::pmr::vector<std::byte>>,
                 std::string>::makeResult(std::move(buffers));
 }
@@ -472,84 +407,29 @@ describeGltfAccessor(yyjson_val *root, uint32_t accessorIndex) {
 Result<std::pmr::vector<float>, std::string> readGltfAccessorAsFloatArray(
     yyjson_val *root, std::span<const std::pmr::vector<std::byte>> buffers,
     uint32_t accessorIndex, std::pmr::memory_resource *memory) {
-  if (memory == nullptr) {
-    memory = std::pmr::get_default_resource();
-  }
-  auto resolvedResult = resolveAccessor(root, buffers, accessorIndex);
-  if (resolvedResult.hasError()) {
-    return Result<std::pmr::vector<float>, std::string>::makeError(
-        resolvedResult.error());
-  }
-  const AccessorResolvedView resolved = resolvedResult.value();
-  const uint32_t componentSize = gltfComponentTypeSize(resolved.componentType);
-  std::pmr::vector<float> values(memory);
-  values.resize(static_cast<size_t>(resolved.count) * resolved.componentCount);
-  for (uint32_t elementIndex = 0; elementIndex < resolved.count;
-       ++elementIndex) {
-    const std::byte *elementPtr =
-        resolved.bytes.data() +
-        static_cast<ptrdiff_t>(elementIndex * resolved.elementStride);
-    for (uint32_t componentIndex = 0; componentIndex < resolved.componentCount;
-         ++componentIndex) {
-      values[static_cast<size_t>(elementIndex) * resolved.componentCount +
-             componentIndex] =
-          normalizedComponentValue(
-              resolved.componentType, resolved.normalized,
-              elementPtr +
-                  static_cast<ptrdiff_t>(componentIndex * componentSize));
-    }
-  }
-  return Result<std::pmr::vector<float>, std::string>::makeResult(
-      std::move(values));
+  return readAccessorValues<float>(
+      root, buffers, accessorIndex, memory, {},
+      [](uint32_t type, bool normalized, const std::byte *source, float &out) {
+        out = normalizedComponentValue(type, normalized, source);
+        return true;
+      });
 }
 
 Result<std::pmr::vector<uint16_t>, std::string> readGltfAccessorAsU16Array(
     yyjson_val *root, std::span<const std::pmr::vector<std::byte>> buffers,
     uint32_t accessorIndex, std::pmr::memory_resource *memory) {
-  if (memory == nullptr) {
-    memory = std::pmr::get_default_resource();
-  }
-  auto resolvedResult = resolveAccessor(root, buffers, accessorIndex);
-  if (resolvedResult.hasError()) {
-    return Result<std::pmr::vector<uint16_t>, std::string>::makeError(
-        resolvedResult.error());
-  }
-  const AccessorResolvedView resolved = resolvedResult.value();
-  if (resolved.componentType != 5121u && resolved.componentType != 5123u &&
-      resolved.componentType != 5125u) {
-    return Result<std::pmr::vector<uint16_t>, std::string>::makeError(
-        "glTF accessor component type is not compatible with uint16 output");
-  }
-  const uint32_t componentSize = gltfComponentTypeSize(resolved.componentType);
-  std::pmr::vector<uint16_t> values(memory);
-  values.resize(static_cast<size_t>(resolved.count) * resolved.componentCount);
-  for (uint32_t elementIndex = 0; elementIndex < resolved.count;
-       ++elementIndex) {
-    const std::byte *elementPtr =
-        resolved.bytes.data() +
-        static_cast<ptrdiff_t>(elementIndex * resolved.elementStride);
-    for (uint32_t componentIndex = 0; componentIndex < resolved.componentCount;
-         ++componentIndex) {
-      const std::byte *componentPtr =
-          elementPtr + static_cast<ptrdiff_t>(componentIndex * componentSize);
-      const size_t valueIndex =
-          static_cast<size_t>(elementIndex) * resolved.componentCount +
-          componentIndex;
-      if (resolved.componentType == 5125u) {
-        const uint32_t component = loadUnaligned<uint32_t>(componentPtr);
-        if (component > std::numeric_limits<uint16_t>::max()) {
-          return Result<std::pmr::vector<uint16_t>, std::string>::makeError(
-              "glTF accessor UNSIGNED_INT index exceeds uint16 range");
+  return readAccessorValues<uint16_t>(
+      root, buffers, accessorIndex, memory,
+      "glTF accessor value is not compatible with uint16 output",
+      [](uint32_t type, bool, const std::byte *source, uint16_t &out) {
+        if (type == 5125u) {
+          const uint32_t value = loadUnaligned<uint32_t>(source);
+          out = static_cast<uint16_t>(value);
+          return value <= std::numeric_limits<uint16_t>::max();
         }
-        values[valueIndex] = static_cast<uint16_t>(component);
-      } else {
-        values[valueIndex] =
-            u16ComponentValue(resolved.componentType, componentPtr);
-      }
-    }
-  }
-  return Result<std::pmr::vector<uint16_t>, std::string>::makeResult(
-      std::move(values));
+        out = u16ComponentValue(type, source);
+        return type == 5121u || type == 5123u;
+      });
 }
 
 Result<std::pmr::vector<glm::mat4>, std::string> readGltfAccessorAsMat4Array(
@@ -571,19 +451,11 @@ Result<std::pmr::vector<glm::mat4>, std::string> readGltfAccessorAsMat4Array(
     return Result<std::pmr::vector<glm::mat4>, std::string>::makeError(
         valuesResult.error());
   }
+  static_assert(sizeof(glm::mat4) == 16u * sizeof(float));
   std::pmr::vector<glm::mat4> matrices(memory);
   matrices.resize(info.count);
   const std::pmr::vector<float> &values = valuesResult.value();
-  for (uint32_t matrixIndex = 0; matrixIndex < info.count; ++matrixIndex) {
-    glm::mat4 matrix;
-    const size_t base = static_cast<size_t>(matrixIndex) * 16u;
-    for (uint32_t column = 0; column < 4u; ++column) {
-      for (uint32_t row = 0; row < 4u; ++row) {
-        matrix[column][row] = values[base + column * 4u + row];
-      }
-    }
-    matrices[matrixIndex] = matrix;
-  }
+  std::memcpy(matrices.data(), values.data(), values.size() * sizeof(float));
   return Result<std::pmr::vector<glm::mat4>, std::string>::makeResult(
       std::move(matrices));
 }

@@ -1,21 +1,15 @@
-#include "nuri/pch.h"
-
 #include "nuri/resources/async/asset_system.h"
-
-#include "nuri/core/log.h"
 #include "nuri/core/profiling.h"
+#include "nuri/pch.h"
 #include "nuri/resources/detail/scene_asset_build_backend.h"
 #include "nuri/resources/storage/texture/dds_texture_pack.h"
 #include "nuri/resources/storage/texture/texture_cache_utils.h"
 #include "nuri/scene/render_scene.h"
-
 #include <algorithm>
 #include <filesystem>
 #include <limits>
-
 namespace nuri {
 namespace {
-
 [[nodiscard]] uint64_t estimateSourceBytes(std::string_view path) noexcept {
   std::error_code error;
   const uintmax_t bytes = std::filesystem::file_size(
@@ -27,7 +21,6 @@ namespace {
                                 bytes, std::numeric_limits<uint64_t>::max())),
                             1ull * 1024ull * 1024ull * 1024ull);
 }
-
 [[nodiscard]] uint64_t
 estimateAdaptedMeshBytes(const AdaptedSceneMesh &source) noexcept {
   uint64_t bytes =
@@ -43,7 +36,6 @@ estimateAdaptedMeshBytes(const AdaptedSceneMesh &source) noexcept {
   }
   return std::max<uint64_t>(bytes, 1u);
 }
-
 [[nodiscard]] Result<PreparedTextureData, std::string>
 prepareTextureRequest(const TextureRequest &request) {
   switch (request.kind) {
@@ -70,16 +62,23 @@ prepareTextureRequest(const TextureRequest &request) {
   return Result<PreparedTextureData, std::string>::makeError(
       "AssetSystem: unknown texture request kind");
 }
-
 [[nodiscard]] Result<PreparedModelData, std::string>
-prepareModelRequest(const ModelRequest &request) {
+prepareModelRequest(const ModelRequest &request, AdaptedSceneMesh *adapted) {
+  if (adapted != nullptr) {
+    auto cooked =
+        detail::cookAdaptedSceneMesh(std::move(*adapted), request.importOptions,
+                                     std::pmr::get_default_resource());
+    return cooked.hasError()
+               ? Result<PreparedModelData, std::string>::makeError(
+                     cooked.error())
+               : Model::prepare(std::move(cooked.value()));
+  }
   if (request.sceneMeshIndex == std::numeric_limits<uint32_t>::max()) {
     return Model::prepareFromFile(request.path, request.importOptions);
   }
   return Model::prepareSceneMeshFromFile(request.path, request.sceneMeshIndex,
                                          request.importOptions);
 }
-
 [[nodiscard]] bool canSelectMaterialization(uint64_t bytes,
                                             uint32_t selectedCount,
                                             uint64_t selectedBytes,
@@ -93,94 +92,219 @@ prepareModelRequest(const ModelRequest &request) {
   return selectedBytes < config.maxGpuUploadBytesPerFrame &&
          bytes <= config.maxGpuUploadBytesPerFrame - selectedBytes;
 }
-
-template <typename Node>
-[[nodiscard]] bool canMaterialize(const Node &node, uint32_t selectedCount,
-                                  uint64_t selectedBytes,
-                                  const AssetSystemConfig &config) {
-  return node.prepared.has_value() &&
-         canSelectMaterialization(node.prepared->uploadBytes(), selectedCount,
-                                  selectedBytes, config);
+void hashCombine(size_t &seed, uint64_t value) noexcept {
+  seed ^= static_cast<size_t>(value) + 0x9e3779b97f4a7c15ull + (seed << 6u) +
+          (seed >> 2u);
 }
-
-[[nodiscard]] uint64_t
-encodeTextureAssetHandle(TextureAssetHandle handle) noexcept {
-  return (static_cast<uint64_t>(handle.generation) << 32u) |
-         static_cast<uint64_t>(handle.index);
+[[nodiscard]] bool supportsBackgroundPreparation(GPUDevice &gpu,
+                                                 const PreparedTextureData &) {
+  return gpu.supportsBackgroundTexturePreparation();
 }
-
-template <typename Fn>
-void forEachMaterialTextureAsset(
-    const MaterialAssetRequest::TextureAssets &textures, Fn &&fn) {
-  fn(textures.baseColor);
-  fn(textures.metallicRoughness);
-  fn(textures.normal);
-  fn(textures.occlusion);
-  fn(textures.emissive);
-  fn(textures.clearcoat);
-  fn(textures.clearcoatRoughness);
-  fn(textures.clearcoatNormal);
-  fn(textures.specular);
-  fn(textures.specularColor);
-  fn(textures.sheenColor);
-  fn(textures.sheenRoughness);
-  fn(textures.transmission);
-  fn(textures.thickness);
+[[nodiscard]] bool supportsBackgroundPreparation(GPUDevice &gpu,
+                                                 const PreparedModelData &) {
+  return gpu.supportsBackgroundBufferPreparation() &&
+         gpu.supportsBackgroundBufferBatchPreparation() &&
+         gpu.supportsBackgroundGeometryPreparation();
 }
-
-void setMaterialTextureAsset(MaterialAssetRequest::TextureAssets &textures,
-                             size_t slotIndex, TextureAssetHandle handle) {
-  std::array<TextureAssetHandle *, kMaterialTextureSlotCount> slots{
-      &textures.baseColor,
-      &textures.metallicRoughness,
-      &textures.normal,
-      &textures.occlusion,
-      &textures.emissive,
-      &textures.clearcoat,
-      &textures.clearcoatRoughness,
-      &textures.clearcoatNormal,
-      &textures.specular,
-      &textures.specularColor,
-      &textures.sheenColor,
-      &textures.sheenRoughness,
-      &textures.transmission,
-      &textures.thickness,
-  };
-  if (slotIndex < slots.size()) {
-    *slots[slotIndex] = handle;
-  }
+[[nodiscard]] std::pair<std::string, std::string>
+materializationNames(const TextureRequest &request,
+                     const PreparedTextureData &prepared) {
+  std::string gpuName = prepared.debugName;
+  return {gpuName, gpuName.empty() ? request.debugName : gpuName};
 }
-
-template <typename Fn>
-void forEachEnvironmentTexture(const EnvironmentAssetRequest &request,
-                               Fn &&fn) {
-  fn(0u, request.cubemap, request.cubemapOptional);
-  fn(1u, request.irradiance, request.irradianceOptional);
-  fn(2u, request.prefilteredGgx, request.prefilteredGgxOptional);
-  fn(3u, request.prefilteredCharlie, request.prefilteredCharlieOptional);
-  fn(4u, request.brdfLut, request.brdfLutOptional);
+[[nodiscard]] std::pair<std::string, std::string>
+materializationNames(const ModelRequest &request, const PreparedModelData &) {
+  return {request.debugName,
+          request.debugName.empty() ? request.path : request.debugName};
 }
-
-[[nodiscard]] bool sameEnvironment(const EnvironmentHandles &lhs,
-                                   const EnvironmentHandles &rhs) noexcept {
-  return lhs.cubemap == rhs.cubemap && lhs.irradiance == rhs.irradiance &&
-         lhs.prefilteredGgx == rhs.prefilteredGgx &&
-         lhs.prefilteredCharlie == rhs.prefilteredCharlie &&
-         lhs.brdfLut == rhs.brdfLut;
+auto prepareGpuAsset(GPUDevice &gpu, PreparedTextureData &prepared,
+                     std::string_view debugName) {
+  return gpu.prepareTexture(prepared.descriptor(), debugName);
 }
-
+auto prepareGpuAsset(GPUDevice &gpu, PreparedModelData &prepared,
+                     std::string_view debugName) {
+  return Model::prepareGpu(gpu, std::move(prepared), debugName);
+}
+auto createGpuAsset(GPUDevice &gpu, PreparedTextureData prepared,
+                    std::string_view) {
+  return Texture::createPrepared(gpu, std::move(prepared));
+}
+auto createGpuAsset(GPUDevice &gpu, PreparedModelData prepared,
+                    std::string_view debugName) {
+  return Model::createPrepared(gpu, std::move(prepared), debugName);
+}
+auto adoptGpuAsset(ResourceManager &resources, const TextureRequest &request,
+                   std::unique_ptr<Texture> pending) {
+  return resources.adoptPreparedTexture(request, std::move(pending));
+}
+auto adoptGpuAsset(ResourceManager &resources, const ModelRequest &request,
+                   std::unique_ptr<Model> pending) {
+  return resources.adoptPreparedModel(request, std::move(pending));
+}
+constexpr std::array<TextureRef EnvironmentHandles::*,
+                     EnvironmentAssetRequest::kTextureCount>
+    kEnvironmentTextureFields{
+        &EnvironmentHandles::cubemap, &EnvironmentHandles::irradiance,
+        &EnvironmentHandles::prefilteredGgx,
+        &EnvironmentHandles::prefilteredCharlie, &EnvironmentHandles::brdfLut};
 [[nodiscard]] bool isAssetTerminalState(AssetState state) noexcept {
   return state == AssetState::Published || state == AssetState::Cancelled ||
          state == AssetState::Failed;
 }
-
 [[nodiscard]] bool isSceneTerminalState(SceneLoadState state) noexcept {
   return state == SceneLoadState::Complete ||
          state == SceneLoadState::CompleteWithErrors ||
          state == SceneLoadState::Failed || state == SceneLoadState::Cancelled;
 }
-
+constexpr std::array kAssetStateProgress{0.0f, 0.15f, 0.55f, 0.55f, 0.7f, 0.75f,
+                                         0.9f, 1.0f,  0.0f,  1.0f,  1.0f};
+[[nodiscard]] constexpr float assetStateProgress(AssetState state) noexcept {
+  return kAssetStateProgress[static_cast<size_t>(state)];
+}
+template <typename Node>
+[[nodiscard]] AssetLoadSnapshot assetSnapshot(const Node *node,
+                                              std::string_view error) {
+  if (node == nullptr) {
+    return {.state = AssetState::Failed,
+            .progress = 1.0f,
+            .error = std::string(error)};
+  }
+  AssetLoadSnapshot snapshot{
+      .state = node->state,
+      .priority = node->priority,
+      .progress = assetStateProgress(node->state),
+      .error = node->error,
+  };
+  if constexpr (requires { node->cpuPayloadBytes; }) {
+    snapshot.cpuPayloadBytes = node->cpuPayloadBytes;
+  }
+  return snapshot;
+}
+template <typename Node> [[nodiscard]] auto resolvedAsset(const Node *node) {
+  using Ref = std::remove_cvref_t<decltype(node->published)>;
+  return node != nullptr && node->state == AssetState::Published
+             ? std::optional<Ref>(node->published)
+             : std::nullopt;
+}
+template <typename Completion, typename Work, typename Emit>
+[[nodiscard]] AssetCpuJob
+makeAssetCpuJob(AssetPriority priority, AssetWorkClass workClass,
+                uint64_t estimatedBytes, std::string debugName, Completion base,
+                Work work, Emit emit) {
+  return AssetCpuJob{
+      .priority = priority,
+      .workClass = workClass,
+      .estimatedBytes = estimatedBytes,
+      .debugName = std::move(debugName),
+      .execute =
+          [base, work = std::move(work),
+           emit](std::stop_token stopToken) mutable {
+            Completion completion = base;
+            if (stopToken.stop_requested()) {
+              completion.cancelled = true;
+            } else {
+              auto result = work();
+              completion.cancelled = stopToken.stop_requested();
+              if (!completion.cancelled) {
+                if (result.hasError()) {
+                  completion.error = result.error();
+                } else if constexpr (requires {
+                                       completion.manifest =
+                                           std::move(result.value());
+                                     }) {
+                  completion.manifest = std::move(result.value());
+                } else {
+                  completion.prepared = std::move(result.value());
+                }
+              }
+            }
+            emit(std::move(completion));
+          },
+      .onCancelled =
+          [base, emit]() mutable {
+            base.cancelled = true;
+            emit(std::move(base));
+          },
+  };
+}
+template <typename Node, typename Map>
+void finishAssetNode(Node &node, AssetState state, std::string error, Map &map,
+                     bool &releasedTerminalNodes) {
+  node.state = state;
+  if (!error.empty() || node.error.empty())
+    node.error = std::move(error);
+  if constexpr (requires { node.prepared; }) {
+    if (state != AssetState::Published)
+      node.prepared.reset();
+  }
+  if constexpr (requires { node.preparedGpu; }) {
+    if (state != AssetState::Published)
+      node.preparedGpu.reset();
+  }
+  if constexpr (requires { node.publication.desc; }) {
+    node.publication = {};
+  }
+  map.erase(node.key);
+  if (state == AssetState::Cancelled) {
+    node.request = {};
+    node.key = {};
+    if constexpr (requires { node.cpuPayloadBytes; })
+      node.cpuPayloadBytes = 0u;
+  }
+  releasedTerminalNodes |=
+      node.subscriberCount == 0u && isAssetTerminalState(state);
+}
+template <typename T>
+void deferPreparedDestroy(AssetCpuScheduler &scheduler,
+                          std::unique_ptr<T> prepared) {
+  if (!prepared)
+    return;
+  auto lifetime = std::shared_ptr<T>(std::move(prepared));
+  (void)scheduler.enqueue(AssetCpuJob{
+      .priority = AssetPriority::Background,
+      .workClass = AssetWorkClass::GpuMaterialization,
+      .debugName = "discard prepared GPU asset",
+      .execute = [lifetime](std::stop_token) {},
+  });
+}
+template <typename Node, typename Released>
+bool claimCancellation(Node *node, bool &releasedTerminalNodes,
+                       Released released) {
+  if (node == nullptr || node->subscriberCount == 0u)
+    return false;
+  if (--node->subscriberCount != 0u)
+    return false;
+  if (released(node->state)) {
+    releasedTerminalNodes = true;
+    return false;
+  }
+  return true;
+}
+struct OperationTimer {
+  explicit OperationTimer(double &maximum)
+      : maximum(maximum), start(std::chrono::steady_clock::now()) {}
+  ~OperationTimer() {
+    maximum = std::max(maximum, std::chrono::duration<double, std::milli>(
+                                    std::chrono::steady_clock::now() - start)
+                                    .count());
+  }
+  double &maximum;
+  std::chrono::steady_clock::time_point start;
+};
 } // namespace
+
+template <typename Node>
+void AssetSystem::finishNode(Node &node, AssetState state, std::string error) {
+  if constexpr (std::is_same_v<Node, TextureNode>)
+    finishAssetNode(node, state, std::move(error), textureInFlight_,
+                    releasedTerminalNodes_);
+  else if constexpr (std::is_same_v<Node, ModelNode>)
+    finishAssetNode(node, state, std::move(error), modelInFlight_,
+                    releasedTerminalNodes_);
+  else
+    finishAssetNode(node, state, std::move(error), materialInFlight_,
+                    releasedTerminalNodes_);
+}
 
 AssetSystem::AssetSystem(GPUDevice &gpu, ResourceManager &resources,
                          AssetSystemConfig config)
@@ -203,23 +327,18 @@ AssetSystem::AssetSystem(GPUDevice &gpu, ResourceManager &resources,
 AssetSystem::~AssetSystem() {
   scheduler_.requestStop();
   scheduler_.waitIdle();
-  for (TextureNode &node : textureNodes_) {
-    node.pendingTexture.reset();
-    if (isValid(node.published) && resources_.owns(node.published)) {
-      resources_.release(node.published);
+  const auto release = [this](auto &pool) {
+    for (auto &node : pool) {
+      if constexpr (requires { node.pending; })
+        node.pending.reset();
+      if (isValid(node.published) && resources_.owns(node.published)) {
+        resources_.release(node.published);
+      }
     }
-  }
-  for (ModelNode &node : modelNodes_) {
-    node.pendingModel.reset();
-    if (isValid(node.published) && resources_.owns(node.published)) {
-      resources_.release(node.published);
-    }
-  }
-  for (MaterialNode &node : materialNodes_) {
-    if (isValid(node.published) && resources_.owns(node.published)) {
-      resources_.release(node.published);
-    }
-  }
+  };
+  release(textures_);
+  release(models_);
+  release(materials_);
 }
 
 void AssetSystem::setInteractiveMode(bool enabled) {
@@ -230,11 +349,8 @@ AssetSystem::MaterialAssetKey
 AssetSystem::makeMaterialAssetKey(const MaterialAssetRequest &request) {
   MaterialAssetKey key{};
   key.descHash = hashMaterialDesc(request.desc);
-  size_t index = 0u;
-  forEachMaterialTextureAsset(
-      request.textures, [&key, &index](TextureAssetHandle handle) {
-        key.textureHandles[index++] = encodeTextureAssetHandle(handle);
-      });
+  for (size_t index = 0; index < request.textures.size(); ++index)
+    key.textureHandles[index] = handleKey(request.textures[index]);
   key.sourceIdentity = request.sourceIdentity;
   return key;
 }
@@ -255,105 +371,22 @@ AssetSystem::requestTexture(const TextureRequest &request,
       .optionsHash = hashTextureLoadOptions(resolved.loadOptions),
       .kind = resolved.kind,
   };
-
-  if (const auto ready = resources_.tryAcquireTexture(resolved);
-      ready.has_value()) {
-    const SlotReservation slot = textureSlots_.acquire();
-    if (slot.appended) {
-      textureNodes_.emplace_back();
-    }
-    TextureNode &node = textureNodes_[slot.index];
-    node = TextureNode{
-        .handle = TextureAssetHandle{slot.index, slot.generation},
-        .state = AssetState::Published,
-        .priority = priority,
-        .request = std::move(resolved),
-        .key = key,
-        .published = *ready,
-    };
-    return Result<TextureAssetHandle, std::string>::makeResult(node.handle);
-  }
-
-  if (auto it = textureInFlight_.find(key); it != textureInFlight_.end()) {
-    if (TextureNode *node = find(it->second)) {
-      ++node->subscriberCount;
-      if (priority < node->priority) {
-        setPriority(node->handle, priority);
-      }
-      return Result<TextureAssetHandle, std::string>::makeResult(node->handle);
-    }
-    textureInFlight_.erase(it);
-  }
-
-  const SlotReservation slot = textureSlots_.acquire();
-  if (slot.appended) {
-    textureNodes_.emplace_back();
-  }
-  TextureNode &node = textureNodes_[slot.index];
-  node = TextureNode{
-      .handle = TextureAssetHandle{slot.index, slot.generation},
-      .state = AssetState::Queued,
-      .priority = priority,
-      .request = std::move(resolved),
-      .key = key,
-  };
-  textureInFlight_.emplace(node.key, node.handle);
-  const TextureAssetHandle handle = node.handle;
-  const TextureRequest workerRequest = node.request;
-  auto task = scheduler_.enqueue(AssetCpuJob{
-      .priority = priority,
-      .workClass = AssetWorkClass::Decode,
-      .estimatedBytes = estimateSourceBytes(workerRequest.path),
-      .debugName = workerRequest.debugName.empty() ? workerRequest.path
-                                                   : workerRequest.debugName,
-      .execute =
-          [this, handle, workerRequest](std::stop_token stopToken) {
-            if (stopToken.stop_requested()) {
-              pushCompletion(TextureCpuCompletion{
-                  .handle = handle,
-                  .cancelled = true,
-              });
-              return;
-            }
-            auto result = prepareTextureRequest(workerRequest);
-            if (stopToken.stop_requested()) {
-              pushCompletion(TextureCpuCompletion{
-                  .handle = handle,
-                  .cancelled = true,
-              });
-            } else if (result.hasError()) {
-              pushCompletion(TextureCpuCompletion{
-                  .handle = handle,
-                  .error = result.error(),
-              });
-            } else {
-              pushCompletion(TextureCpuCompletion{
-                  .handle = handle,
-                  .prepared = std::move(result.value()),
-              });
-            }
-          },
-      .onCancelled =
-          [this, handle] {
-            pushCompletion(TextureCpuCompletion{
-                .handle = handle,
-                .cancelled = true,
-            });
-          },
-  });
-  if (task.hasError()) {
-    finishTextureNode(node, AssetState::Failed, task.error());
-    node.subscriberCount = 0u;
-    releasedTerminalNodes_ = true;
-    return Result<TextureAssetHandle, std::string>::makeError(task.error());
-  }
-  node.cpuTask = task.value();
-  node.state = AssetState::CpuRunning;
-  return Result<TextureAssetHandle, std::string>::makeResult(handle);
+  const auto ready = resources_.tryAcquireTexture(resolved);
+  return requestGpuAsset<TextureNode, TextureAssetHandle, TextureCpuCompletion>(
+      textures_, textureInFlight_, std::move(resolved), key, ready, priority,
+      AssetWorkClass::Decode, estimateSourceBytes(request.path),
+      prepareTextureRequest);
 }
 
 Result<ModelAssetHandle, std::string>
 AssetSystem::requestModel(const ModelRequest &request, AssetPriority priority) {
+  return requestModelAsset(request, nullptr, priority);
+}
+
+Result<ModelAssetHandle, std::string>
+AssetSystem::requestModelAsset(const ModelRequest &request,
+                               std::shared_ptr<AdaptedSceneMesh> source,
+                               AssetPriority priority) {
   std::lock_guard stateLock(stateMutex_);
   reclaimReleasedNodes();
   if (request.path.empty()) {
@@ -367,304 +400,119 @@ AssetSystem::requestModel(const ModelRequest &request, AssetPriority priority) {
       .importOptionsHash = hashModelImportOptions(resolved.importOptions),
       .sceneMeshIndex = resolved.sceneMeshIndex,
   };
-  if (const auto ready = resources_.tryAcquireModel(resolved);
-      ready.has_value()) {
-    const SlotReservation slot = modelSlots_.acquire();
-    if (slot.appended) {
-      modelNodes_.emplace_back();
-    }
-    ModelNode &node = modelNodes_[slot.index];
-    node = ModelNode{
-        .handle = ModelAssetHandle{slot.index, slot.generation},
-        .state = AssetState::Published,
-        .priority = priority,
-        .request = std::move(resolved),
-        .key = key,
-        .published = *ready,
-    };
-    return Result<ModelAssetHandle, std::string>::makeResult(node.handle);
-  }
-  if (auto it = modelInFlight_.find(key); it != modelInFlight_.end()) {
-    if (ModelNode *node = find(it->second)) {
-      ++node->subscriberCount;
-      if (priority < node->priority) {
-        setPriority(node->handle, priority);
-      }
-      return Result<ModelAssetHandle, std::string>::makeResult(node->handle);
-    }
-    modelInFlight_.erase(it);
-  }
+  const uint64_t estimatedBytes = source != nullptr
+                                      ? estimateAdaptedMeshBytes(*source)
+                                      : estimateSourceBytes(resolved.path);
+  const auto ready = resources_.tryAcquireModel(resolved);
+  return requestGpuAsset<ModelNode, ModelAssetHandle, ModelCpuCompletion>(
+      models_, modelInFlight_, std::move(resolved), key, ready, priority,
+      AssetWorkClass::Cook, estimatedBytes,
+      [source = std::move(source)](const ModelRequest &workerRequest) {
+        return prepareModelRequest(workerRequest, source.get());
+      });
+}
 
-  const SlotReservation slot = modelSlots_.acquire();
-  if (slot.appended) {
-    modelNodes_.emplace_back();
+template <typename Node, typename Handle, typename Completion, typename Pool,
+          typename Map, typename Request, typename Key, typename Published,
+          typename Prepare>
+Result<Handle, std::string>
+AssetSystem::requestGpuAsset(Pool &pool, Map &inFlight, Request request,
+                             Key key, std::optional<Published> ready,
+                             AssetPriority priority, AssetWorkClass workClass,
+                             uint64_t estimatedBytes, Prepare prepare) {
+  if (ready) {
+    Node &node = pool.insert(Node{.state = AssetState::Published,
+                                  .priority = priority,
+                                  .request = std::move(request),
+                                  .key = std::move(key),
+                                  .published = *ready});
+    return Result<Handle, std::string>::makeResult(node.handle);
   }
-  ModelNode &node = modelNodes_[slot.index];
-  node = ModelNode{
-      .handle = ModelAssetHandle{slot.index, slot.generation},
-      .state = AssetState::Queued,
-      .priority = priority,
-      .request = std::move(resolved),
-      .key = key,
-  };
-  modelInFlight_.emplace(node.key, node.handle);
-  const ModelAssetHandle handle = node.handle;
-  const ModelRequest workerRequest = node.request;
-  auto task = scheduler_.enqueue(AssetCpuJob{
-      .priority = priority,
-      .workClass = AssetWorkClass::Cook,
-      .estimatedBytes = estimateSourceBytes(workerRequest.path),
-      .debugName = workerRequest.debugName.empty() ? workerRequest.path
-                                                   : workerRequest.debugName,
-      .execute =
-          [this, handle, workerRequest](std::stop_token stopToken) {
-            if (stopToken.stop_requested()) {
-              pushCompletion(ModelCpuCompletion{
-                  .handle = handle,
-                  .cancelled = true,
-              });
-              return;
-            }
-            auto result = prepareModelRequest(workerRequest);
-            if (stopToken.stop_requested()) {
-              pushCompletion(ModelCpuCompletion{
-                  .handle = handle,
-                  .cancelled = true,
-              });
-            } else if (result.hasError()) {
-              pushCompletion(ModelCpuCompletion{
-                  .handle = handle,
-                  .error = result.error(),
-              });
-            } else {
-              pushCompletion(ModelCpuCompletion{
-                  .handle = handle,
-                  .prepared = std::move(result.value()),
-              });
-            }
-          },
-      .onCancelled =
-          [this, handle] {
-            pushCompletion(ModelCpuCompletion{
-                .handle = handle,
-                .cancelled = true,
-            });
-          },
-  });
+  if (auto it = inFlight.find(key); it != inFlight.end()) {
+    Node &node = *pool.find(it->second);
+    ++node.subscriberCount;
+    if (priority < node.priority)
+      setPriority(node.handle, priority);
+    return Result<Handle, std::string>::makeResult(node.handle);
+  }
+  Node &node = pool.insert(Node{.state = AssetState::Queued,
+                                .priority = priority,
+                                .request = std::move(request),
+                                .key = std::move(key)});
+  inFlight.emplace(node.key, node.handle);
+  const Handle handle = node.handle;
+  const Request workerRequest = node.request;
+  auto task = scheduler_.enqueue(makeAssetCpuJob<Completion>(
+      priority, workClass, estimatedBytes,
+      workerRequest.debugName.empty() ? workerRequest.path
+                                      : workerRequest.debugName,
+      Completion{.handle = handle},
+      [workerRequest, prepare = std::move(prepare)]() mutable {
+        return prepare(workerRequest);
+      },
+      [this](Completion completion) {
+        pushCompletion(std::move(completion));
+      }));
   if (task.hasError()) {
-    finishModelNode(node, AssetState::Failed, task.error());
     node.subscriberCount = 0u;
-    releasedTerminalNodes_ = true;
-    return Result<ModelAssetHandle, std::string>::makeError(task.error());
+    finishNode(node, AssetState::Failed, task.error());
+    return Result<Handle, std::string>::makeError(task.error());
   }
   node.cpuTask = task.value();
   node.state = AssetState::CpuRunning;
-  return Result<ModelAssetHandle, std::string>::makeResult(handle);
+  return Result<Handle, std::string>::makeResult(handle);
 }
 
-Result<ModelAssetHandle, std::string>
-AssetSystem::requestAdaptedModel(const ModelRequest &request,
-                                 AdaptedSceneMesh source,
-                                 AssetPriority priority) {
-  std::lock_guard stateLock(stateMutex_);
-  reclaimReleasedNodes();
-  if (request.path.empty()) {
-    return Result<ModelAssetHandle, std::string>::makeError(
-        "AssetSystem::requestAdaptedModel: path is empty");
-  }
-  ModelRequest resolved = request;
-  resolved.path = canonicalizeResourcePath(request.path);
-  const ModelKey key{
-      .canonicalPath = resolved.path,
-      .importOptionsHash = hashModelImportOptions(resolved.importOptions),
-      .sceneMeshIndex = resolved.sceneMeshIndex,
-  };
-  if (const auto ready = resources_.tryAcquireModel(resolved);
-      ready.has_value()) {
-    const SlotReservation slot = modelSlots_.acquire();
-    if (slot.appended) {
-      modelNodes_.emplace_back();
-    }
-    ModelNode &node = modelNodes_[slot.index];
-    node = ModelNode{
-        .handle = ModelAssetHandle{slot.index, slot.generation},
-        .state = AssetState::Published,
-        .priority = priority,
-        .request = std::move(resolved),
-        .key = key,
-        .published = *ready,
-    };
-    return Result<ModelAssetHandle, std::string>::makeResult(node.handle);
-  }
-  if (auto it = modelInFlight_.find(key); it != modelInFlight_.end()) {
-    if (ModelNode *node = find(it->second)) {
-      ++node->subscriberCount;
-      if (priority < node->priority) {
-        setPriority(node->handle, priority);
-      }
-      return Result<ModelAssetHandle, std::string>::makeResult(node->handle);
-    }
-    modelInFlight_.erase(it);
-  }
-
-  const uint64_t estimatedBytes = estimateAdaptedMeshBytes(source);
-  auto sourceOwner = std::make_shared<AdaptedSceneMesh>(std::move(source));
-  const SlotReservation slot = modelSlots_.acquire();
-  if (slot.appended) {
-    modelNodes_.emplace_back();
-  }
-  ModelNode &node = modelNodes_[slot.index];
-  node = ModelNode{
-      .handle = ModelAssetHandle{slot.index, slot.generation},
-      .state = AssetState::Queued,
-      .priority = priority,
-      .request = std::move(resolved),
-      .key = key,
-  };
-  modelInFlight_.emplace(node.key, node.handle);
-  const ModelAssetHandle handle = node.handle;
-  const ModelRequest workerRequest = node.request;
-  auto task = scheduler_.enqueue(AssetCpuJob{
-      .priority = priority,
-      .workClass = AssetWorkClass::Cook,
-      .estimatedBytes = estimatedBytes,
-      .debugName = workerRequest.debugName.empty() ? workerRequest.path
-                                                   : workerRequest.debugName,
-      .execute =
-          [this, handle, workerRequest,
-           sourceOwner](std::stop_token stopToken) {
-            if (stopToken.stop_requested()) {
-              pushCompletion(ModelCpuCompletion{
-                  .handle = handle,
-                  .cancelled = true,
-              });
-              return;
-            }
-            auto cooked = detail::cookAdaptedSceneMesh(
-                std::move(*sourceOwner), workerRequest.importOptions,
-                std::pmr::get_default_resource());
-            if (cooked.hasError()) {
-              pushCompletion(ModelCpuCompletion{
-                  .handle = handle,
-                  .error = cooked.error(),
-              });
-              return;
-            }
-            auto prepared = Model::prepare(std::move(cooked.value()));
-            if (stopToken.stop_requested()) {
-              pushCompletion(ModelCpuCompletion{
-                  .handle = handle,
-                  .cancelled = true,
-              });
-            } else if (prepared.hasError()) {
-              pushCompletion(ModelCpuCompletion{
-                  .handle = handle,
-                  .error = prepared.error(),
-              });
-            } else {
-              pushCompletion(ModelCpuCompletion{
-                  .handle = handle,
-                  .prepared = std::move(prepared.value()),
-              });
-            }
-          },
-      .onCancelled =
-          [this, handle] {
-            pushCompletion(ModelCpuCompletion{
-                .handle = handle,
-                .cancelled = true,
-            });
-          },
-  });
-  if (task.hasError()) {
-    finishModelNode(node, AssetState::Failed, task.error());
-    node.subscriberCount = 0u;
-    releasedTerminalNodes_ = true;
-    return Result<ModelAssetHandle, std::string>::makeError(task.error());
-  }
-  node.cpuTask = task.value();
-  node.state = AssetState::CpuRunning;
-  return Result<ModelAssetHandle, std::string>::makeResult(handle);
-}
-
-Result<MaterialAssetHandle, std::string>
+MaterialAssetHandle
 AssetSystem::requestMaterial(const MaterialAssetRequest &request,
                              AssetPriority priority) {
   std::lock_guard stateLock(stateMutex_);
   reclaimReleasedNodes();
   const MaterialAssetKey key = makeMaterialAssetKey(request);
   if (auto it = materialInFlight_.find(key); it != materialInFlight_.end()) {
-    if (MaterialNode *node = find(it->second)) {
-      ++node->subscriberCount;
-      if (priority < node->priority) {
-        setPriority(node->handle, priority);
-      }
-      return Result<MaterialAssetHandle, std::string>::makeResult(node->handle);
-    }
-    materialInFlight_.erase(it);
+    MaterialNode &node = *find(it->second);
+    ++node.subscriberCount;
+    if (priority < node.priority)
+      setPriority(node.handle, priority);
+    return node.handle;
   }
-
-  const SlotReservation slot = materialSlots_.acquire();
-  if (slot.appended) {
-    materialNodes_.emplace_back();
-  }
-  MaterialNode &node = materialNodes_[slot.index];
-  node = MaterialNode{
-      .handle = MaterialAssetHandle{slot.index, slot.generation},
+  MaterialNode &node = materials_.insert(MaterialNode{
       .state = AssetState::CpuReady,
       .priority = priority,
       .request = request,
       .key = key,
-  };
+  });
   materialInFlight_.emplace(node.key, node.handle);
-  forEachMaterialTextureAsset(node.request.textures,
-                              [this, priority](TextureAssetHandle handle) {
-                                if (isValidAssetHandle(handle)) {
-                                  setPriority(handle, priority);
-                                }
-                              });
-  return Result<MaterialAssetHandle, std::string>::makeResult(node.handle);
+  for (TextureAssetHandle texture : node.request.textures)
+    setPriority(texture, priority);
+  return node.handle;
 }
 
 Result<EnvironmentAssetHandle, std::string>
 AssetSystem::requestEnvironment(const EnvironmentAssetRequest &request) {
   std::lock_guard stateLock(stateMutex_);
   reclaimReleasedNodes();
-  const SlotReservation slot = environmentSlots_.acquire();
-  if (slot.appended) {
-    environmentNodes_.emplace_back();
-  }
-  EnvironmentNode &node = environmentNodes_[slot.index];
-  node = EnvironmentNode{
-      .handle = EnvironmentAssetHandle{slot.index, slot.generation},
+  EnvironmentNode &node = environments_.insert(EnvironmentNode{
       .state = AssetState::CpuReady,
       .request = request,
-  };
-
+  });
   std::string requestError;
-  forEachEnvironmentTexture(
-      node.request,
-      [this, &node, &requestError](size_t index,
-                                   const std::optional<TextureRequest> &texture,
-                                   bool optional) {
-        if (!requestError.empty() || !texture.has_value()) {
-          return;
-        }
-        auto requested = requestTexture(*texture, node.request.priority);
-        if (requested.hasError()) {
-          if (!optional) {
-            requestError = requested.error();
-          }
-          return;
-        }
-        node.textures[index] = requested.value();
-      });
-  if (!requestError.empty()) {
-    for (const TextureAssetHandle texture : node.textures) {
-      if (isValidAssetHandle(texture)) {
-        cancel(texture);
-      }
+  for (size_t index = 0; index < node.request.textures.size(); ++index) {
+    const auto &texture = node.request.textures[index];
+    if (!texture)
+      continue;
+    auto requested = requestTexture(*texture, node.request.priority);
+    if (requested.hasError()) {
+      if (node.request.optionalTextures[index])
+        continue;
+      requestError = requested.error();
+      break;
     }
+    node.textures[index] = requested.value();
+  }
+  if (!requestError.empty()) {
+    for (const TextureAssetHandle texture : node.textures)
+      cancel(texture);
     node.state = AssetState::Failed;
     node.subscriberCount = 0u;
     releasedTerminalNodes_ = true;
@@ -682,10 +530,9 @@ AssetSystem::requestScene(const SceneLoadRequest &request) {
     return Result<SceneLoadHandle, std::string>::makeError(
         "AssetSystem::requestScene: path is empty");
   }
-
   SceneLoadRequest resolved = request;
   resolved.path = canonicalizeResourcePath(request.path);
-  if (isValidAssetHandle(resolved.publicationTarget) &&
+  if (isValid(resolved.publicationTarget) &&
       find(resolved.publicationTarget) == nullptr) {
     return Result<SceneLoadHandle, std::string>::makeError(
         "AssetSystem::requestScene: publication target is invalid or stale");
@@ -699,97 +546,51 @@ AssetSystem::requestScene(const SceneLoadRequest &request) {
       .publicationTarget = resolved.publicationTarget,
   };
   if (auto it = sceneInFlight_.find(key); it != sceneInFlight_.end()) {
-    if (SceneNode *node = find(it->second)) {
-      ++node->subscriberCount;
-      if (resolved.priority < node->request.priority) {
-        setPriority(node->handle, resolved.priority);
-      }
-      return Result<SceneLoadHandle, std::string>::makeResult(node->handle);
-    }
-    sceneInFlight_.erase(it);
+    SceneNode &node = *find(it->second);
+    ++node.subscriberCount;
+    if (resolved.priority < node.request.priority)
+      setPriority(node.handle, resolved.priority);
+    return Result<SceneLoadHandle, std::string>::makeResult(node.handle);
   }
-
-  const SlotReservation slot = sceneSlots_.acquire();
-  if (slot.appended) {
-    sceneNodes_.emplace_back();
-  }
-  SceneNode &node = sceneNodes_[slot.index];
-  node = SceneNode{
-      .handle = SceneLoadHandle{slot.index, slot.generation},
+  SceneNode &node = scenes_.insert(SceneNode{
       .state = SceneLoadState::Requested,
       .request = std::move(resolved),
       .key = key,
       .publicationTarget = key.publicationTarget,
-  };
+  });
   sceneInFlight_.emplace(node.key, node.handle);
-
   const SceneLoadHandle handle = node.handle;
   const std::string workerPath = node.request.path;
   const SceneImportOptions workerOptions = node.request.importOptions;
-  auto task = scheduler_.enqueue(AssetCpuJob{
-      .priority = node.request.priority,
-      .workClass = AssetWorkClass::Metadata,
-      .estimatedBytes = estimateSourceBytes(workerPath),
-      .debugName =
-          node.request.debugName.empty() ? workerPath : node.request.debugName,
-      .execute =
-          [this, handle, workerPath, workerOptions](std::stop_token stopToken) {
-            if (stopToken.stop_requested()) {
-              pushCompletion(SceneManifestCompletion{
-                  .handle = handle,
-                  .cancelled = true,
-              });
-              return;
-            }
-            auto result = prepareSceneManifest(workerPath, workerOptions);
-            if (stopToken.stop_requested()) {
-              pushCompletion(SceneManifestCompletion{
-                  .handle = handle,
-                  .cancelled = true,
-              });
-            } else if (result.hasError()) {
-              pushCompletion(SceneManifestCompletion{
-                  .handle = handle,
-                  .error = result.error(),
-              });
-            } else {
-              pushCompletion(SceneManifestCompletion{
-                  .handle = handle,
-                  .manifest = std::move(result.value()),
-              });
-            }
-          },
-      .onCancelled =
-          [this, handle] {
-            pushCompletion(SceneManifestCompletion{
-                .handle = handle,
-                .cancelled = true,
-            });
-          },
-  });
+  auto task = scheduler_.enqueue(makeAssetCpuJob<SceneManifestCompletion>(
+      node.request.priority, AssetWorkClass::Metadata,
+      estimateSourceBytes(workerPath),
+      node.request.debugName.empty() ? workerPath : node.request.debugName,
+      SceneManifestCompletion{.handle = handle},
+      [workerPath, workerOptions] {
+        return prepareSceneManifest(workerPath, workerOptions);
+      },
+      [this](SceneManifestCompletion completion) {
+        pushCompletion(std::move(completion));
+      }));
   if (task.hasError()) {
-    finishSceneNode(node, SceneLoadState::Failed, task.error());
     node.subscriberCount = 0u;
-    releasedTerminalNodes_ = true;
+    finishSceneNode(node, SceneLoadState::Failed, task.error());
     return Result<SceneLoadHandle, std::string>::makeError(task.error());
   }
   node.manifestTask = task.value();
+  node.dependencies.emplace_back(node.manifestTask);
   return Result<SceneLoadHandle, std::string>::makeResult(handle);
 }
 
 ScenePublicationTargetHandle
 AssetSystem::registerScenePublicationTarget(RenderScene &scene, NodeId parent) {
   std::lock_guard stateLock(stateMutex_);
-  const SlotReservation slot = scenePublicationTargetSlots_.acquire();
-  if (slot.appended) {
-    scenePublicationTargets_.emplace_back();
-  }
-  ScenePublicationTargetNode &target = scenePublicationTargets_[slot.index];
-  target = ScenePublicationTargetNode{
-      .handle = ScenePublicationTargetHandle{slot.index, slot.generation},
-      .scene = &scene,
-      .parent = parent,
-  };
+  ScenePublicationTargetNode &target =
+      sceneTargets_.insert(ScenePublicationTargetNode{
+          .scene = &scene,
+          .parent = parent,
+      });
   return target.handle;
 }
 
@@ -800,14 +601,14 @@ bool AssetSystem::unregisterScenePublicationTarget(
   if (target == nullptr) {
     return false;
   }
-  for (const SceneNode &scene : sceneNodes_) {
+  for (const SceneNode &scene : scenes_) {
     if (scene.publicationTarget == handle &&
         !isSceneTerminalState(scene.state)) {
       return false;
     }
   }
   target->scene = nullptr;
-  scenePublicationTargetSlots_.release(handle.index);
+  sceneTargets_.release(handle);
   return true;
 }
 
@@ -822,7 +623,7 @@ AssetSystem::query(ScenePublicationTargetHandle handle) const {
   }
   ScenePublicationTargetSnapshot snapshot{};
   float progressSum = 0.0f;
-  for (const SceneNode &scene : sceneNodes_) {
+  for (const SceneNode &scene : scenes_) {
     if (scene.publicationTarget != handle) {
       continue;
     }
@@ -845,55 +646,17 @@ AssetSystem::query(ScenePublicationTargetHandle handle) const {
 
 AssetLoadSnapshot AssetSystem::query(TextureAssetHandle handle) const {
   std::lock_guard stateLock(stateMutex_);
-  const TextureNode *node = find(handle);
-  if (node == nullptr) {
-    return AssetLoadSnapshot{
-        .state = AssetState::Failed,
-        .error = "invalid or stale texture asset handle",
-    };
-  }
-  return AssetLoadSnapshot{
-      .state = node->state,
-      .priority = node->priority,
-      .progress = progressForState(node->state),
-      .cpuPayloadBytes = node->cpuPayloadBytes,
-      .error = node->error,
-  };
+  return assetSnapshot(find(handle), "invalid or stale texture asset handle");
 }
 
 AssetLoadSnapshot AssetSystem::query(ModelAssetHandle handle) const {
   std::lock_guard stateLock(stateMutex_);
-  const ModelNode *node = find(handle);
-  if (node == nullptr) {
-    return AssetLoadSnapshot{
-        .state = AssetState::Failed,
-        .error = "invalid or stale model asset handle",
-    };
-  }
-  return AssetLoadSnapshot{
-      .state = node->state,
-      .priority = node->priority,
-      .progress = progressForState(node->state),
-      .cpuPayloadBytes = node->cpuPayloadBytes,
-      .error = node->error,
-  };
+  return assetSnapshot(find(handle), "invalid or stale model asset handle");
 }
 
 AssetLoadSnapshot AssetSystem::query(MaterialAssetHandle handle) const {
   std::lock_guard stateLock(stateMutex_);
-  const MaterialNode *node = find(handle);
-  if (node == nullptr) {
-    return AssetLoadSnapshot{
-        .state = AssetState::Failed,
-        .error = "invalid or stale material asset handle",
-    };
-  }
-  return AssetLoadSnapshot{
-      .state = node->state,
-      .priority = node->priority,
-      .progress = progressForState(node->state),
-      .error = node->error,
-  };
+  return assetSnapshot(find(handle), "invalid or stale material asset handle");
 }
 
 AssetLoadSnapshot AssetSystem::query(EnvironmentAssetHandle handle) const {
@@ -908,16 +671,18 @@ AssetLoadSnapshot AssetSystem::query(EnvironmentAssetHandle handle) const {
   float progress = 0.0f;
   uint32_t dependencyCount = 0u;
   for (const TextureAssetHandle texture : node->textures) {
-    if (!isValidAssetHandle(texture)) {
+    if (!isValid(texture)) {
       continue;
     }
     ++dependencyCount;
-    progress += progressForState(query(texture).state);
+    const TextureNode *dependency = find(texture);
+    progress += assetStateProgress(dependency != nullptr ? dependency->state
+                                                         : AssetState::Failed);
   }
   if (dependencyCount != 0u) {
     progress /= static_cast<float>(dependencyCount);
   } else {
-    progress = progressForState(node->state);
+    progress = assetStateProgress(node->state);
   }
   return AssetLoadSnapshot{
       .state = node->state,
@@ -936,7 +701,6 @@ SceneLoadSnapshot AssetSystem::query(SceneLoadHandle handle) const {
         .error = "invalid or stale scene load handle",
     };
   }
-
   uint32_t publishedRenderables = 0u;
   for (const RenderableId renderable : node->instantiation.renderables) {
     publishedRenderables += isValid(renderable) ? 1u : 0u;
@@ -945,31 +709,20 @@ SceneLoadSnapshot AssetSystem::query(SceneLoadHandle handle) const {
       node->request.publication == ScenePublicationPolicy::Progressive ||
       isSceneTerminalState(node->state);
   bool cancellationPendingGpuRetirement = false;
-  const auto inspectCancellation =
-      [this, &cancellationPendingGpuRetirement](auto handleValue) {
-        const auto *dependency = find(handleValue);
-        cancellationPendingGpuRetirement |=
-            dependency != nullptr &&
-            dependency->state == AssetState::CancelRequested;
-      };
-  for (const ModelAssetHandle model : node->models) {
-    if (isValidAssetHandle(model)) {
-      inspectCancellation(model);
-    }
-  }
-  for (const MaterialAssetHandle material : node->materials) {
-    if (isValidAssetHandle(material)) {
-      inspectCancellation(material);
-    }
-  }
-  for (const auto &subscriptions : node->textureSubscriptions) {
-    for (const TextureAssetHandle texture : subscriptions) {
-      if (isValidAssetHandle(texture)) {
-        inspectCancellation(texture);
-      }
-    }
-  }
-
+  for (const SceneDependency &dependency : node->dependencies)
+    std::visit(
+        [this, &cancellationPendingGpuRetirement](auto handleValue) {
+          if constexpr (!std::is_same_v<decltype(handleValue),
+                                        AssetCpuTaskHandle>)
+            cancellationPendingGpuRetirement |=
+                find(handleValue)->state == AssetState::CancelRequested;
+        },
+        dependency);
+  const SceneAssetCounts models =
+      collectSceneCounts(std::span<const ModelAssetHandle>(node->models));
+  const SceneAssetCounts materials =
+      collectSceneCounts(std::span<const MaterialAssetHandle>(node->materials));
+  const SceneAssetCounts textures = collectSceneTextureCounts(*node);
   return SceneLoadSnapshot{
       .state = node->state,
       .priority = node->request.priority,
@@ -977,30 +730,17 @@ SceneLoadSnapshot AssetSystem::query(SceneLoadHandle handle) const {
       .sourceDiscoveryComplete = node->manifest.has_value(),
       .hierarchyPublished = publishProgress && node->hierarchyPublished,
       .cancellationPendingGpuRetirement = cancellationPendingGpuRetirement,
-      .models = collectSceneCounts(
-          *this, std::span<const ModelAssetHandle>(node->models.data(),
-                                                   node->models.size())),
-      .materials = collectSceneCounts(
-          *this, std::span<const MaterialAssetHandle>(node->materials.data(),
-                                                      node->materials.size())),
-      .textures = collectSceneTextureCounts(*this, *node),
+      .models = models,
+      .materials = materials,
+      .textures = textures,
       .publishedRenderables = publishProgress ? publishedRenderables : 0u,
       .totalRenderables =
           node->manifest.has_value()
               ? static_cast<uint32_t>(node->manifest->prefab.renderables.size())
               : 0u,
       .requiredFailures = node->requiredFailures,
-      .optionalFailures =
-          node->optionalFailures +
-          collectSceneCounts(
-              *this, std::span<const ModelAssetHandle>(node->models.data(),
-                                                       node->models.size()))
-              .failed +
-          collectSceneCounts(
-              *this, std::span<const MaterialAssetHandle>(
-                         node->materials.data(), node->materials.size()))
-              .failed +
-          collectSceneTextureCounts(*this, *node).failed,
+      .optionalFailures = node->optionalFailures + models.failed +
+                          materials.failed + textures.failed,
       .cpuPayloadBytes = node->cpuPayloadBytes,
       .error = node->error,
   };
@@ -1009,39 +749,24 @@ SceneLoadSnapshot AssetSystem::query(SceneLoadHandle handle) const {
 std::optional<TextureRef>
 AssetSystem::tryResolve(TextureAssetHandle handle) const {
   std::lock_guard stateLock(stateMutex_);
-  const TextureNode *node = find(handle);
-  return node != nullptr && node->state == AssetState::Published &&
-                 isValid(node->published)
-             ? std::optional<TextureRef>(node->published)
-             : std::nullopt;
+  return resolvedAsset(find(handle));
 }
 
 std::optional<ModelRef> AssetSystem::tryResolve(ModelAssetHandle handle) const {
   std::lock_guard stateLock(stateMutex_);
-  const ModelNode *node = find(handle);
-  return node != nullptr && node->state == AssetState::Published &&
-                 isValid(node->published)
-             ? std::optional<ModelRef>(node->published)
-             : std::nullopt;
+  return resolvedAsset(find(handle));
 }
 
 std::optional<MaterialRef>
 AssetSystem::tryResolve(MaterialAssetHandle handle) const {
   std::lock_guard stateLock(stateMutex_);
-  const MaterialNode *node = find(handle);
-  return node != nullptr && node->state == AssetState::Published &&
-                 isValid(node->published)
-             ? std::optional<MaterialRef>(node->published)
-             : std::nullopt;
+  return resolvedAsset(find(handle));
 }
 
 std::optional<EnvironmentHandles>
 AssetSystem::tryResolve(EnvironmentAssetHandle handle) const {
   std::lock_guard stateLock(stateMutex_);
-  const EnvironmentNode *node = find(handle);
-  return node != nullptr && node->state == AssetState::Published
-             ? std::optional<EnvironmentHandles>(node->published)
-             : std::nullopt;
+  return resolvedAsset(find(handle));
 }
 
 const ScenePrefab *
@@ -1088,27 +813,24 @@ AssetSystem::tryGetSceneInstantiation(SceneLoadHandle handle) const {
              : std::nullopt;
 }
 
+template <typename Handle>
+void AssetSystem::setGpuAssetPriority(Handle handle, AssetPriority priority) {
+  if (auto *node = find(handle); node != nullptr && priority < node->priority) {
+    node->priority = priority;
+    (void)scheduler_.setPriority(node->cpuTask, priority);
+    (void)scheduler_.setPriority(node->gpuTask, priority);
+  }
+}
+
 void AssetSystem::setPriority(TextureAssetHandle handle,
                               AssetPriority priority) {
   std::lock_guard stateLock(stateMutex_);
-  if (TextureNode *node = find(handle)) {
-    if (priority < node->priority) {
-      node->priority = priority;
-      (void)scheduler_.setPriority(node->cpuTask, priority);
-      (void)scheduler_.setPriority(node->gpuTask, priority);
-    }
-  }
+  setGpuAssetPriority(handle, priority);
 }
 
 void AssetSystem::setPriority(ModelAssetHandle handle, AssetPriority priority) {
   std::lock_guard stateLock(stateMutex_);
-  if (ModelNode *node = find(handle)) {
-    if (priority < node->priority) {
-      node->priority = priority;
-      (void)scheduler_.setPriority(node->cpuTask, priority);
-      (void)scheduler_.setPriority(node->gpuTask, priority);
-    }
-  }
+  setGpuAssetPriority(handle, priority);
 }
 
 void AssetSystem::setPriority(MaterialAssetHandle handle,
@@ -1119,12 +841,8 @@ void AssetSystem::setPriority(MaterialAssetHandle handle,
       return;
     }
     node->priority = priority;
-    forEachMaterialTextureAsset(node->request.textures,
-                                [this, priority](TextureAssetHandle texture) {
-                                  if (isValidAssetHandle(texture)) {
-                                    setPriority(texture, priority);
-                                  }
-                                });
+    for (TextureAssetHandle texture : node->request.textures)
+      setPriority(texture, priority);
   }
 }
 
@@ -1136,11 +854,8 @@ void AssetSystem::setPriority(EnvironmentAssetHandle handle,
     return;
   }
   node->request.priority = priority;
-  for (const TextureAssetHandle texture : node->textures) {
-    if (isValidAssetHandle(texture)) {
-      setPriority(texture, priority);
-    }
-  }
+  for (const TextureAssetHandle texture : node->textures)
+    setPriority(texture, priority);
 }
 
 void AssetSystem::setPriority(SceneLoadHandle handle, AssetPriority priority) {
@@ -1150,169 +865,93 @@ void AssetSystem::setPriority(SceneLoadHandle handle, AssetPriority priority) {
     return;
   }
   node->request.priority = priority;
-  (void)scheduler_.setPriority(node->manifestTask, priority);
-  for (const AssetCpuTaskHandle task : node->materialTasks) {
-    (void)scheduler_.setPriority(task, priority);
+  for (const SceneDependency &dependency : node->dependencies)
+    std::visit(
+        [this, priority](auto dependencyHandle) {
+          if constexpr (std::is_same_v<decltype(dependencyHandle),
+                                       AssetCpuTaskHandle>)
+            (void)scheduler_.setPriority(dependencyHandle, priority);
+          else
+            setPriority(dependencyHandle, priority);
+        },
+        dependency);
+}
+
+template <typename Handle> void AssetSystem::cancelGpuAsset(Handle handle) {
+  auto *node = find(handle);
+  if (!claimCancellation(node, releasedTerminalNodes_, [](AssetState state) {
+        return state == AssetState::Cancelled || state == AssetState::Failed;
+      })) {
+    return;
   }
-  for (const ModelAssetHandle model : node->models) {
-    setPriority(model, priority);
+  const auto finish = [this, node] {
+    finishNode(*node, AssetState::Cancelled);
+  };
+  if (node->state == AssetState::Published) {
+    resources_.release(node->published);
+    node->published = {};
+    finish();
+    return;
   }
-  for (const MaterialAssetHandle material : node->materials) {
-    setPriority(material, priority);
+  if (node->state == AssetState::CpuReady) {
+    finish();
+    return;
   }
-  for (const auto &subscriptions : node->textureSubscriptions) {
-    for (const TextureAssetHandle texture : subscriptions) {
-      setPriority(texture, priority);
-    }
+  if (node->state == AssetState::GpuReady) {
+    deferPreparedDestroy(scheduler_, std::move(node->preparedGpu));
+    finish();
+    return;
   }
-  if (isValidAssetHandle(node->fallbackMaterial)) {
-    setPriority(node->fallbackMaterial, priority);
-  }
+  node->state = AssetState::CancelRequested;
+  (void)scheduler_.cancel(node->cpuTask);
+  (void)scheduler_.cancel(node->gpuTask);
 }
 
 void AssetSystem::cancel(TextureAssetHandle handle) {
   std::lock_guard stateLock(stateMutex_);
-  TextureNode *node = find(handle);
-  if (node == nullptr || node->subscriberCount == 0u) {
-    return;
-  }
-  if (node->subscriberCount > 1u) {
-    --node->subscriberCount;
-    return;
-  }
-  node->subscriberCount = 0u;
-  if (node->state == AssetState::Cancelled ||
-      node->state == AssetState::Failed) {
-    releasedTerminalNodes_ = true;
-    return;
-  }
-  if (node->state == AssetState::Published) {
-    if (isValid(node->published) && resources_.owns(node->published)) {
-      resources_.release(node->published);
-    }
-    node->published = kInvalidTextureRef;
-    finishTextureNode(*node, AssetState::Cancelled);
-    return;
-  }
-  if (node->state == AssetState::CpuReady) {
-    finishTextureNode(*node, AssetState::Cancelled);
-    return;
-  }
-  if (node->state == AssetState::GpuReady) {
-    discardPreparedTextureAsync(std::move(node->preparedGpuTexture));
-    finishTextureNode(*node, AssetState::Cancelled);
-    return;
-  }
-  node->state = AssetState::CancelRequested;
-  (void)scheduler_.cancel(node->cpuTask);
-  (void)scheduler_.cancel(node->gpuTask);
+  cancelGpuAsset(handle);
 }
 
 void AssetSystem::cancel(ModelAssetHandle handle) {
   std::lock_guard stateLock(stateMutex_);
-  ModelNode *node = find(handle);
-  if (node == nullptr || node->subscriberCount == 0u) {
-    return;
-  }
-  if (node->subscriberCount > 1u) {
-    --node->subscriberCount;
-    return;
-  }
-  node->subscriberCount = 0u;
-  if (node->state == AssetState::Cancelled ||
-      node->state == AssetState::Failed) {
-    releasedTerminalNodes_ = true;
-    return;
-  }
-  if (node->state == AssetState::Published) {
-    if (isValid(node->published) && resources_.owns(node->published)) {
-      resources_.release(node->published);
-    }
-    node->published = kInvalidModelRef;
-    finishModelNode(*node, AssetState::Cancelled);
-    return;
-  }
-  if (node->state == AssetState::CpuReady) {
-    finishModelNode(*node, AssetState::Cancelled);
-    return;
-  }
-  if (node->state == AssetState::GpuReady) {
-    discardPreparedModelAsync(std::move(node->preparedGpuModel));
-    finishModelNode(*node, AssetState::Cancelled);
-    return;
-  }
-  node->state = AssetState::CancelRequested;
-  (void)scheduler_.cancel(node->cpuTask);
-  (void)scheduler_.cancel(node->gpuTask);
+  cancelGpuAsset(handle);
 }
 
 void AssetSystem::cancel(MaterialAssetHandle handle) {
   std::lock_guard stateLock(stateMutex_);
   MaterialNode *node = find(handle);
-  if (node == nullptr || node->subscriberCount == 0u) {
+  if (!claimCancellation(node, releasedTerminalNodes_, [](AssetState state) {
+        return state == AssetState::Cancelled || state == AssetState::Failed;
+      })) {
     return;
   }
-  if (node->subscriberCount > 1u) {
-    --node->subscriberCount;
-    return;
-  }
-  node->subscriberCount = 0u;
-  if (node->state == AssetState::Cancelled ||
-      node->state == AssetState::Failed) {
-    releasedTerminalNodes_ = true;
-    return;
-  }
-  if (node->state == AssetState::Published && isValid(node->published) &&
-      resources_.owns(node->published)) {
+  if (node->state == AssetState::Published) {
     resources_.release(node->published);
     node->published = kInvalidMaterialRef;
   }
-  finishMaterialNode(*node, AssetState::Cancelled);
+  finishNode(*node, AssetState::Cancelled);
 }
 
 void AssetSystem::cancel(EnvironmentAssetHandle handle) {
   std::lock_guard stateLock(stateMutex_);
   EnvironmentNode *node = find(handle);
-  if (node == nullptr || node->subscriberCount == 0u) {
-    return;
-  }
-  if (node->subscriberCount > 1u) {
-    --node->subscriberCount;
-    return;
-  }
-  node->subscriberCount = 0u;
-  if (node->state == AssetState::Cancelled) {
-    releasedTerminalNodes_ = true;
+  if (!claimCancellation(node, releasedTerminalNodes_, [](AssetState state) {
+        return state == AssetState::Cancelled;
+      })) {
     return;
   }
   node->state = AssetState::CancelRequested;
-  if (!node->dependenciesCancelled) {
-    node->dependenciesCancelled = true;
-    for (const TextureAssetHandle texture : node->textures) {
-      if (isValidAssetHandle(texture)) {
-        cancel(texture);
-      }
-    }
-  }
+  for (const TextureAssetHandle texture : node->textures)
+    cancel(texture);
 }
 
 void AssetSystem::cancel(SceneLoadHandle handle) {
   std::lock_guard stateLock(stateMutex_);
   SceneNode *node = find(handle);
-  if (node == nullptr || node->subscriberCount == 0u) {
-    return;
-  }
-  if (node->subscriberCount > 1u) {
-    --node->subscriberCount;
-    return;
-  }
-  node->subscriberCount = 0u;
-  if (node->state == SceneLoadState::Cancelled) {
-    releasedTerminalNodes_ = true;
-    return;
-  }
-  if (node->state == SceneLoadState::Failed) {
-    node->state = SceneLoadState::Cancelling;
+  if (!claimCancellation(node, releasedTerminalNodes_,
+                         [](SceneLoadState state) {
+                           return state == SceneLoadState::Cancelled;
+                         })) {
     return;
   }
   node->state = SceneLoadState::Cancelling;
@@ -1337,21 +976,61 @@ AssetSystem::prepareFrame(AssetPublicationContext context) {
     return Clock::now() >= workDeadline;
   };
   double maxOperationMilliseconds = 0.0;
-  const auto measureOperation = [&maxOperationMilliseconds](std::string_view,
-                                                            auto &&operation) {
-    const Clock::time_point operationStart = Clock::now();
-    operation();
-    const double elapsed =
-        std::chrono::duration<double, std::milli>(Clock::now() - operationStart)
-            .count();
-    if (elapsed > maxOperationMilliseconds) {
-      maxOperationMilliseconds = elapsed;
-    }
+  const auto measureOperation =
+      [&maxOperationMilliseconds](auto &&operation) -> decltype(auto) {
+    OperationTimer timer(maxOperationMilliseconds);
+    return operation();
   };
   resources_.beginPublicationBatch();
   AssetPublicationStats stats{};
   std::vector<CpuCompletion> completions =
       takeCompletions(config_.maxCpuCompletionsPerFrame);
+  const auto ingestCpu = [this, &stats](auto &completion) {
+    auto *node = find(completion.handle);
+    const auto finish = [this, node](AssetState state, std::string error = {}) {
+      finishNode(*node, state, std::move(error));
+    };
+    if (completion.cancelled || node->state == AssetState::CancelRequested) {
+      finish(AssetState::Cancelled);
+      ++stats.cancelled;
+    } else if (!completion.error.empty()) {
+      finish(AssetState::Failed, std::move(completion.error));
+      ++stats.failed;
+    } else {
+      node->cpuPayloadBytes = completion.prepared->uploadBytes();
+      node->prepared = std::move(completion.prepared);
+      node->state = AssetState::CpuReady;
+    }
+  };
+  const auto ingestGpu = [this, &stats](auto &completion) {
+    using Completion = std::decay_t<decltype(completion)>;
+    auto *node = find(completion.handle);
+    const auto discard = [this, &completion] {
+      deferPreparedDestroy(scheduler_, std::move(completion.prepared));
+    };
+    const auto finish = [this, node](AssetState state, std::string error = {}) {
+      finishNode(*node, state, std::move(error));
+    };
+    if (completion.cancelled || node->state == AssetState::CancelRequested) {
+      discard();
+      finish(AssetState::Cancelled);
+      ++stats.cancelled;
+    } else if (!completion.error.empty()) {
+      finish(AssetState::Failed, std::move(completion.error));
+      ++stats.failed;
+    } else {
+      if constexpr (std::is_same_v<Completion, TextureGpuCompletion>) {
+        node->preparedGpu = std::move(completion.prepared);
+        node->publication.desc = completion.publication.desc;
+        node->publication.desc.data = {};
+        node->publication.debugName =
+            std::move(completion.publication.debugName);
+      } else {
+        node->preparedGpu = std::move(completion.prepared);
+      }
+      node->state = AssetState::GpuReady;
+    }
+  };
   size_t processedCompletionCount = 0u;
   for (; processedCompletionCount < completions.size();
        ++processedCompletionCount) {
@@ -1359,100 +1038,18 @@ AssetSystem::prepareFrame(AssetPublicationContext context) {
       break;
     }
     CpuCompletion &completion = completions[processedCompletionCount];
-    measureOperation("completion ingestion", [&] {
+    measureOperation([&] {
       std::visit(
-          [this, &stats](auto &typed) {
+          [this, &stats, &ingestCpu, &ingestGpu](auto &typed) {
             using Completion = std::decay_t<decltype(typed)>;
-            if constexpr (std::is_same_v<Completion, TextureCpuCompletion>) {
-              TextureNode *node = find(typed.handle);
-              if (node == nullptr) {
-                return;
-              }
-              if (typed.cancelled ||
-                  node->state == AssetState::CancelRequested) {
-                finishTextureNode(*node, AssetState::Cancelled);
-                ++stats.cancelled;
-              } else if (!typed.error.empty()) {
-                finishTextureNode(*node, AssetState::Failed,
-                                  std::move(typed.error));
-                ++stats.failed;
-              } else if (typed.prepared.has_value()) {
-                node->cpuPayloadBytes = typed.prepared->uploadBytes();
-                node->prepared = std::move(typed.prepared);
-                node->state = AssetState::CpuReady;
-              }
+            if constexpr (std::is_same_v<Completion, TextureCpuCompletion> ||
+                          std::is_same_v<Completion, ModelCpuCompletion>) {
+              ingestCpu(typed);
             } else if constexpr (std::is_same_v<Completion,
-                                                TextureGpuCompletion>) {
-              TextureNode *node = find(typed.handle);
-              if (node == nullptr) {
-                discardPreparedTextureAsync(std::move(typed.prepared));
-                return;
-              }
-              if (typed.cancelled ||
-                  node->state == AssetState::CancelRequested) {
-                discardPreparedTextureAsync(std::move(typed.prepared));
-                finishTextureNode(*node, AssetState::Cancelled);
-                ++stats.cancelled;
-              } else if (!typed.error.empty()) {
-                finishTextureNode(*node, AssetState::Failed,
-                                  std::move(typed.error));
-                ++stats.failed;
-              } else if (typed.prepared != nullptr) {
-                node->preparedGpuTexture = std::move(typed.prepared);
-                node->preparedGpuDesc = typed.desc;
-                node->preparedGpuDesc.data = {};
-                node->preparedGpuDebugName = std::move(typed.debugName);
-                node->state = AssetState::GpuReady;
-              } else {
-                finishTextureNode(
-                    *node, AssetState::Failed,
-                    "AssetSystem: GPU texture completion has no payload");
-                ++stats.failed;
-              }
-            } else if constexpr (std::is_same_v<Completion,
-                                                ModelCpuCompletion>) {
-              ModelNode *node = find(typed.handle);
-              if (node == nullptr) {
-                return;
-              }
-              if (typed.cancelled ||
-                  node->state == AssetState::CancelRequested) {
-                finishModelNode(*node, AssetState::Cancelled);
-                ++stats.cancelled;
-              } else if (!typed.error.empty()) {
-                finishModelNode(*node, AssetState::Failed,
-                                std::move(typed.error));
-                ++stats.failed;
-              } else if (typed.prepared.has_value()) {
-                node->cpuPayloadBytes = typed.prepared->uploadBytes();
-                node->prepared = std::move(typed.prepared);
-                node->state = AssetState::CpuReady;
-              }
-            } else if constexpr (std::is_same_v<Completion,
+                                                TextureGpuCompletion> ||
+                                 std::is_same_v<Completion,
                                                 ModelGpuCompletion>) {
-              ModelNode *node = find(typed.handle);
-              if (node == nullptr) {
-                discardPreparedModelAsync(std::move(typed.prepared));
-                return;
-              }
-              if (typed.cancelled ||
-                  node->state == AssetState::CancelRequested) {
-                discardPreparedModelAsync(std::move(typed.prepared));
-                finishModelNode(*node, AssetState::Cancelled);
-                ++stats.cancelled;
-              } else if (!typed.error.empty()) {
-                finishModelNode(*node, AssetState::Failed,
-                                std::move(typed.error));
-                ++stats.failed;
-              } else if (typed.prepared != nullptr) {
-                node->preparedGpuModel = std::move(typed.prepared);
-                node->state = AssetState::GpuReady;
-              } else {
-                finishModelNode(
-                    *node, AssetState::Failed,
-                    "AssetSystem: GPU model completion has no payload");
-                ++stats.failed;
-              }
+              ingestGpu(typed);
             } else if constexpr (std::is_same_v<Completion,
                                                 SceneManifestCompletion>) {
               SceneNode *node = find(typed.handle);
@@ -1472,42 +1069,21 @@ AssetSystem::prepareFrame(AssetPublicationContext context) {
                 ++stats.failed;
                 return;
               }
-              if (!typed.manifest.has_value()) {
-                ++node->requiredFailures;
-                finishSceneNode(
-                    *node, SceneLoadState::Failed,
-                    "AssetSystem: scene manifest completion has no payload");
-                ++stats.failed;
-                return;
-              }
-
               node->manifest = std::move(typed.manifest);
               const ScenePrefab &prefab = node->manifest->prefab;
               node->cpuPayloadBytes = estimateSourceBytes(node->request.path);
               node->models.resize(prefab.meshAssets.size());
               node->materials.resize(prefab.materialAssets.size());
-              node->materialTasks.resize(prefab.materialAssets.size());
               node->materialPreparationFinished.resize(
                   prefab.materialAssets.size(), 0u);
-              node->textureSubscriptions.resize(prefab.materialAssets.size());
               node->modelFallbackMapped.resize(prefab.meshAssets.size(), 0u);
               node->renderableMaterialMapped.resize(prefab.renderables.size(),
                                                     0u);
-              node->structureCursor = {};
-              node->modelAdmissionCursor = 0u;
-              node->materialAdmissionCursor = 0u;
-              node->modelMappingCursor = 0u;
-              node->materialMappingCursor = 0u;
-              node->renderableCursor = 0u;
-              node->fallbackRequested = false;
-              node->manifestAdmissionComplete = false;
               node->state = SceneLoadState::ManifestReady;
             } else if constexpr (std::is_same_v<Completion,
                                                 SceneMaterialCompletion>) {
               SceneNode *node = find(typed.scene);
-              if (node == nullptr ||
-                  typed.materialIndex >=
-                      node->materialPreparationFinished.size()) {
+              if (node == nullptr) {
                 return;
               }
               node->materialPreparationFinished[typed.materialIndex] = 1u;
@@ -1515,11 +1091,10 @@ AssetSystem::prepareFrame(AssetPublicationContext context) {
                   node->state == SceneLoadState::Cancelling) {
                 return;
               }
-              if (!typed.error.empty() || !typed.prepared.has_value()) {
+              if (!typed.error.empty()) {
                 ++node->optionalFailures;
                 return;
               }
-
               PreparedImportedMaterial &prepared = *typed.prepared;
               MaterialAssetRequest materialRequest{
                   .desc = prepared.desc,
@@ -1539,538 +1114,381 @@ AssetSystem::prepareFrame(AssetPublicationContext context) {
                   ++node->optionalFailures;
                   continue;
                 }
-                setMaterialTextureAsset(materialRequest.textures, slotIndex,
-                                        texture.value());
-                node->textureSubscriptions[typed.materialIndex].push_back(
-                    texture.value());
+                materialRequest.textures[slotIndex] = texture.value();
+                node->dependencies.emplace_back(texture.value());
               }
-
-              auto material =
+              node->materials[typed.materialIndex] =
                   requestMaterial(materialRequest, node->request.priority);
-              if (material.hasError()) {
-                ++node->optionalFailures;
-                return;
-              }
-              node->materials[typed.materialIndex] = material.value();
+              node->dependencies.emplace_back(
+                  node->materials[typed.materialIndex]);
             }
           },
           completion);
     });
     ++stats.cpuCompletions;
   }
-  if (processedCompletionCount < completions.size()) {
-    stats.deferredCpuCompletions =
-        static_cast<uint32_t>(completions.size() - processedCompletionCount);
-    returnCompletions(std::span<CpuCompletion>(
-        completions.data() + processedCompletionCount,
-        completions.size() - processedCompletionCount));
-  }
-
+  stats.deferredCpuCompletions =
+      static_cast<uint32_t>(completions.size() - processedCompletionCount);
+  returnCompletions(
+      std::span<CpuCompletion>(completions).subspan(processedCompletionCount));
+  ScopedScratch frameScratch(frameScratch_);
+  std::pmr::vector<TextureNode *> textureCpuReady(frameScratch.resource());
+  std::pmr::vector<TextureNode *> textureGpuReady(frameScratch.resource());
+  std::pmr::vector<TextureNode *> textureResidency(frameScratch.resource());
+  std::pmr::vector<ModelNode *> modelCpuReady(frameScratch.resource());
+  std::pmr::vector<ModelNode *> modelGpuReady(frameScratch.resource());
+  std::pmr::vector<ModelNode *> modelResidency(frameScratch.resource());
+  std::pmr::vector<MaterialNode *> materialReady(frameScratch.resource());
+  std::pmr::vector<EnvironmentNode *> activeEnvironments(
+      frameScratch.resource());
+  std::pmr::vector<SceneNode *> activeScenes(frameScratch.resource());
+  const auto collectGpuPhases = [](auto &pool, auto &cpuReady, auto &gpuReady,
+                                   auto &residency) {
+    using Node = std::remove_pointer_t<
+        typename std::decay_t<decltype(cpuReady)>::value_type>;
+    pool.forEachLive([&](Node &node) {
+      switch (node.state) {
+      case AssetState::CpuReady:
+        cpuReady.push_back(&node);
+        break;
+      case AssetState::GpuReady:
+        gpuReady.push_back(&node);
+        break;
+      case AssetState::GpuSubmitted:
+        residency.push_back(&node);
+        break;
+      case AssetState::CancelRequested:
+        if (node.pending) {
+          residency.push_back(&node);
+        }
+        break;
+      default:
+        break;
+      }
+    });
+  };
+  collectGpuPhases(textures_, textureCpuReady, textureGpuReady,
+                   textureResidency);
+  collectGpuPhases(models_, modelCpuReady, modelGpuReady, modelResidency);
+  materials_.forEachLive([&](MaterialNode &node) {
+    if (node.state == AssetState::CpuReady) {
+      materialReady.push_back(&node);
+    }
+  });
+  environments_.forEachLive([&](EnvironmentNode &node) {
+    if (node.state != AssetState::Failed &&
+        node.state != AssetState::Cancelled) {
+      activeEnvironments.push_back(&node);
+    }
+  });
+  scenes_.forEachLive([&](SceneNode &node) {
+    if (node.state != SceneLoadState::Failed &&
+        node.state != SceneLoadState::Cancelled) {
+      activeScenes.push_back(&node);
+    }
+  });
   uint32_t selectedCount = 0u;
   uint64_t selectedBytes = 0u;
   uint64_t submittedBytes = 0u;
-  std::vector<TextureNode *> submittedTextures{};
-  std::vector<ModelNode *> submittedModels{};
-  for (TextureNode &node : textureNodes_) {
-    if (deadlineReached()) {
-      break;
-    }
-    if (node.state != AssetState::GpuReady ||
-        !canSelectMaterialization(node.cpuPayloadBytes, selectedCount,
-                                  selectedBytes, config_)) {
-      continue;
-    }
-    Result<TextureHandle, std::string> published =
-        Result<TextureHandle, std::string>::makeError(
-            "AssetSystem: prepared texture publication did not run");
-    measureOperation("texture handle publication", [&] {
-      published =
-          gpu_.publishPreparedTexture(std::move(node.preparedGpuTexture));
-    });
-    if (published.hasError()) {
-      finishTextureNode(node, AssetState::Failed, published.error());
-      ++stats.failed;
-      continue;
-    }
-    node.pendingTexture =
-        Texture::adoptPrepared(gpu_, published.value(), node.preparedGpuDesc,
-                               std::move(node.preparedGpuDebugName));
-    if (node.pendingTexture == nullptr) {
-      gpu_.destroyTexture(published.value());
-      finishTextureNode(node, AssetState::Failed,
-                        "AssetSystem: failed to adopt prepared texture");
-      ++stats.failed;
-      continue;
-    }
-    submittedTextures.push_back(&node);
-    ++selectedCount;
-    selectedBytes += node.cpuPayloadBytes;
-    submittedBytes += node.cpuPayloadBytes;
-  }
-  for (TextureNode &node : textureNodes_) {
-    if (deadlineReached()) {
-      break;
-    }
-    if (node.state != AssetState::CpuReady ||
-        !canMaterialize(node, selectedCount, selectedBytes, config_)) {
-      continue;
-    }
-    node.state = AssetState::GpuQueued;
-    const uint64_t bytes = node.prepared->uploadBytes();
-    if (gpu_.supportsBackgroundTexturePreparation()) {
-      const TextureAssetHandle handle = node.handle;
-      PreparedTextureData prepared = std::move(*node.prepared);
-      node.prepared.reset();
-      auto task = scheduler_.enqueue(AssetCpuJob{
-          .priority = node.priority,
-          .workClass = AssetWorkClass::GpuMaterialization,
-          .estimatedBytes = bytes,
-          .debugName = prepared.debugName.empty() ? node.request.debugName
-                                                  : prepared.debugName,
-          .execute =
-              [this, handle, prepared = std::move(prepared)](
-                  std::stop_token stopToken) mutable {
-                if (stopToken.stop_requested()) {
-                  pushCompletion(TextureGpuCompletion{
-                      .handle = handle,
-                      .cancelled = true,
-                  });
-                  return;
-                }
-                const TextureDesc desc = prepared.descriptor();
-                std::string debugName = prepared.debugName;
-                auto result = gpu_.prepareTexture(desc, debugName);
-                if (stopToken.stop_requested()) {
-                  if (!result.hasError()) {
-                    result.value().reset();
-                  }
-                  pushCompletion(TextureGpuCompletion{
-                      .handle = handle,
-                      .cancelled = true,
-                  });
-                } else if (result.hasError()) {
-                  pushCompletion(TextureGpuCompletion{
-                      .handle = handle,
-                      .error = result.error(),
-                  });
-                } else {
-                  TextureDesc storedDesc = prepared.createDesc;
-                  storedDesc.data = {};
-                  pushCompletion(TextureGpuCompletion{
-                      .handle = handle,
-                      .prepared = std::move(result.value()),
-                      .desc = storedDesc,
-                      .debugName = std::move(debugName),
-                  });
-                }
-              },
-          .onCancelled =
-              [this, handle] {
-                pushCompletion(TextureGpuCompletion{
-                    .handle = handle,
-                    .cancelled = true,
-                });
-              },
-      });
-      if (task.hasError()) {
-        finishTextureNode(node, AssetState::Failed, task.error());
-        ++stats.failed;
+  std::pmr::vector<TextureNode *> submittedTextures(frameScratch.resource());
+  std::pmr::vector<ModelNode *> submittedModels(frameScratch.resource());
+  const auto finishGpuAsset = [this, &stats](auto &node, AssetState state,
+                                             std::string error = {}) {
+    finishNode(node, state, std::move(error));
+    state == AssetState::Failed ? ++stats.failed : ++stats.cancelled;
+  };
+  const auto publishPrepared = [&](auto &candidates, auto &submitted) {
+    using Node = std::remove_pointer_t<
+        typename std::decay_t<decltype(candidates)>::value_type>;
+    for (Node *candidate : candidates) {
+      Node &node = *candidate;
+      if (deadlineReached()) {
+        break;
+      }
+      if (!canSelectMaterialization(node.cpuPayloadBytes, selectedCount,
+                                    selectedBytes, config_)) {
         continue;
       }
-      node.gpuTask = task.value();
-      ++selectedCount;
-      selectedBytes += bytes;
-      continue;
-    }
-    Result<std::unique_ptr<Texture>, std::string> textureResult =
-        Result<std::unique_ptr<Texture>, std::string>::makeError(
-            "AssetSystem: texture preparation did not run");
-    measureOperation("texture GPU materialization", [&] {
-      textureResult = Texture::createPrepared(gpu_, std::move(*node.prepared));
-    });
-    node.prepared.reset();
-    if (textureResult.hasError()) {
-      finishTextureNode(node, AssetState::Failed, textureResult.error());
-      ++stats.failed;
-      continue;
-    }
-    node.pendingTexture = std::move(textureResult.value());
-    submittedTextures.push_back(&node);
-    ++selectedCount;
-    selectedBytes += bytes;
-    submittedBytes += bytes;
-  }
-  for (ModelNode &node : modelNodes_) {
-    if (deadlineReached()) {
-      break;
-    }
-    if (node.state != AssetState::GpuReady ||
-        !canSelectMaterialization(node.cpuPayloadBytes, selectedCount,
-                                  selectedBytes, config_)) {
-      continue;
-    }
-    Result<std::unique_ptr<Model>, std::string> modelResult =
-        Result<std::unique_ptr<Model>, std::string>::makeError(
-            "AssetSystem: prepared model publication did not run");
-    measureOperation("model handle publication", [&] {
-      modelResult =
-          Model::publishPreparedGpu(gpu_, std::move(node.preparedGpuModel));
-    });
-    if (modelResult.hasError()) {
-      finishModelNode(node, AssetState::Failed, modelResult.error());
-      ++stats.failed;
-      continue;
-    }
-    node.pendingModel = std::move(modelResult.value());
-    submittedModels.push_back(&node);
-    ++selectedCount;
-    selectedBytes += node.cpuPayloadBytes;
-    submittedBytes += node.cpuPayloadBytes;
-  }
-  for (ModelNode &node : modelNodes_) {
-    if (deadlineReached()) {
-      break;
-    }
-    if (node.state != AssetState::CpuReady ||
-        !canMaterialize(node, selectedCount, selectedBytes, config_)) {
-      continue;
-    }
-    node.state = AssetState::GpuQueued;
-    const uint64_t bytes = node.prepared->uploadBytes();
-    if (gpu_.supportsBackgroundBufferPreparation() &&
-        gpu_.supportsBackgroundBufferBatchPreparation() &&
-        gpu_.supportsBackgroundGeometryPreparation()) {
-      const ModelAssetHandle handle = node.handle;
-      const std::string debugName = node.request.debugName;
-      PreparedModelData prepared = std::move(*node.prepared);
-      node.prepared.reset();
-      auto task = scheduler_.enqueue(AssetCpuJob{
-          .priority = node.priority,
-          .workClass = AssetWorkClass::GpuMaterialization,
-          .estimatedBytes = bytes,
-          .debugName = debugName.empty() ? node.request.path : debugName,
-          .execute =
-              [this, handle, debugName, prepared = std::move(prepared)](
-                  std::stop_token stopToken) mutable {
-                if (stopToken.stop_requested()) {
-                  pushCompletion(ModelGpuCompletion{
-                      .handle = handle,
-                      .cancelled = true,
-                  });
-                  return;
-                }
-                auto result =
-                    Model::prepareGpu(gpu_, std::move(prepared), debugName);
-                if (stopToken.stop_requested()) {
-                  if (!result.hasError()) {
-                    result.value().reset();
-                  }
-                  pushCompletion(ModelGpuCompletion{
-                      .handle = handle,
-                      .cancelled = true,
-                  });
-                } else if (result.hasError()) {
-                  pushCompletion(ModelGpuCompletion{
-                      .handle = handle,
-                      .error = result.error(),
-                  });
-                } else {
-                  pushCompletion(ModelGpuCompletion{
-                      .handle = handle,
-                      .prepared = std::move(result.value()),
-                  });
-                }
-              },
-          .onCancelled =
-              [this, handle] {
-                pushCompletion(ModelGpuCompletion{
-                    .handle = handle,
-                    .cancelled = true,
-                });
-              },
+      auto published = measureOperation([&] {
+        if constexpr (std::is_same_v<Node, TextureNode>) {
+          auto result =
+              gpu_.publishPreparedTexture(std::move(node.preparedGpu));
+          using Published = Result<std::unique_ptr<Texture>, std::string>;
+          return result.hasError()
+                     ? Published::makeError(result.error())
+                     : Published::makeResult(Texture::adoptPrepared(
+                           gpu_, result.value(), node.publication.desc,
+                           std::move(node.publication.debugName)));
+        } else {
+          return Model::publishPreparedGpu(gpu_, std::move(node.preparedGpu));
+        }
       });
-      if (task.hasError()) {
-        finishModelNode(node, AssetState::Failed, task.error());
-        ++stats.failed;
+      if (published.hasError()) {
+        finishGpuAsset(node, AssetState::Failed, published.error());
         continue;
       }
-      node.gpuTask = task.value();
+      node.pending = std::move(published.value());
+      submitted.push_back(&node);
+      ++selectedCount;
+      selectedBytes += node.cpuPayloadBytes;
+      submittedBytes += node.cpuPayloadBytes;
+    }
+  };
+  publishPrepared(textureGpuReady, submittedTextures);
+  publishPrepared(modelGpuReady, submittedModels);
+  const auto materializeCpuReady = [&](auto &candidates, auto &submitted) {
+    using Node = std::remove_pointer_t<
+        typename std::decay_t<decltype(candidates)>::value_type>;
+    using Completion =
+        std::conditional_t<std::is_same_v<Node, TextureNode>,
+                           TextureGpuCompletion, ModelGpuCompletion>;
+    for (Node *candidate : candidates) {
+      Node &node = *candidate;
+      if (deadlineReached()) {
+        break;
+      }
+      if (!canSelectMaterialization(node.cpuPayloadBytes, selectedCount,
+                                    selectedBytes, config_)) {
+        continue;
+      }
+      node.state = AssetState::GpuQueued;
+      const uint64_t bytes = node.prepared->uploadBytes();
+      const bool background =
+          supportsBackgroundPreparation(gpu_, *node.prepared);
+      if (background) {
+        const auto handle = node.handle;
+        auto [gpuDebugName, taskDebugName] =
+            materializationNames(node.request, *node.prepared);
+        auto prepared = std::move(*node.prepared);
+        node.prepared.reset();
+        auto task = scheduler_.enqueue(AssetCpuJob{
+            .priority = node.priority,
+            .workClass = AssetWorkClass::GpuMaterialization,
+            .estimatedBytes = bytes,
+            .debugName = std::move(taskDebugName),
+            .execute =
+                [this, handle, debugName = std::move(gpuDebugName),
+                 prepared =
+                     std::move(prepared)](std::stop_token stopToken) mutable {
+                  if (stopToken.stop_requested()) {
+                    pushCompletion(
+                        Completion{.handle = handle, .cancelled = true});
+                    return;
+                  }
+                  TextureDesc storedDesc{};
+                  if constexpr (std::is_same_v<Node, TextureNode>) {
+                    storedDesc = prepared.createDesc;
+                    storedDesc.data = {};
+                  }
+                  auto result = prepareGpuAsset(gpu_, prepared, debugName);
+                  Completion completion{.handle = handle};
+                  completion.cancelled = stopToken.stop_requested();
+                  if (completion.cancelled && !result.hasError())
+                    result.value().reset();
+                  else if (result.hasError())
+                    completion.error = result.error();
+                  else
+                    completion.prepared = std::move(result.value());
+                  if constexpr (std::is_same_v<Node, TextureNode>) {
+                    completion.publication = {
+                        .desc = storedDesc,
+                        .debugName = std::move(debugName),
+                    };
+                  }
+                  pushCompletion(std::move(completion));
+                },
+            .onCancelled =
+                [this, handle] {
+                  pushCompletion(
+                      Completion{.handle = handle, .cancelled = true});
+                },
+        });
+        if (task.hasError()) {
+          finishGpuAsset(node, AssetState::Failed, task.error());
+          continue;
+        }
+        node.gpuTask = task.value();
+        ++selectedCount;
+        selectedBytes += bytes;
+        continue;
+      }
+      auto result = measureOperation([&] {
+        return createGpuAsset(gpu_, std::move(*node.prepared),
+                              node.request.debugName);
+      });
+      node.prepared.reset();
+      if (result.hasError()) {
+        finishGpuAsset(node, AssetState::Failed, result.error());
+        continue;
+      }
+      node.pending = std::move(result.value());
+      submitted.push_back(&node);
       ++selectedCount;
       selectedBytes += bytes;
-      continue;
+      submittedBytes += bytes;
     }
-    Result<std::unique_ptr<Model>, std::string> modelResult =
-        Result<std::unique_ptr<Model>, std::string>::makeError(
-            "AssetSystem: model preparation did not run");
-    measureOperation("model GPU materialization", [&] {
-      modelResult = Model::createPrepared(gpu_, std::move(*node.prepared),
-                                          node.request.debugName);
-    });
-    node.prepared.reset();
-    if (modelResult.hasError()) {
-      finishModelNode(node, AssetState::Failed, modelResult.error());
-      ++stats.failed;
-      continue;
-    }
-    node.pendingModel = std::move(modelResult.value());
-    submittedModels.push_back(&node);
-    ++selectedCount;
-    selectedBytes += bytes;
-    submittedBytes += bytes;
-  }
-
+  };
+  materializeCpuReady(textureCpuReady, submittedTextures);
+  materializeCpuReady(modelCpuReady, submittedModels);
   if (!submittedTextures.empty() || !submittedModels.empty()) {
-    Result<SubmissionHandle, std::string> uploadResult =
-        Result<SubmissionHandle, std::string>::makeError(
-            "AssetSystem: upload submission did not run");
-    measureOperation("upload submission",
-                     [&] { uploadResult = gpu_.submitPendingUploads(); });
+    auto uploadResult =
+        measureOperation([&] { return gpu_.submitPendingUploads(); });
     if (uploadResult.hasError()) {
-      for (TextureNode *node : submittedTextures) {
-        node->pendingTexture.reset();
-        finishTextureNode(*node, AssetState::Failed, uploadResult.error());
-        ++stats.failed;
-      }
-      for (ModelNode *node : submittedModels) {
-        node->pendingModel.reset();
-        finishModelNode(*node, AssetState::Failed, uploadResult.error());
-        ++stats.failed;
-      }
+      const auto failSubmitted = [&](auto &nodes) {
+        for (auto *node : nodes) {
+          node->pending.reset();
+          finishNode(*node, AssetState::Failed, uploadResult.error());
+          ++stats.failed;
+        }
+      };
+      failSubmitted(submittedTextures);
+      failSubmitted(submittedModels);
     } else {
-      for (TextureNode *node : submittedTextures) {
-        node->upload = uploadResult.value();
-        node->state = AssetState::GpuSubmitted;
-      }
-      for (ModelNode *node : submittedModels) {
-        node->upload = uploadResult.value();
-        node->state = AssetState::GpuSubmitted;
-      }
+      const auto markSubmitted = [&](auto &nodes, auto &residency) {
+        for (auto *node : nodes) {
+          node->upload = uploadResult.value();
+          node->state = AssetState::GpuSubmitted;
+          residency.push_back(node);
+        }
+      };
+      markSubmitted(submittedTextures, textureResidency);
+      markSubmitted(submittedModels, modelResidency);
       stats.gpuMaterialized = static_cast<uint32_t>(submittedTextures.size() +
                                                     submittedModels.size());
       stats.uploadBytes = submittedBytes;
     }
   }
-
-  for (TextureNode &node : textureNodes_) {
-    if (deadlineReached()) {
-      break;
+  const auto publishResident = [&](auto &candidates) {
+    using Node = std::remove_pointer_t<
+        typename std::decay_t<decltype(candidates)>::value_type>;
+    for (Node *candidate : candidates) {
+      Node &node = *candidate;
+      if (deadlineReached()) {
+        break;
+      }
+      auto &pending = node.pending;
+      const auto finish = [&](AssetState state, std::string error = {}) {
+        finishNode(node, state, std::move(error));
+      };
+      if (!gpu_.isSubmissionComplete(node.upload)) {
+        continue;
+      }
+      auto visible = gpu_.makeSubmissionVisibleToGraphics(node.upload);
+      if (visible.hasError()) {
+        pending.reset();
+        finish(AssetState::Failed, visible.error());
+        ++stats.failed;
+        continue;
+      }
+      if (!visible.value()) {
+        continue;
+      }
+      if (node.state == AssetState::CancelRequested) {
+        pending.reset();
+        finish(AssetState::Cancelled);
+        ++stats.cancelled;
+        continue;
+      }
+      node.state = AssetState::Resident;
+      auto adopted =
+          adoptGpuAsset(resources_, node.request, std::move(pending));
+      if (adopted.hasError()) {
+        finish(AssetState::Failed, adopted.error());
+        ++stats.failed;
+        continue;
+      }
+      node.published = adopted.value();
+      finish(AssetState::Published);
+      ++stats.published;
     }
-    const bool cancelAfterSubmit = node.state == AssetState::CancelRequested &&
-                                   node.pendingTexture != nullptr;
-    if ((node.state != AssetState::GpuSubmitted && !cancelAfterSubmit) ||
-        !gpu_.isSubmissionComplete(node.upload)) {
-      continue;
-    }
-    auto graphicsVisibility = gpu_.makeSubmissionVisibleToGraphics(node.upload);
-    if (graphicsVisibility.hasError()) {
-      node.pendingTexture.reset();
-      finishTextureNode(node, AssetState::Failed, graphicsVisibility.error());
-      ++stats.failed;
-      continue;
-    }
-    if (!graphicsVisibility.value()) {
-      continue;
-    }
-    if (cancelAfterSubmit) {
-      node.pendingTexture.reset();
-      finishTextureNode(node, AssetState::Cancelled);
-      ++stats.cancelled;
-      continue;
-    }
-    node.state = AssetState::Resident;
-    if (!node.pendingTexture) {
-      node.pendingTexture.reset();
-      finishTextureNode(node, AssetState::Cancelled);
-      ++stats.cancelled;
-      continue;
-    }
-    auto adopted = resources_.adoptPreparedTexture(
-        node.request, std::move(node.pendingTexture));
-    if (adopted.hasError()) {
-      finishTextureNode(node, AssetState::Failed, adopted.error());
-      ++stats.failed;
-      continue;
-    }
-    node.published = adopted.value();
-    finishTextureNode(node, AssetState::Published);
-    ++stats.published;
-  }
-  for (ModelNode &node : modelNodes_) {
-    if (deadlineReached()) {
-      break;
-    }
-    const bool cancelAfterSubmit = node.state == AssetState::CancelRequested &&
-                                   node.pendingModel != nullptr;
-    if ((node.state != AssetState::GpuSubmitted && !cancelAfterSubmit) ||
-        !gpu_.isSubmissionComplete(node.upload)) {
-      continue;
-    }
-    auto graphicsVisibility = gpu_.makeSubmissionVisibleToGraphics(node.upload);
-    if (graphicsVisibility.hasError()) {
-      node.pendingModel.reset();
-      finishModelNode(node, AssetState::Failed, graphicsVisibility.error());
-      ++stats.failed;
-      continue;
-    }
-    if (!graphicsVisibility.value()) {
-      continue;
-    }
-    if (cancelAfterSubmit) {
-      node.pendingModel.reset();
-      finishModelNode(node, AssetState::Cancelled);
-      ++stats.cancelled;
-      continue;
-    }
-    node.state = AssetState::Resident;
-    if (!node.pendingModel) {
-      node.pendingModel.reset();
-      finishModelNode(node, AssetState::Cancelled);
-      ++stats.cancelled;
-      continue;
-    }
-    auto adopted = resources_.adoptPreparedModel(node.request,
-                                                 std::move(node.pendingModel));
-    if (adopted.hasError()) {
-      finishModelNode(node, AssetState::Failed, adopted.error());
-      ++stats.failed;
-      continue;
-    }
-    node.published = adopted.value();
-    finishModelNode(node, AssetState::Published);
-    ++stats.published;
-  }
-
+  };
+  publishResident(textureResidency);
+  publishResident(modelResidency);
   uint32_t materialPublications = 0u;
-  for (MaterialNode &node : materialNodes_) {
+  for (MaterialNode *candidate : materialReady) {
+    MaterialNode &node = *candidate;
     if (deadlineReached()) {
       break;
     }
-    if (node.state != AssetState::CpuReady ||
-        materialPublications >= config_.maxMaterialPublicationsPerFrame) {
+    if (materialPublications >= config_.maxMaterialPublicationsPerFrame) {
       continue;
     }
-
     MaterialRequest materialRequest{
         .desc = node.request.desc,
         .debugName = node.request.debugName,
         .sourceIdentity = node.request.sourceIdentity,
     };
     bool dependenciesReady = true;
-    size_t dependencyIndex = 0u;
     const auto resolveDependency =
         [this,
          &dependenciesReady](TextureAssetHandle dependency) -> TextureRef {
-      if (!isValidAssetHandle(dependency)) {
+      if (!isValid(dependency)) {
         return kInvalidTextureRef;
       }
-      const TextureNode *texture = find(dependency);
-      if (texture == nullptr || texture->state == AssetState::Cancelled ||
-          texture->state == AssetState::Failed) {
+      const TextureNode &texture = *find(dependency);
+      if (texture.state == AssetState::Cancelled ||
+          texture.state == AssetState::Failed) {
         return kInvalidTextureRef;
       }
-      if (texture->state != AssetState::Published ||
-          !isValid(texture->published)) {
+      if (texture.state != AssetState::Published) {
         dependenciesReady = false;
         return kInvalidTextureRef;
       }
-      return texture->published;
+      return texture.published;
     };
-    std::array<TextureRef *, 14u> outputRefs{
-        &materialRequest.textureRefs.baseColor,
-        &materialRequest.textureRefs.metallicRoughness,
-        &materialRequest.textureRefs.normal,
-        &materialRequest.textureRefs.occlusion,
-        &materialRequest.textureRefs.emissive,
-        &materialRequest.textureRefs.clearcoat,
-        &materialRequest.textureRefs.clearcoatRoughness,
-        &materialRequest.textureRefs.clearcoatNormal,
-        &materialRequest.textureRefs.specular,
-        &materialRequest.textureRefs.specularColor,
-        &materialRequest.textureRefs.sheenColor,
-        &materialRequest.textureRefs.sheenRoughness,
-        &materialRequest.textureRefs.transmission,
-        &materialRequest.textureRefs.thickness,
-    };
-    forEachMaterialTextureAsset(
-        node.request.textures,
-        [&resolveDependency, &outputRefs,
-         &dependencyIndex](TextureAssetHandle dependency) {
-          *outputRefs[dependencyIndex++] = resolveDependency(dependency);
-        });
+    for (size_t index = 0; index < node.request.textures.size(); ++index) {
+      materialRequest.textureRefs[index] =
+          resolveDependency(node.request.textures[index]);
+    }
     if (!dependenciesReady) {
       continue;
     }
-
     auto material = resources_.acquireMaterial(materialRequest);
     if (material.hasError()) {
-      finishMaterialNode(node, AssetState::Failed, material.error());
+      finishNode(node, AssetState::Failed, material.error());
       ++stats.failed;
       continue;
     }
     node.published = material.value();
-    finishMaterialNode(node, AssetState::Published);
+    finishNode(node, AssetState::Published);
     ++materialPublications;
     ++stats.published;
   }
-
-  for (EnvironmentNode &node : environmentNodes_) {
+  for (EnvironmentNode *candidate : activeEnvironments) {
+    EnvironmentNode &node = *candidate;
     if (deadlineReached()) {
       break;
     }
-    if (node.state == AssetState::Failed ||
-        node.state == AssetState::Cancelled) {
-      continue;
-    }
     if (node.state == AssetState::Published && node.environmentPublished &&
         context.scene == node.boundScene && context.scene != nullptr &&
-        sameEnvironment(context.scene->environment(), node.published)) {
+        context.scene->environment() == node.published) {
       continue;
     }
-    const auto dependencyOptional = [&node](size_t index) {
-      return (index == 0u && node.request.cubemapOptional) ||
-             (index == 1u && node.request.irradianceOptional) ||
-             (index == 2u && node.request.prefilteredGgxOptional) ||
-             (index == 3u && node.request.prefilteredCharlieOptional) ||
-             (index == 4u && node.request.brdfLutOptional);
-    };
     bool dependenciesTerminal = true;
     bool requiredDependencyFailed = false;
     EnvironmentHandles resolved{};
-    std::array<TextureRef *, 5u> output{
-        &resolved.cubemap,        &resolved.irradiance,
-        &resolved.prefilteredGgx, &resolved.prefilteredCharlie,
-        &resolved.brdfLut,
-    };
     for (size_t index = 0u; index < node.textures.size(); ++index) {
       const TextureAssetHandle textureHandle = node.textures[index];
-      if (!isValidAssetHandle(textureHandle)) {
+      if (!isValid(textureHandle)) {
         continue;
       }
-      const TextureNode *texture = find(textureHandle);
-      if (texture == nullptr) {
-        if (node.state != AssetState::CancelRequested) {
-          dependenciesTerminal = false;
-        }
-        continue;
-      }
-      if (!isAssetTerminalState(texture->state)) {
+      const TextureNode &texture = *find(textureHandle);
+      if (!isAssetTerminalState(texture.state)) {
         dependenciesTerminal = false;
         continue;
       }
-      if (texture->state == AssetState::Published &&
-          isValid(texture->published)) {
-        *output[index] = texture->published;
-      } else if (!dependencyOptional(index)) {
+      if (texture.state == AssetState::Published) {
+        resolved.*kEnvironmentTextureFields[index] = texture.published;
+      } else if (!node.request.optionalTextures[index]) {
         requiredDependencyFailed = true;
-        if (node.error.empty() && texture != nullptr) {
-          node.error = texture->error;
+        if (node.error.empty()) {
+          node.error = texture.error;
         }
       }
     }
-
     if (node.state == AssetState::CancelRequested) {
       if (node.environmentPublished && node.boundScene != nullptr &&
-          sameEnvironment(node.boundScene->environment(), node.published)) {
+          node.boundScene->environment() == node.published) {
         node.boundScene->setEnvironment(EnvironmentHandles{});
       }
       if (dependenciesTerminal) {
@@ -2106,10 +1524,9 @@ AssetSystem::prepareFrame(AssetPublicationContext context) {
     node.state = AssetState::Published;
     ++stats.published;
   }
-
   uint32_t remainingScenePatches = config_.maxScenePatchesPerFrame;
-  std::vector<RenderScene *> dirtyScenes{};
-  const size_t sceneCount = sceneNodes_.size();
+  std::pmr::vector<RenderScene *> dirtyScenes(frameScratch.resource());
+  const size_t sceneCount = activeScenes.size();
   const size_t sceneStart =
       sceneCount == 0u ? 0u : scenePrepareCursor_ % sceneCount;
   for (size_t visited = 0u; visited < sceneCount; ++visited) {
@@ -2117,13 +1534,8 @@ AssetSystem::prepareFrame(AssetPublicationContext context) {
       break;
     }
     const size_t sceneIndex = (sceneStart + visited) % sceneCount;
-    SceneNode &node = sceneNodes_[sceneIndex];
-    scenePrepareCursor_ =
-        sceneCount == 0u ? 0u : (sceneIndex + 1u) % sceneCount;
-    if (node.state == SceneLoadState::Failed ||
-        node.state == SceneLoadState::Cancelled) {
-      continue;
-    }
+    SceneNode &node = *activeScenes[sceneIndex];
+    scenePrepareCursor_ = (sceneIndex + 1u) % sceneCount;
     const ScenePublicationTargetNode *publicationTarget =
         find(node.publicationTarget);
     RenderScene *candidateScene =
@@ -2131,37 +1543,32 @@ AssetSystem::prepareFrame(AssetPublicationContext context) {
             ? node.boundScene
             : (publicationTarget != nullptr ? publicationTarget->scene
                                             : context.scene);
-    auto sceneResult = prepareSceneNode(node, context, stats,
-                                        remainingScenePatches, workDeadline);
-    if (sceneResult.hasError()) {
-      resources_.endPublicationBatch();
-      return Result<AssetPublicationStats, std::string>::makeError(
-          sceneResult.error());
-    }
+    const NodeId candidateParent = publicationTarget != nullptr
+                                       ? publicationTarget->parent
+                                       : context.parent;
+    const bool sceneDirty =
+        prepareSceneNode(node, stats, remainingScenePatches, workDeadline,
+                         candidateScene, candidateParent);
     node.progress = std::max(node.progress, progressForScene(node, *this));
-    node.commitPending = node.commitPending || sceneResult.value();
+    node.commitPending |= sceneDirty;
     if (node.commitPending && candidateScene != nullptr &&
-        !isValidAssetHandle(node.publicationTarget) &&
+        !isValid(node.publicationTarget) &&
         std::ranges::find(dirtyScenes, candidateScene) == dirtyScenes.end()) {
       dirtyScenes.push_back(candidateScene);
     }
   }
-
   resources_.endPublicationBatch();
   if (context.commitScene) {
     for (RenderScene *scene : dirtyScenes) {
       if (deadlineReached()) {
         break;
       }
-      Result<bool, std::string> commit =
-          Result<bool, std::string>::makeResult(false);
-      measureOperation("progressive scene commit",
-                       [&] { commit = scene->commit(); });
+      auto commit = measureOperation([&] { return scene->commit(); });
       if (commit.hasError()) {
         return Result<AssetPublicationStats, std::string>::makeError(
             "AssetSystem: progressive scene commit failed: " + commit.error());
       }
-      for (SceneNode &node : sceneNodes_) {
+      for (SceneNode &node : scenes_) {
         if (node.boundScene == scene) {
           node.commitPending = false;
         }
@@ -2177,97 +1584,6 @@ AssetSystem::prepareFrame(AssetPublicationContext context) {
   return Result<AssetPublicationStats, std::string>::makeResult(stats);
 }
 
-AssetSystem::TextureNode *AssetSystem::find(TextureAssetHandle handle) {
-  return handle.index < textureNodes_.size() &&
-                 textureSlots_.isValid(handle.index, handle.generation)
-             ? &textureNodes_[handle.index]
-             : nullptr;
-}
-
-const AssetSystem::TextureNode *
-AssetSystem::find(TextureAssetHandle handle) const {
-  return handle.index < textureNodes_.size() &&
-                 textureSlots_.isValid(handle.index, handle.generation)
-             ? &textureNodes_[handle.index]
-             : nullptr;
-}
-
-AssetSystem::ModelNode *AssetSystem::find(ModelAssetHandle handle) {
-  return handle.index < modelNodes_.size() &&
-                 modelSlots_.isValid(handle.index, handle.generation)
-             ? &modelNodes_[handle.index]
-             : nullptr;
-}
-
-const AssetSystem::ModelNode *AssetSystem::find(ModelAssetHandle handle) const {
-  return handle.index < modelNodes_.size() &&
-                 modelSlots_.isValid(handle.index, handle.generation)
-             ? &modelNodes_[handle.index]
-             : nullptr;
-}
-
-AssetSystem::MaterialNode *AssetSystem::find(MaterialAssetHandle handle) {
-  return handle.index < materialNodes_.size() &&
-                 materialSlots_.isValid(handle.index, handle.generation)
-             ? &materialNodes_[handle.index]
-             : nullptr;
-}
-
-const AssetSystem::MaterialNode *
-AssetSystem::find(MaterialAssetHandle handle) const {
-  return handle.index < materialNodes_.size() &&
-                 materialSlots_.isValid(handle.index, handle.generation)
-             ? &materialNodes_[handle.index]
-             : nullptr;
-}
-
-AssetSystem::EnvironmentNode *AssetSystem::find(EnvironmentAssetHandle handle) {
-  return handle.index < environmentNodes_.size() &&
-                 environmentSlots_.isValid(handle.index, handle.generation)
-             ? &environmentNodes_[handle.index]
-             : nullptr;
-}
-
-const AssetSystem::EnvironmentNode *
-AssetSystem::find(EnvironmentAssetHandle handle) const {
-  return handle.index < environmentNodes_.size() &&
-                 environmentSlots_.isValid(handle.index, handle.generation)
-             ? &environmentNodes_[handle.index]
-             : nullptr;
-}
-
-AssetSystem::SceneNode *AssetSystem::find(SceneLoadHandle handle) {
-  return handle.index < sceneNodes_.size() &&
-                 sceneSlots_.isValid(handle.index, handle.generation)
-             ? &sceneNodes_[handle.index]
-             : nullptr;
-}
-
-const AssetSystem::SceneNode *AssetSystem::find(SceneLoadHandle handle) const {
-  return handle.index < sceneNodes_.size() &&
-                 sceneSlots_.isValid(handle.index, handle.generation)
-             ? &sceneNodes_[handle.index]
-             : nullptr;
-}
-
-AssetSystem::ScenePublicationTargetNode *
-AssetSystem::find(ScenePublicationTargetHandle handle) {
-  return handle.index < scenePublicationTargets_.size() &&
-                 scenePublicationTargetSlots_.isValid(handle.index,
-                                                      handle.generation)
-             ? &scenePublicationTargets_[handle.index]
-             : nullptr;
-}
-
-const AssetSystem::ScenePublicationTargetNode *
-AssetSystem::find(ScenePublicationTargetHandle handle) const {
-  return handle.index < scenePublicationTargets_.size() &&
-                 scenePublicationTargetSlots_.isValid(handle.index,
-                                                      handle.generation)
-             ? &scenePublicationTargets_[handle.index]
-             : nullptr;
-}
-
 void AssetSystem::pushCompletion(CpuCompletion completion) {
   std::lock_guard lock(completionMutex_);
   completions_.push_back(std::move(completion));
@@ -2277,66 +1593,18 @@ std::vector<AssetSystem::CpuCompletion>
 AssetSystem::takeCompletions(uint32_t maxCompletions) {
   std::lock_guard lock(completionMutex_);
   const size_t count = std::min<size_t>(completions_.size(), maxCompletions);
-  std::vector<CpuCompletion> result{};
-  result.reserve(count);
-  for (size_t index = 0u; index < count; ++index) {
-    result.push_back(std::move(completions_[index]));
-  }
+  std::vector<CpuCompletion> result(
+      std::make_move_iterator(completions_.begin()),
+      std::make_move_iterator(completions_.begin() + count));
   completions_.erase(completions_.begin(), completions_.begin() + count);
   return result;
 }
 
 void AssetSystem::returnCompletions(std::span<CpuCompletion> completions) {
-  if (completions.empty()) {
-    return;
-  }
   std::lock_guard lock(completionMutex_);
-  std::vector<CpuCompletion> returned{};
-  returned.reserve(completions.size() + completions_.size());
-  for (CpuCompletion &completion : completions) {
-    returned.push_back(std::move(completion));
-  }
-  for (CpuCompletion &completion : completions_) {
-    returned.push_back(std::move(completion));
-  }
-  completions_ = std::move(returned);
-}
-
-void AssetSystem::discardPreparedTextureAsync(
-    std::unique_ptr<PreparedGpuTexture> prepared) {
-  if (prepared == nullptr) {
-    return;
-  }
-  auto retained = std::shared_ptr<PreparedGpuTexture>(std::move(prepared));
-  auto task = scheduler_.enqueue(AssetCpuJob{
-      .priority = AssetPriority::Background,
-      .workClass = AssetWorkClass::GpuMaterialization,
-      .debugName = "discard prepared GPU texture",
-      .execute = [retained](std::stop_token) {},
-  });
-  if (task.hasError()) {
-    NURI_LOG_WARNING(
-        "AssetSystem: could not defer prepared texture disposal: %s",
-        task.error().c_str());
-  }
-}
-
-void AssetSystem::discardPreparedModelAsync(
-    std::unique_ptr<PreparedGpuModelData> prepared) {
-  if (prepared == nullptr) {
-    return;
-  }
-  auto retained = std::shared_ptr<PreparedGpuModelData>(std::move(prepared));
-  auto task = scheduler_.enqueue(AssetCpuJob{
-      .priority = AssetPriority::Background,
-      .workClass = AssetWorkClass::GpuMaterialization,
-      .debugName = "discard prepared GPU model",
-      .execute = [retained](std::stop_token) {},
-  });
-  if (task.hasError()) {
-    NURI_LOG_WARNING("AssetSystem: could not defer prepared model disposal: %s",
-                     task.error().c_str());
-  }
+  completions_.insert(completions_.begin(),
+                      std::make_move_iterator(completions.begin()),
+                      std::make_move_iterator(completions.end()));
 }
 
 void AssetSystem::reclaimReleasedNodes() {
@@ -2344,86 +1612,11 @@ void AssetSystem::reclaimReleasedNodes() {
     return;
   }
   releasedTerminalNodes_ = false;
-  const auto reclaim = [](auto &nodes, auto &slots, auto isTerminal) {
-    for (uint32_t index = 0u; index < slots.slotCount(); ++index) {
-      if (!slots.isLive(index)) {
-        continue;
-      }
-      auto &node = nodes[index];
-      if (node.subscriberCount != 0u || !isTerminal(node.state)) {
-        continue;
-      }
-      node = {};
-      slots.release(index);
-    }
-  };
-
-  reclaim(textureNodes_, textureSlots_, isAssetTerminalState);
-  reclaim(modelNodes_, modelSlots_, isAssetTerminalState);
-  reclaim(materialNodes_, materialSlots_, isAssetTerminalState);
-  reclaim(environmentNodes_, environmentSlots_, isAssetTerminalState);
-  reclaim(sceneNodes_, sceneSlots_, [](SceneLoadState state) {
-    return state == SceneLoadState::Complete ||
-           state == SceneLoadState::CompleteWithErrors ||
-           state == SceneLoadState::Failed ||
-           state == SceneLoadState::Cancelled;
-  });
-}
-
-void AssetSystem::finishTextureNode(TextureNode &node, AssetState terminalState,
-                                    std::string error) {
-  node.state = terminalState;
-  if (!error.empty() || node.error.empty()) {
-    node.error = std::move(error);
-  }
-  if (terminalState != AssetState::Published) {
-    node.prepared.reset();
-  }
-  node.preparedGpuDesc = {};
-  node.preparedGpuDebugName.clear();
-  textureInFlight_.erase(node.key);
-  if (terminalState == AssetState::Cancelled) {
-    node.request = {};
-    node.key = {};
-    node.cpuPayloadBytes = 0u;
-  }
-  if (node.subscriberCount == 0u && isAssetTerminalState(terminalState)) {
-    releasedTerminalNodes_ = true;
-  }
-}
-
-void AssetSystem::finishModelNode(ModelNode &node, AssetState terminalState,
-                                  std::string error) {
-  node.state = terminalState;
-  node.error = std::move(error);
-  if (terminalState != AssetState::Published) {
-    node.prepared.reset();
-    node.preparedGpuModel.reset();
-  }
-  modelInFlight_.erase(node.key);
-  if (terminalState == AssetState::Cancelled) {
-    node.request = {};
-    node.key = {};
-    node.cpuPayloadBytes = 0u;
-  }
-  if (node.subscriberCount == 0u && isAssetTerminalState(terminalState)) {
-    releasedTerminalNodes_ = true;
-  }
-}
-
-void AssetSystem::finishMaterialNode(MaterialNode &node,
-                                     AssetState terminalState,
-                                     std::string error) {
-  node.state = terminalState;
-  node.error = std::move(error);
-  materialInFlight_.erase(node.key);
-  if (terminalState == AssetState::Cancelled) {
-    node.request = {};
-    node.key = {};
-  }
-  if (node.subscriberCount == 0u && isAssetTerminalState(terminalState)) {
-    releasedTerminalNodes_ = true;
-  }
+  textures_.reclaim(isAssetTerminalState);
+  models_.reclaim(isAssetTerminalState);
+  materials_.reclaim(isAssetTerminalState);
+  environments_.reclaim(isAssetTerminalState);
+  scenes_.reclaim(isSceneTerminalState);
 }
 
 void AssetSystem::finishSceneNode(SceneNode &node, SceneLoadState terminalState,
@@ -2432,34 +1625,20 @@ void AssetSystem::finishSceneNode(SceneNode &node, SceneLoadState terminalState,
   if (!error.empty() || node.error.empty()) {
     node.error = std::move(error);
   }
-  if (terminalState == SceneLoadState::Complete ||
-      terminalState == SceneLoadState::CompleteWithErrors ||
-      terminalState == SceneLoadState::Failed ||
-      terminalState == SceneLoadState::Cancelled) {
+  if (isSceneTerminalState(terminalState)) {
     node.progress = 1.0f;
     sceneInFlight_.erase(node.key);
   }
   if (terminalState == SceneLoadState::Cancelled) {
-    node.manifest.reset();
-    node.materialTasks = {};
-    node.materialPreparationFinished = {};
-    node.models = {};
-    node.materials = {};
-    node.textureSubscriptions = {};
-    node.fallbackMaterial = {};
-    node.instantiation = SceneInstantiationMap{};
-    node.root = kInvalidNodeId;
-    node.boundScene = nullptr;
-    node.modelFallbackMapped = {};
-    node.renderableMaterialMapped = {};
-    node.cpuPayloadBytes = 0u;
-    node.hierarchyPublished = false;
+    const SceneLoadHandle handle = node.handle;
+    std::string retainedError = std::move(node.error);
+    node = SceneNode{.handle = handle,
+                     .state = SceneLoadState::Cancelled,
+                     .subscriberCount = 0u,
+                     .progress = 1.0f,
+                     .error = std::move(retainedError)};
   }
-  if (node.subscriberCount == 0u &&
-      (terminalState == SceneLoadState::Complete ||
-       terminalState == SceneLoadState::CompleteWithErrors ||
-       terminalState == SceneLoadState::Failed ||
-       terminalState == SceneLoadState::Cancelled)) {
+  if (node.subscriberCount == 0u && isSceneTerminalState(terminalState)) {
     releasedTerminalNodes_ = true;
   }
 }
@@ -2467,159 +1646,66 @@ void AssetSystem::finishSceneNode(SceneNode &node, SceneLoadState terminalState,
 bool AssetSystem::cancelSceneDependencies(
     SceneNode &node, std::chrono::steady_clock::time_point deadline,
     uint32_t maxOperations) {
-  if (node.dependenciesCancelled) {
-    return true;
-  }
   uint32_t operations = 0u;
-  const auto canContinue = [&] {
-    return operations < maxOperations &&
-           std::chrono::steady_clock::now() < deadline;
-  };
-  if (!node.manifestTaskCancelled && canContinue()) {
-    (void)scheduler_.cancel(node.manifestTask);
-    node.manifestTaskCancelled = true;
+  while (node.cancellationCursor < node.dependencies.size() &&
+         operations < maxOperations &&
+         std::chrono::steady_clock::now() < deadline) {
+    std::visit(
+        [this](auto handle) {
+          using Handle = decltype(handle);
+          if constexpr (std::is_same_v<Handle, AssetCpuTaskHandle>) {
+            (void)scheduler_.cancel(handle);
+          } else {
+            cancel(handle);
+          }
+        },
+        node.dependencies[node.cancellationCursor++]);
     ++operations;
   }
-  while (node.cancellationTaskCursor < node.materialTasks.size() &&
-         canContinue()) {
-    (void)scheduler_.cancel(node.materialTasks[node.cancellationTaskCursor++]);
-    ++operations;
-  }
-  while (node.cancellationModelCursor < node.models.size() && canContinue()) {
-    const ModelAssetHandle model = node.models[node.cancellationModelCursor++];
-    if (isValidAssetHandle(model)) {
-      cancel(model);
-    }
-    ++operations;
-  }
-  while (node.cancellationMaterialCursor < node.materials.size() &&
-         canContinue()) {
-    const MaterialAssetHandle material =
-        node.materials[node.cancellationMaterialCursor++];
-    if (isValidAssetHandle(material)) {
-      cancel(material);
-    }
-    ++operations;
-  }
-  while (node.cancellationTextureSubscriptionCursor <
-             node.textureSubscriptions.size() &&
-         canContinue()) {
-    const auto &subscriptions =
-        node.textureSubscriptions[node.cancellationTextureSubscriptionCursor];
-    while (node.cancellationTextureCursor < subscriptions.size() &&
-           canContinue()) {
-      const TextureAssetHandle texture =
-          subscriptions[node.cancellationTextureCursor++];
-      if (isValidAssetHandle(texture)) {
-        cancel(texture);
-      }
-      ++operations;
-    }
-    if (node.cancellationTextureCursor == subscriptions.size()) {
-      ++node.cancellationTextureSubscriptionCursor;
-      node.cancellationTextureCursor = 0u;
-    }
-  }
-  if (!node.fallbackMaterialCancelled && canContinue()) {
-    if (isValidAssetHandle(node.fallbackMaterial)) {
-      cancel(node.fallbackMaterial);
-    }
-    node.fallbackMaterialCancelled = true;
-    ++operations;
-  }
-  node.dependenciesCancelled =
-      node.manifestTaskCancelled &&
-      node.cancellationTaskCursor == node.materialTasks.size() &&
-      node.cancellationModelCursor == node.models.size() &&
-      node.cancellationMaterialCursor == node.materials.size() &&
-      node.cancellationTextureSubscriptionCursor ==
-          node.textureSubscriptions.size() &&
-      node.fallbackMaterialCancelled;
-  return node.dependenciesCancelled;
+  return node.cancellationCursor == node.dependencies.size();
 }
 
-Result<bool, std::string>
-AssetSystem::prepareSceneNode(SceneNode &node, AssetPublicationContext &context,
-                              AssetPublicationStats &stats,
-                              uint32_t &patchBudget,
-                              std::chrono::steady_clock::time_point deadline) {
+bool AssetSystem::prepareSceneNode(
+    SceneNode &node, AssetPublicationStats &stats, uint32_t &patchBudget,
+    std::chrono::steady_clock::time_point deadline, RenderScene *targetScene,
+    NodeId targetParent) {
   bool sceneDirty = false;
   const auto deadlineReached = [&deadline] {
     return std::chrono::steady_clock::now() >= deadline;
   };
-  const ScenePublicationTargetNode *publicationTarget =
-      find(node.publicationTarget);
-  if (isValidAssetHandle(node.publicationTarget) &&
-      publicationTarget == nullptr && node.boundScene == nullptr) {
-    finishSceneNode(node, SceneLoadState::Failed,
-                    "AssetSystem: scene publication target is stale");
-    ++stats.failed;
-    return Result<bool, std::string>::makeResult(false);
-  }
-  RenderScene *targetScene =
-      node.boundScene != nullptr
-          ? node.boundScene
-          : (publicationTarget != nullptr ? publicationTarget->scene
-                                          : context.scene);
-  const NodeId targetParent =
-      publicationTarget != nullptr ? publicationTarget->parent : context.parent;
+  const bool completeOnly =
+      node.request.publication == ScenePublicationPolicy::CompleteOnly;
   const auto dependenciesTerminal = [this, &node] {
-    if (!node.manifest.has_value()) {
-      return false;
-    }
-    if (!node.manifestAdmissionComplete) {
+    const ScenePrefab &prefab = node.manifest->prefab;
+    if ((!isValid(node.fallbackMaterial) &&
+         node.state != SceneLoadState::Cancelling) ||
+        node.modelAdmissionCursor != prefab.meshAssets.size() ||
+        node.materialAdmissionCursor != prefab.materialAssets.size()) {
       return false;
     }
     if (std::ranges::any_of(node.materialPreparationFinished,
                             [](uint8_t finished) { return finished == 0u; })) {
       return false;
     }
-    const auto handlesTerminal = [this](const auto &handles) {
-      for (const auto handle : handles) {
-        if (!isValidAssetHandle(handle)) {
-          continue;
-        }
-        const auto *dependency = find(handle);
-        if (dependency != nullptr && !isAssetTerminalState(dependency->state)) {
-          return false;
-        }
-      }
-      return true;
-    };
-    if (!handlesTerminal(node.models) || !handlesTerminal(node.materials)) {
-      return false;
-    }
-    for (const auto &subscriptions : node.textureSubscriptions) {
-      if (!handlesTerminal(subscriptions)) {
-        return false;
-      }
-    }
-    if (isValidAssetHandle(node.fallbackMaterial)) {
-      const MaterialNode *fallback = find(node.fallbackMaterial);
-      if (fallback != nullptr && !isAssetTerminalState(fallback->state)) {
-        return false;
-      }
-    }
-    return true;
+    return std::ranges::all_of(node.dependencies, [this](const auto &entry) {
+      return std::visit(
+          [this](auto handle) {
+            if constexpr (std::is_same_v<decltype(handle), AssetCpuTaskHandle>)
+              return true;
+            else
+              return isAssetTerminalState(find(handle)->state);
+          },
+          entry);
+    });
   };
-
   const auto destroyPublishedHierarchy = [&node, &sceneDirty] {
-    // Explicit targets own an invisible document. Dropping that document is
-    // the rollback journal, so walking and destroying a large hierarchy here
-    // would only add an unbounded cancellation stall. Legacy callers publish
-    // into a shared scene and still require surgical graph removal.
-    if (isValidAssetHandle(node.publicationTarget)) {
-      return;
-    }
-    if (node.boundScene == nullptr || !node.manifest.has_value() ||
-        !node.structureCursor.initialized) {
+    if (isValid(node.publicationTarget) || !node.hierarchyPublished) {
       return;
     }
     const ScenePrefab &prefab = node.manifest->prefab;
     for (uint32_t nodeIndex = 0u; nodeIndex < prefab.nodes.size();
          ++nodeIndex) {
       if (prefab.nodes[nodeIndex].parentIndex != kInvalidScenePrefabIndex ||
-          nodeIndex >= node.instantiation.nodes.size() ||
           !isValid(node.instantiation.nodes[nodeIndex])) {
         continue;
       }
@@ -2629,90 +1715,70 @@ AssetSystem::prepareSceneNode(SceneNode &node, AssetPublicationContext &context,
     node.hierarchyPublished = false;
     sceneDirty = true;
   };
-
   if (node.state == SceneLoadState::Cancelling) {
     if (!cancelSceneDependencies(node, deadline)) {
-      return Result<bool, std::string>::makeResult(false);
+      return false;
     }
     if (!node.manifest.has_value()) {
-      return Result<bool, std::string>::makeResult(false);
+      return false;
     }
-    // Unadmitted dependencies have no task that can produce a terminal
-    // completion. Mark that tail settled so cancellation cannot wait forever.
-    const ScenePrefab &cancelledPrefab = node.manifest->prefab;
-    for (uint32_t materialIndex = node.materialAdmissionCursor;
-         materialIndex < node.materialPreparationFinished.size();
-         ++materialIndex) {
-      node.materialPreparationFinished[materialIndex] = 1u;
-    }
-    node.modelAdmissionCursor =
-        static_cast<uint32_t>(cancelledPrefab.meshAssets.size());
-    node.materialAdmissionCursor =
-        static_cast<uint32_t>(cancelledPrefab.materialAssets.size());
-    node.fallbackRequested = true;
-    node.manifestAdmissionComplete = true;
+    std::fill(node.materialPreparationFinished.begin() +
+                  node.materialAdmissionCursor,
+              node.materialPreparationFinished.end(), 1u);
+    node.modelAdmissionCursor = static_cast<uint32_t>(node.models.size());
+    node.materialAdmissionCursor = static_cast<uint32_t>(node.materials.size());
     if (!dependenciesTerminal()) {
-      return Result<bool, std::string>::makeResult(false);
+      return false;
     }
     destroyPublishedHierarchy();
     finishSceneNode(node, SceneLoadState::Cancelled);
     ++stats.cancelled;
-    return Result<bool, std::string>::makeResult(sceneDirty);
+    return sceneDirty;
   }
   if (!node.manifest.has_value()) {
-    return Result<bool, std::string>::makeResult(false);
+    return false;
   }
-
   const ScenePrefab &prefab = node.manifest->prefab;
-  if (!node.fallbackRequested && !deadlineReached()) {
-    auto fallback = requestMaterial(
+  if (!isValid(node.fallbackMaterial)) {
+    node.fallbackMaterial = requestMaterial(
         MaterialAssetRequest{
             .debugName = "async_scene_fallback_material",
             .sourceIdentity = node.request.path + "#async_fallback",
         },
         node.request.priority);
-    if (fallback.hasError()) {
-      ++node.requiredFailures;
-      finishSceneNode(node, SceneLoadState::Failed, fallback.error());
-      ++stats.failed;
-      return Result<bool, std::string>::makeResult(false);
-    }
-    node.fallbackMaterial = fallback.value();
-    node.fallbackRequested = true;
+    node.dependencies.emplace_back(node.fallbackMaterial);
   }
-
   while (node.modelAdmissionCursor < prefab.meshAssets.size() &&
          !deadlineReached()) {
     const uint32_t modelIndex = node.modelAdmissionCursor++;
-    const ScenePrefabMeshAssetRef &asset = prefab.meshAssets[modelIndex];
+    const ScenePrefabAssetRef &asset = prefab.meshAssets[modelIndex];
     ModelRequest modelRequest{
         .path = node.request.path,
         .importOptions = node.request.importOptions.assetBuildOptions,
-        .debugName =
-            "async_scene_mesh_" + std::to_string(asset.sourceSceneMeshIndex),
-        .sceneMeshIndex = asset.sourceSceneMeshIndex,
+        .debugName = "async_scene_mesh_" + std::to_string(asset.sourceIndex),
+        .sceneMeshIndex = asset.sourceIndex,
     };
     Result<ModelAssetHandle, std::string> model =
         modelIndex < node.manifest->meshes.size()
-            ? requestAdaptedModel(modelRequest,
-                                  std::move(node.manifest->meshes[modelIndex]),
-                                  node.request.priority)
+            ? requestModelAsset(modelRequest,
+                                std::make_shared<AdaptedSceneMesh>(std::move(
+                                    node.manifest->meshes[modelIndex])),
+                                node.request.priority)
             : requestModel(modelRequest, node.request.priority);
     if (model.hasError()) {
       ++node.optionalFailures;
       continue;
     }
     node.models[modelIndex] = model.value();
+    node.dependencies.emplace_back(model.value());
   }
-
   const TextureCompressionCaps compressionCaps =
       resources_.textureCompressionCaps();
   const auto embeddedTextures = node.manifest->embeddedTextures;
   while (node.materialAdmissionCursor < prefab.materialAssets.size() &&
          !deadlineReached()) {
     const uint32_t materialIndex = node.materialAdmissionCursor++;
-    const ScenePrefabMaterialAssetRef &asset =
-        prefab.materialAssets[materialIndex];
+    const ScenePrefabAssetRef &asset = prefab.materialAssets[materialIndex];
     const MaterialData workerMaterial =
         materialIndex < node.manifest->materials.size()
             ? node.manifest->materials[materialIndex]
@@ -2720,98 +1786,52 @@ AssetSystem::prepareSceneNode(SceneNode &node, AssetPublicationContext &context,
     const SceneLoadHandle sceneHandle = node.handle;
     const std::string scenePath = node.request.path;
     const AssetPriority priority = node.request.priority;
-    auto task = scheduler_.enqueue(AssetCpuJob{
-        .priority = priority,
-        .workClass = AssetWorkClass::Transcode,
-        .estimatedBytes = std::min<uint64_t>(estimateSourceBytes(scenePath),
-                                             64ull * 1024ull * 1024ull),
-        .debugName = "prepare_scene_material_" +
-                     std::to_string(asset.sourceMaterialIndex),
-        .execute =
-            [this, sceneHandle, materialIndex, workerMaterial, scenePath,
-             sourceMaterialIndex = asset.sourceMaterialIndex, compressionCaps,
-             embeddedTextures](std::stop_token stopToken) {
-              if (stopToken.stop_requested()) {
-                pushCompletion(SceneMaterialCompletion{
-                    .scene = sceneHandle,
-                    .materialIndex = materialIndex,
-                    .cancelled = true,
-                });
-                return;
-              }
-              auto result = prepareImportedMaterial(
-                  workerMaterial, scenePath, sourceMaterialIndex,
-                  compressionCaps,
-                  embeddedTextures != nullptr
-                      ? std::span<const EmbeddedSceneTextureData>(
-                            embeddedTextures->data(), embeddedTextures->size())
-                      : std::span<const EmbeddedSceneTextureData>(),
-                  "async_scene");
-              if (stopToken.stop_requested()) {
-                pushCompletion(SceneMaterialCompletion{
-                    .scene = sceneHandle,
-                    .materialIndex = materialIndex,
-                    .cancelled = true,
-                });
-              } else if (result.hasError()) {
-                pushCompletion(SceneMaterialCompletion{
-                    .scene = sceneHandle,
-                    .materialIndex = materialIndex,
-                    .error = result.error(),
-                });
-              } else {
-                pushCompletion(SceneMaterialCompletion{
-                    .scene = sceneHandle,
-                    .materialIndex = materialIndex,
-                    .prepared = std::move(result.value()),
-                });
-              }
-            },
-        .onCancelled =
-            [this, sceneHandle, materialIndex] {
-              pushCompletion(SceneMaterialCompletion{
-                  .scene = sceneHandle,
-                  .materialIndex = materialIndex,
-                  .cancelled = true,
-              });
-            },
-    });
+    auto task = scheduler_.enqueue(makeAssetCpuJob<SceneMaterialCompletion>(
+        priority, AssetWorkClass::Transcode,
+        std::min<uint64_t>(estimateSourceBytes(scenePath),
+                           64ull * 1024ull * 1024ull),
+        "prepare_scene_material_" + std::to_string(asset.sourceIndex),
+        SceneMaterialCompletion{.scene = sceneHandle,
+                                .materialIndex = materialIndex},
+        [workerMaterial, scenePath, sourceMaterialIndex = asset.sourceIndex,
+         compressionCaps, embeddedTextures] {
+          return prepareImportedMaterial(
+              workerMaterial, scenePath, sourceMaterialIndex, compressionCaps,
+              embeddedTextures != nullptr
+                  ? std::span<const EmbeddedSceneTextureData>(
+                        embeddedTextures->data(), embeddedTextures->size())
+                  : std::span<const EmbeddedSceneTextureData>(),
+              "async_scene");
+        },
+        [this](SceneMaterialCompletion completion) {
+          pushCompletion(std::move(completion));
+        }));
     if (task.hasError()) {
       node.materialPreparationFinished[materialIndex] = 1u;
       ++node.optionalFailures;
       continue;
     }
-    node.materialTasks[materialIndex] = task.value();
+    node.dependencies.emplace_back(task.value());
   }
-  node.manifestAdmissionComplete =
-      node.fallbackRequested &&
-      node.modelAdmissionCursor == prefab.meshAssets.size() &&
-      node.materialAdmissionCursor == prefab.materialAssets.size();
-
   const bool allDependenciesTerminal = dependenciesTerminal();
-  uint32_t &scenePatchBudget = patchBudget;
   if (!node.hierarchyPublished) {
-    if (node.request.publication == ScenePublicationPolicy::CompleteOnly &&
-        !allDependenciesTerminal) {
-      return Result<bool, std::string>::makeResult(false);
+    if (completeOnly && !allDependenciesTerminal) {
+      return false;
     }
-    if (scenePatchBudget == 0u) {
-      return Result<bool, std::string>::makeResult(false);
+    if (patchBudget == 0u) {
+      return false;
     }
     if (targetScene == nullptr) {
-      return Result<bool, std::string>::makeResult(false);
+      return false;
     }
-    // Legacy publication binds directly to the caller-owned scene. Explicit
-    // editor targets must stay handle-resolved so a retired document can never
-    // leave a terminal scene node holding a dangling RenderScene pointer.
-    if (!isValidAssetHandle(node.publicationTarget)) {
+    if (!isValid(node.publicationTarget)) {
       node.boundScene = targetScene;
     }
     const NodeId parent =
         isValid(targetParent) ? targetParent : targetScene->graph().rootNode();
     const uint32_t nodesBefore = node.structureCursor.nextNode;
     const uint32_t lightsBefore = node.structureCursor.nextLight;
-    const uint32_t structureBudget = std::min(scenePatchBudget, 128u);
+    const uint32_t structureBudget = std::min(patchBudget, 128u);
     auto structure = targetScene->graph().instantiatePrefabStructureStep(
         prefab, parent, node.instantiation, node.structureCursor,
         structureBudget);
@@ -2819,169 +1839,141 @@ AssetSystem::prepareSceneNode(SceneNode &node, AssetPublicationContext &context,
       ++node.requiredFailures;
       finishSceneNode(node, SceneLoadState::Failed, structure.error());
       ++stats.failed;
-      return Result<bool, std::string>::makeResult(false);
+      return false;
     }
     const uint32_t structureOperations =
         (node.structureCursor.nextNode - nodesBefore) +
         (node.structureCursor.nextLight - lightsBefore);
-    scenePatchBudget -= std::min(scenePatchBudget, structureOperations);
+    patchBudget -= std::min(patchBudget, structureOperations);
     stats.scenePatches += structureOperations;
     sceneDirty = structureOperations != 0u;
     if (!structure.value()) {
-      return Result<bool, std::string>::makeResult(sceneDirty);
+      return sceneDirty;
     }
-    node.root = node.structureCursor.firstRoot;
     node.hierarchyPublished = true;
     node.state = SceneLoadState::HierarchyPublished;
   }
-
-  const MaterialNode *fallbackNode = find(node.fallbackMaterial);
-  if (fallbackNode == nullptr || fallbackNode->state == AssetState::Failed ||
-      fallbackNode->state == AssetState::Cancelled) {
+  const MaterialNode &fallbackNode = *find(node.fallbackMaterial);
+  if (fallbackNode.state == AssetState::Failed ||
+      fallbackNode.state == AssetState::Cancelled) {
     ++node.requiredFailures;
     destroyPublishedHierarchy();
     finishSceneNode(node, SceneLoadState::Failed,
                     "AssetSystem: scene fallback material failed");
     ++stats.failed;
-    return Result<bool, std::string>::makeResult(sceneDirty);
+    return sceneDirty;
   }
-  if (fallbackNode->state != AssetState::Published ||
-      !isValid(fallbackNode->published)) {
+  if (fallbackNode.state != AssetState::Published) {
     node.state = SceneLoadState::PartiallyResident;
-    return Result<bool, std::string>::makeResult(sceneDirty);
+    return sceneDirty;
   }
-  const MaterialRef fallbackMaterial = fallbackNode->published;
-
-  uint32_t modelIndex =
-      node.request.publication == ScenePublicationPolicy::CompleteOnly
-          ? node.modelMappingCursor
-          : 0u;
-  for (; modelIndex < node.models.size() && scenePatchBudget > 0u &&
+  const MaterialRef fallbackMaterial = fallbackNode.published;
+  uint32_t modelIndex = completeOnly ? node.modelMappingCursor : 0u;
+  for (; modelIndex < node.models.size() && patchBudget > 0u &&
          !deadlineReached();
        ++modelIndex) {
-    const std::optional<ModelRef> model = tryResolve(node.models[modelIndex]);
+    const std::optional<ModelRef> model =
+        resolvedAsset(find(node.models[modelIndex]));
     if (!model.has_value()) {
-      if (node.request.publication == ScenePublicationPolicy::CompleteOnly &&
-          allDependenciesTerminal) {
+      if (completeOnly && allDependenciesTerminal) {
         node.modelFallbackMapped[modelIndex] = 1u;
       }
       continue;
     }
     if (node.modelFallbackMapped[modelIndex] == 0u) {
-      // Models are shared across publication targets. A staging scene may use
-      // the same model as the active scene, so its fallback must not overwrite
-      // material mappings that are already visible to the renderer.
-      if (const ModelRecord *record = resources_.tryGet(*model)) {
-        const uint32_t sourceMaterialCount =
-            static_cast<uint32_t>(record->sourceMaterialToRuntime.size());
-        for (uint32_t sourceMaterialIndex = 0u;
-             sourceMaterialIndex < sourceMaterialCount; ++sourceMaterialIndex) {
-          if (!isValid(record->materialForSource(sourceMaterialIndex))) {
-            (void)resources_.setModelMaterialForSource(
-                *model, sourceMaterialIndex, fallbackMaterial);
-          }
+      const ModelRecord &record = *resources_.tryGet(*model);
+      for (uint32_t sourceMaterialIndex = 0u;
+           sourceMaterialIndex < record.sourceMaterialToRuntime.size();
+           ++sourceMaterialIndex) {
+        if (!isValid(record.materialForSource(sourceMaterialIndex))) {
+          (void)resources_.setModelMaterialForSource(
+              *model, sourceMaterialIndex, fallbackMaterial);
         }
       }
       node.modelFallbackMapped[modelIndex] = 1u;
-      --scenePatchBudget;
+      --patchBudget;
       ++stats.scenePatches;
     }
   }
-  if (node.request.publication == ScenePublicationPolicy::CompleteOnly) {
+  if (completeOnly) {
     node.modelMappingCursor = modelIndex;
   }
-
+  bool bindingsSettled = modelIndex == node.models.size();
   uint32_t materialBindingIndex =
-      node.request.publication == ScenePublicationPolicy::CompleteOnly
-          ? node.materialMappingCursor
-          : 0u;
-  for (; materialBindingIndex < prefab.renderables.size() &&
-         scenePatchBudget > 0u && !deadlineReached();
+      completeOnly ? node.materialMappingCursor : 0u;
+  for (; materialBindingIndex < prefab.renderables.size() && patchBudget > 0u &&
+         !deadlineReached();
        ++materialBindingIndex) {
     if (node.renderableMaterialMapped[materialBindingIndex] != 0u) {
       continue;
     }
     const ScenePrefabRenderable &binding =
         prefab.renderables[materialBindingIndex];
-    if (binding.meshIndex >= node.models.size() ||
-        binding.materialIndex >= node.materials.size()) {
-      node.renderableMaterialMapped[materialBindingIndex] = 1u;
-      continue;
-    }
     const std::optional<ModelRef> model =
-        tryResolve(node.models[binding.meshIndex]);
+        resolvedAsset(find(node.models[binding.meshAssetIndex]));
     const std::optional<MaterialRef> material =
-        tryResolve(node.materials[binding.materialIndex]);
+        resolvedAsset(find(node.materials[binding.materialAssetIndex]));
     if (!model.has_value() || !material.has_value()) {
-      if (node.request.publication == ScenePublicationPolicy::CompleteOnly &&
-          allDependenciesTerminal) {
+      if (completeOnly && allDependenciesTerminal) {
         node.renderableMaterialMapped[materialBindingIndex] = 1u;
       }
       continue;
     }
     bool mappedModelSubmesh = false;
-    if (const ModelRecord *record = resources_.tryGet(*model);
-        record != nullptr && record->model != nullptr) {
-      for (const Submesh &submesh : record->model->submeshes()) {
-        mappedModelSubmesh = resources_.setModelMaterialForSource(
-                                 *model, submesh.materialIndex, *material) ||
-                             mappedModelSubmesh;
-      }
+    const ModelRecord &record = *resources_.tryGet(*model);
+    for (const Submesh &submesh : record.model->submeshes()) {
+      mappedModelSubmesh = resources_.setModelMaterialForSource(
+                               *model, submesh.materialIndex, *material) ||
+                           mappedModelSubmesh;
     }
     if (!mappedModelSubmesh) {
       (void)resources_.setModelMaterialForSource(
-          *model,
-          prefab.materialAssets[binding.materialIndex].sourceMaterialIndex,
+          *model, prefab.materialAssets[binding.materialAssetIndex].sourceIndex,
           *material);
     }
     node.renderableMaterialMapped[materialBindingIndex] = 1u;
-    --scenePatchBudget;
+    --patchBudget;
     ++stats.scenePatches;
   }
-  if (node.request.publication == ScenePublicationPolicy::CompleteOnly) {
+  if (completeOnly) {
     node.materialMappingCursor = materialBindingIndex;
   }
-
-  uint32_t renderableIndex =
-      node.request.publication == ScenePublicationPolicy::CompleteOnly
-          ? node.renderableCursor
-          : 0u;
-  for (; renderableIndex < prefab.renderables.size() && scenePatchBudget > 0u &&
+  bindingsSettled &= materialBindingIndex == prefab.renderables.size();
+  uint32_t renderableIndex = completeOnly ? node.renderableCursor : 0u;
+  bool renderablesSettled = true;
+  for (; renderableIndex < prefab.renderables.size() && patchBudget > 0u &&
          !deadlineReached();
        ++renderableIndex) {
     const ScenePrefabRenderable &prefabRenderable =
         prefab.renderables[renderableIndex];
-    if (prefabRenderable.meshIndex >= node.models.size()) {
-      continue;
-    }
-    const std::optional<ModelRef> model =
-        tryResolve(node.models[prefabRenderable.meshIndex]);
+    const ModelNode *modelNode =
+        find(node.models[prefabRenderable.meshAssetIndex]);
+    const std::optional<ModelRef> model = resolvedAsset(modelNode);
     if (!model.has_value()) {
+      renderablesSettled &= modelNode == nullptr ||
+                            modelNode->state == AssetState::Failed ||
+                            modelNode->state == AssetState::Cancelled;
       continue;
     }
     MaterialRef material = fallbackMaterial;
-    if (prefabRenderable.materialIndex < node.materials.size()) {
-      if (const std::optional<MaterialRef> resolved =
-              tryResolve(node.materials[prefabRenderable.materialIndex]);
-          resolved.has_value()) {
-        material = *resolved;
-      }
+    if (const std::optional<MaterialRef> resolved = resolvedAsset(
+            find(node.materials[prefabRenderable.materialAssetIndex]));
+        resolved.has_value()) {
+      material = *resolved;
     }
-
-    if (renderableIndex >= node.instantiation.renderables.size() ||
-        !isValid(node.instantiation.renderables[renderableIndex])) {
+    if (!isValid(node.instantiation.renderables[renderableIndex])) {
       auto attached = targetScene->graph().attachPrefabRenderable(
           prefab, renderableIndex, *model, material, node.instantiation);
       if (attached.hasError()) {
         ++node.optionalFailures;
+        renderablesSettled = false;
         continue;
       }
       sceneDirty = true;
-      --scenePatchBudget;
+      --patchBudget;
       ++stats.scenePatches;
       continue;
     }
-
     MaterialRef current = kInvalidMaterialRef;
     if (targetScene->graph().getRenderableMaterial(
             node.instantiation.renderables[renderableIndex], current) &&
@@ -2989,25 +1981,24 @@ AssetSystem::prepareSceneNode(SceneNode &node, AssetPublicationContext &context,
         targetScene->graph().setRenderableMaterial(
             node.instantiation.renderables[renderableIndex], material)) {
       sceneDirty = true;
-      --scenePatchBudget;
+      --patchBudget;
       ++stats.scenePatches;
     }
   }
-  if (node.request.publication == ScenePublicationPolicy::CompleteOnly) {
+  if (completeOnly) {
     node.renderableCursor = renderableIndex;
   }
-
+  renderablesSettled &= renderableIndex == prefab.renderables.size();
   if (deadlineReached()) {
-    return Result<bool, std::string>::makeResult(sceneDirty);
+    return sceneDirty;
   }
-
   const SceneAssetCounts modelCounts =
-      collectSceneCounts(*this, std::span<const ModelAssetHandle>(
-                                    node.models.data(), node.models.size()));
-  const SceneAssetCounts materialCounts = collectSceneCounts(
-      *this, std::span<const MaterialAssetHandle>(node.materials.data(),
-                                                  node.materials.size()));
-  const SceneAssetCounts textureCounts = collectSceneTextureCounts(*this, node);
+      collectSceneCounts(std::span<const ModelAssetHandle>(node.models.data(),
+                                                           node.models.size()));
+  const SceneAssetCounts materialCounts =
+      collectSceneCounts(std::span<const MaterialAssetHandle>(
+          node.materials.data(), node.materials.size()));
+  const SceneAssetCounts textureCounts = collectSceneTextureCounts(node);
   if (node.error.empty()) {
     for (const ModelAssetHandle modelHandle : node.models) {
       const ModelNode *model = find(modelHandle);
@@ -3036,263 +2027,73 @@ AssetSystem::prepareSceneNode(SceneNode &node, AssetPublicationContext &context,
     finishSceneNode(node, SceneLoadState::Failed,
                     "AssetSystem: scene dependency failed");
     ++stats.failed;
-    return Result<bool, std::string>::makeResult(sceneDirty);
+    return sceneDirty;
   }
-
-  bool renderablesSettled = true;
-  for (uint32_t renderableIndex = 0u;
-       renderableIndex < prefab.renderables.size(); ++renderableIndex) {
-    if (renderableIndex < node.instantiation.renderables.size() &&
-        isValid(node.instantiation.renderables[renderableIndex])) {
-      continue;
-    }
-    const ScenePrefabRenderable &renderable =
-        prefab.renderables[renderableIndex];
-    if (renderable.meshIndex >= node.models.size()) {
-      continue;
-    }
-    const ModelNode *model = find(node.models[renderable.meshIndex]);
-    if (model != nullptr && model->state != AssetState::Failed &&
-        model->state != AssetState::Cancelled) {
-      renderablesSettled = false;
-      break;
-    }
-  }
-
-  bool bindingsSettled = true;
-  for (uint32_t modelIndex = 0u; modelIndex < node.models.size();
-       ++modelIndex) {
-    if (node.modelFallbackMapped[modelIndex] == 0u &&
-        tryResolve(node.models[modelIndex]).has_value()) {
-      bindingsSettled = false;
-      break;
-    }
-  }
-  if (bindingsSettled) {
-    for (uint32_t renderableIndex = 0u;
-         renderableIndex < prefab.renderables.size(); ++renderableIndex) {
-      const ScenePrefabRenderable &binding =
-          prefab.renderables[renderableIndex];
-      if (binding.meshIndex >= node.models.size() ||
-          binding.materialIndex >= node.materials.size()) {
-        continue;
-      }
-      if (tryResolve(node.models[binding.meshIndex]).has_value() &&
-          tryResolve(node.materials[binding.materialIndex]).has_value() &&
-          node.renderableMaterialMapped[renderableIndex] == 0u) {
-        bindingsSettled = false;
-        break;
-      }
-    }
-  }
-
   if (allDependenciesTerminal && renderablesSettled && bindingsSettled) {
     finishSceneNode(node, anyFailures ? SceneLoadState::CompleteWithErrors
                                       : SceneLoadState::Complete);
   } else {
     node.state = SceneLoadState::PartiallyResident;
   }
-  return Result<bool, std::string>::makeResult(sceneDirty);
+  return sceneDirty;
 }
 
 SceneAssetCounts
-AssetSystem::collectSceneCounts(const AssetSystem &assets,
-                                std::span<const ModelAssetHandle> handles) {
-  SceneAssetCounts counts{.total = static_cast<uint32_t>(handles.size())};
-  for (const ModelAssetHandle handle : handles) {
-    const ModelNode *node = assets.find(handle);
-    if (node == nullptr) {
-      ++counts.queued;
-      continue;
-    }
-    switch (node->state) {
-    case AssetState::CpuReady:
-    case AssetState::GpuQueued:
-    case AssetState::GpuReady:
-      ++counts.cpuReady;
-      break;
-    case AssetState::GpuSubmitted:
-    case AssetState::Resident:
-      ++counts.gpuSubmitted;
-      break;
-    case AssetState::Published:
-      ++counts.published;
-      break;
-    case AssetState::Failed:
-      ++counts.failed;
-      break;
-    case AssetState::Cancelled:
-      ++counts.cancelled;
-      break;
-    default:
-      ++counts.queued;
-      break;
-    }
-  }
-  return counts;
-}
-
-SceneAssetCounts
-AssetSystem::collectSceneCounts(const AssetSystem &assets,
-                                std::span<const MaterialAssetHandle> handles) {
-  SceneAssetCounts counts{.total = static_cast<uint32_t>(handles.size())};
-  for (const MaterialAssetHandle handle : handles) {
-    const MaterialNode *node = assets.find(handle);
-    if (node == nullptr) {
-      ++counts.queued;
-      continue;
-    }
-    switch (node->state) {
-    case AssetState::CpuReady:
-    case AssetState::GpuQueued:
-    case AssetState::GpuReady:
-      ++counts.cpuReady;
-      break;
-    case AssetState::GpuSubmitted:
-    case AssetState::Resident:
-      ++counts.gpuSubmitted;
-      break;
-    case AssetState::Published:
-      ++counts.published;
-      break;
-    case AssetState::Failed:
-      ++counts.failed;
-      break;
-    case AssetState::Cancelled:
-      ++counts.cancelled;
-      break;
-    default:
-      ++counts.queued;
-      break;
-    }
-  }
-  return counts;
-}
-
-SceneAssetCounts
-AssetSystem::collectSceneTextureCounts(const AssetSystem &assets,
-                                       const SceneNode &node) {
+AssetSystem::collectSceneTextureCounts(const SceneNode &node) const {
   SceneAssetCounts counts{};
-  for (const auto &subscriptions : node.textureSubscriptions) {
-    const SceneAssetCounts materialTextures = [&assets, &subscriptions] {
-      SceneAssetCounts local{.total =
-                                 static_cast<uint32_t>(subscriptions.size())};
-      for (const TextureAssetHandle handle : subscriptions) {
-        const TextureNode *texture = assets.find(handle);
-        if (texture == nullptr) {
-          ++local.queued;
-          continue;
-        }
-        switch (texture->state) {
-        case AssetState::CpuReady:
-        case AssetState::GpuQueued:
-        case AssetState::GpuReady:
-          ++local.cpuReady;
-          break;
-        case AssetState::GpuSubmitted:
-        case AssetState::Resident:
-          ++local.gpuSubmitted;
-          break;
-        case AssetState::Published:
-          ++local.published;
-          break;
-        case AssetState::Failed:
-          ++local.failed;
-          break;
-        case AssetState::Cancelled:
-          ++local.cancelled;
-          break;
-        default:
-          ++local.queued;
-          break;
-        }
-      }
-      return local;
-    }();
-    counts.total += materialTextures.total;
-    counts.queued += materialTextures.queued;
-    counts.cpuReady += materialTextures.cpuReady;
-    counts.gpuSubmitted += materialTextures.gpuSubmitted;
-    counts.published += materialTextures.published;
-    counts.failed += materialTextures.failed;
-    counts.cancelled += materialTextures.cancelled;
-  }
+  for (const SceneDependency &dependency : node.dependencies)
+    if (const auto *texture = std::get_if<TextureAssetHandle>(&dependency)) {
+      ++counts.total;
+      countSceneAssetState(counts, find(*texture)->state);
+    }
   return counts;
+}
+
+void AssetSystem::countSceneAssetState(SceneAssetCounts &counts,
+                                       AssetState state) {
+  static constexpr std::array counters{
+      &SceneAssetCounts::queued,       &SceneAssetCounts::queued,
+      &SceneAssetCounts::cpuReady,     &SceneAssetCounts::cpuReady,
+      &SceneAssetCounts::cpuReady,     &SceneAssetCounts::gpuSubmitted,
+      &SceneAssetCounts::gpuSubmitted, &SceneAssetCounts::published,
+      &SceneAssetCounts::queued,       &SceneAssetCounts::cancelled,
+      &SceneAssetCounts::failed};
+  ++(counts.*counters[static_cast<size_t>(state)]);
 }
 
 size_t AssetSystem::MaterialAssetKeyHash::operator()(
     const MaterialAssetKey &key) const noexcept {
   size_t seed = static_cast<size_t>(key.descHash);
-  const auto combine = [&seed](uint64_t value) {
-    seed ^= static_cast<size_t>(value) + 0x9e3779b97f4a7c15ull + (seed << 6u) +
-            (seed >> 2u);
-  };
-  for (const uint64_t handle : key.textureHandles) {
-    combine(handle);
-  }
-  combine(std::hash<std::string>{}(key.sourceIdentity));
+  for (const uint64_t handle : key.textureHandles)
+    hashCombine(seed, handle);
+  hashCombine(seed, std::hash<std::string>{}(key.sourceIdentity));
   return seed;
 }
 
 size_t
 AssetSystem::SceneKeyHash::operator()(const SceneKey &key) const noexcept {
   size_t seed = std::hash<std::string>{}(key.canonicalPath);
-  const auto combine = [&seed](uint64_t value) {
-    seed ^= static_cast<size_t>(value) + 0x9e3779b97f4a7c15ull + (seed << 6u) +
-            (seed >> 2u);
-  };
-  combine(key.importOptionsHash);
-  combine(static_cast<uint64_t>(key.publication));
-  combine(static_cast<uint64_t>(key.failurePolicy));
-  combine((static_cast<uint64_t>(key.publicationTarget.generation) << 32u) |
-          key.publicationTarget.index);
+  hashCombine(seed, key.importOptionsHash);
+  hashCombine(seed, static_cast<uint64_t>(key.publication));
+  hashCombine(seed, static_cast<uint64_t>(key.failurePolicy));
+  hashCombine(seed,
+              (static_cast<uint64_t>(key.publicationTarget.generation) << 32u) |
+                  key.publicationTarget.index);
   return seed;
-}
-
-float AssetSystem::progressForState(AssetState state) noexcept {
-  switch (state) {
-  case AssetState::Queued:
-    return 0.0f;
-  case AssetState::CpuRunning:
-    return 0.15f;
-  case AssetState::CpuReady:
-  case AssetState::GpuQueued:
-    return 0.55f;
-  case AssetState::GpuReady:
-    return 0.7f;
-  case AssetState::GpuSubmitted:
-    return 0.75f;
-  case AssetState::Resident:
-    return 0.9f;
-  case AssetState::Published:
-  case AssetState::Cancelled:
-  case AssetState::Failed:
-    return 1.0f;
-  case AssetState::CancelRequested:
-    return 0.0f;
-  }
-  return 0.0f;
 }
 
 float AssetSystem::progressForScene(const SceneNode &node,
                                     const AssetSystem &assets) {
-  if (node.state == SceneLoadState::Complete ||
-      node.state == SceneLoadState::CompleteWithErrors ||
-      node.state == SceneLoadState::Failed ||
-      node.state == SceneLoadState::Cancelled) {
+  if (isSceneTerminalState(node.state))
     return 1.0f;
-  }
   if (!node.manifest.has_value()) {
     return node.state == SceneLoadState::Requested ? 0.05f : 0.0f;
   }
-
   const SceneAssetCounts models =
-      collectSceneCounts(assets, std::span<const ModelAssetHandle>(
-                                     node.models.data(), node.models.size()));
-  const SceneAssetCounts materials = collectSceneCounts(
-      assets, std::span<const MaterialAssetHandle>(node.materials.data(),
-                                                   node.materials.size()));
-  const SceneAssetCounts textures = collectSceneTextureCounts(assets, node);
+      assets.collectSceneCounts(std::span<const ModelAssetHandle>(node.models));
+  const SceneAssetCounts materials = assets.collectSceneCounts(
+      std::span<const MaterialAssetHandle>(node.materials));
+  const SceneAssetCounts textures = assets.collectSceneTextureCounts(node);
   const auto weightedProgress = [](const SceneAssetCounts &counts) {
     if (counts.total == 0u) {
       return 1.0f;
@@ -3304,18 +2105,14 @@ float AssetSystem::progressForScene(const SceneNode &node,
         static_cast<float>(counts.published + counts.failed + counts.cancelled);
     return value / static_cast<float>(counts.total);
   };
-  const uint32_t classCount = (models.total != 0u ? 1u : 0u) +
-                              (materials.total != 0u ? 1u : 0u) +
-                              (textures.total != 0u ? 1u : 0u);
+  const std::array counts{models, materials, textures};
+  uint32_t classCount = 0u;
   float classProgress = 0.0f;
-  if (models.total != 0u) {
-    classProgress += weightedProgress(models);
-  }
-  if (materials.total != 0u) {
-    classProgress += weightedProgress(materials);
-  }
-  if (textures.total != 0u) {
-    classProgress += weightedProgress(textures);
+  for (const SceneAssetCounts &entry : counts) {
+    if (entry.total != 0u) {
+      classProgress += weightedProgress(entry);
+      ++classCount;
+    }
   }
   const float assetProgress =
       classCount == 0u ? 1.0f : classProgress / static_cast<float>(classCount);

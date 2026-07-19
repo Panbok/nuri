@@ -1,13 +1,13 @@
 #pragma once
-
 #include "nuri/core/runtime_config.h"
 #include "nuri/defines.h"
 #include "nuri/gfx/dynamic_buffer.h"
 #include "nuri/gfx/frame/render_frame_context.h"
 #include "nuri/gfx/gpu_device.h"
-#include "nuri/gfx/pipeline.h"
+#include "nuri/gfx/owned_gpu_resource.h"
 #include "nuri/gfx/render_graph/render_graph.h"
 #include "nuri/gfx/renderers/detail/instance_data.h"
+#include "nuri/gfx/renderers/scene_draw_database.h"
 #include "nuri/gfx/shader.h"
 #include "nuri/gfx/visibility/visibility.h"
 #include "nuri/resources/cpu/mesh_data.h"
@@ -15,9 +15,9 @@
 #include "nuri/resources/gpu/material.h"
 #include "nuri/resources/gpu/model.h"
 #include "nuri/scene/render_scene.h"
-
 #include <array>
 #include <cstdint>
+#include <glm/glm.hpp>
 #include <limits>
 #include <memory>
 #include <memory_resource>
@@ -26,13 +26,11 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
-
-#include <glm/glm.hpp>
-
 namespace nuri {
 
 using OpaqueRendererConfig = RuntimeOpaqueShaderConfig;
 class ResourceManager;
+class RenderPipeline;
 
 class NURI_API OpaqueRenderer {
 public:
@@ -40,30 +38,23 @@ public:
       GPUDevice &gpu, OpaqueRendererConfig config,
       std::pmr::memory_resource *memory = std::pmr::get_default_resource());
   ~OpaqueRenderer();
-
   OpaqueRenderer(const OpaqueRenderer &) = delete;
   OpaqueRenderer &operator=(const OpaqueRenderer &) = delete;
   OpaqueRenderer(OpaqueRenderer &&) = delete;
   OpaqueRenderer &operator=(OpaqueRenderer &&) = delete;
-
   void onAttach();
   void onDetach();
   void onResize(uint32_t width, uint32_t height);
   void publishFrameData(RenderFrameContext &frame);
   Result<bool, std::string> prepareOpaqueGraphPasses(RenderFrameContext &frame);
-  Result<bool, std::string> prepareSceneCacheStep(
-      const RenderScene &scene, const ResourceManager &resources,
-      uint32_t maxOperations = 128u, const RenderSettings *settings = nullptr,
-      const Camera *camera = nullptr, float aspectRatio = 1.0f,
-      uint32_t renderWidth = 1u, uint32_t renderHeight = 1u);
+  Result<bool, std::string> prepareSceneCache(SceneDrawDatabase &database,
+                                              const RenderScene &scene,
+                                              const ResourceManager &resources);
   void commitSubmittedFrame(uint64_t frameIndex) noexcept;
   void abandonPreparedFrame(uint64_t frameIndex) noexcept;
-  [[nodiscard]] bool hasPreparedOpaqueMainPasses() const noexcept;
   [[nodiscard]] bool hasPreparedOpaquePrepassPasses() const noexcept;
   [[nodiscard]] bool hasPreparedOpaqueMainLightingPasses() const noexcept;
   [[nodiscard]] bool hasPreparedOpaquePickPasses() const noexcept;
-  Result<bool, std::string> appendOpaqueMainPasses(RenderFrameContext &frame,
-                                                   RenderGraphBuilder &graph);
   Result<bool, std::string>
   appendOpaquePrepassPasses(RenderFrameContext &frame,
                             RenderGraphBuilder &graph);
@@ -74,42 +65,104 @@ public:
                                                    RenderGraphBuilder &graph);
 
 private:
+  enum class PreparedPassPhase : uint8_t { PreLighting, MainLighting, Pick };
+  enum class PreparedPassKind : uint8_t {
+    Other,
+    Main,
+    Pick,
+    Depth,
+    TransmissionDepth,
+    Normal,
+    DepthPyramid,
+    Velocity,
+    ReactiveMask
+  };
+  enum class OverlayPipelineKind : uint8_t {
+    Wireframe,
+    TessWireframe,
+    Geometry,
+    TessGeometry,
+    Count
+  };
+  enum ShaderSlot : uint8_t {
+    MeshVertex,
+    MeshTessVertex,
+    MeshTessControl,
+    MeshTessEval,
+    MeshFragment,
+    MeshDebugOverlayGeometry,
+    MeshDebugOverlayFragment,
+    MeshPickVertex,
+    MeshPickTessVertex,
+    MeshPickTessControl,
+    MeshPickTessEval,
+    MeshPickFragment,
+    MeshShadowInspectFragment,
+    MeshVelocityVertex,
+    MeshVelocityTessVertex,
+    MeshVelocityTessControl,
+    MeshVelocityTessEval,
+    MeshVelocityFragment,
+    MeshReactiveMaskVertex,
+    MeshReactiveMaskFragment,
+    MeshNormalFragment,
+    DepthVertex,
+    DepthTessVertex,
+    DepthTessControl,
+    DepthTessEval,
+    DepthAlphaVertex,
+    DepthAlphaTessVertex,
+    DepthAlphaTessControl,
+    DepthAlphaTessEval,
+    DepthFragment,
+    DepthAlphaFragment,
+    DepthPyramidVertex,
+    DepthPyramidFragment,
+    DepthMotionVectorVertex,
+    DepthMotionVectorFragment,
+    Compute,
+    VisibilityCompute,
+    VisibilityIndirectDrawCompute,
+    VisibilityIndirectMeshDispatchCompute,
+    MeshletCompactionCompute,
+    MeshletTask,
+    MeshletCompactedTask,
+    MeshletMesh,
+    MeshletFragment,
+    MeshletDepthFragment,
+    MeshletDepthAlphaFragment,
+    MeshletSimpleNormalMesh,
+    MeshletSimpleNormalFragment,
+    MeshletNormalFragment,
+    MeshletVelocityMesh,
+    MeshletVelocityFragment,
+    MeshletReactiveMaskMesh,
+    MeshletReactiveMaskFragment,
+    ShaderSlotCount
+  };
+  enum BufferRingSlot : uint8_t {
+    InstanceMatricesRing,
+    PreviousInstanceMatricesRing,
+    VelocityInstanceFlagsRing,
+    VelocityFrameDataRing,
+    VelocityGeometryRing,
+    InstanceRemapRing,
+    IndirectCommandRing,
+    MeshletBatchRing,
+    VisibilityCandidateRing,
+    VisibilityPassRing,
+    VisibilityVisibleIndexRing,
+    VisibilityCounterRing,
+    VisibilityMeshletDispatchRing,
+    VisibilityMeshletIndirectCommandRing,
+    MeshletCompactionRing,
+    BufferRingCount
+  };
   using FrameData = ForwardSceneFrameData;
   static_assert(sizeof(FrameData) == 464,
                 "OpaqueRenderer::FrameData must match shader FrameDataBuffer "
                 "layout");
-
-  struct PushConstants {
-    uint64_t frameDataAddress = 0;
-    uint64_t vertexBufferAddress = 0;
-    uint64_t vertexDecodeBufferAddress = 0;
-    uint64_t instanceMatricesAddress = 0;
-    uint64_t previousInstanceMatricesAddress = 0;
-    uint64_t instanceRemapAddress = 0;
-    uint64_t instanceCentersPhaseAddress = 0;
-    uint64_t instanceBaseMatricesAddress = 0;
-    uint64_t velocityInstanceFlagsAddress = 0;
-    uint64_t velocityFrameDataAddress = 0;
-    uint32_t instanceCount = 0;
-    uint32_t materialIndex = 0;
-    uint32_t vertexDecodeIndex = 0;
-    uint32_t packedVertexFormat = 0;
-    float timeSeconds = 0.0f;
-    float tessNearDistance = 1.0f;
-    float tessFarDistance = 8.0f;
-    float tessMinFactor = 1.0f;
-    float tessMaxFactor = 6.0f;
-    uint32_t debugVisualizationMode = 0;
-    uint32_t shadowCascadeIndex = 0;
-  };
-  static_assert(sizeof(PushConstants) == 128,
-                "OpaqueRenderer::PushConstants must match shader layout");
-  static_assert(offsetof(PushConstants, instanceRemapAddress) == 40u);
-  static_assert(offsetof(PushConstants, instanceCentersPhaseAddress) == 48u);
-  static_assert(offsetof(PushConstants, instanceBaseMatricesAddress) == 56u);
-  static_assert(offsetof(PushConstants, instanceCount) == 80u);
-  static_assert(offsetof(PushConstants, shadowCascadeIndex) == 120u);
-
+  using PushConstants = ForwardMeshPushConstants;
   struct MeshletPushConstants {
     uint64_t frameDataAddress = 0;
     uint64_t instanceMatricesAddress = 0;
@@ -141,17 +194,14 @@ private:
   static_assert(offsetof(MeshletPushConstants, velocityFrameDataAddress) ==
                 80u);
   static_assert(offsetof(MeshletPushConstants, batchBase) == 88u);
-
   struct alignas(16) MeshletCompactionWorkItemGpuData {
     glm::uvec4 data{0u};
   };
   static_assert(sizeof(MeshletCompactionWorkItemGpuData) == 16u);
-
   struct alignas(16) CompactedMeshletGpuData {
     glm::uvec4 ids{0u};
   };
   static_assert(sizeof(CompactedMeshletGpuData) == 16u);
-
   struct alignas(16) MeshletCompactionPushConstants {
     uint64_t frameDataAddress = 0;
     uint64_t instanceMatricesAddress = 0;
@@ -176,7 +226,6 @@ private:
   static_assert(sizeof(MeshletCompactionPushConstants) == 128u);
   static_assert(offsetof(MeshletCompactionPushConstants, lodThresholds) == 80u);
   static_assert(offsetof(MeshletCompactionPushConstants, workItemCount) == 96u);
-
   struct alignas(16) MeshletBatchGpuData {
     uint64_t vertexBufferAddress = 0;
     uint64_t vertexDecodeBufferAddress = 0;
@@ -193,7 +242,6 @@ private:
   static_assert(offsetof(MeshletBatchGpuData, draw) == 48u);
   static_assert(offsetof(MeshletBatchGpuData, mesh) == 64u);
   static_assert(offsetof(MeshletBatchGpuData, flags) == 80u);
-
   struct alignas(16) ShadowSdsmReducePushConstants {
     uint64_t resultBufferAddress = 0u;
     uint32_t sourceTexId = kInvalidShadowBindlessIndex;
@@ -202,48 +250,12 @@ private:
   static_assert(sizeof(ShadowSdsmReducePushConstants) == 16u,
                 "OpaqueRenderer::ShadowSdsmReducePushConstants layout "
                 "changed");
-
-  // These templates hold non-owning borrowed pointers. Callers must ensure the
-  // referenced scene/model data outlives the cached template usage.
-  struct RenderableTemplate {
-    const Renderable *renderable = nullptr;
-    const Model *model = nullptr;
-  };
-
-  // These templates hold non-owning borrowed pointers. Callers must ensure the
-  // referenced renderable/model/submesh data outlives the cached template
-  // usage.
-  struct MeshDrawTemplate {
-    const Renderable *renderable = nullptr;
-    const Submesh *submesh = nullptr;
-    uint32_t submeshIndex = 0;
-    uint32_t instanceIndex = 0;
-    GeometryAllocationHandle geometryHandle{};
-    BufferHandle indexBuffer{};
-    uint64_t indexBufferOffset = 0;
-    BufferHandle baseVertexBuffer{};
-    BufferHandle vertexBuffer{};
-    BufferHandle baseVertexDecodeBuffer{};
-    BufferHandle vertexDecodeBuffer{};
-    uint64_t baseVertexBufferAddress = 0;
-    uint64_t baseVertexDecodeBufferAddress = 0;
-    uint64_t vertexBufferAddress = 0;
-    uint64_t vertexDecodeBufferAddress = 0;
-    uint32_t basePackedVertexFormat = 0;
-    uint32_t vertexDecodeIndex = 0;
-    uint32_t packedVertexFormat = 0;
-    uint32_t materialIndex = kInvalidMaterialIndex;
-    const Model::ModelMeshletGpuView *meshletView = nullptr;
-    bool doubleSided = false;
-    bool alphaMasked = false;
-    bool materialNormalRequired = false;
-  };
-
+  using RenderableTemplate = SceneInstanceRecord;
+  using MeshDrawTemplate = SceneDrawRecord;
   struct TessCandidate {
     float distanceSq = 0.0f;
     uint32_t instanceId = 0;
   };
-
   struct MeshletBatchInfo {
     const Model::ModelMeshletGpuView *view = nullptr;
     BufferHandle vertexDecodeBuffer{};
@@ -257,7 +269,6 @@ private:
     bool alphaMasked = false;
     bool materialNormalRequired = false;
   };
-
   struct BatchEntry {
     DrawItem draw{};
     BufferHandle vertexBuffer{};
@@ -280,19 +291,15 @@ private:
     bool alphaMasked = false;
     bool materialNormalRequired = false;
   };
-
   struct MeshletDispatchDependencyBuffers {
     std::pmr::vector<BufferHandle> buffers;
-
     explicit MeshletDispatchDependencyBuffers(
         std::pmr::memory_resource *memory = std::pmr::get_default_resource())
         : buffers(memory) {}
-
     [[nodiscard]] std::span<const BufferHandle> span() const noexcept {
       return std::span<const BufferHandle>(buffers.data(), buffers.size());
     }
   };
-
   struct alignas(16) VelocityFrameGpuData {
     glm::mat4 currentViewProjNoJitter{1.0f};
     glm::mat4 previousViewProjNoJitter{1.0f};
@@ -314,7 +321,6 @@ private:
   static_assert(offsetof(VelocityFrameGpuData, previousGeometryAddress) ==
                 160u);
   static_assert(offsetof(VelocityFrameGpuData, previousGeometryInfo) == 176u);
-
   struct alignas(16) VelocityRenderableGeometryGpuData {
     uint64_t previousVertexBufferAddress = 0u;
     uint64_t previousVertexBufferAddressPadding = 0u;
@@ -324,13 +330,11 @@ private:
                 "OpaqueRenderer::VelocityRenderableGeometryGpuData layout "
                 "changed");
   static_assert(offsetof(VelocityRenderableGeometryGpuData, metadata) == 16u);
-
   enum class VelocityInstanceFlagsMode : uint32_t {
     Buffer = 0u,
     AllValid = 1u,
     AllInvalid = 2u,
   };
-
   struct alignas(16) DepthMotionVectorPushConstants {
     uint32_t depthTexId = 0u;
     uint32_t pointSamplerId = 0u;
@@ -340,7 +344,6 @@ private:
   };
   static_assert(sizeof(DepthMotionVectorPushConstants) <= 128u,
                 "Depth motion vector push constants exceed Vulkan minimum");
-
   struct SingleInstanceBatchEntry {
     DrawItem draw{};
     BufferHandle vertexBuffer{};
@@ -353,7 +356,6 @@ private:
     bool alphaMasked = false;
     bool materialNormalRequired = false;
   };
-
   struct SingleInstanceBatchCache {
     bool valid = false;
     uint32_t requestedLod = 0;
@@ -366,80 +368,36 @@ private:
     uint64_t templateRevision = 0;
     size_t remapCount = 0;
     std::pmr::vector<SingleInstanceBatchEntry> batches;
-
     explicit SingleInstanceBatchCache(std::pmr::memory_resource *memory)
         : batches(memory) {}
   };
-
   struct PreparedGraphPass {
-    struct DependencyBufferBinding {
-      uint32_t dependencyIndex = UINT32_MAX;
-      BufferHandle buffer{};
-      RenderGraphAccessMode mode =
-          RenderGraphAccessMode::Read | RenderGraphAccessMode::Write;
-    };
-
-    struct DependencyTextureBinding {
-      TextureHandle texture{};
-      RenderGraphAccessMode mode = RenderGraphAccessMode::Read;
-    };
-
-    struct PreDispatchDependencyBinding {
-      uint32_t preDispatchIndex = UINT32_MAX;
-      uint32_t dependencyIndex = UINT32_MAX;
-      BufferHandle buffer{};
-      RenderGraphAccessMode mode =
-          RenderGraphAccessMode::Read | RenderGraphAccessMode::Write;
-    };
-
-    struct DrawBufferBinding {
-      uint32_t drawIndex = UINT32_MAX;
-      RenderGraphDrawBufferBindingTarget target =
-          RenderGraphDrawBufferBindingTarget::Vertex;
-      BufferHandle buffer{};
-      RenderGraphAccessMode mode = RenderGraphAccessMode::Read;
-    };
-
     RenderGraphGraphicsPassDesc desc{};
     TextureHandle colorTextureHandle{};
     TextureHandle colorResolveTextureHandle{};
     TextureHandle depthTextureHandle{};
     TextureHandle depthResolveTextureHandle{};
-    std::pmr::vector<DependencyBufferBinding> dependencyBufferBindings;
-    std::pmr::vector<DependencyTextureBinding> dependencyTextureBindings;
-    std::pmr::vector<PreDispatchDependencyBinding>
-        preDispatchDependencyBindings;
-    std::pmr::vector<DrawBufferBinding> drawBufferBindings;
-    bool hasDraws = false;
-    bool hasPreDispatch = false;
-    bool hasIndirectDraws = false;
-    bool isMainPass = false;
-    bool isPickPass = false;
-    bool isDepthPrepass = false;
-    bool isTransmissionVisibilityDepthPass = false;
-    bool isNormalPrepass = false;
-    bool isDepthPyramidPass = false;
-    bool isVelocityPass = false;
-    bool isEarlyVelocityPass = false;
-    bool isReactiveMaskPass = false;
-    bool isEarlyReactiveMaskPass = false;
-    bool isVisibilityComputePass = false;
+    PreparedPassPhase phase = PreparedPassPhase::MainLighting;
+    PreparedPassKind kind = PreparedPassKind::Other;
+    bool publishesDepth = false;
     uint32_t depthPyramidLevel = UINT32_MAX;
-
     explicit PreparedGraphPass(
-        std::pmr::memory_resource *memory = std::pmr::get_default_resource())
-        : dependencyBufferBindings(memory), dependencyTextureBindings(memory),
-          preDispatchDependencyBindings(memory), drawBufferBindings(memory) {}
+        std::pmr::memory_resource * = std::pmr::get_default_resource()) {}
   };
-
   struct IndirectPackCache {
     bool valid = false;
     uint64_t drawSignature = std::numeric_limits<uint64_t>::max();
     size_t requiredBytes = 0;
   };
-
-  struct SceneCachePreparation;
-
+  struct FrameSlotState {
+    uint64_t matricesUploadVersion = std::numeric_limits<uint64_t>::max();
+    uint64_t indirectUploadSignature = std::numeric_limits<uint64_t>::max();
+    uint64_t remapUploadSignature = std::numeric_limits<uint64_t>::max();
+    uint64_t visibilityPublishedFrame = std::numeric_limits<uint64_t>::max();
+    uint32_t expectedVisibleCount = 0;
+    uint64_t expectedVisibleHash = 0;
+    bool expectedVisibleListValid = false;
+  };
   struct StaticBatchCache {
     bool valid = false;
     bool meshletRequested = false;
@@ -462,7 +420,6 @@ private:
         meshletDispatchDependencyBuffers;
     std::pmr::vector<MeshletBatchGpuData> meshletBatchGpuData;
     std::pmr::vector<uint32_t> remap;
-
     explicit StaticBatchCache(std::pmr::memory_resource *memory)
         : draws(memory), pushConstantsTemplates(memory), alphaMasked(memory),
           meshletBatchInfos(memory), meshletDispatches(memory),
@@ -470,22 +427,13 @@ private:
           meshletDispatchDependencyBuffers(memory), meshletBatchGpuData(memory),
           remap(memory) {}
   };
-
   Result<bool, std::string> ensureInitialized();
   [[nodiscard]] bool meshletPipelinesConfigured() const noexcept;
   Result<bool, std::string> recreatePickTexture();
-  Result<bool, std::string>
-  ensureCentersPhaseBufferCapacity(size_t requiredBytes);
-  Result<bool, std::string>
-  ensureInstanceLodBoundsBufferCapacity(size_t requiredBytes);
-  Result<bool, std::string>
-  ensureInstanceBaseMatricesBufferCapacity(size_t requiredBytes);
+  Result<bool, std::string> ensureStaticInstanceBufferCapacity(size_t count);
   Result<bool, std::string> ensureRingBufferCount(uint32_t requiredCount);
   Result<bool, std::string>
   ensureInstanceMatricesRingCapacity(size_t requiredBytes);
-  Result<bool, std::string>
-  ensureInstanceMatricesRingSlotCapacity(size_t requiredBytes,
-                                         size_t slotIndex);
   Result<bool, std::string>
   ensurePreviousInstanceMatricesRingCapacity(size_t requiredBytes);
   Result<bool, std::string>
@@ -508,6 +456,7 @@ private:
   ensureVisibilityMeshletIndirectCommandRingCapacity(size_t requiredBytes);
   Result<bool, std::string>
   ensureVisibilityCounterRingCapacity(size_t requiredBytes);
+  void invalidateVisibilityReadbackSlot(size_t slot);
   Result<bool, std::string>
   ensureVisibilityVisibleIndexRingCapacity(size_t requiredBytes);
   Result<bool, std::string>
@@ -536,27 +485,19 @@ private:
                                                uint64_t drawSignature,
                                                bool drawSignatureValid);
   [[nodiscard]] uint64_t computeIndirectDrawSignature(size_t remapCount) const;
-  [[nodiscard]] bool canReuseIndirectPack(uint64_t drawSignature) const;
   Result<bool, std::string> rebuildIndirectPack(uint32_t frameSlot,
-                                                size_t remapCount,
                                                 uint64_t drawSignature);
   Result<bool, std::string> refreshCachedIndirectPack(uint32_t frameSlot,
                                                       uint64_t drawSignature);
-  Result<bool, std::string> rebuildSceneCache(const RenderScene &scene,
-                                              const ResourceManager &resources,
-                                              uint32_t materialCount,
-                                              bool excludeTransmission);
-  bool adoptPreparedSceneCache(const RenderScene &scene,
-                               const ResourceManager &resources,
-                               uint32_t materialCount,
-                               bool excludeTransmission);
+  void rebuildSceneCache(const SceneDrawDatabase &database,
+                         const RenderScene &scene, bool excludeTransmission);
   Result<bool, std::string>
-  rebuildMaterialTextureAccessCache(const RenderScene &scene,
+  rebuildMaterialTextureAccessCache(const SceneDrawDatabase &database,
                                     const ResourceManager &resources,
                                     bool excludeTransmission);
   Result<bool, std::string> createShaders();
   Result<bool, std::string> createPipelines();
-  Result<bool, std::string> ensureMeshletPipelineState();
+  Result<bool, std::string> createMeshletPipelineState();
   void readLatestVisibilityGpuReadback(RenderFrameContext &frame);
   Result<bool, std::string> appendGpuVisibilityMainPass(
       RenderFrameContext &frame, uint32_t frameSlot,
@@ -574,16 +515,14 @@ private:
   [[nodiscard]] bool
   shouldBuildTransmissionVisibilityDepth(const RenderFrameContext &frame,
                                          const RenderSettings &settings) const;
-  Result<bool, std::string> appendPreparedGraphPass(
-      RenderFrameContext &frame, RenderGraphBuilder &graph,
-      const PreparedGraphPass &pass, uint32_t safeWidth, uint32_t safeHeight,
-      std::span<const RenderGraphBufferId> preResolvedDrawBufferIds);
-  Result<bool, std::string>
-  ensurePreResolvedDrawBufferIds(RenderFrameContext &frame,
-                                 RenderGraphBuilder &graph);
-  [[nodiscard]] static bool
-  isPreLightingPass(const PreparedGraphPass &pass) noexcept;
-  void cachePreparedGraphPassMetadata(PreparedGraphPass &pass) const;
+  void appendPreparedGraphPass(RenderFrameContext &frame,
+                               RenderGraphBuilder &graph,
+                               const PreparedGraphPass &pass,
+                               uint32_t safeWidth, uint32_t safeHeight);
+  Result<bool, std::string> appendPreparedPasses(RenderFrameContext &frame,
+                                                 RenderGraphBuilder &graph,
+                                                 PreparedPassPhase phase);
+  [[nodiscard]] bool hasPreparedPasses(PreparedPassPhase phase) const noexcept;
   [[nodiscard]] bool
   shouldPublishSceneDepthGraphTexture(const RenderFrameContext &frame) const;
   [[nodiscard]] RenderPipelineHandle selectMeshPipeline(bool doubleSided,
@@ -607,12 +546,14 @@ private:
   [[nodiscard]] bool isDoubleSidedPipeline(RenderPipelineHandle handle) const;
   [[nodiscard]] bool isTessPipeline(RenderPipelineHandle handle) const;
   Result<bool, std::string> ensureSceneDepthSampler();
-  Result<bool, std::string> ensureWireframePipeline(bool requireMsaa = false);
-  Result<bool, std::string>
-  ensureTessWireframePipeline(bool requireMsaa = false);
-  Result<bool, std::string> ensureGsOverlayPipeline(bool requireMsaa = false);
-  Result<bool, std::string>
-  ensureGsTessOverlayPipeline(bool requireMsaa = false);
+  [[nodiscard]] static constexpr size_t
+  overlayPipelineIndex(OverlayPipelineKind kind, bool msaa) noexcept {
+    return static_cast<size_t>(kind) +
+           (msaa ? static_cast<size_t>(OverlayPipelineKind::Count) : 0u);
+  }
+  [[nodiscard]] RenderPipelineHandle overlayPipeline(OverlayPipelineKind kind,
+                                                     bool msaa) const noexcept;
+  bool ensureOverlayPipeline(OverlayPipelineKind kind, bool requireMsaa);
   void resetOverlayPipelineState();
   void invalidateAutoLodHistory();
   void invalidateStaticBatchCache();
@@ -632,51 +573,18 @@ private:
   Result<bool, std::string> recreateShadowInspectTexture();
   void destroyShadowInspectTexture();
   void destroyBuffers();
-
   GPUDevice &gpu_;
   OpaqueRendererConfig config_{};
-  std::unique_ptr<Shader> meshShader_;
-  std::unique_ptr<Shader> meshTessShader_;
-  std::unique_ptr<Shader> meshDebugOverlayShader_;
-  std::unique_ptr<Shader> meshPickShader_;
-  std::unique_ptr<Shader> meshShadowInspectShader_;
-  std::unique_ptr<Shader> meshVelocityShader_;
-  std::unique_ptr<Shader> meshReactiveMaskShader_;
-  std::unique_ptr<Shader> meshNormalShader_;
-  std::unique_ptr<Shader> depthShader_;
-  std::unique_ptr<Shader> depthAlphaShader_;
-  std::unique_ptr<Shader> depthPyramidShader_;
-  std::unique_ptr<Shader> depthMotionVectorShader_;
-  std::unique_ptr<Shader> computeShader_;
-  std::unique_ptr<Shader> visibilityShader_;
-  std::unique_ptr<Shader> visibilityIndirectDrawShader_;
-  std::unique_ptr<Shader> visibilityIndirectMeshDispatchShader_;
-  std::unique_ptr<Shader> meshletCompactionShader_;
-  std::unique_ptr<Shader> meshletShader_;
-  std::unique_ptr<Pipeline> meshPipeline_;
-  std::unique_ptr<Pipeline> computePipeline_;
-  std::unique_ptr<Pipeline> visibilityComputePipeline_;
-  std::unique_ptr<Pipeline> visibilityIndirectDrawComputePipeline_;
-  std::unique_ptr<Pipeline> visibilityIndirectMeshDispatchComputePipeline_;
-  std::unique_ptr<Pipeline> meshletCompactionComputePipeline_;
+  OwnedRenderPipelineHandle meshPipeline_;
+  OwnedComputePipelineHandle computePipeline_;
+  OwnedComputePipelineHandle visibilityComputePipeline_;
+  OwnedComputePipelineHandle visibilityIndirectDrawComputePipeline_;
+  OwnedComputePipelineHandle visibilityIndirectMeshDispatchComputePipeline_;
+  OwnedComputePipelineHandle meshletCompactionComputePipeline_;
   std::unique_ptr<Buffer> instanceCentersPhaseBuffer_;
   std::unique_ptr<Buffer> instanceLodBoundsBuffer_;
   std::unique_ptr<Buffer> instanceBaseMatricesBuffer_;
-  std::pmr::vector<DynamicBufferSlot> instanceMatricesRing_;
-  std::pmr::vector<DynamicBufferSlot> previousInstanceMatricesRing_;
-  std::pmr::vector<DynamicBufferSlot> velocityInstanceFlagsRing_;
-  std::pmr::vector<DynamicBufferSlot> velocityFrameDataRing_;
-  std::pmr::vector<DynamicBufferSlot> velocityGeometryRing_;
-  std::pmr::vector<DynamicBufferSlot> instanceRemapRing_;
-  std::pmr::vector<DynamicBufferSlot> indirectCommandRing_;
-  std::pmr::vector<DynamicBufferSlot> meshletBatchRing_;
-  std::pmr::vector<DynamicBufferSlot> visibilityCandidateRing_;
-  std::pmr::vector<DynamicBufferSlot> visibilityPassRing_;
-  std::pmr::vector<DynamicBufferSlot> visibilityVisibleIndexRing_;
-  std::pmr::vector<DynamicBufferSlot> visibilityCounterRing_;
-  std::pmr::vector<DynamicBufferSlot> visibilityMeshletDispatchRing_;
-  std::pmr::vector<DynamicBufferSlot> visibilityMeshletIndirectCommandRing_;
-  std::pmr::vector<DynamicBufferSlot> meshletCompactionRing_;
+  std::pmr::vector<std::pmr::vector<DynamicBufferSlot>> bufferRings_;
   bool cachedMeshletCounterValid_ = false;
   uint32_t cachedMeshletCounterSourceFrame_ = 0u;
   uint32_t cachedMeshletEmitted_ = 0u;
@@ -692,185 +600,29 @@ private:
   std::optional<uint64_t> sceneDepthPyramidSourceFrameIndex_{};
   std::optional<glm::mat4> sceneDepthPyramidSourceViewProj_{};
   SamplerHandle sceneDepthSampler_{};
-
-  ShaderHandle meshVertexShader_{};
-  ShaderHandle meshTessVertexShader_{};
-  ShaderHandle meshTessControlShader_{};
-  ShaderHandle meshTessEvalShader_{};
-  ShaderHandle meshFragmentShader_{};
-  ShaderHandle meshDebugOverlayGeometryShader_{};
-  ShaderHandle meshDebugOverlayFragmentShader_{};
-  ShaderHandle meshPickVertexShader_{};
-  ShaderHandle meshPickTessVertexShader_{};
-  ShaderHandle meshPickTessControlShader_{};
-  ShaderHandle meshPickTessEvalShader_{};
-  ShaderHandle meshPickFragmentShader_{};
-  ShaderHandle meshShadowInspectFragmentShader_{};
-  ShaderHandle meshVelocityVertexShader_{};
-  ShaderHandle meshVelocityTessVertexShader_{};
-  ShaderHandle meshVelocityTessControlShader_{};
-  ShaderHandle meshVelocityTessEvalShader_{};
-  ShaderHandle meshVelocityFragmentShader_{};
-  ShaderHandle meshReactiveMaskVertexShader_{};
-  ShaderHandle meshReactiveMaskFragmentShader_{};
-  ShaderHandle meshNormalFragmentShader_{};
-  ShaderHandle depthVertexShader_{};
-  ShaderHandle depthTessVertexShader_{};
-  ShaderHandle depthTessControlShader_{};
-  ShaderHandle depthTessEvalShader_{};
-  ShaderHandle depthAlphaVertexShader_{};
-  ShaderHandle depthAlphaTessVertexShader_{};
-  ShaderHandle depthAlphaTessControlShader_{};
-  ShaderHandle depthAlphaTessEvalShader_{};
-  ShaderHandle depthFragmentShader_{};
-  ShaderHandle depthAlphaFragmentShader_{};
-  ShaderHandle depthPyramidVertexShader_{};
-  ShaderHandle depthPyramidFragmentShader_{};
-  ShaderHandle depthMotionVectorVertexShader_{};
-  ShaderHandle depthMotionVectorFragmentShader_{};
-  ShaderHandle computeShaderHandle_{};
-  ShaderHandle visibilityComputeShader_{};
-  ShaderHandle visibilityIndirectDrawComputeShader_{};
-  ShaderHandle visibilityIndirectMeshDispatchComputeShader_{};
-  ShaderHandle meshletCompactionComputeShader_{};
-  ShaderHandle meshletTaskShader_{};
-  ShaderHandle meshletCompactedTaskShader_{};
-  ShaderHandle meshletMeshShader_{};
-  ShaderHandle meshletFragmentShader_{};
-  ShaderHandle meshletDepthFragmentShader_{};
-  ShaderHandle meshletDepthAlphaFragmentShader_{};
-  ShaderHandle meshletSimpleNormalMeshShader_{};
-  ShaderHandle meshletSimpleNormalFragmentShader_{};
-  ShaderHandle meshletNormalFragmentShader_{};
-  ShaderHandle meshletVelocityMeshShader_{};
-  ShaderHandle meshletVelocityFragmentShader_{};
-  ShaderHandle meshletReactiveMaskMeshShader_{};
-  ShaderHandle meshletReactiveMaskFragmentShader_{};
-  RenderPipelineHandle meshFillPipelineHandle_{};
-  RenderPipelineHandle meshDoubleSidedFillPipelineHandle_{};
-  RenderPipelineHandle meshTessPipelineHandle_{};
-  RenderPipelineHandle meshDoubleSidedTessPipelineHandle_{};
-  RenderPipelineHandle meshMsaaFillPipelineHandle_{};
-  RenderPipelineHandle meshMsaaDoubleSidedFillPipelineHandle_{};
-  RenderPipelineHandle meshMsaaTessPipelineHandle_{};
-  RenderPipelineHandle meshMsaaDoubleSidedTessPipelineHandle_{};
-  RenderPipelineHandle meshMsaaAlphaFillPipelineHandle_{};
-  RenderPipelineHandle meshMsaaAlphaDoubleSidedFillPipelineHandle_{};
-  RenderPipelineHandle meshMsaaAlphaTessPipelineHandle_{};
-  RenderPipelineHandle meshMsaaAlphaDoubleSidedTessPipelineHandle_{};
-  RenderPipelineHandle meshGsOverlayPipelineHandle_{};
-  RenderPipelineHandle meshGsTessOverlayPipelineHandle_{};
-  RenderPipelineHandle meshWireframePipelineHandle_{};
-  RenderPipelineHandle meshTessWireframePipelineHandle_{};
-  RenderPipelineHandle meshMsaaGsOverlayPipelineHandle_{};
-  RenderPipelineHandle meshMsaaGsTessOverlayPipelineHandle_{};
-  RenderPipelineHandle meshMsaaWireframePipelineHandle_{};
-  RenderPipelineHandle meshMsaaTessWireframePipelineHandle_{};
-  RenderPipelineHandle meshPickPipelineHandle_{};
-  RenderPipelineHandle meshPickDoubleSidedPipelineHandle_{};
-  RenderPipelineHandle meshPickTessPipelineHandle_{};
-  RenderPipelineHandle meshPickDoubleSidedTessPipelineHandle_{};
-  RenderPipelineHandle meshShadowInspectPipelineHandle_{};
-  RenderPipelineHandle meshShadowInspectDoubleSidedPipelineHandle_{};
-  RenderPipelineHandle meshShadowInspectTessPipelineHandle_{};
-  RenderPipelineHandle meshShadowInspectDoubleSidedTessPipelineHandle_{};
-  RenderPipelineHandle meshVelocityPipelineHandle_{};
-  RenderPipelineHandle meshVelocityDoubleSidedPipelineHandle_{};
-  RenderPipelineHandle meshVelocityTessPipelineHandle_{};
-  RenderPipelineHandle meshVelocityDoubleSidedTessPipelineHandle_{};
-  RenderPipelineHandle meshReactiveMaskPipelineHandle_{};
-  RenderPipelineHandle meshReactiveMaskDoubleSidedPipelineHandle_{};
-  RenderPipelineHandle meshNormalPipelineHandle_{};
-  RenderPipelineHandle meshNormalDoubleSidedPipelineHandle_{};
-  RenderPipelineHandle meshNormalTessPipelineHandle_{};
-  RenderPipelineHandle meshNormalDoubleSidedTessPipelineHandle_{};
-  RenderPipelineHandle meshDepthPipelineHandle_{};
-  RenderPipelineHandle meshDepthDoubleSidedPipelineHandle_{};
-  RenderPipelineHandle meshDepthTessPipelineHandle_{};
-  RenderPipelineHandle meshDepthDoubleSidedTessPipelineHandle_{};
-  RenderPipelineHandle meshDepthAlphaPipelineHandle_{};
-  RenderPipelineHandle meshDepthAlphaDoubleSidedPipelineHandle_{};
-  RenderPipelineHandle meshDepthAlphaTessPipelineHandle_{};
-  RenderPipelineHandle meshDepthAlphaDoubleSidedTessPipelineHandle_{};
-  RenderPipelineHandle meshMsaaDepthPipelineHandle_{};
-  RenderPipelineHandle meshMsaaDepthDoubleSidedPipelineHandle_{};
-  RenderPipelineHandle meshMsaaDepthTessPipelineHandle_{};
-  RenderPipelineHandle meshMsaaDepthDoubleSidedTessPipelineHandle_{};
-  RenderPipelineHandle meshMsaaDepthAlphaPipelineHandle_{};
-  RenderPipelineHandle meshMsaaDepthAlphaDoubleSidedPipelineHandle_{};
-  RenderPipelineHandle meshMsaaDepthAlphaTessPipelineHandle_{};
-  RenderPipelineHandle meshMsaaDepthAlphaDoubleSidedTessPipelineHandle_{};
+  std::array<ShaderHandle, ShaderSlotCount> shaders_{};
+  std::array<RenderPipelineHandle, 16> meshScenePipelines_{};
+  std::array<RenderPipelineHandle, 4> meshPickPipelines_{};
+  std::array<RenderPipelineHandle, 4> meshShadowInspectPipelines_{};
+  std::array<RenderPipelineHandle, 4> meshVelocityPipelines_{};
+  std::array<RenderPipelineHandle, 2> meshReactiveMaskPipelines_{};
+  std::array<RenderPipelineHandle, 4> meshNormalPipelines_{};
+  std::array<RenderPipelineHandle, 16> meshDepthPipelines_{};
+  std::array<RenderPipelineHandle, 8> overlayPipelines_{};
   RenderPipelineHandle depthPyramidPipelineHandle_{};
   RenderPipelineHandle depthMotionVectorPipelineHandle_{};
-  ComputePipelineHandle computePipelineHandle_{};
-  ComputePipelineHandle visibilityPipelineHandle_{};
-  ComputePipelineHandle visibilityIndirectDrawPipelineHandle_{};
-  ComputePipelineHandle visibilityIndirectMeshDispatchPipelineHandle_{};
-  ComputePipelineHandle meshletCompactionPipelineHandle_{};
-  MeshletPipelineHandle meshletPipelineHandle_{};
-  MeshletPipelineHandle meshletDoubleSidedPipelineHandle_{};
-  MeshletPipelineHandle meshletCompactedPipelineHandle_{};
-  MeshletPipelineHandle meshletCompactedDoubleSidedPipelineHandle_{};
-  MeshletPipelineHandle meshletMsaaPipelineHandle_{};
-  MeshletPipelineHandle meshletMsaaDoubleSidedPipelineHandle_{};
-  MeshletPipelineHandle meshletCompactedMsaaPipelineHandle_{};
-  MeshletPipelineHandle meshletCompactedMsaaDoubleSidedPipelineHandle_{};
-  MeshletPipelineHandle meshletDepthPipelineHandle_{};
-  MeshletPipelineHandle meshletDepthDoubleSidedPipelineHandle_{};
-  MeshletPipelineHandle meshletDepthAlphaPipelineHandle_{};
-  MeshletPipelineHandle meshletDepthAlphaDoubleSidedPipelineHandle_{};
-  MeshletPipelineHandle meshletMsaaDepthPipelineHandle_{};
-  MeshletPipelineHandle meshletMsaaDepthDoubleSidedPipelineHandle_{};
-  MeshletPipelineHandle meshletMsaaDepthAlphaPipelineHandle_{};
-  MeshletPipelineHandle meshletMsaaDepthAlphaDoubleSidedPipelineHandle_{};
-  MeshletPipelineHandle meshletSimpleNormalPipelineHandle_{};
-  MeshletPipelineHandle meshletSimpleNormalDoubleSidedPipelineHandle_{};
-  MeshletPipelineHandle meshletNormalPipelineHandle_{};
-  MeshletPipelineHandle meshletNormalDoubleSidedPipelineHandle_{};
-  MeshletPipelineHandle meshletVelocityPipelineHandle_{};
-  MeshletPipelineHandle meshletVelocityDoubleSidedPipelineHandle_{};
-  MeshletPipelineHandle meshletReactiveMaskPipelineHandle_{};
-  MeshletPipelineHandle meshletReactiveMaskDoubleSidedPipelineHandle_{};
-
+  std::array<MeshletPipelineHandle, 8> meshletScenePipelines_{};
+  std::array<MeshletPipelineHandle, 8> meshletDepthPipelines_{};
+  std::array<MeshletPipelineHandle, 4> meshletNormalPipelines_{};
+  std::array<MeshletPipelineHandle, 2> meshletVelocityPipelines_{};
+  std::array<MeshletPipelineHandle, 2> meshletReactiveMaskPipelines_{};
   size_t instanceCentersPhaseBufferCapacityBytes_ = 0;
   size_t instanceLodBoundsBufferCapacityBytes_ = 0;
   size_t instanceBaseMatricesBufferCapacityBytes_ = 0;
   bool initialized_ = false;
   bool tessellationUnsupported_ = false;
-  bool wireframePipelineInitialized_ = false;
-  bool wireframePipelineUnsupported_ = false;
-  bool tessWireframePipelineInitialized_ = false;
-  bool tessWireframePipelineUnsupported_ = false;
-  bool gsOverlayPipelineInitialized_ = false;
-  bool gsOverlayPipelineUnsupported_ = false;
-  bool gsTessOverlayPipelineInitialized_ = false;
-  bool gsTessOverlayPipelineUnsupported_ = false;
-  bool msaaWireframePipelineInitialized_ = false;
-  bool msaaWireframePipelineUnsupported_ = false;
-  bool msaaTessWireframePipelineInitialized_ = false;
-  bool msaaTessWireframePipelineUnsupported_ = false;
-  bool msaaGsOverlayPipelineInitialized_ = false;
-  bool msaaGsOverlayPipelineUnsupported_ = false;
-  bool msaaGsTessOverlayPipelineInitialized_ = false;
-  bool msaaGsTessOverlayPipelineUnsupported_ = false;
-  bool loggedWireframeFallbackUnsupported_ = false;
-  bool loggedTessWireframeFallbackUnsupported_ = false;
-  bool loggedGsOverlayUnsupported_ = false;
-  bool loggedGsTessOverlayUnsupported_ = false;
-  bool loggedDepthPrepassUnsupported_ = false;
-  bool loggedTransmissionVisibilityDepthUnsupported_ = false;
-  bool loggedNormalPrepassUnsupported_ = false;
-  bool loggedDepthPyramidUnsupported_ = false;
-  bool loggedMaterialFallbackWarning_ = false;
-  bool loggedBlendMaterialUnsupportedWarning_ = false;
-  bool loggedShadowSdsmReduceSkipWarning_ = false;
+  std::array<bool, 8> overlayPipelineUnsupported_{};
   bool meshletPipelineInitialized_ = false;
-  bool meshletPipelineUnsupported_ = false;
-  bool loggedMeshletUnsupportedWarning_ = false;
-  bool loggedMeshletAssetWarning_ = false;
-  bool loggedMeshletIncompatibleWarning_ = false;
-  bool loggedVisibilityGpuUnsupportedWarning_ = false;
-
   const RenderScene *cachedScene_ = nullptr;
   uint64_t cachedTopologyVersion_ = std::numeric_limits<uint64_t>::max();
   uint64_t cachedTransformVersion_ = std::numeric_limits<uint64_t>::max();
@@ -907,24 +659,16 @@ private:
   bool cachedAnimationSceneActive_ = false;
   bool instanceStaticBuffersDirty_ = true;
   bool uniformSingleSubmeshPath_ = false;
-
   static constexpr size_t kSingleInstanceCacheVariantCount =
       static_cast<size_t>(Submesh::kMaxLodCount) * 2u;
   std::pmr::vector<SingleInstanceBatchCache> singleInstanceBatchCaches_;
   uint64_t singleInstanceTemplateRevision_ = 1;
   IndirectPackCache indirectPackCache_{};
   StaticBatchCache staticBatchCache_;
-
   std::pmr::vector<RenderableTemplate> renderableTemplates_;
   std::pmr::vector<MeshDrawTemplate> meshDrawTemplates_;
   std::pmr::vector<size_t> indirectSourceDrawIndices_;
-  std::pmr::vector<uint64_t> instanceMatricesUploadVersions_;
-  std::pmr::vector<uint64_t> indirectUploadSignatures_;
-  std::pmr::vector<uint64_t> remapUploadSignatures_;
-  std::pmr::vector<uint64_t> visibilityCounterRingPublishedFrames_;
-  std::pmr::vector<uint32_t> visibilityExpectedVisibleIndexCounts_;
-  std::pmr::vector<uint64_t> visibilityExpectedVisibleIndexHashes_;
-  std::pmr::vector<uint8_t> visibilityExpectedVisibleListsValid_;
+  std::pmr::vector<FrameSlotState> frameSlotStates_;
   std::pmr::vector<uint32_t> visibilityVisibleIndexReadback_;
   std::pmr::vector<VisibilityCandidate> visibilityCandidates_;
   std::pmr::vector<VisibilityCandidateGpu> visibilityCandidateGpuData_;
@@ -941,28 +685,7 @@ private:
   std::pmr::vector<uint8_t> instanceAutoLodCounts_;
   std::pmr::vector<TextureHandle> materialTextureAccessHandles_;
   bool materialTextureAccessCacheValid_ = false;
-  std::shared_ptr<SceneCachePreparation> sceneCachePreparation_;
-  std::vector<std::unique_ptr<Buffer>> sceneBufferRetirements_;
-  uint32_t sceneBufferRetirementCooldownFrames_ = 0u;
   std::pmr::vector<uint32_t> instanceAutoLodLevels_;
-  std::pmr::vector<uint32_t> preparedInitialInstanceRemap_;
-  const RenderScene *preparedInitialAutoLodScene_ = nullptr;
-  uint64_t preparedInitialAutoLodTransformVersion_ = 0u;
-  glm::mat4 preparedInitialAutoLodView_{1.0f};
-  ProjectionType preparedInitialAutoLodProjectionType_ =
-      ProjectionType::Perspective;
-  float preparedInitialAutoLodNearPlane_ = 0.1f;
-  float preparedInitialAutoLodProjectionScaleY_ = 1.0f;
-  float preparedInitialAutoLodTargetPixelError_ = 1.0f;
-  float preparedInitialAutoLodHysteresisRatio_ = 0.0f;
-  uint32_t preparedInitialAutoLodRenderHeight_ = 1u;
-  std::array<size_t, Submesh::kMaxLodCount>
-      preparedInitialAutoLodBucketCounts_{};
-  uint64_t preparedInitialAutoLodLod0Count_ = 0u;
-  uint64_t preparedInitialAutoLodLod1Count_ = 0u;
-  uint64_t preparedInitialRemapSignature_ =
-      std::numeric_limits<uint64_t>::max();
-  bool preparedInitialAutoLodValid_ = false;
   std::pmr::vector<uint8_t> instanceTessSelection_;
   std::pmr::vector<TessCandidate> tessCandidates_;
   std::pmr::vector<uint32_t> instanceRemap_;
@@ -1056,7 +779,6 @@ private:
   std::pmr::vector<RenderGraphAccessMode> passDependencyBufferAccessModes_;
   std::pmr::vector<BufferHandle> preResolvedDecodeBuffers_;
   std::pmr::vector<BufferHandle> preResolvedDrawBuffers_;
-  std::pmr::vector<RenderGraphBufferId> cachedPreResolvedDrawBufferIds_;
   std::pmr::vector<BufferHandle> dispatchDependencyBuffers_;
   std::pmr::vector<TextureHandle> passDependencyTextures_;
   std::pmr::vector<BufferHandle> mainPassDependencyBuffers_;
@@ -1079,11 +801,6 @@ private:
   std::pmr::vector<PreparedGraphPass> preparedGraphPasses_;
   PushConstants computePushConstants_{};
   DrawItem baseMeshFillDraw_{};
-  DrawItem baseMeshWireframeDraw_{};
-  uint64_t cachedPreResolvedBufferFrameIndex_ =
-      std::numeric_limits<uint64_t>::max();
-  uint64_t cachedPreResolvedBufferSignature_ =
-      std::numeric_limits<uint64_t>::max();
   uint64_t cachedRemapSignature_ = std::numeric_limits<uint64_t>::max();
   bool cachedRemapSignatureValid_ = false;
   bool autoLodHistoryValid_ = false;
@@ -1096,7 +813,6 @@ private:
   float cachedAutoLodNearPlane_ = std::numeric_limits<float>::quiet_NaN();
   glm::uvec2 cachedAutoLodRenderExtent_{0u};
   ProjectionType cachedAutoLodProjectionType_ = ProjectionType::Perspective;
-
   PersistentBufferId persistentCentersPhaseBuffer_{};
   PersistentBufferId persistentBaseMatricesBuffer_{};
   BufferHandle registeredCentersPhaseBufferHandle_{};
@@ -1119,18 +835,23 @@ private:
   bool pendingPreviousTransformDataChanged_ = false;
   std::optional<OpaquePickRequest> pendingPickRequest_{};
   std::optional<ShadowInspectRequest> pendingShadowInspectRequest_{};
-
   struct InFlightPickReadback {
     OpaquePickRequest request{};
     uint64_t submissionFrame = 0;
   };
   std::optional<InFlightPickReadback> inFlightPickReadback_{};
-
   struct InFlightShadowInspectReadback {
     ShadowInspectRequest request{};
     uint64_t submissionFrame = 0;
   };
   std::optional<InFlightShadowInspectReadback> inFlightShadowInspectReadback_{};
 };
+
+NURI_API OpaqueRenderer *registerOpaquePrepassStages(
+    RenderPipeline &pipeline, GPUDevice &gpu, RuntimeOpaqueShaderConfig config,
+    std::pmr::memory_resource *memory = std::pmr::get_default_resource(),
+    SceneDrawDatabase *database = nullptr);
+NURI_API void registerOpaqueMainStage(RenderPipeline &pipeline,
+                                      OpaqueRenderer &renderer);
 
 } // namespace nuri

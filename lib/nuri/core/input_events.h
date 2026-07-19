@@ -1,9 +1,6 @@
 #pragma once
-
 #include "nuri/core/input_codes.h"
-
 #include "nuri/pch.h"
-
 namespace nuri {
 
 struct RawKeyEvent {
@@ -103,7 +100,6 @@ union InputEventPayload {
   InputMouseScrollData mouseScroll;
   InputFocusData focus;
   InputCursorEnterData cursorEnter;
-
   constexpr InputEventPayload() : key() {}
 };
 

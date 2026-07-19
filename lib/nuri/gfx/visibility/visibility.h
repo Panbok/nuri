@@ -1,21 +1,17 @@
 #pragma once
-
 #include "nuri/defines.h"
 #include "nuri/gfx/frame/render_frame_context.h"
 #include "nuri/gfx/renderers/detail/visibility_math.h"
 #include "nuri/math/types.h"
 #include "nuri/resources/gpu/model.h"
-
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <glm/glm.hpp>
 #include <limits>
 #include <memory_resource>
 #include <span>
 #include <vector>
-
-#include <glm/glm.hpp>
-
 namespace nuri {
 
 enum class VisibilityPassKind : uint32_t {
@@ -231,10 +227,8 @@ struct VisibilityPassResult {
   uint32_t cpuVisibleCandidates = 0;
   uint32_t cpuRejected = 0;
   uint32_t uncertainVisible = 0;
-
   explicit VisibilityPassResult(
       std::pmr::memory_resource *memory = std::pmr::get_default_resource());
-
   void clear();
 };
 
@@ -242,9 +236,7 @@ class NURI_API VisibilityFrameState {
 public:
   explicit VisibilityFrameState(
       std::pmr::memory_resource *memory = std::pmr::get_default_resource());
-
   void clear();
-
   [[nodiscard]] VisibilityPassResult
   evaluateCpu(const VisibilityPassRequest &request,
               std::span<const VisibilityCandidate> candidates);

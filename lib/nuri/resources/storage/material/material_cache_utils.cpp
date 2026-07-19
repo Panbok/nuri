@@ -1,53 +1,21 @@
-#include "nuri/pch.h"
-
 #include "nuri/resources/storage/material/material_cache_utils.h"
-
+#include "nuri/pch.h"
 #include "nuri/resources/storage/material/material_binary_format.h"
-#include "nuri/resources/storage/mesh/mesh_cache_utils.h"
-
 namespace nuri {
-namespace {
-
-constexpr uint64_t kFnvOffsetBasis = 14695981039346656037ull;
-constexpr uint64_t kFnvPrime = 1099511628211ull;
-
-void fnv1aAddBytes(uint64_t &hash, std::span<const std::byte> bytes) {
-  for (const std::byte value : bytes) {
-    hash ^= static_cast<uint8_t>(value);
-    hash *= kFnvPrime;
-  }
-}
-
-std::string hexU64(uint64_t value) { return std::format("{:016x}", value); }
-
-[[nodiscard]] uint64_t
-hashScenePathNormalized(std::string_view normalizedPath) {
-  uint64_t hash = kFnvOffsetBasis;
-  fnv1aAddBytes(hash,
-                {reinterpret_cast<const std::byte *>(normalizedPath.data()),
-                 normalizedPath.size()});
-  return hash;
-}
-
-} // namespace
-
-uint64_t hashScenePath(const std::filesystem::path &sourcePath) {
-  const std::filesystem::path normalized = normalizeMeshSourcePath(sourcePath);
-  const std::string normalizedString = normalized.generic_string();
-  return hashScenePathNormalized(normalizedString);
-}
 
 Result<SceneMaterialCacheKey, std::string>
 buildSceneMaterialCacheKey(const std::filesystem::path &sourcePath) {
   SceneMaterialCacheKey key{};
-  key.normalizedSourcePath = normalizeMeshSourcePath(sourcePath);
+  key.normalizedSourcePath = normalizeSourcePath(sourcePath);
   const std::string normalizedString =
       key.normalizedSourcePath.generic_string();
   if (normalizedString.empty()) {
     return Result<SceneMaterialCacheKey, std::string>::makeError(
         "buildSceneMaterialCacheKey: normalized source path is empty");
   }
-  key.sourcePathHash = hashScenePathNormalized(normalizedString);
+  Fnv1a64 hash{14695981039346656037ull};
+  hash.add(normalizedString);
+  key.sourcePathHash = hash.value();
   std::filesystem::path cacheDir =
       key.normalizedSourcePath.parent_path() / ".nuri_scene_cache";
   std::string stem = key.normalizedSourcePath.stem().string();
@@ -59,16 +27,4 @@ buildSceneMaterialCacheKey(const std::filesystem::path &sourcePath) {
                              kMaterialBinaryFormatMajorVersion);
   return Result<SceneMaterialCacheKey, std::string>::makeResult(std::move(key));
 }
-
-SceneSourceFingerprint
-querySceneSourceFingerprint(const std::filesystem::path &sourcePath) {
-  const MeshSourceFingerprint meshFingerprint =
-      queryMeshSourceFingerprint(sourcePath);
-  return SceneSourceFingerprint{
-      .exists = meshFingerprint.exists,
-      .sizeBytes = meshFingerprint.sizeBytes,
-      .mtimeNs = meshFingerprint.mtimeNs,
-  };
-}
-
 } // namespace nuri

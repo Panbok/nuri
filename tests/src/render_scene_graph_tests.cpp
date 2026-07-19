@@ -98,9 +98,9 @@ TEST(RenderSceneGraphTests, ReparentPreserveWorldKeepsWorldTransformStable) {
 TEST(RenderSceneGraphTests, CommitCarriesRenderableMaterialOverride) {
   nuri::RenderScene scene;
   nuri::SceneGraph &graph = scene.graph();
-  constexpr nuri::ModelRef kModel = nuri::makeModelRef(1u, 1u);
-  constexpr nuri::MaterialRef kMaterial = nuri::makeMaterialRef(2u, 1u);
-  constexpr nuri::MaterialRef kOverride = nuri::makeMaterialRef(4u, 1u);
+  constexpr nuri::ModelRef kModel{nuri::packResourceHandle(1u, 1u)};
+  constexpr nuri::MaterialRef kMaterial{nuri::packResourceHandle(2u, 1u)};
+  constexpr nuri::MaterialRef kOverride{nuri::packResourceHandle(4u, 1u)};
 
   auto nodeResult = graph.createNode(graph.rootNode(), "Node");
   ASSERT_FALSE(nodeResult.hasError()) << nodeResult.error();
@@ -119,9 +119,9 @@ TEST(RenderSceneGraphTests, CommitCarriesRenderableMaterialOverride) {
 TEST(RenderSceneGraphTests, DestroyNodeSubtreeClearsRenderableOverrides) {
   nuri::RenderScene scene;
   nuri::SceneGraph &graph = scene.graph();
-  constexpr nuri::ModelRef kModel = nuri::makeModelRef(1u, 1u);
-  constexpr nuri::MaterialRef kMaterial = nuri::makeMaterialRef(2u, 1u);
-  constexpr nuri::MaterialRef kOverride = nuri::makeMaterialRef(5u, 1u);
+  constexpr nuri::ModelRef kModel{nuri::packResourceHandle(1u, 1u)};
+  constexpr nuri::MaterialRef kMaterial{nuri::packResourceHandle(2u, 1u)};
+  constexpr nuri::MaterialRef kOverride{nuri::packResourceHandle(5u, 1u)};
 
   auto nodeResult = graph.createNode(graph.rootNode(), "Node");
   ASSERT_FALSE(nodeResult.hasError()) << nodeResult.error();
@@ -161,7 +161,7 @@ TEST(RenderSceneGraphTests,
   nuri::RenderScene scene;
   nuri::SceneGraph &graph = scene.graph();
 
-  constexpr nuri::ModelRef kModel = nuri::makeModelRef(1u, 1u);
+  constexpr nuri::ModelRef kModel{nuri::packResourceHandle(1u, 1u)};
   const std::array<glm::mat4, 2u> modelMatrices = {
       translate(glm::vec3(1.0f, 0.0f, 0.0f)),
       translate(glm::vec3(2.0f, 0.0f, 0.0f)),
@@ -185,8 +185,8 @@ TEST(RenderSceneGraphTests,
   prefab.nodes[1].parentIndex = 0u;
   prefab.renderables.push_back(nuri::ScenePrefabRenderable{
       .nodeIndex = 0u,
-      .meshIndex = 0u,
-      .materialIndex = 0u,
+      .meshAssetIndex = 0u,
+      .materialAssetIndex = 0u,
   });
   prefab.lights.push_back(nuri::ScenePrefabLight{
       .nodeIndex = nuri::kInvalidScenePrefabIndex,
@@ -194,8 +194,9 @@ TEST(RenderSceneGraphTests,
   });
 
   nuri::ScenePrefabAssets assets;
-  assets.models.push_back(nuri::makeModelRef(1u, 1u));
-  assets.materials.push_back(nuri::makeMaterialRef(2u, 1u));
+  assets.models.push_back(nuri::ModelRef{nuri::packResourceHandle(1u, 1u)});
+  assets.materials.push_back(
+      nuri::MaterialRef{nuri::packResourceHandle(2u, 1u)});
 
   nuri::SceneInstantiationMap instantiated;
   auto instantiateResult =
@@ -226,8 +227,8 @@ TEST(RenderSceneGraphTests,
   prefab.nodes[1].morphWeights = {0.25f, 0.75f};
   prefab.renderables.push_back(nuri::ScenePrefabRenderable{
       .nodeIndex = 1u,
-      .meshIndex = 0u,
-      .materialIndex = 0u,
+      .meshAssetIndex = 0u,
+      .materialAssetIndex = 0u,
   });
 
   nuri::SceneInstantiationMap instantiated;
@@ -242,8 +243,8 @@ TEST(RenderSceneGraphTests,
   ASSERT_FALSE(commit.hasError()) << commit.error();
   EXPECT_TRUE(scene.renderables().empty());
 
-  constexpr nuri::ModelRef kModel = nuri::makeModelRef(1u, 1u);
-  constexpr nuri::MaterialRef kMaterial = nuri::makeMaterialRef(2u, 1u);
+  constexpr nuri::ModelRef kModel{nuri::packResourceHandle(1u, 1u)};
+  constexpr nuri::MaterialRef kMaterial{nuri::packResourceHandle(2u, 1u)};
   auto attached =
       graph.attachPrefabRenderable(prefab, 0u, kModel, kMaterial, instantiated);
   ASSERT_FALSE(attached.hasError()) << attached.error();

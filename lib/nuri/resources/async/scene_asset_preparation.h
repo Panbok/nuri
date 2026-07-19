@@ -1,19 +1,16 @@
 #pragma once
-
 #include "nuri/core/result.h"
 #include "nuri/gfx/gpu_types.h"
 #include "nuri/resources/gpu/material.h"
 #include "nuri/resources/gpu/resource_keys.h"
 #include "nuri/resources/gpu/resource_manager.h"
 #include "nuri/resources/scene_importer.h"
-
 #include <array>
 #include <memory>
 #include <optional>
 #include <span>
 #include <string>
 #include <vector>
-
 namespace nuri {
 
 struct PreparedSceneManifest {

@@ -1,9 +1,6 @@
-#include "nuri/pch.h"
-
 #include "nuri/scene/camera_system.h"
-
 #include "nuri/core/log.h"
-
+#include "nuri/pch.h"
 namespace nuri {
 
 namespace {
@@ -31,7 +28,6 @@ CameraHandle CameraSystem::addCamera(const Camera &camera,
       .camera = camera,
       .controller = std::move(controller),
   });
-
   const uint32_t index = static_cast<uint32_t>(cameras_.size() - 1);
   NURI_LOG_DEBUG("CameraSystem::addCamera: Added camera index=%u", index);
   return CameraHandle{index};
@@ -44,17 +40,13 @@ bool CameraSystem::setActiveCamera(CameraHandle handle, Window &window) {
         handle.index);
     return false;
   }
-
   if (activeIndex_ == handle.index) {
     return true;
   }
-
   if (CameraSlot *previous = activeSlot()) {
     previous->controller.onDeactivate(window);
   }
-
   activeIndex_ = handle.index;
-
   if (CameraSlot *active = activeSlot()) {
     active->controller.onActivate(window);
   }
@@ -105,12 +97,10 @@ bool CameraSystem::onInput(const InputEvent &event, Window &window) {
   if (!slot) {
     return false;
   }
-
   if (event.type == InputEventType::Key && event.payload.key.key == Key::P &&
       event.payload.key.action == KeyAction::Press) {
     return toggleActiveProjection();
   }
-
   return slot->controller.onInput(event, window);
 }
 
@@ -119,7 +109,6 @@ void CameraSystem::update(double deltaTime, const InputSystem &input) {
   if (!slot) {
     return;
   }
-
   slot->controller.update(deltaTime, input, slot->camera);
 }
 
@@ -130,7 +119,6 @@ bool CameraSystem::toggleActiveProjection() {
         "CameraSystem::toggleActiveProjection: No active camera to toggle");
     return false;
   }
-
   switch (active->projectionType()) {
   case ProjectionType::Perspective:
     active->setProjectionType(ProjectionType::Orthographic);
@@ -143,11 +131,9 @@ bool CameraSystem::toggleActiveProjection() {
         "CameraSystem::toggleActiveProjection: Unknown projection type");
     return false;
   }
-
   NURI_LOG_INFO("CameraSystem::toggleActiveProjection: Active camera "
                 "projection is now %s",
                 projectionTypeToString(active->projectionType()));
-
   return true;
 }
 

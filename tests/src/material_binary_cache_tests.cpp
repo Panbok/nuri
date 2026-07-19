@@ -34,7 +34,8 @@ nuri::SceneMaterialRecord makeSceneMaterialRecord() {
   record.sourceMaterial.doubleSided = true;
   record.sourceMaterial.alphaMode = nuri::MaterialAlphaMode::Blend;
 
-  auto &baseColor = record.sourceMaterial.baseColor;
+  auto &baseColor =
+      record.sourceMaterial.textures[nuri::kMaterialTextureSlotBaseColor];
   baseColor.path = "E:/tmp/albedo.png";
   baseColor.sourceKind = nuri::MaterialTextureSourceKind::ExternalFile;
   baseColor.uvSet = 2u;
@@ -44,7 +45,8 @@ nuri::SceneMaterialRecord makeSceneMaterialRecord() {
   baseColor.transform.scale = {2.0f, 3.0f};
   baseColor.transform.rotationRadians = 0.75f;
 
-  auto &normal = record.sourceMaterial.normal;
+  auto &normal =
+      record.sourceMaterial.textures[nuri::kMaterialTextureSlotNormal];
   normal.sourceKind = nuri::MaterialTextureSourceKind::EmbeddedSceneTexture;
   normal.embeddedIndex = 5u;
   normal.uvSet = 1u;
@@ -54,7 +56,8 @@ nuri::SceneMaterialRecord makeSceneMaterialRecord() {
   normal.transform.scale = {4.0f, 5.0f};
   normal.transform.rotationRadians = 0.25f;
 
-  auto &specGloss = record.sourceMaterial.specularColor;
+  auto &specGloss =
+      record.sourceMaterial.textures[nuri::kMaterialTextureSlotSpecularColor];
   specGloss.path = "E:/tmp/specgloss.png";
   specGloss.sourceKind = nuri::MaterialTextureSourceKind::ExternalFile;
   specGloss.uvSet = 1u;
@@ -115,25 +118,48 @@ TEST(MaterialBinaryCacheTests, RoundTripPreservesMaterialFields) {
                   inputRecord.sourceMaterial.glossinessFactor);
   EXPECT_FLOAT_EQ(output.sourceMaterial.ior, inputRecord.sourceMaterial.ior);
 
-  EXPECT_EQ(output.sourceMaterial.baseColor.sourceKind,
+  EXPECT_EQ(output.sourceMaterial.textures[nuri::kMaterialTextureSlotBaseColor]
+                .sourceKind,
             nuri::MaterialTextureSourceKind::ExternalFile);
-  EXPECT_EQ(output.sourceMaterial.baseColor.path,
-            inputRecord.sourceMaterial.baseColor.path);
-  EXPECT_EQ(output.sourceMaterial.baseColor.uvSet,
-            inputRecord.sourceMaterial.baseColor.uvSet);
-  EXPECT_FLOAT_EQ(output.sourceMaterial.baseColor.transform.scale.y,
-                  inputRecord.sourceMaterial.baseColor.transform.scale.y);
+  EXPECT_EQ(
+      output.sourceMaterial.textures[nuri::kMaterialTextureSlotBaseColor].path,
+      inputRecord.sourceMaterial.textures[nuri::kMaterialTextureSlotBaseColor]
+          .path);
+  EXPECT_EQ(
+      output.sourceMaterial.textures[nuri::kMaterialTextureSlotBaseColor].uvSet,
+      inputRecord.sourceMaterial.textures[nuri::kMaterialTextureSlotBaseColor]
+          .uvSet);
+  EXPECT_FLOAT_EQ(
+      output.sourceMaterial.textures[nuri::kMaterialTextureSlotBaseColor]
+          .transform.scale.y,
+      inputRecord.sourceMaterial.textures[nuri::kMaterialTextureSlotBaseColor]
+          .transform.scale.y);
 
-  EXPECT_EQ(output.sourceMaterial.normal.sourceKind,
+  EXPECT_EQ(output.sourceMaterial.textures[nuri::kMaterialTextureSlotNormal]
+                .sourceKind,
             nuri::MaterialTextureSourceKind::EmbeddedSceneTexture);
-  EXPECT_EQ(output.sourceMaterial.normal.embeddedIndex,
-            inputRecord.sourceMaterial.normal.embeddedIndex);
-  EXPECT_FLOAT_EQ(output.sourceMaterial.normal.transform.rotationRadians,
-                  inputRecord.sourceMaterial.normal.transform.rotationRadians);
-  EXPECT_EQ(output.sourceMaterial.specularColor.path,
-            inputRecord.sourceMaterial.specularColor.path);
-  EXPECT_EQ(output.sourceMaterial.specularColor.uvSet,
-            inputRecord.sourceMaterial.specularColor.uvSet);
+  EXPECT_EQ(
+      output.sourceMaterial.textures[nuri::kMaterialTextureSlotNormal]
+          .embeddedIndex,
+      inputRecord.sourceMaterial.textures[nuri::kMaterialTextureSlotNormal]
+          .embeddedIndex);
+  EXPECT_FLOAT_EQ(
+      output.sourceMaterial.textures[nuri::kMaterialTextureSlotNormal]
+          .transform.rotationRadians,
+      inputRecord.sourceMaterial.textures[nuri::kMaterialTextureSlotNormal]
+          .transform.rotationRadians);
+  EXPECT_EQ(
+      output.sourceMaterial.textures[nuri::kMaterialTextureSlotSpecularColor]
+          .path,
+      inputRecord.sourceMaterial
+          .textures[nuri::kMaterialTextureSlotSpecularColor]
+          .path);
+  EXPECT_EQ(
+      output.sourceMaterial.textures[nuri::kMaterialTextureSlotSpecularColor]
+          .uvSet,
+      inputRecord.sourceMaterial
+          .textures[nuri::kMaterialTextureSlotSpecularColor]
+          .uvSet);
 
   EXPECT_EQ(output.textureCache[0].artifactIdentityHash,
             inputRecord.textureCache[0].artifactIdentityHash);

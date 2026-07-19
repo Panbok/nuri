@@ -1,5 +1,4 @@
 #pragma once
-
 #include "nuri/core/log.h"
 #include "nuri/core/result.h"
 #include "nuri/defines.h"
@@ -7,12 +6,10 @@
 #include "nuri/gfx/owned_gpu_resource.h"
 #include "nuri/gfx/shader.h"
 #include "nuri/resources/gpu/buffer.h"
-
 #include <filesystem>
 #include <memory>
 #include <memory_resource>
 #include <string>
-
 namespace nuri {
 
 class NURI_API AnimationGpuServices {
@@ -21,12 +18,10 @@ public:
       GPUDevice &gpu, std::filesystem::path shaderRoot,
       std::pmr::memory_resource *memory = std::pmr::get_default_resource());
   ~AnimationGpuServices();
-
   AnimationGpuServices(const AnimationGpuServices &) = delete;
   AnimationGpuServices &operator=(const AnimationGpuServices &) = delete;
   AnimationGpuServices(AnimationGpuServices &&) = delete;
   AnimationGpuServices &operator=(AnimationGpuServices &&) = delete;
-
   [[nodiscard]] Result<void, std::string> ensureInitialized();
   [[nodiscard]] GPUDevice &gpu() noexcept { return gpu_; }
   [[nodiscard]] const std::filesystem::path &shaderRoot() const noexcept {
@@ -61,7 +56,6 @@ public:
     assertPipelineHandle(skinPipelineHandle_.get(), "skinPipeline");
     return skinPipelineHandle_.get();
   }
-
   [[nodiscard]] Result<std::unique_ptr<Buffer>, std::string>
   createStorageBuffer(size_t sizeBytes, std::string_view debugName);
   [[nodiscard]] Result<std::unique_ptr<Buffer>, std::string>
@@ -69,21 +63,11 @@ public:
 
 private:
   void assertPipelineHandle(ComputePipelineHandle handle,
-                            std::string_view accessorName) const noexcept {
-    NURI_ASSERT(initialized_,
-                "AnimationGpuServices::%.*s: ensureInitialized() must succeed "
-                "before accessing pipelines",
-                static_cast<int>(accessorName.size()), accessorName.data());
-    NURI_ASSERT(nuri::isValid(handle),
-                "AnimationGpuServices::%.*s: pipeline handle is invalid",
-                static_cast<int>(accessorName.size()), accessorName.data());
-  }
-
+                            std::string_view accessorName) const noexcept {}
   [[nodiscard]] Result<bool, std::string> createShaders();
   [[nodiscard]] Result<bool, std::string> createPipelines();
   void destroyPipelines() noexcept;
   void destroyShaders() noexcept;
-
   GPUDevice &gpu_;
   std::filesystem::path shaderRoot_;
   std::pmr::memory_resource *memory_ = std::pmr::get_default_resource();

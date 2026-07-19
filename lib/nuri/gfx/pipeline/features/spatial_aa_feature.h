@@ -1,100 +1,55 @@
 #pragma once
-
 #include "nuri/core/runtime_config.h"
 #include "nuri/defines.h"
 #include "nuri/gfx/gpu_device.h"
-#include "nuri/gfx/pipeline/render_feature.h"
-#include "nuri/gfx/pipeline/render_feature_pass.h"
+#include "nuri/gfx/pipeline/render_pipeline.h"
 #include "nuri/gfx/shader.h"
-
 #include <array>
 #include <cstdint>
-#include <filesystem>
-#include <memory>
 #include <span>
+#include <string>
 #include <vector>
-
 namespace nuri {
+
+class RenderPipeline;
 
 enum class SpatialAAPlacement : uint8_t {
   SceneColor = 0,
   PostTransparent = 1,
 };
 
-class NURI_API SpatialAAPass final : public RenderFeaturePass {
+class NURI_API SpatialAAPass final {
 public:
   explicit SpatialAAPass(
       GPUDevice &gpu, RuntimeCompositeConfig config,
       SpatialAAPlacement placement = SpatialAAPlacement::SceneColor);
-  ~SpatialAAPass() override;
-
-  SpatialAAPass(const SpatialAAPass &) = delete;
-  SpatialAAPass &operator=(const SpatialAAPass &) = delete;
-  SpatialAAPass(SpatialAAPass &&) = delete;
-  SpatialAAPass &operator=(SpatialAAPass &&) = delete;
-
-  [[nodiscard]] std::string_view name() const noexcept override {
-    return "SpatialAAPass";
-  }
-  [[nodiscard]] bool isEnabled(const FrameBuildContext &ctx) const override;
-  Result<bool, std::string> prepare(FrameBuildContext &ctx) override;
-  Result<bool, std::string> build(FrameBuildContext &ctx) override;
+  ~SpatialAAPass();
+  [[nodiscard]] bool isEnabled(const FrameBuildContext &ctx) const;
+  Result<bool, std::string> prepare(FrameBuildContext &ctx);
+  Result<bool, std::string> build(FrameBuildContext &ctx);
 
 private:
-  struct FullscreenResources {
-    std::unique_ptr<Shader> shader{};
-    ShaderHandle vertexShader{};
-    ShaderHandle fragmentShader{};
-    RenderPipelineHandle pipeline{};
-    Format pipelineColorFormat = Format::Count;
-    std::filesystem::path vertexPath{};
-    std::filesystem::path fragmentPath{};
-    bool initialized = false;
-  };
-
   GPUDevice &gpu_;
   RuntimeCompositeConfig config_{};
   SpatialAAPlacement placement_;
-  FullscreenResources edgeResources_{};
-  FullscreenResources blendResources_{};
-  FullscreenResources neighborhoodResources_{};
-  SamplerHandle linearClampSampler_{};
-  SamplerHandle pointClampSampler_{};
-  TextureHandle areaLutTexture_{};
-  TextureHandle searchLutTexture_{};
-  std::vector<TextureHandle> edgeTextures_{};
-  std::vector<TextureHandle> blendTextures_{};
-  std::vector<TextureHandle> outputTextures_{};
+  ShaderHandle vertexShader_{};
+  std::array<ShaderHandle, 3> fragmentShaders_{};
+  std::array<RenderPipelineHandle, 3> pipelines_{};
+  std::array<SamplerHandle, 2> samplers_{};
+  std::array<TextureHandle, 2> luts_{};
+  std::array<std::vector<TextureHandle>, 3> scratchTextures_{};
+  std::string initializationError_{};
   uint32_t scratchWidth_ = 0u;
   uint32_t scratchHeight_ = 0u;
   uint32_t scratchRingCount_ = 0u;
   Format outputScratchFormat_ = Format::Count;
-
-  Result<bool, std::string> ensureResources(FrameBuildContext &ctx);
+  Result<bool, std::string> initialize();
+  Result<bool, std::string> ensureScratchTextures(FrameBuildContext &ctx);
   void destroyResources();
-  void destroyFullscreenResources(FullscreenResources &resources);
 };
 
-class NURI_API SpatialAAFeature final : public RenderFeature {
-public:
-  explicit SpatialAAFeature(
-      GPUDevice &gpu, RuntimeCompositeConfig config,
-      SpatialAAPlacement placement = SpatialAAPlacement::SceneColor);
-  ~SpatialAAFeature() override = default;
-
-  SpatialAAFeature(const SpatialAAFeature &) = delete;
-  SpatialAAFeature &operator=(const SpatialAAFeature &) = delete;
-  SpatialAAFeature(SpatialAAFeature &&) = delete;
-  SpatialAAFeature &operator=(SpatialAAFeature &&) = delete;
-
-  [[nodiscard]] std::string_view name() const noexcept override {
-    return "SpatialAAFeature";
-  }
-  [[nodiscard]] std::span<RenderFeaturePass *const> passes() noexcept override;
-
-private:
-  SpatialAAPass spatialPass_;
-  std::array<RenderFeaturePass *, 1> passes_{&spatialPass_};
-};
+NURI_API void registerSpatialAAStage(
+    RenderPipeline &pipeline, GPUDevice &gpu, RuntimeCompositeConfig config,
+    SpatialAAPlacement placement = SpatialAAPlacement::SceneColor);
 
 } // namespace nuri

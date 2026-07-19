@@ -3,7 +3,6 @@
 #include "editor_scene_assets.h"
 
 #include "nuri/core/log.h"
-#include "nuri/resources/gpu/material.h"
 #include "nuri/resources/gpu/resource_manager.h"
 #include "nuri/resources/scene_importer.h"
 
@@ -47,7 +46,7 @@ ImportedPrefabSceneResources &ImportedPrefabSceneResources::operator=(
 }
 
 void ImportedPrefabSceneResources::release() noexcept {
-  if (assetSystem != nullptr && isValidAssetHandle(sceneLoad)) {
+  if (assetSystem != nullptr && isValid(sceneLoad)) {
     assetSystem->cancel(sceneLoad);
   }
   sceneLoad = {};
@@ -134,7 +133,7 @@ StreamingSceneState::operator=(StreamingSceneState &&other) noexcept {
 }
 
 void StreamingSceneState::release() noexcept {
-  if (assets != nullptr && isValidAssetHandle(sceneLoad)) {
+  if (assets != nullptr && isValid(sceneLoad)) {
     assets->cancel(sceneLoad);
   }
   sceneLoad = {};
@@ -162,7 +161,7 @@ Result<void, std::string> prepareImportedPrefabSceneResources(
     EditorRuntime &runtime, std::string_view sceneName,
     const std::filesystem::path &modelPath,
     const MeshImportOptions &importOptions, ImportedPrefabSceneResources &out) {
-  if (isValidAssetHandle(out.sceneLoad)) {
+  if (isValid(out.sceneLoad)) {
     return Result<void, std::string>::makeResult();
   }
 
@@ -194,7 +193,7 @@ refreshImportedPrefabSceneResources(EditorRuntime &runtime,
   if (out.ready) {
     return Result<bool, std::string>::makeResult(true);
   }
-  if (!isValidAssetHandle(out.sceneLoad)) {
+  if (!isValid(out.sceneLoad)) {
     return Result<bool, std::string>::makeError(
         "async prefab scene request is invalid");
   }
@@ -222,88 +221,6 @@ refreshImportedPrefabSceneResources(EditorRuntime &runtime,
                 out.prefab.renderables.size(), out.prefab.lights.size(),
                 out.prefab.meshAssets.size());
   return Result<bool, std::string>::makeResult(true);
-}
-
-Result<void, std::string> prepareSimpleImportedModelSceneAssets(
-    EditorRuntime &runtime, std::string_view sceneName,
-    const std::filesystem::path &modelPath,
-    const MeshImportOptions &importOptions, std::string_view modelDebugName,
-    std::string_view importedMaterialPrefix,
-    std::string_view fallbackMaterialDebugName, bool loadImportedLights,
-    SimpleModelSceneAssets &out) {
-  if (out.ready) {
-    return Result<void, std::string>::makeResult();
-  }
-
-  out.release();
-  out.resources = &runtime.resources();
-  out.sourcePath = modelPath;
-
-  auto modelResult = runtime.resources().acquireModel(ModelRequest{
-      .path = modelPath.string(),
-      .importOptions = importOptions,
-      .debugName = std::string(modelDebugName),
-  });
-  if (modelResult.hasError()) {
-    return Result<void, std::string>::makeError(modelResult.error());
-  }
-  out.model = modelResult.value();
-  out.material = acquireImportedMaterialOrFallback(
-      runtime.resources(), sceneName, modelPath.string(), out.model,
-      importedMaterialPrefix, fallbackMaterialDebugName);
-  if (!isValid(out.material)) {
-    return Result<void, std::string>::makeError(
-        std::string("prepareSimpleImportedModelSceneAssets: failed to acquire "
-                    "material for '") +
-        std::string(sceneName) + "'");
-  }
-  if (loadImportedLights) {
-    loadImportedLightsForScene(sceneName, modelPath.string(),
-                               out.fallbackLights);
-  }
-  out.ready = true;
-  return Result<void, std::string>::makeResult();
-}
-
-[[nodiscard]] MaterialRef acquireImportedMaterialOrFallback(
-    ResourceManager &resources, std::string_view sceneName,
-    std::string_view modelPath, ModelRef modelRef,
-    std::string_view debugNamePrefix, std::string_view fallbackDebugName) {
-  auto loadResult = resources.acquireMaterialsFromModel(ImportedMaterialRequest{
-      .modelPath = std::string(modelPath),
-      .model = modelRef,
-      .debugNamePrefix = std::string(debugNamePrefix),
-  });
-  if (!loadResult.hasError() && isValid(loadResult.value().firstMaterial)) {
-    return loadResult.value().firstMaterial;
-  }
-
-  if (loadResult.hasError()) {
-    NURI_LOG_WARNING("prepareSimpleImportedModelSceneAssets: failed to import "
-                     "%s materials from '%s': %s",
-                     std::string(sceneName).c_str(),
-                     std::string(modelPath).c_str(),
-                     loadResult.error().c_str());
-  }
-
-  auto fallbackMaterialResult = resources.acquireMaterial(MaterialRequest{
-      .desc = MaterialDesc{},
-      .debugName = std::string(fallbackDebugName),
-  });
-  NURI_ASSERT(!fallbackMaterialResult.hasError(),
-              "Failed to acquire %s fallback material: %s",
-              std::string(sceneName).c_str(),
-              fallbackMaterialResult.error().c_str());
-  if (fallbackMaterialResult.hasError()) {
-    NURI_LOG_ERROR("prepareSimpleImportedModelSceneAssets: failed to acquire "
-                   "fallback material for '%s': %s",
-                   std::string(sceneName).c_str(),
-                   fallbackMaterialResult.error().c_str());
-    return kInvalidMaterialRef;
-  }
-  const MaterialRef fallbackMaterial = fallbackMaterialResult.value();
-  resources.setModelMaterialForAllSources(modelRef, fallbackMaterial);
-  return fallbackMaterial;
 }
 
 void loadImportedLightsForScene(std::string_view sceneName,

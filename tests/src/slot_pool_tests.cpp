@@ -2,7 +2,7 @@
 
 #include "nuri/core/containers/slot_pool.h"
 #include "nuri/gfx/gpu_retirement_queue.h"
-#include "nuri/gfx/recording_retirement_tracker.h"
+#include "nuri/platform/detail/recording_retirement_tracker.h"
 
 #include <memory>
 

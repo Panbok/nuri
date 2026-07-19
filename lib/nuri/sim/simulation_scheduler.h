@@ -1,20 +1,14 @@
 #pragma once
-
 #include "nuri/defines.h"
 #include "nuri/sim/fixed_step_clock.h"
-
 #include <cstdint>
-
 namespace nuri {
 
 class SceneRuntimeHost;
 
 struct NURI_API SimulationSchedulerConfig {
-  // fixedDeltaSeconds must be finite and > 0.
   double fixedDeltaSeconds = 1.0 / 60.0;
-  // maxStepsPerFrame should be >= 1.
   uint32_t maxStepsPerFrame = 4u;
-  // maxAccumulatedSeconds must be finite and >= 0.
   double maxAccumulatedSeconds = 0.25;
   bool allowFrameDropping = true;
 };
@@ -40,7 +34,6 @@ public:
   [[nodiscard]] const SimulationSchedulerConfig &config() const noexcept {
     return config_;
   }
-
   [[nodiscard]] SimulationTickResult tick(SceneRuntimeHost &host,
                                           const SimulationTickInput &input);
 

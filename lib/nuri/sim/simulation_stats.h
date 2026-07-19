@@ -1,24 +1,17 @@
 #pragma once
-
 #include "nuri/defines.h"
 #include "nuri/sim/simulation_handles.h"
-
 #include <array>
 #include <cstdint>
 #include <limits>
 #include <memory_resource>
 #include <string>
-
 namespace nuri {
 
 struct NURI_API SimulationStats {
-  // Copy construction keeps the default std::pmr copy behavior for
-  // lastFaultReason. Construct the destination with an explicit memory_resource
-  // before assignment if allocator locality matters.
   explicit SimulationStats(
       std::pmr::memory_resource *memory = std::pmr::get_default_resource())
       : lastFaultReason(memory) {}
-
   uint64_t creationOrder = 0u;
   uint64_t controlVersion = 0u;
   uint64_t executedStepCount = 0u;
@@ -30,9 +23,6 @@ struct NURI_API SimulationStats {
   bool enabled = false;
   bool paused = false;
   bool faulted = false;
-  bool gpuEligible = false;
-  // Uses the destination string allocator on assignment; copy construction uses
-  // the default std::pmr allocator semantics.
   std::pmr::string lastFaultReason;
 };
 

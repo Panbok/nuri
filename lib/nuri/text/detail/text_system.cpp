@@ -1,87 +1,57 @@
-#include "nuri/pch.h"
-
-#include "nuri/core/log.h"
 #include "nuri/text/text_system.h"
-
+#include "nuri/core/log.h"
+#include "nuri/gfx/pipeline/render_pipeline.h"
+#include "nuri/pch.h"
+#include "nuri/text/font_manager.h"
+#include "nuri/text/text_layouter.h"
+#include "nuri/text/text_renderer.h"
+#include "nuri/text/text_shaper.h"
 namespace nuri {
 namespace {
-
 constexpr float MIN_FONT_SIZE_PX = 8.0f;
 constexpr float MAX_FONT_SIZE_PX = 256.0f;
-
 template <typename T, typename... Args>
 [[nodiscard]] Result<T, std::string> makeError(Args &&...args) {
   std::ostringstream oss;
   (oss << ... << std::forward<Args>(args));
   return Result<T, std::string>::makeError(oss.str());
 }
-
 } // namespace
 
-TextSystem::TextSystem(CreateDesc desc)
-    : gpu_(desc.gpu), memory_(desc.memory),
-      defaultFontPath_(std::move(desc.defaultFontPath)),
-      requireDefaultFont_(desc.requireDefaultFont),
-      shaderPaths_(std::move(desc.shaderPaths)) {}
+TextSystem::TextSystem(GPUDevice &gpu, std::pmr::memory_resource &memory)
+    : gpu_(gpu), memory_(memory) {}
 
 TextSystem::~TextSystem() = default;
 
-Result<bool, std::string> TextSystem::initialize() {
-  auto fonts = FontManager::create(FontManager::CreateDesc{
+Result<bool, std::string> TextSystem::initialize(const CreateDesc &desc) {
+  fonts_ = std::make_unique<FontManager>(FontManager::CreateDesc{
       .gpu = gpu_,
       .memory = memory_,
   });
-  if (!fonts) {
-    return Result<bool, std::string>::makeError(
-        "TextSystem: failed to create FontManager");
-  }
-
-  std::unique_ptr<TextShaper> shaper;
-  try {
-    shaper = std::make_unique<TextShaper>(TextShaper::CreateDesc{
-        .fonts = *fonts,
-        .memory = memory_,
-    });
-  } catch (const std::exception &e) {
-    return makeError<bool>("TextSystem: failed to create TextShaper (",
-                           e.what(), ")");
-  } catch (...) {
-    return Result<bool, std::string>::makeError(
-        "TextSystem: failed to create TextShaper (unknown exception)");
-  }
-
-  auto layouter = std::make_unique<TextLayouter>(TextLayouter::CreateDesc{
-      .fonts = *fonts,
-      .shaper = *shaper,
+  shaper_ = std::make_unique<TextShaper>(TextShaper::CreateDesc{
+      .fonts = *fonts_,
+  });
+  layouter_ = std::make_unique<TextLayouter>(TextLayouter::CreateDesc{
+      .fonts = *fonts_,
+      .shaper = *shaper_,
       .memory = memory_,
   });
-
-  std::unique_ptr<TextRenderer> rendererPtr;
-  try {
-    rendererPtr = std::make_unique<TextRenderer>(TextRenderer::CreateDesc{
-        .gpu = gpu_,
-        .fonts = *fonts,
-        .layouter = *layouter,
-        .memory = memory_,
-        .shaderPaths = shaderPaths_,
-    });
-  } catch (const std::exception &e) {
-    return makeError<bool>("TextSystem: failed to create TextRenderer (",
-                           e.what(), ")");
-  } catch (...) {
-    return Result<bool, std::string>::makeError(
-        "TextSystem: failed to create TextRenderer (unknown exception)");
-  }
-
-  if (!defaultFontPath_.empty()) {
-    const std::string defaultFontPathString = defaultFontPath_.string();
-    auto loadResult = fonts->loadFont(FontLoadDesc{
+  renderer_.reset(new TextRenderer(TextRenderer::CreateDesc{
+      .gpu = gpu_,
+      .fonts = *fonts_,
+      .layouter = *layouter_,
+      .memory = memory_,
+      .shaderPaths = desc.shaderPaths,
+  }));
+  if (!desc.defaultFontPath.empty()) {
+    const std::string defaultFontPathString = desc.defaultFontPath.string();
+    auto loadResult = fonts_->loadFont(FontLoadDesc{
         .path = defaultFontPathString,
         .debugName = "default_ui",
         .memory = &memory_,
     });
     if (loadResult.hasError()) {
-      if (requireDefaultFont_) {
+      if (desc.requireDefaultFont) {
         return makeError<bool>("TextSystem: failed to load default font '",
                                defaultFontPathString, "' (", loadResult.error(),
                                ")");
@@ -93,22 +63,23 @@ Result<bool, std::string> TextSystem::initialize() {
       defaultFont_ = loadResult.value();
     }
   }
-
-  fonts_ = std::move(fonts);
-  shaper_ = std::move(shaper);
-  layouter_ = std::move(layouter);
-  renderer_ = std::move(rendererPtr);
   return Result<bool, std::string>::makeResult(true);
 }
 
-FontManager &TextSystem::fonts() {
-  NURI_ASSERT(fonts_ != nullptr, "TextSystem::fonts is not initialized");
-  return *fonts_;
+void TextSystem::beginFrame(uint64_t frameIndex) {
+  renderer_->beginFrame(frameIndex);
 }
 
-TextRenderer &TextSystem::renderer() {
-  NURI_ASSERT(renderer_ != nullptr, "TextSystem::renderer is not initialized");
-  return *renderer_;
+Result<TextBounds, std::string>
+TextSystem::enqueue2D(const Text2DDesc &desc,
+                      std::pmr::memory_resource &scratch) {
+  return renderer_->enqueue2D(desc, scratch);
+}
+
+Result<TextBounds, std::string>
+TextSystem::enqueue3D(const Text3DDesc &desc,
+                      std::pmr::memory_resource &scratch) {
+  return renderer_->enqueue3D(desc, scratch);
 }
 
 FontHandle TextSystem::defaultFont() const { return defaultFont_; }
@@ -120,11 +91,6 @@ TextSystem::loadAndSetDefaultFont(std::string_view fontPath,
     return makeError<FontHandle>(
         "TextSystem::loadAndSetDefaultFont: font path is empty");
   }
-  if (fonts_ == nullptr) {
-    return makeError<FontHandle>(
-        "TextSystem::loadAndSetDefaultFont: FontManager is not initialized");
-  }
-
   const std::filesystem::path path{std::string(fontPath)};
   const std::string pathString = path.string();
   const std::string resolvedDebugName =
@@ -137,24 +103,12 @@ TextSystem::loadAndSetDefaultFont(std::string_view fontPath,
   if (loadResult.hasError()) {
     return Result<FontHandle, std::string>::makeError(loadResult.error());
   }
-
   const FontHandle newDefault = loadResult.value();
   const FontHandle oldDefault = defaultFont_;
   defaultFont_ = newDefault;
-  defaultFontPath_ = path;
-
   if (::nuri::isValid(oldDefault) && oldDefault.value != newDefault.value) {
-    auto unloadResult = fonts_->unloadFont(oldDefault);
-    if (unloadResult.hasError()) {
-      NURI_LOG_WARNING(
-          "TextSystem::loadAndSetDefaultFont: failed to unload previous "
-          "default font: %s",
-          unloadResult.error().c_str());
-    }
+    fonts_->unloadFont(oldDefault);
   }
-
-  NURI_LOG_INFO("TextSystem: default font switched to '%s'",
-                defaultFontPath_.string().c_str());
   return Result<FontHandle, std::string>::makeResult(newDefault);
 }
 
@@ -166,14 +120,80 @@ void TextSystem::setDefaultFontSizePx(float sizePx) {
 
 Result<std::unique_ptr<TextSystem>, std::string>
 TextSystem::create(const CreateDesc &desc) {
-  auto system = std::unique_ptr<TextSystem>(new TextSystem(desc));
-  auto initResult = system->initialize();
+  auto system =
+      std::unique_ptr<TextSystem>(new TextSystem(desc.gpu, desc.memory));
+  auto initResult = system->initialize(desc);
   if (initResult.hasError()) {
     return Result<std::unique_ptr<TextSystem>, std::string>::makeError(
         initResult.error());
   }
   return Result<std::unique_ptr<TextSystem>, std::string>::makeResult(
       std::move(system));
+}
+
+namespace {
+Result<bool, std::string> beginTextFrame(void *state, FrameBuildContext &ctx) {
+  static_cast<TextSystem *>(state)->beginFrame(ctx.frame.frameIndex);
+  return Result<bool, std::string>::makeResult(true);
+}
+} // namespace
+
+void registerText3DStage(RenderPipeline &pipeline, TextSystem &text) {
+  pipeline.addBorrowedComponent(
+      &text,
+      PipelineComponentDesc{
+          .publish =
+              [](void *state, FrameBuildContext &ctx) {
+                ctx.frame.transparentContributors.publish(
+                    TransparentContributionCollector{
+                        .user =
+                            static_cast<TextSystem *>(state)->renderer_.get(),
+                        .collect =
+                            [](void *user, RenderFrameContext &frame,
+                               TransparentStageContribution &out) {
+                              return static_cast<TextRenderer *>(user)
+                                  ->buildTransparentStageContribution(frame,
+                                                                      out);
+                            },
+                    });
+                return Result<bool, std::string>::makeResult(true);
+              },
+          .prepare = beginTextFrame,
+      });
+  pipeline.addStage(PipelineStageDesc{
+      .componentName = "Text3DFeature",
+      .name = "Text3DPass",
+      .state = &text,
+      .enabled =
+          [](const void *, const FrameBuildContext &ctx) {
+            return !ctx.frame.sharedResources.transparentStageEnabled;
+          },
+      .build =
+          [](void *state, FrameBuildContext &ctx) {
+            return static_cast<TextSystem *>(state)
+                ->renderer_->append3DGraphPass(
+                    ctx.frame, ctx.graph,
+                    ctx.frame.sharedResources.sceneDepthGraphTexture,
+                    ctx.graph.passCount() > 0u);
+          },
+  });
+}
+
+void registerText2DStage(RenderPipeline &pipeline, TextSystem &text) {
+  pipeline.addBorrowedComponent(&text, PipelineComponentDesc{
+                                           .prepare = beginTextFrame,
+                                       });
+  pipeline.addStage(PipelineStageDesc{
+      .componentName = "Text2DFeature",
+      .name = "Text2DPass",
+      .state = &text,
+      .build =
+          [](void *state, FrameBuildContext &ctx) {
+            return static_cast<TextSystem *>(state)
+                ->renderer_->append2DGraphPass(ctx.frame, ctx.graph,
+                                               ctx.graph.passCount() > 0u);
+          },
+  });
 }
 
 } // namespace nuri

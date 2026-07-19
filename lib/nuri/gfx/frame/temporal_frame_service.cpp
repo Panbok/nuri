@@ -1,12 +1,8 @@
-#include "nuri/pch.h"
-
 #include "nuri/gfx/frame/temporal_frame_service.h"
-
+#include "nuri/pch.h"
 #include <cmath>
-
 namespace nuri {
 namespace {
-
 [[nodiscard]] TemporalResetReasonFlags
 resetFlags(TemporalHistoryResetReason reason) noexcept {
   switch (reason) {
@@ -33,7 +29,6 @@ resetFlags(TemporalHistoryResetReason reason) noexcept {
   }
   return TemporalResetReasonFlags::SceneDiscontinuity;
 }
-
 [[nodiscard]] bool invalidatesView(TemporalResetReasonFlags flags) noexcept {
   constexpr TemporalResetReasonFlags kViewReasons =
       TemporalResetReasonFlags::FirstUse |
@@ -44,7 +39,6 @@ resetFlags(TemporalHistoryResetReason reason) noexcept {
   return (static_cast<uint32_t>(flags) & static_cast<uint32_t>(kViewReasons)) !=
          0u;
 }
-
 [[nodiscard]] bool invalidatesGrid(TemporalResetReasonFlags flags) noexcept {
   constexpr TemporalResetReasonFlags kGridReasons =
       TemporalResetReasonFlags::Resize |
@@ -52,7 +46,6 @@ resetFlags(TemporalHistoryResetReason reason) noexcept {
   return (static_cast<uint32_t>(flags) & static_cast<uint32_t>(kGridReasons)) !=
          0u;
 }
-
 } // namespace
 
 Result<CameraFrameState, std::string> TemporalFrameService::prepareFrame(
@@ -68,14 +61,12 @@ Result<CameraFrameState, std::string> TemporalFrameService::prepareFrame(
     return Result<CameraFrameState, std::string>::makeError(
         "TemporalFrameService::prepareFrame: prior frame is still pending");
   }
-
   Pending pending{};
   pending.plan = plan;
   const TemporalCameraHistoryState &committedHistory = committedCameraHistory_;
   pending.cameraHistory = committedCameraHistory_;
   CameraFrameState cameraState = makeTemporalCameraFrameState(
       camera, aspectRatio, antiAliasing, desc, pending.cameraHistory);
-
   TemporalResetReasonFlags reasons =
       resetFlags(cameraState.historyResetReason) | deferredResetReasons_;
   if (committedPlan_.valid && committedPlan_ != plan) {
@@ -93,7 +84,6 @@ Result<CameraFrameState, std::string> TemporalFrameService::prepareFrame(
                                         !invalidatesView(reasons) &&
                                         !invalidatesGrid(reasons);
   pending.facts.pendingCommit = true;
-
   if (invalidatesView(reasons)) {
     ++pending.facts.epochs.viewContinuity;
   }
@@ -110,7 +100,6 @@ Result<CameraFrameState, std::string> TemporalFrameService::prepareFrame(
                              TemporalResetReasonFlags::BackendRecreation)) {
     ++pending.facts.epochs.resourceGeneration;
   }
-
   cameraState.jitterEnabled = plan.jitterScene && cameraState.jitterEnabled;
   cameraState.historyValid =
       cameraState.historyValid &&

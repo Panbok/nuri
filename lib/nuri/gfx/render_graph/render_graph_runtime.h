@@ -1,10 +1,8 @@
 #pragma once
-
 #include "nuri/core/log.h"
 #include "nuri/core/pmr_scratch.h"
 #include "nuri/core/profiling.h"
 #include "nuri/defines.h"
-
 #include <condition_variable>
 #include <cstdint>
 #include <functional>
@@ -14,7 +12,6 @@
 #include <span>
 #include <thread>
 #include <vector>
-
 namespace nuri {
 
 struct NURI_API RenderGraphRuntimeConfig {
@@ -36,12 +33,10 @@ public:
       RenderGraphRuntimeConfig config,
       std::pmr::memory_resource *memory = std::pmr::get_default_resource());
   ~RenderGraphRuntime();
-
   RenderGraphRuntime(const RenderGraphRuntime &) = delete;
   RenderGraphRuntime &operator=(const RenderGraphRuntime &) = delete;
   RenderGraphRuntime(RenderGraphRuntime &&) = delete;
   RenderGraphRuntime &operator=(RenderGraphRuntime &&) = delete;
-
   [[nodiscard]] const RenderGraphRuntimeConfig &config() const noexcept {
     return config_;
   }
@@ -59,14 +54,10 @@ public:
   }
   [[nodiscard]] ScratchArena &
   workerScratchArena(uint32_t workerIndex) noexcept {
-    NURI_ASSERT(!workers_.empty(), "RenderGraphRuntime has no workers");
-    NURI_ASSERT(workerIndex < workers_.size(), "Worker index out of bounds");
     return workers_[workerIndex]->scratch;
   }
-
   [[nodiscard]] static std::vector<RenderGraphContiguousRange>
   makeRanges(uint32_t itemCount, uint32_t maxRangeCount);
-
   template <typename Fn>
   void runRanges(std::span<const RenderGraphContiguousRange> ranges, Fn &&fn) {
     std::function<void(uint32_t, RenderGraphContiguousRange)> task =
@@ -79,13 +70,11 @@ private:
     ScratchArena scratch;
     std::jthread thread;
   };
-
   void runRangesImpl(
       std::span<const RenderGraphContiguousRange> ranges,
       const std::function<void(uint32_t, RenderGraphContiguousRange)> &task);
   void workerLoop(uint32_t workerIndex, std::stop_token stopToken);
   void clearScheduledWorkLocked();
-
   std::pmr::memory_resource *memory_ = nullptr;
   RenderGraphRuntimeConfig config_{};
   std::vector<std::unique_ptr<WorkerState>> workers_{};

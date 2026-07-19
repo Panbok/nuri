@@ -1,23 +1,18 @@
-#include "nuri/pch.h"
-
 #include "nuri/gfx/pipeline/features/skybox_feature.h"
-
 #include "nuri/core/profiling.h"
 #include "nuri/gfx/frame/render_frame_context.h"
+#include "nuri/gfx/pipeline/render_pipeline.h"
+#include "nuri/pch.h"
 #include "nuri/resources/gpu/resource_manager.h"
 #include "nuri/scene/render_scene.h"
-
 namespace nuri {
 namespace {
-
 constexpr uint32_t kSkyboxVertexCount = 36;
-
 [[nodiscard]] bool isMsaa4xSelected(const RenderFrameContext &frame) noexcept {
   const RenderSettings &settings = renderSettingsOrDefault(frame);
   return sanitizeAntiAliasingMode(settings.antiAliasing.mode) ==
          AntiAliasingMode::MSAA4x;
 }
-
 } // namespace
 
 SkyboxPass::SkyboxPass(GPUDevice &gpu, const SkyboxFeatureConfig &config)
@@ -32,10 +27,6 @@ SkyboxPass::~SkyboxPass() {
   skyboxPipeline_.reset();
   skyboxVertexShader_ = {};
   skyboxFragmentShader_ = {};
-  skyboxPipelineHandle_ = {};
-  skyboxMsaaPipelineHandle_ = {};
-  skyboxDepthPipelineHandle_ = {};
-  skyboxMsaaDepthPipelineHandle_ = {};
 }
 
 bool SkyboxPass::isEnabled(const FrameBuildContext &ctx) const {
@@ -50,11 +41,9 @@ Result<bool, std::string> SkyboxPass::prepare(FrameBuildContext &ctx) {
 
 Result<bool, std::string> SkyboxPass::build(FrameBuildContext &ctx) {
   NURI_PROFILER_FUNCTION();
-
   if (!hasPreparedDraw_) {
     return Result<bool, std::string>::makeResult(true);
   }
-
   RenderGraphGraphicsPassDesc passDesc{};
   const bool msaaSelected = isMsaa4xSelected(ctx.frame);
   const bool usedMsaa = msaaSelected &&
@@ -72,11 +61,9 @@ Result<bool, std::string> SkyboxPass::build(FrameBuildContext &ctx) {
       usedMsaa ? ctx.shared.msaaSceneDepthGraphTexture
                : ctx.shared.sceneDepthGraphTexture;
   const bool useDepthTest = nuri::isValid(sceneDepthGraphTexture);
-
   passDesc.color = {.loadOp = useDepthTest ? LoadOp::Load : LoadOp::DontCare,
                     .storeOp = StoreOp::Store,
                     .clearColor = {1.0f, 1.0f, 1.0f, 1.0f}};
-
   if (!nuri::isValid(sceneColorGraphTexture) &&
       nuri::isValid(sceneColorTexture)) {
     auto sceneColorImport = ctx.graph.importTexture(
@@ -98,35 +85,31 @@ Result<bool, std::string> SkyboxPass::build(FrameBuildContext &ctx) {
                       .clearStencil = 0u};
     passDesc.depthTexture = sceneDepthGraphTexture;
     drawItem_.pipeline =
-        usedMsaa ? skyboxMsaaDepthPipelineHandle_ : skyboxDepthPipelineHandle_;
+        usedMsaa ? skyboxMsaaDepthPipeline_.get() : skyboxDepthPipeline_.get();
     drawItem_.useDepthState = true;
     drawItem_.depthState = {.compareOp = CompareOp::LessEqual,
                             .isDepthWriteEnabled = false};
   } else {
     drawItem_.pipeline =
-        usedMsaa ? skyboxMsaaPipelineHandle_ : skyboxPipelineHandle_;
+        usedMsaa ? skyboxMsaaPipeline_.get() : skyboxPipeline_.get();
     drawItem_.useDepthState = false;
     drawItem_.depthState = {};
   }
-
   passDesc.draws = std::span<const DrawItem>(&drawItem_, 1u);
   passDesc.gpuTimingScope = GpuTimingScope::Skybox;
   passDesc.debugLabel = "Skybox Pass";
   passDesc.debugColor = 0xff3366ff;
-
   auto addResult = ctx.graph.addGraphicsPass(passDesc);
   if (addResult.hasError()) {
     return Result<bool, std::string>::makeError(addResult.error());
   }
   const RenderGraphPassId passId = addResult.value();
-
   if (usedMsaa) {
     ctx.shared.msaaSceneColorGraphTexture = sceneColorGraphTexture;
     ctx.frame.metrics.antiAliasing.msaaColorGraphPublished = true;
   } else {
     ctx.shared.sceneColorGraphTexture = sceneColorGraphTexture;
   }
-
   if (nuri::isValid(preparedFrameBuffer_)) {
     auto frameBufferResult = ctx.graph.importBuffer(preparedFrameBuffer_,
                                                     "skybox_frame_data_buffer");
@@ -139,7 +122,6 @@ Result<bool, std::string> SkyboxPass::build(FrameBuildContext &ctx) {
       return Result<bool, std::string>::makeError(accessResult.error());
     }
   }
-
   if (ctx.frame.scene != nullptr) {
     const TextureRecord *cubemap =
         ctx.resources.tryGet(ctx.frame.scene->environment().cubemap);
@@ -156,7 +138,6 @@ Result<bool, std::string> SkyboxPass::build(FrameBuildContext &ctx) {
       }
     }
   }
-
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -164,17 +145,14 @@ Result<bool, std::string> SkyboxPass::ensureInitialized() {
   if (initialized_) {
     return Result<bool, std::string>::makeResult(true);
   }
-
   auto shaderResult = createShaders();
   if (shaderResult.hasError()) {
     return shaderResult;
   }
-
   auto pipelineResult = createPipeline();
   if (pipelineResult.hasError()) {
     return pipelineResult;
   }
-
   initialized_ = true;
   return Result<bool, std::string>::makeResult(true);
 }
@@ -185,7 +163,6 @@ void SkyboxPass::syncFrameBufferSlots() {
   if (frameBufferSlots_.size() == requiredSlotCount) {
     return;
   }
-
   destroyFrameBuffers();
   frameBufferSlots_.resize(requiredSlotCount);
 }
@@ -197,12 +174,10 @@ SkyboxPass::ensureFrameBufferCapacity(FrameBufferSlot &slot,
   if (nuri::isValid(slot.buffer) && slot.capacityBytes >= requested) {
     return Result<bool, std::string>::makeResult(true);
   }
-
   if (nuri::isValid(slot.buffer)) {
     gpu_.destroyBuffer(slot.buffer);
     slot = {};
   }
-
   const BufferDesc frameBufferDesc{
       .usage = BufferUsage::Storage,
       .storage = Storage::HostVisible,
@@ -212,7 +187,6 @@ SkyboxPass::ensureFrameBufferCapacity(FrameBufferSlot &slot,
   if (bufferResult.hasError()) {
     return Result<bool, std::string>::makeError(bufferResult.error());
   }
-
   slot.buffer = bufferResult.value();
   slot.capacityBytes = requested;
   return Result<bool, std::string>::makeResult(true);
@@ -232,7 +206,6 @@ Result<bool, std::string> SkyboxPass::createShaders() {
       ShaderSpec{skyboxShader_.get(), &config_.fragment, ShaderStage::Fragment,
                  &skyboxFragmentShader_},
   };
-
   for (const ShaderSpec &spec : shaderSpecs) {
     if (!spec.shader || !spec.outHandle || !spec.path ||
         spec.path->string().empty()) {
@@ -246,21 +219,10 @@ Result<bool, std::string> SkyboxPass::createShaders() {
     }
     *spec.outHandle = compileResult.value();
   }
-
   return Result<bool, std::string>::makeResult(true);
 }
 
 Result<bool, std::string> SkyboxPass::createPipeline() {
-  skyboxPipeline_ = Pipeline::create(gpu_);
-  skyboxMsaaPipeline_ = Pipeline::create(gpu_);
-  skyboxDepthPipeline_ = Pipeline::create(gpu_);
-  skyboxMsaaDepthPipeline_ = Pipeline::create(gpu_);
-  if (!skyboxPipeline_ || !skyboxMsaaPipeline_ || !skyboxDepthPipeline_ ||
-      !skyboxMsaaDepthPipeline_) {
-    return Result<bool, std::string>::makeError(
-        "SkyboxPass::createPipeline: failed to create skybox pipeline");
-  }
-
   const RenderPipelineDesc skyboxDesc{
       .vertexInput = {},
       .vertexShader = skyboxVertexShader_,
@@ -272,47 +234,36 @@ Result<bool, std::string> SkyboxPass::createPipeline() {
       .topology = Topology::Triangle,
       .blendEnabled = false,
   };
-
-  auto pipelineResult =
-      skyboxPipeline_->createRenderPipeline(skyboxDesc, "skybox");
-  if (pipelineResult.hasError()) {
-    return Result<bool, std::string>::makeError(pipelineResult.error());
-  }
-  skyboxPipelineHandle_ = skyboxPipeline_->getRenderPipeline();
-
   RenderPipelineDesc skyboxMsaaDesc = skyboxDesc;
   skyboxMsaaDesc.numSamples = kMsaa4xSampleCount;
-  auto msaaPipelineResult = skyboxMsaaPipeline_->createRenderPipeline(
-      skyboxMsaaDesc, "skybox_msaa4x");
-  if (msaaPipelineResult.hasError()) {
-    return Result<bool, std::string>::makeError(msaaPipelineResult.error());
-  }
-  skyboxMsaaPipelineHandle_ = skyboxMsaaPipeline_->getRenderPipeline();
-
   RenderPipelineDesc skyboxDepthDesc = skyboxDesc;
   skyboxDepthDesc.depthFormat = kFrameCompositionDepthFormat;
   skyboxDepthDesc.rasterState = makeRasterPipelineState(DepthState{
       .compareOp = CompareOp::LessEqual,
       .isDepthWriteEnabled = false,
   });
-  auto depthPipelineResult = skyboxDepthPipeline_->createRenderPipeline(
-      skyboxDepthDesc, "skybox_depth_tested");
-  if (depthPipelineResult.hasError()) {
-    return Result<bool, std::string>::makeError(depthPipelineResult.error());
-  }
-  skyboxDepthPipelineHandle_ = skyboxDepthPipeline_->getRenderPipeline();
-
   RenderPipelineDesc skyboxMsaaDepthDesc = skyboxDepthDesc;
   skyboxMsaaDepthDesc.numSamples = kMsaa4xSampleCount;
-  auto msaaDepthPipelineResult = skyboxMsaaDepthPipeline_->createRenderPipeline(
-      skyboxMsaaDepthDesc, "skybox_msaa4x_depth_tested");
-  if (msaaDepthPipelineResult.hasError()) {
-    return Result<bool, std::string>::makeError(
-        msaaDepthPipelineResult.error());
+  struct PipelineSpec {
+    const RenderPipelineDesc &desc;
+    std::string_view name;
+    OwnedRenderPipelineHandle &owner;
+  };
+  const std::array specs{
+      PipelineSpec{skyboxDesc, "skybox", skyboxPipeline_},
+      PipelineSpec{skyboxMsaaDesc, "skybox_msaa4x", skyboxMsaaPipeline_},
+      PipelineSpec{skyboxDepthDesc, "skybox_depth_tested",
+                   skyboxDepthPipeline_},
+      PipelineSpec{skyboxMsaaDepthDesc, "skybox_msaa4x_depth_tested",
+                   skyboxMsaaDepthPipeline_},
+  };
+  for (const PipelineSpec &spec : specs) {
+    auto result = gpu_.createRenderPipeline(spec.desc, spec.name);
+    if (result.hasError()) {
+      return Result<bool, std::string>::makeError(result.error());
+    }
+    spec.owner.reset(gpu_, result.value());
   }
-  skyboxMsaaDepthPipelineHandle_ =
-      skyboxMsaaDepthPipeline_->getRenderPipeline();
-
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -322,20 +273,15 @@ SkyboxPass::prepareSkyboxDraw(FrameBuildContext &ctx) {
   hasPreparedDraw_ = false;
   preparedFrameBuffer_ = {};
   drawItem_ = DrawItem{};
-
   if (frame.scene == nullptr) {
     return Result<bool, std::string>::makeError(
         "SkyboxPass::prepareSkyboxDraw: frame scene is null");
   }
-
   auto initResult = ensureInitialized();
   if (initResult.hasError()) {
     return Result<bool, std::string>::makeError(initResult.error());
   }
-
   syncFrameBufferSlots();
-  NURI_ASSERT(!frameBufferSlots_.empty(),
-              "Skybox frame buffer ring must contain at least one slot");
   FrameBufferSlot &frameBuffer = frameBufferSlots_[static_cast<size_t>(
       frame.frameIndex % frameBufferSlots_.size())];
   auto bufferResult =
@@ -343,14 +289,12 @@ SkyboxPass::prepareSkyboxDraw(FrameBuildContext &ctx) {
   if (bufferResult.hasError()) {
     return Result<bool, std::string>::makeError(bufferResult.error());
   }
-
   const TextureRecord *cubemap =
       ctx.resources.tryGet(frame.scene->environment().cubemap);
   if (cubemap == nullptr || !nuri::isValid(cubemap->texture) ||
       cubemap->bindlessIndex == kInvalidTextureBindlessIndex) {
     return Result<bool, std::string>::makeResult(true);
   }
-
   uint32_t frameFlags = 0u;
   uint32_t sceneColorTexId = 0u;
   uint32_t sceneColorSamplerId = 0u;
@@ -362,7 +306,6 @@ SkyboxPass::prepareSkyboxDraw(FrameBuildContext &ctx) {
       frameFlags |= HasSceneColor;
     }
   }
-
   frameData_ = FrameData{
       .view = frame.camera.view,
       .proj = frame.camera.proj,
@@ -394,26 +337,23 @@ SkyboxPass::prepareSkyboxDraw(FrameBuildContext &ctx) {
       .materialCoverageSamplerId = kInvalidSamplerBindlessIndex,
       .materialDataSamplerId = 0u,
   };
-
   const std::span<const std::byte> frameBytes{
       reinterpret_cast<const std::byte *>(&frameData_), sizeof(frameData_)};
   auto updateResult = gpu_.updateBuffer(frameBuffer.buffer, frameBytes, 0u);
   if (updateResult.hasError()) {
     return Result<bool, std::string>::makeError(updateResult.error());
   }
-
   const uint64_t baseAddress = gpu_.getBufferDeviceAddress(frameBuffer.buffer);
   if (baseAddress == 0) {
     return Result<bool, std::string>::makeError(
         "SkyboxPass::prepareSkyboxDraw: invalid frame buffer address");
   }
-
   pushConstants_ = PushConstants{
       .frameDataAddress = baseAddress,
   };
   drawItem_ = DrawItem{};
-  drawItem_.pipeline = isMsaa4xSelected(frame) ? skyboxMsaaPipelineHandle_
-                                               : skyboxPipelineHandle_;
+  drawItem_.pipeline = isMsaa4xSelected(frame) ? skyboxMsaaPipeline_.get()
+                                               : skyboxPipeline_.get();
   drawItem_.vertexCount = kSkyboxVertexCount;
   drawItem_.pushConstants = std::span<const std::byte>(
       reinterpret_cast<const std::byte *>(&pushConstants_),
@@ -422,7 +362,6 @@ SkyboxPass::prepareSkyboxDraw(FrameBuildContext &ctx) {
   drawItem_.debugColor = 0xff3366ff;
   preparedFrameBuffer_ = frameBuffer.buffer;
   hasPreparedDraw_ = true;
-
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -437,11 +376,10 @@ void SkyboxPass::destroyFrameBuffers() {
   preparedFrameBuffer_ = {};
 }
 
-SkyboxFeature::SkyboxFeature(GPUDevice &gpu, SkyboxFeatureConfig config)
-    : pass_(gpu, std::move(config)) {}
-
-std::span<RenderFeaturePass *const> SkyboxFeature::passes() noexcept {
-  return passes_;
+void registerSkyboxStage(RenderPipeline &pipeline, GPUDevice &gpu,
+                         SkyboxFeatureConfig config) {
+  pipeline.addStage(std::make_unique<SkyboxPass>(gpu, std::move(config)),
+                    "SkyboxFeature", "SkyboxPass");
 }
 
 } // namespace nuri

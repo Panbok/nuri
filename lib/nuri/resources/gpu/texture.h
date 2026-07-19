@@ -1,15 +1,12 @@
 #pragma once
-
 #include "nuri/core/result.h"
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/gfx/owned_gpu_resource.h"
 #include "nuri/resources/storage/texture/texture_processing.h"
-
 #include <cstdint>
 #include <string>
 #include <string_view>
 #include <vector>
-
 namespace nuri {
 
 struct TextureCacheTelemetry {
@@ -27,20 +24,15 @@ struct TextureCacheTelemetry {
   uint64_t ddsReadTimeNs = 0u;
 };
 
-// Immutable CPU-side texture payload. The descriptor never retains a span into
-// caller memory; descriptor() binds it to this object's owned bytes only for
-// the duration of GPU materialization.
 struct NURI_API PreparedTextureData {
   TextureDesc createDesc{};
   std::vector<std::byte> bytes{};
   std::string debugName{};
-
   [[nodiscard]] TextureDesc descriptor() const noexcept {
     TextureDesc desc = createDesc;
     desc.data = std::span<const std::byte>(bytes.data(), bytes.size());
     return desc;
   }
-
   [[nodiscard]] uint64_t uploadBytes() const noexcept {
     return static_cast<uint64_t>(bytes.size());
   }
@@ -49,12 +41,10 @@ struct NURI_API PreparedTextureData {
 class NURI_API Texture final {
 public:
   ~Texture() = default;
-
   Texture(const Texture &) = delete;
   Texture &operator=(const Texture &) = delete;
   Texture(Texture &&) = delete;
   Texture &operator=(Texture &&) = delete;
-
   [[nodiscard]] static Result<std::unique_ptr<Texture>, std::string>
   create(GPUDevice &gpu, const TextureDesc &desc,
          std::string_view debugName = {});
@@ -63,7 +53,6 @@ public:
   [[nodiscard]] static std::unique_ptr<Texture>
   adoptPrepared(GPUDevice &gpu, TextureHandle handle, const TextureDesc &desc,
                 std::string debugName);
-
   [[nodiscard]] static Result<PreparedTextureData, std::string>
   prepareTexture(std::string_view filePath,
                  const TextureLoadOptions &options = {},
@@ -81,7 +70,6 @@ public:
   [[nodiscard]] static Result<PreparedTextureData, std::string>
   prepareCubemapKtx2(std::string_view filePath,
                      std::string_view debugName = {});
-
   [[nodiscard]] static Result<std::unique_ptr<Texture>, std::string>
   loadTexture(GPUDevice &gpu, std::string_view filePath,
               std::string_view debugName = {});
@@ -92,21 +80,16 @@ public:
   [[nodiscard]] static Result<std::unique_ptr<Texture>, std::string>
   loadDdsTexture(GPUDevice &gpu, std::span<const std::byte> fileBytes,
                  std::string_view sourceName, std::string_view debugName = {});
-
   [[nodiscard]] static Result<std::unique_ptr<Texture>, std::string>
   loadCubemapFromEquirectangularHDR(GPUDevice &gpu, std::string_view filePath,
                                     std::string_view debugName = {});
-
   [[nodiscard]] static Result<std::unique_ptr<Texture>, std::string>
   loadTextureKtx2(GPUDevice &gpu, std::string_view filePath,
                   std::string_view debugName = {});
-
   [[nodiscard]] static Result<std::unique_ptr<Texture>, std::string>
   loadCubemapKtx2(GPUDevice &gpu, std::string_view filePath,
                   std::string_view debugName = {});
-
   [[nodiscard]] static TextureCacheTelemetry cacheTelemetry() noexcept;
-
   [[nodiscard]] TextureHandle handle() const { return resource_.get(); }
   [[nodiscard]] TextureType type() const { return type_; }
   [[nodiscard]] Format format() const { return format_; }
@@ -121,9 +104,6 @@ public:
     return debugName_;
   }
   [[nodiscard]] bool valid() const noexcept { return resource_.valid(); }
-
-  // Explicitly transfers native ownership to another move-only owner. The
-  // Texture metadata wrapper is invalid after this call.
   [[nodiscard]] TextureHandle release() noexcept { return resource_.release(); }
 
 private:
@@ -135,7 +115,6 @@ private:
         numSamples_(desc.numSamples), numMipLevels_(desc.numMipLevels),
         generateMipmaps_(desc.generateMipmaps),
         debugName_(std::move(debugName)) {}
-
   OwnedTextureHandle resource_;
   TextureType type_ = TextureType::Texture2D;
   Format format_ = Format::RGBA8_UNORM;

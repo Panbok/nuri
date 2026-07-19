@@ -1,14 +1,10 @@
-#include "nuri/pch.h"
-
 #include "nuri/resources/detail/gltf_json_utils.h"
-
+#include "nuri/pch.h"
 namespace nuri::detail {
 namespace {
-
 constexpr uint32_t kGlbMagic = 0x46546C67u;
 constexpr uint32_t kGlbVersion2 = 2u;
 constexpr uint32_t kGlbChunkTypeJson = 0x4E4F534Au;
-
 [[nodiscard]] YyJsonDocResult parseJsonDocument(std::string_view jsonText) {
   std::string mutableJson(jsonText);
   yyjson_read_err parseError{};
@@ -26,7 +22,6 @@ constexpr uint32_t kGlbChunkTypeJson = 0x4E4F534Au;
   }
   return YyJsonDocResult::makeResult(std::move(doc));
 }
-
 [[nodiscard]] bool readU32(std::span<const uint8_t> bytes, size_t offset,
                            uint32_t &out) {
   if (offset + sizeof(uint32_t) > bytes.size()) {
@@ -38,92 +33,69 @@ constexpr uint32_t kGlbChunkTypeJson = 0x4E4F534Au;
         (static_cast<uint32_t>(bytes[offset + 3u]) << 24u);
   return true;
 }
-
+template <size_t Size, typename Vector>
+[[nodiscard]] bool readJsonVector(yyjson_val *value, Vector &out) {
+  if (!yyjson_is_arr(value) || yyjson_arr_size(value) < Size) {
+    return false;
+  }
+  Vector result{};
+  for (size_t index = 0; index < Size; ++index) {
+    if (!tryReadJsonFloat(yyjson_arr_get(value, index), result[index])) {
+      return false;
+    }
+  }
+  out = result;
+  return true;
+}
 [[nodiscard]] YyJsonDocResult
 loadGltfJsonDocumentFromBytes(const std::filesystem::path &path,
-                              std::span<const std::byte> fileBytes,
-                              std::string_view sourceLabel) {
+                              std::span<const std::byte> fileBytes) {
   if (hasExtensionCaseInsensitive(path, ".gltf")) {
     return parseJsonDocument(std::string_view(
         reinterpret_cast<const char *>(fileBytes.data()), fileBytes.size()));
   }
-
   if (!hasExtensionCaseInsensitive(path, ".glb")) {
     return YyJsonDocResult::makeError("Unsupported glTF file extension");
   }
   if (fileBytes.size() < 20u) {
     return YyJsonDocResult::makeError(".glb file is too small");
   }
-
   const std::span<const uint8_t> bytes(
       reinterpret_cast<const uint8_t *>(fileBytes.data()), fileBytes.size());
   uint32_t magic = 0u;
   uint32_t version = 0u;
   uint32_t declaredLength = 0u;
   if (!readU32(bytes, 0u, magic) || !readU32(bytes, 4u, version) ||
-      !readU32(bytes, 8u, declaredLength)) {
-    return YyJsonDocResult::makeError("Failed to read .glb header");
+      !readU32(bytes, 8u, declaredLength) || magic != kGlbMagic ||
+      version != kGlbVersion2 || declaredLength != bytes.size()) {
+    return YyJsonDocResult::makeError("Invalid .glb header");
   }
-  if (magic != kGlbMagic) {
-    return YyJsonDocResult::makeError(".glb magic mismatch");
+  uint32_t chunkLength = 0u;
+  uint32_t chunkType = 0u;
+  constexpr size_t kChunkDataOffset = 20u;
+  if (!readU32(bytes, 12u, chunkLength) || !readU32(bytes, 16u, chunkType) ||
+      chunkType != kGlbChunkTypeJson ||
+      chunkLength > bytes.size() - kChunkDataOffset) {
+    return YyJsonDocResult::makeError("Invalid .glb JSON chunk");
   }
-  if (version != kGlbVersion2) {
-    return YyJsonDocResult::makeError(".glb version is not 2");
-  }
-  if (declaredLength != bytes.size()) {
-    return YyJsonDocResult::makeError(".glb declared length mismatch");
-  }
-
-  size_t chunkOffset = 12u;
-  while (chunkOffset + 8u <= bytes.size()) {
-    uint32_t chunkLength = 0u;
-    uint32_t chunkType = 0u;
-    if (!readU32(bytes, chunkOffset, chunkLength) ||
-        !readU32(bytes, chunkOffset + 4u, chunkType)) {
-      return YyJsonDocResult::makeError("Failed to read .glb chunk header");
-    }
-    chunkOffset += 8u;
-    if (chunkLength > bytes.size() - chunkOffset) {
-      return YyJsonDocResult::makeError(".glb chunk exceeds file bounds");
-    }
-    if (chunkType == kGlbChunkTypeJson) {
-      return parseJsonDocument(std::string_view(
-          reinterpret_cast<const char *>(bytes.data() + chunkOffset),
-          chunkLength));
-    }
-    chunkOffset += chunkLength;
-  }
-
-  (void)sourceLabel;
-  return YyJsonDocResult::makeError(".glb JSON chunk is missing");
+  return parseJsonDocument(std::string_view(
+      reinterpret_cast<const char *>(bytes.data() + kChunkDataOffset),
+      chunkLength));
 }
-
 } // namespace
 
 bool hasExtensionCaseInsensitive(const std::filesystem::path &path,
                                  std::string_view extension) {
-  if (!path.has_extension()) {
-    return false;
-  }
-
   const std::string pathExtension = path.extension().string();
   const auto trimLeadingDot = [](std::string_view value) {
     return value.starts_with('.') ? value.substr(1) : value;
   };
-
   const std::string_view lhs = trimLeadingDot(pathExtension);
   const std::string_view rhs = trimLeadingDot(extension);
-  if (lhs.size() != rhs.size()) {
-    return false;
-  }
-
-  for (size_t i = 0; i < lhs.size(); ++i) {
-    if (std::tolower(static_cast<unsigned char>(lhs[i])) !=
-        std::tolower(static_cast<unsigned char>(rhs[i]))) {
-      return false;
-    }
-  }
-  return true;
+  return std::ranges::equal(lhs, rhs, [](char left, char right) {
+    return std::tolower(static_cast<unsigned char>(left)) ==
+           std::tolower(static_cast<unsigned char>(right));
+  });
 }
 
 bool isGltfJsonAssetPath(const std::filesystem::path &path) {
@@ -136,113 +108,53 @@ bool isGltfJsonAssetPath(std::string_view path) {
 }
 
 std::string_view readJsonStringView(yyjson_val *value) {
-  if (!yyjson_is_str(value)) {
-    return {};
-  }
-  const char *raw = yyjson_get_str(value);
-  return raw != nullptr ? std::string_view(raw) : std::string_view{};
+  return yyjson_is_str(value)
+             ? std::string_view(yyjson_get_str(value), yyjson_get_len(value))
+             : std::string_view{};
 }
 
 std::string_view readJsonStringView(yyjson_val *object, const char *key) {
-  if (!yyjson_is_obj(object)) {
-    return {};
-  }
   return readJsonStringView(yyjson_obj_get(object, key));
 }
 
 bool tryReadJsonFloat(yyjson_val *value, float &out) {
-  if (yyjson_is_uint(value)) {
-    out = static_cast<float>(yyjson_get_uint(value));
-    return true;
+  if (!yyjson_is_num(value)) {
+    return false;
   }
-  if (yyjson_is_sint(value)) {
-    out = static_cast<float>(yyjson_get_sint(value));
-    return true;
-  }
-  if (yyjson_is_real(value) || yyjson_is_num(value)) {
-    out = static_cast<float>(yyjson_get_real(value));
-    return true;
-  }
-  return false;
+  out = static_cast<float>(yyjson_get_num(value));
+  return true;
 }
 
 bool tryReadJsonUint32(yyjson_val *value, uint32_t &out) {
-  if (yyjson_is_uint(value)) {
-    const uint64_t raw = yyjson_get_uint(value);
-    if (raw > std::numeric_limits<uint32_t>::max()) {
-      return false;
-    }
-    out = static_cast<uint32_t>(raw);
-    return true;
+  if (!yyjson_is_uint(value) && !yyjson_is_sint(value)) {
+    return false;
   }
-  if (yyjson_is_sint(value)) {
-    const int64_t raw = yyjson_get_sint(value);
-    if (raw < 0 ||
-        raw > static_cast<int64_t>(std::numeric_limits<uint32_t>::max())) {
-      return false;
-    }
-    out = static_cast<uint32_t>(raw);
-    return true;
+  const int64_t raw = yyjson_is_uint(value)
+                          ? static_cast<int64_t>(yyjson_get_uint(value))
+                          : yyjson_get_sint(value);
+  if (raw < 0 || raw > std::numeric_limits<uint32_t>::max()) {
+    return false;
   }
-  return false;
+  out = static_cast<uint32_t>(raw);
+  return true;
 }
 
 bool tryReadJsonVec2(yyjson_val *value, glm::vec2 &out) {
-  if (!yyjson_is_arr(value) || yyjson_arr_size(value) < 2u) {
-    return false;
-  }
-
-  float x = 0.0f;
-  float y = 0.0f;
-  if (!tryReadJsonFloat(yyjson_arr_get(value, 0u), x) ||
-      !tryReadJsonFloat(yyjson_arr_get(value, 1u), y)) {
-    return false;
-  }
-  out = glm::vec2(x, y);
-  return true;
+  return readJsonVector<2>(value, out);
 }
 
 bool tryReadJsonVec3(yyjson_val *value, glm::vec3 &out) {
-  if (!yyjson_is_arr(value) || yyjson_arr_size(value) < 3u) {
-    return false;
-  }
-
-  float x = 0.0f;
-  float y = 0.0f;
-  float z = 0.0f;
-  if (!tryReadJsonFloat(yyjson_arr_get(value, 0u), x) ||
-      !tryReadJsonFloat(yyjson_arr_get(value, 1u), y) ||
-      !tryReadJsonFloat(yyjson_arr_get(value, 2u), z)) {
-    return false;
-  }
-  out = glm::vec3(x, y, z);
-  return true;
+  return readJsonVector<3>(value, out);
 }
 
 bool tryReadJsonVec4(yyjson_val *value, glm::vec4 &out) {
-  if (!yyjson_is_arr(value) || yyjson_arr_size(value) < 4u) {
-    return false;
-  }
-
-  float x = 0.0f;
-  float y = 0.0f;
-  float z = 0.0f;
-  float w = 0.0f;
-  if (!tryReadJsonFloat(yyjson_arr_get(value, 0u), x) ||
-      !tryReadJsonFloat(yyjson_arr_get(value, 1u), y) ||
-      !tryReadJsonFloat(yyjson_arr_get(value, 2u), z) ||
-      !tryReadJsonFloat(yyjson_arr_get(value, 3u), w)) {
-    return false;
-  }
-  out = glm::vec4(x, y, z, w);
-  return true;
+  return readJsonVector<4>(value, out);
 }
 
 bool tryReadJsonMat4(yyjson_val *value, glm::mat4 &out) {
   if (!yyjson_is_arr(value) || yyjson_arr_size(value) < 16u) {
     return false;
   }
-
   glm::mat4 matrix(1.0f);
   for (uint32_t column = 0; column < 4u; ++column) {
     for (uint32_t row = 0; row < 4u; ++row) {
@@ -273,43 +185,18 @@ YyJsonDocResult loadGltfJsonDocument(const std::filesystem::path &path,
     return YyJsonDocResult::makeError("Failed to open " +
                                       std::string(sourceLabel));
   }
-
-  if (hasExtensionCaseInsensitive(path, ".gltf")) {
-    file.seekg(0, std::ios::end);
-    const std::streamoff fileSize = file.tellg();
-    if (fileSize < 0) {
-      return YyJsonDocResult::makeError("Failed to determine .gltf file size");
-    }
-    file.seekg(0, std::ios::beg);
-
-    std::string jsonText(static_cast<size_t>(fileSize), '\0');
-    if (!jsonText.empty() && !file.read(jsonText.data(), fileSize)) {
-      return YyJsonDocResult::makeError("Failed to read .gltf file");
-    }
-    return parseJsonDocument(jsonText);
-  }
-
-  if (!hasExtensionCaseInsensitive(path, ".glb")) {
-    return YyJsonDocResult::makeError("Unsupported glTF file extension");
-  }
-
   file.seekg(0, std::ios::end);
   const std::streamoff fileSize = file.tellg();
   if (fileSize < 0) {
-    return YyJsonDocResult::makeError("Failed to determine .glb file size");
+    return YyJsonDocResult::makeError("Failed to determine glTF file size");
   }
   file.seekg(0, std::ios::beg);
-
-  std::vector<uint8_t> bytes(static_cast<size_t>(fileSize));
+  std::vector<std::byte> bytes(static_cast<size_t>(fileSize));
   if (!bytes.empty() &&
       !file.read(reinterpret_cast<char *>(bytes.data()), fileSize)) {
-    return YyJsonDocResult::makeError("Failed to read .glb file");
+    return YyJsonDocResult::makeError("Failed to read glTF file");
   }
-  return loadGltfJsonDocumentFromBytes(
-      path,
-      std::span<const std::byte>(
-          reinterpret_cast<const std::byte *>(bytes.data()), bytes.size()),
-      sourceLabel);
+  return loadGltfJsonDocumentFromBytes(path, bytes);
 }
 
 YyJsonDocResult loadGltfJsonDocument(const std::filesystem::path &path,
@@ -319,7 +206,7 @@ YyJsonDocResult loadGltfJsonDocument(const std::filesystem::path &path,
     return YyJsonDocResult::makeError("Failed to read " +
                                       std::string(sourceLabel));
   }
-  return loadGltfJsonDocumentFromBytes(path, fileBytes, sourceLabel);
+  return loadGltfJsonDocumentFromBytes(path, fileBytes);
 }
 
 Result<GltfPrimitiveMaterialMapping, std::string>
@@ -328,37 +215,22 @@ readGltfPrimitiveMaterialMapping(yyjson_val *root) {
     return Result<GltfPrimitiveMaterialMapping, std::string>::makeError(
         "glTF root is not a JSON object");
   }
-
   GltfPrimitiveMaterialMapping mapping{};
   if (yyjson_val *materials = yyjson_obj_get(root, "materials");
       yyjson_is_arr(materials)) {
     mapping.materialCount = static_cast<uint32_t>(std::min<size_t>(
         yyjson_arr_size(materials), std::numeric_limits<uint32_t>::max()));
   }
-
   yyjson_val *meshes = yyjson_obj_get(root, "meshes");
   if (!yyjson_is_arr(meshes)) {
     return Result<GltfPrimitiveMaterialMapping, std::string>::makeResult(
         std::move(mapping));
   }
-
   const size_t meshArraySize = yyjson_arr_size(meshes);
   mapping.meshCount = static_cast<uint32_t>(
       std::min<size_t>(meshArraySize, std::numeric_limits<uint32_t>::max()));
   mapping.singlePrimitiveMeshMaterialIndices.reserve(mapping.meshCount);
-  size_t totalPrimitiveCount = 0;
-  yyjson_arr_iter reserveMeshIter = yyjson_arr_iter_with(meshes);
-  yyjson_val *reserveMeshValue = nullptr;
-  for (uint32_t meshIndex = 0;
-       meshIndex < mapping.meshCount &&
-       (reserveMeshValue = yyjson_arr_iter_next(&reserveMeshIter)) != nullptr;
-       ++meshIndex) {
-    yyjson_val *primitives = yyjson_obj_get(reserveMeshValue, "primitives");
-    if (yyjson_is_arr(primitives)) {
-      totalPrimitiveCount += yyjson_arr_size(primitives);
-    }
-  }
-  mapping.primitiveMaterialIndices.reserve(totalPrimitiveCount);
+  mapping.primitiveMaterialIndices.reserve(mapping.meshCount);
   yyjson_arr_iter meshIter = yyjson_arr_iter_with(meshes);
   yyjson_val *meshValue = nullptr;
   for (uint32_t meshIndex = 0;
@@ -371,7 +243,6 @@ readGltfPrimitiveMaterialMapping(yyjson_val *root) {
           kInvalidMaterialIndex);
       continue;
     }
-
     const size_t primitiveCount = yyjson_arr_size(primitives);
     uint32_t singlePrimitiveMaterialIndex = kInvalidMaterialIndex;
     yyjson_arr_iter primitiveIter = yyjson_arr_iter_with(primitives);
@@ -390,7 +261,6 @@ readGltfPrimitiveMaterialMapping(yyjson_val *root) {
   }
   mapping.sceneMeshIndicesAreFlatPrimitiveOrder =
       mapping.meshCount == 1u && mapping.primitiveMaterialIndices.size() > 1u;
-
   return Result<GltfPrimitiveMaterialMapping, std::string>::makeResult(
       std::move(mapping));
 }

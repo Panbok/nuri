@@ -1,38 +1,29 @@
-#include "nuri/pch.h"
-
 #include "nuri/scene/render_scene.h"
-
 #include "nuri/core/profiling.h"
 #include "nuri/core/thread_priority.h"
 #include "nuri/math/light.h"
 #include "nuri/math/utils.h"
+#include "nuri/pch.h"
 #include "nuri/resources/gpu/resource_manager.h"
-
 namespace nuri {
 namespace {
-
 std::atomic<uint64_t> gNextRenderSceneId{1u};
-
 template <typename Ref>
 [[nodiscard]] bool resourceAlive(ResourceManager *resources, Ref ref) {
-  return resources != nullptr && isValid(ref) && resources->owns(ref) &&
-         resources->tryGet(ref) != nullptr;
+  return resources != nullptr && resources->tryGet(ref) != nullptr;
 }
-
 template <typename Ref>
-void retainResourceIfAlive(ResourceManager *resources, Ref ref) {
-  if (resourceAlive(resources, ref)) {
+void retainResource(ResourceManager *resources, Ref ref) {
+  if (resources != nullptr) {
     resources->retain(ref);
   }
 }
-
 template <typename Ref>
 void releaseResourceIfOwned(ResourceManager *resources, Ref ref) {
-  if (resources != nullptr && isValid(ref) && resources->owns(ref)) {
+  if (resources != nullptr) {
     resources->release(ref);
   }
 }
-
 template <typename Fn>
 void forEachEnvironmentTextureRef(const EnvironmentHandles &handles, Fn &&fn) {
   fn(handles.cubemap);
@@ -41,29 +32,18 @@ void forEachEnvironmentTextureRef(const EnvironmentHandles &handles, Fn &&fn) {
   fn(handles.prefilteredCharlie);
   fn(handles.brdfLut);
 }
-
-bool sameEnvironmentHandles(const EnvironmentHandles &lhs,
-                            const EnvironmentHandles &rhs) {
-  return lhs.cubemap == rhs.cubemap && lhs.irradiance == rhs.irradiance &&
-         lhs.prefilteredGgx == rhs.prefilteredGgx &&
-         lhs.prefilteredCharlie == rhs.prefilteredCharlie &&
-         lhs.brdfLut == rhs.brdfLut;
-}
-
 } // namespace
 
 struct RenderScene::IncrementalCommitState {
   explicit IncrementalCommitState(std::pmr::memory_resource *memory)
       : renderables(memory), renderableIndexById(memory), morphWeights(memory),
         skinPalettes(memory) {}
-
   std::pmr::vector<Renderable> renderables;
   std::pmr::unordered_map<RenderableId, uint32_t> renderableIndexById;
   std::pmr::vector<std::pmr::vector<float>> morphWeights;
   std::pmr::vector<std::pmr::vector<glm::mat4>> skinPalettes;
   uint64_t graphTopologyVersion = 0u;
   size_t liveRenderableCount = 0u;
-  uint32_t reserveStage = 0u;
   uint32_t nextRenderableSlot = 0u;
   std::atomic_bool allocationReady = false;
   std::atomic_bool allocationFailed = false;
@@ -96,8 +76,6 @@ void RenderScene::discardIncrementalCommit() noexcept {
   if (pending == nullptr) {
     return;
   }
-  // Before allocationReady, the detached reserve worker has exclusive access
-  // to the containers and no renderable references can have been retained.
   if (!pending->allocationReady.load(std::memory_order_acquire)) {
     return;
   }
@@ -116,26 +94,17 @@ const Renderable *RenderScene::renderable(uint32_t index) const {
 
 std::optional<uint32_t>
 RenderScene::findRenderableIndex(RenderableId id) const {
-  if (!isValid(id)) {
+  const auto it = renderableIndexById_.find(id);
+  if (it == renderableIndexById_.end())
     return std::nullopt;
-  }
-  if (const auto it = renderableIndexById_.find(id);
-      it != renderableIndexById_.end()) {
-    return it->second;
-  }
-  for (uint32_t index = 0; index < renderables_.size(); ++index) {
-    if (renderables_[index].id == id) {
-      return index;
-    }
-  }
-  return std::nullopt;
+  return it->second;
 }
 
 void RenderScene::retainRenderableRefs(ModelRef model, MaterialRef material,
                                        MaterialRef materialOverride) {
-  retainResourceIfAlive(resources_, model);
-  retainResourceIfAlive(resources_, material);
-  retainResourceIfAlive(resources_, materialOverride);
+  retainResource(resources_, model);
+  retainResource(resources_, material);
+  retainResource(resources_, materialOverride);
 }
 
 void RenderScene::releaseRenderableRefs(ModelRef model, MaterialRef material,
@@ -146,18 +115,12 @@ void RenderScene::releaseRenderableRefs(ModelRef model, MaterialRef material,
 }
 
 void RenderScene::retainEnvironment(const EnvironmentHandles &handles) {
-  if (resources_ == nullptr) {
-    return;
-  }
   forEachEnvironmentTextureRef(handles, [this](TextureRef textureRef) {
-    retainResourceIfAlive(resources_, textureRef);
+    retainResource(resources_, textureRef);
   });
 }
 
 void RenderScene::releaseEnvironment(const EnvironmentHandles &handles) {
-  if (resources_ == nullptr) {
-    return;
-  }
   forEachEnvironmentTextureRef(handles, [this](TextureRef textureRef) {
     releaseResourceIfOwned(resources_, textureRef);
   });
@@ -167,7 +130,6 @@ void RenderScene::sanitizeGraphRenderableRefs() {
   if (resources_ == nullptr) {
     return;
   }
-
   auto &components = sceneGraph_.renderableComponents_;
   for (uint32_t index = 0; index < components.slots.slotCount(); ++index) {
     if (!components.slots.isLive(index)) {
@@ -198,14 +160,12 @@ void RenderScene::rebuildFlatRenderables() {
   renderableSkinPalettes_.clear();
   auto &components = sceneGraph_.renderableComponents_;
   const auto &nodes = sceneGraph_.nodes_;
-
   const size_t liveCount = components.slots.liveCount();
   for (uint32_t index = 0; index < components.slots.slotCount(); ++index) {
     if (index < components.flatRenderableIndex.size()) {
       components.flatRenderableIndex[index] = kInvalidIndex;
     }
   }
-
   renderables_.reserve(liveCount);
   renderableIndexById_.reserve(liveCount);
   renderableMorphWeights_.reserve(liveCount);
@@ -215,10 +175,7 @@ void RenderScene::rebuildFlatRenderables() {
       continue;
     }
     const uint32_t nodeIndex = components.node[index];
-    const glm::mat4 world =
-        nodeIndex < nodes.worldFromRoot.size() && nodes.slots.isLive(nodeIndex)
-            ? nodes.worldFromRoot[nodeIndex]
-            : glm::mat4(1.0f);
+    const glm::mat4 world = nodes.worldFromRoot[nodeIndex];
     renderableMorphWeights_.emplace_back();
     renderableMorphWeights_.back().assign(
         components.morphWeights[index].begin(),
@@ -230,9 +187,7 @@ void RenderScene::rebuildFlatRenderables() {
         static_cast<uint32_t>(renderables_.size());
     const Renderable renderable{
         .id = makeRenderableId(index, components.slots.generation(index)),
-        .node = nodeIndex < nodes.slots.slotCount()
-                    ? makeNodeId(nodeIndex, nodes.slots.generation(nodeIndex))
-                    : kInvalidNodeId,
+        .node = makeNodeId(nodeIndex, nodes.slots.generation(nodeIndex)),
         .model = components.models[index],
         .material = components.materials[index],
         .materialOverride = components.materialOverrides[index],
@@ -253,28 +208,21 @@ void RenderScene::rebuildFlatRenderables() {
 void RenderScene::rebuildPackedDirectionalLights() {
   packedDirectionalLights_.clear();
   packedDirectionalLightIds_.clear();
-
-  auto &store = sceneGraph_.directionalLights_;
+  constexpr size_t kTypeIndex = static_cast<size_t>(LightType::Directional);
+  auto &store = sceneGraph_.lights_[kTypeIndex];
   const auto &nodes = sceneGraph_.nodes_;
   for (uint32_t index = 0; index < store.slots.slotCount(); ++index) {
-    store.packedIndices[index] = SceneGraph::kInvalidPackedLightIndex;
-    if (!store.slots.isLive(index) || store.enabled[index] == 0u) {
+    auto &record = store.records[index];
+    record.packedIndex = SceneGraph::kInvalidIndex;
+    if (!store.slots.isLive(index) || !record.enabled) {
       continue;
     }
-    const uint32_t nodeIndex = store.node[index];
-    if (nodeIndex >= nodes.worldFromRoot.size() ||
-        !nodes.slots.isLive(nodeIndex)) {
-      continue;
-    }
-    LightDesc local =
-        nuri::makeLocalLightDesc(store, index, LightType::Directional);
-    local.range = 0.0f;
-    local.innerConeAngleRadians = 0.0f;
-    local.outerConeAngleRadians = 0.0f;
+    const uint32_t nodeIndex = record.node;
+    const LightDesc local =
+        nuri::makeLocalLightDesc(record, LightType::Directional);
     const LightDesc world =
         transformLightDesc(local, nodes.worldFromRoot[nodeIndex]);
-    store.packedIndices[index] =
-        static_cast<uint32_t>(packedDirectionalLights_.size());
+    record.packedIndex = static_cast<uint32_t>(packedDirectionalLights_.size());
     packedDirectionalLights_.push_back(
         nuri::packDirectionalLight(world.rotation, world.color, world.intensity,
                                    world.angularRadiusDegrees));
@@ -287,54 +235,46 @@ void RenderScene::rebuildPackedLocalLights() {
   packedLocalLights_.clear();
   packedLocalLightIds_.clear();
   const auto &nodes = sceneGraph_.nodes_;
-
-  auto &pointStore = sceneGraph_.pointLights_;
-  for (uint32_t index = 0; index < pointStore.slots.slotCount(); ++index) {
-    pointStore.packedIndices[index] = SceneGraph::kInvalidPackedLightIndex;
-    if (!pointStore.slots.isLive(index) || pointStore.enabled[index] == 0u) {
-      continue;
+  for (size_t typeIndex = static_cast<size_t>(LightType::Point);
+       typeIndex <= static_cast<size_t>(LightType::Spot); ++typeIndex) {
+    const LightType type = static_cast<LightType>(typeIndex);
+    auto &store = sceneGraph_.lights_[typeIndex];
+    for (uint32_t index = 0; index < store.slots.slotCount(); ++index) {
+      auto &record = store.records[index];
+      record.packedIndex = SceneGraph::kInvalidIndex;
+      if (!store.slots.isLive(index) || !record.enabled) {
+        continue;
+      }
+      const uint32_t nodeIndex = record.node;
+      const LightDesc world =
+          transformLightDesc(nuri::makeLocalLightDesc(record, type),
+                             nodes.worldFromRoot[nodeIndex]);
+      record.packedIndex = static_cast<uint32_t>(packedLocalLights_.size());
+      packedLocalLights_.push_back(
+          type == LightType::Point
+              ? nuri::packPointLight(world.position, world.rotation,
+                                     world.color, world.intensity, world.range,
+                                     world.enabled)
+              : nuri::packSpotLight(world.position, world.rotation, world.color,
+                                    world.intensity, world.range,
+                                    world.innerConeAngleRadians,
+                                    world.outerConeAngleRadians));
+      packedLocalLightIds_.push_back(
+          makeLightId(type, index, store.slots.generation(index)));
     }
-    const uint32_t nodeIndex = pointStore.node[index];
-    if (nodeIndex >= nodes.worldFromRoot.size() ||
-        !nodes.slots.isLive(nodeIndex)) {
-      continue;
-    }
-    LightDesc local =
-        nuri::makeLocalLightDesc(pointStore, index, LightType::Point);
-    const LightDesc world =
-        transformLightDesc(local, nodes.worldFromRoot[nodeIndex]);
-    pointStore.packedIndices[index] =
-        static_cast<uint32_t>(packedLocalLights_.size());
-    packedLocalLights_.push_back(
-        nuri::packPointLight(world.position, world.rotation, world.color,
-                             world.intensity, world.range, world.enabled));
-    packedLocalLightIds_.push_back(makeLightId(
-        LightType::Point, index, pointStore.slots.generation(index)));
   }
+}
 
-  auto &spotStore = sceneGraph_.spotLights_;
-  for (uint32_t index = 0; index < spotStore.slots.slotCount(); ++index) {
-    spotStore.packedIndices[index] = SceneGraph::kInvalidPackedLightIndex;
-    if (!spotStore.slots.isLive(index) || spotStore.enabled[index] == 0u) {
-      continue;
-    }
-    const uint32_t nodeIndex = spotStore.node[index];
-    if (nodeIndex >= nodes.worldFromRoot.size() ||
-        !nodes.slots.isLive(nodeIndex)) {
-      continue;
-    }
-    LightDesc local =
-        nuri::makeLocalLightDesc(spotStore, index, LightType::Spot);
-    const LightDesc world =
-        transformLightDesc(local, nodes.worldFromRoot[nodeIndex]);
-    spotStore.packedIndices[index] =
-        static_cast<uint32_t>(packedLocalLights_.size());
-    packedLocalLights_.push_back(nuri::packSpotLight(
-        world.position, world.rotation, world.color, world.intensity,
-        world.range, world.innerConeAngleRadians, world.outerConeAngleRadians));
-    packedLocalLightIds_.push_back(
-        makeLightId(LightType::Spot, index, spotStore.slots.generation(index)));
-  }
+bool RenderScene::commitPackedLights() {
+  if (!sceneGraph_.lightTopologyDirty_ && !sceneGraph_.lightDataDirty_)
+    return false;
+  rebuildPackedDirectionalLights();
+  rebuildPackedLocalLights();
+  sceneGraph_.lightTopologyDirty_ ? noteLightTopologyChanged()
+                                  : noteLightTransformChanged();
+  sceneGraph_.lightTopologyDirty_ = false;
+  sceneGraph_.lightDataDirty_ = false;
+  return true;
 }
 
 Result<bool, std::string> RenderScene::commit() {
@@ -343,26 +283,18 @@ Result<bool, std::string> RenderScene::commit() {
     return Result<bool, std::string>::makeError(
         "RenderScene::commit: an inactive incremental commit is in progress");
   }
-  // Commit is the authored-state to derived-cache boundary: hierarchy,
-  // components, and local light data stay in SceneGraph; RenderScene rebuilds
-  // the flat renderer-facing views here.
   bool changed = false;
   (void)sceneGraph_.syncWorldTransforms();
-
   if (sceneGraph_.renderableTopologyDirty_) {
     sanitizeGraphRenderableRefs();
-    if (resources_ != nullptr) {
-      for (const Renderable &renderable : renderables_) {
-        releaseRenderableRefs(renderable.model, renderable.material,
-                              renderable.materialOverride);
-      }
+    for (const Renderable &renderable : renderables_) {
+      releaseRenderableRefs(renderable.model, renderable.material,
+                            renderable.materialOverride);
     }
     rebuildFlatRenderables();
-    if (resources_ != nullptr) {
-      for (const Renderable &renderable : renderables_) {
-        retainRenderableRefs(renderable.model, renderable.material,
-                             renderable.materialOverride);
-      }
+    for (const Renderable &renderable : renderables_) {
+      retainRenderableRefs(renderable.model, renderable.material,
+                           renderable.materialOverride);
     }
     ++topologyVersion_;
     ++transformVersion_;
@@ -381,13 +313,6 @@ Result<bool, std::string> RenderScene::commit() {
       }
       const uint32_t flatIndex = components.flatRenderableIndex[index];
       const uint32_t nodeIndex = components.node[index];
-      if (flatIndex == kInvalidIndex || flatIndex >= renderables_.size() ||
-          flatIndex >= renderableMorphWeights_.size() ||
-          flatIndex >= renderableSkinPalettes_.size() ||
-          nodeIndex >= nodes.worldFromRoot.size() ||
-          !nodes.slots.isLive(nodeIndex)) {
-        continue;
-      }
       renderables_[flatIndex].modelMatrix = nodes.worldFromRoot[nodeIndex];
       renderables_[flatIndex].node =
           makeNodeId(nodeIndex, nodes.slots.generation(nodeIndex));
@@ -399,7 +324,6 @@ Result<bool, std::string> RenderScene::commit() {
     }
     sceneGraph_.renderableTransformsDirty_ = false;
   }
-
   if (!sceneGraph_.renderableTopologyDirty_ &&
       sceneGraph_.renderableDeformationsDirty_) {
     bool updatedAny = false;
@@ -410,19 +334,12 @@ Result<bool, std::string> RenderScene::commit() {
       }
       const uint32_t flatIndex =
           sceneGraph_.renderableComponents_.flatRenderableIndex[index];
-      if (flatIndex == kInvalidIndex || flatIndex >= renderables_.size() ||
-          flatIndex >= renderableMorphWeights_.size() ||
-          flatIndex >= renderableSkinPalettes_.size()) {
-        continue;
-      }
-
       renderableMorphWeights_[flatIndex].assign(
           sceneGraph_.renderableComponents_.morphWeights[index].begin(),
           sceneGraph_.renderableComponents_.morphWeights[index].end());
       renderables_[flatIndex].morphWeights =
           std::span<const float>(renderableMorphWeights_[flatIndex].data(),
                                  renderableMorphWeights_[flatIndex].size());
-
       renderableSkinPalettes_[flatIndex].assign(
           sceneGraph_.renderableComponents_.skinPalette[index].begin(),
           sceneGraph_.renderableComponents_.skinPalette[index].end());
@@ -437,22 +354,7 @@ Result<bool, std::string> RenderScene::commit() {
       changed = true;
     }
   }
-
-  if (sceneGraph_.lightTopologyDirty_) {
-    rebuildPackedDirectionalLights();
-    rebuildPackedLocalLights();
-    noteLightTopologyChanged();
-    sceneGraph_.lightTopologyDirty_ = false;
-    sceneGraph_.lightDataDirty_ = false;
-    changed = true;
-  } else if (sceneGraph_.lightDataDirty_) {
-    rebuildPackedDirectionalLights();
-    rebuildPackedLocalLights();
-    noteLightTransformChanged();
-    sceneGraph_.lightDataDirty_ = false;
-    changed = true;
-  }
-
+  changed |= commitPackedLights();
   return Result<bool, std::string>::makeResult(changed);
 }
 
@@ -463,7 +365,6 @@ RenderScene::commitInactiveStep(uint32_t maxOperations) {
   if (!sceneGraph_.syncWorldTransformsStep(operationBudget)) {
     return Result<bool, std::string>::makeResult(false);
   }
-
   if (!sceneGraph_.renderableTopologyDirty_) {
     auto committed = commit();
     if (committed.hasError()) {
@@ -471,12 +372,12 @@ RenderScene::commitInactiveStep(uint32_t maxOperations) {
     }
     return Result<bool, std::string>::makeResult(true);
   }
-
   if (incrementalCommit_ == nullptr) {
     if (!renderables_.empty()) {
       return Result<bool, std::string>::makeError(
           "RenderScene::commitInactiveStep requires a freshly built scene");
     }
+    sanitizeGraphRenderableRefs();
     incrementalCommit_ = std::make_shared<IncrementalCommitState>(
         std::pmr::new_delete_resource());
     incrementalCommit_->graphTopologyVersion = sceneGraph_.topologyVersion();
@@ -495,7 +396,6 @@ RenderScene::commitInactiveStep(uint32_t maxOperations) {
             pendingAllocation->liveRenderableCount);
         pendingAllocation->skinPalettes.reserve(
             pendingAllocation->liveRenderableCount);
-        pendingAllocation->reserveStage = 4u;
       } catch (...) {
         pendingAllocation->allocationFailed.store(true,
                                                   std::memory_order_release);
@@ -519,7 +419,6 @@ RenderScene::commitInactiveStep(uint32_t maxOperations) {
     return Result<bool, std::string>::makeError(
         "RenderScene::commitInactiveStep: scene mutated during finalization");
   }
-
   auto &components = sceneGraph_.renderableComponents_;
   const auto &nodes = sceneGraph_.nodes_;
   uint32_t processed = 0u;
@@ -536,21 +435,8 @@ RenderScene::commitInactiveStep(uint32_t maxOperations) {
     const ModelRef model = components.models[index];
     const MaterialRef material = components.materials[index];
     const MaterialRef materialOverride = components.materialOverrides[index];
-    if (!resourceAlive(resources_, model) ||
-        !resourceAlive(resources_, material) ||
-        (isValid(materialOverride) &&
-         !resourceAlive(resources_, materialOverride))) {
-      discardIncrementalCommit();
-      return Result<bool, std::string>::makeError(
-          "RenderScene::commitInactiveStep: authored renderable owns a stale "
-          "resource handle");
-    }
-
     const uint32_t nodeIndex = components.node[index];
-    const glm::mat4 world =
-        nodeIndex < nodes.worldFromRoot.size() && nodes.slots.isLive(nodeIndex)
-            ? nodes.worldFromRoot[nodeIndex]
-            : glm::mat4(1.0f);
+    const glm::mat4 world = nodes.worldFromRoot[nodeIndex];
     pending.morphWeights.emplace_back();
     pending.morphWeights.back().assign(components.morphWeights[index].begin(),
                                        components.morphWeights[index].end());
@@ -562,9 +448,7 @@ RenderScene::commitInactiveStep(uint32_t maxOperations) {
     components.flatRenderableIndex[index] = flatIndex;
     const Renderable renderable{
         .id = makeRenderableId(index, components.slots.generation(index)),
-        .node = nodeIndex < nodes.slots.slotCount()
-                    ? makeNodeId(nodeIndex, nodes.slots.generation(nodeIndex))
-                    : kInvalidNodeId,
+        .node = makeNodeId(nodeIndex, nodes.slots.generation(nodeIndex)),
         .model = model,
         .material = material,
         .materialOverride = materialOverride,
@@ -583,39 +467,24 @@ RenderScene::commitInactiveStep(uint32_t maxOperations) {
   if (pending.nextRenderableSlot < components.slots.slotCount()) {
     return Result<bool, std::string>::makeResult(false);
   }
-
   renderables_.swap(pending.renderables);
   renderableIndexById_.swap(pending.renderableIndexById);
   renderableMorphWeights_.swap(pending.morphWeights);
   renderableSkinPalettes_.swap(pending.skinPalettes);
   incrementalCommit_.reset();
-
   ++topologyVersion_;
   ++transformVersion_;
   ++deformationVersion_;
   sceneGraph_.renderableTopologyDirty_ = false;
   sceneGraph_.renderableTransformsDirty_ = false;
   sceneGraph_.renderableDeformationsDirty_ = false;
-
-  if (sceneGraph_.lightTopologyDirty_) {
-    rebuildPackedDirectionalLights();
-    rebuildPackedLocalLights();
-    noteLightTopologyChanged();
-    sceneGraph_.lightTopologyDirty_ = false;
-    sceneGraph_.lightDataDirty_ = false;
-  } else if (sceneGraph_.lightDataDirty_) {
-    rebuildPackedDirectionalLights();
-    rebuildPackedLocalLights();
-    noteLightTransformChanged();
-    sceneGraph_.lightDataDirty_ = false;
-  }
+  commitPackedLights();
   return Result<bool, std::string>::makeResult(true);
 }
 
 bool RenderScene::retireInactiveStep(uint32_t maxOperations) noexcept {
   uint32_t processed = 0u;
   const uint32_t operationBudget = std::max(maxOperations, 1u);
-
   if (incrementalCommit_ != nullptr) {
     IncrementalCommitState &pending = *incrementalCommit_;
     if (!pending.allocationReady.load(std::memory_order_acquire)) {
@@ -626,9 +495,6 @@ bool RenderScene::retireInactiveStep(uint32_t maxOperations) noexcept {
       Renderable &renderable = pending.renderables[retirementCursor_++];
       releaseRenderableRefs(renderable.model, renderable.material,
                             renderable.materialOverride);
-      renderable.model = kInvalidModelRef;
-      renderable.material = kInvalidMaterialRef;
-      renderable.materialOverride = kInvalidMaterialRef;
       ++processed;
     }
     if (retirementCursor_ < pending.renderables.size()) {
@@ -637,15 +503,11 @@ bool RenderScene::retireInactiveStep(uint32_t maxOperations) noexcept {
     incrementalCommit_.reset();
     retirementCursor_ = 0u;
   }
-
   while (retirementCursor_ < renderables_.size() &&
          processed < operationBudget) {
     Renderable &renderable = renderables_[retirementCursor_++];
     releaseRenderableRefs(renderable.model, renderable.material,
                           renderable.materialOverride);
-    renderable.model = kInvalidModelRef;
-    renderable.material = kInvalidMaterialRef;
-    renderable.materialOverride = kInvalidMaterialRef;
     ++processed;
   }
   if (retirementCursor_ < renderables_.size()) {
@@ -662,28 +524,21 @@ void RenderScene::bindResources(ResourceManager *resources) {
   if (resources_ == resources) {
     return;
   }
-
-  if (resources_ != nullptr) {
-    for (const Renderable &renderable : renderables_) {
-      releaseRenderableRefs(renderable.model, renderable.material,
-                            renderable.materialOverride);
-    }
-    releaseEnvironment(environment_);
+  for (const Renderable &renderable : renderables_) {
+    releaseRenderableRefs(renderable.model, renderable.material,
+                          renderable.materialOverride);
   }
-
+  releaseEnvironment(environment_);
   resources_ = resources;
   if (resources_ == nullptr) {
     return;
   }
-
   sanitizeGraphRenderableRefs();
   rebuildFlatRenderables();
-
   for (const Renderable &renderable : renderables_) {
     retainRenderableRefs(renderable.model, renderable.material,
                          renderable.materialOverride);
   }
-
   const auto sanitizeTextureRef = [this](TextureRef &ref) {
     if (isValid(ref) && !resourceAlive(resources_, ref)) {
       ref = kInvalidTextureRef;
@@ -695,42 +550,30 @@ void RenderScene::bindResources(ResourceManager *resources) {
   sanitizeTextureRef(environment_.prefilteredGgx);
   sanitizeTextureRef(environment_.prefilteredCharlie);
   sanitizeTextureRef(environment_.brdfLut);
-  if (!sameEnvironmentHandles(previousEnvironment, environment_)) {
+  if (previousEnvironment != environment_) {
     ++environmentVersion_;
   }
   retainEnvironment(environment_);
 }
 
 void RenderScene::setEnvironment(EnvironmentHandles handles) {
-  if (resources_ == nullptr) {
-    if (sameEnvironmentHandles(environment_, handles)) {
-      return;
-    }
-    environment_ = handles;
-    ++environmentVersion_;
-    return;
-  }
-
   bool environmentChanged = false;
-  const auto updateTextureRef = [this,
-                                 &environmentChanged](TextureRef &currentRef,
-                                                      TextureRef nextRef) {
-    if (currentRef.value == nextRef.value) {
-      return;
-    }
-    releaseResourceIfOwned(resources_, currentRef);
-    if (isValid(nextRef)) {
-      if (!resourceAlive(resources_, nextRef)) {
-        NURI_ASSERT(false, "RenderScene::setEnvironment: stale texture handle");
-        nextRef = kInvalidTextureRef;
-      } else {
-        resources_->retain(nextRef);
-      }
-    }
-    currentRef = nextRef;
-    environmentChanged = true;
-  };
-
+  const auto updateTextureRef =
+      [this, &environmentChanged](TextureRef &currentRef, TextureRef nextRef) {
+        if (currentRef.value == nextRef.value) {
+          return;
+        }
+        releaseResourceIfOwned(resources_, currentRef);
+        if (resources_ != nullptr && isValid(nextRef)) {
+          if (!resourceAlive(resources_, nextRef)) {
+            nextRef = kInvalidTextureRef;
+          } else {
+            resources_->retain(nextRef);
+          }
+        }
+        currentRef = nextRef;
+        environmentChanged = true;
+      };
   updateTextureRef(environment_.cubemap, handles.cubemap);
   updateTextureRef(environment_.irradiance, handles.irradiance);
   updateTextureRef(environment_.prefilteredGgx, handles.prefilteredGgx);

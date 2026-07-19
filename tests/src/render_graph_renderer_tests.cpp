@@ -7,22 +7,20 @@
 #include "nuri/core/log.h"
 #include "nuri/core/runtime_config.h"
 #include "nuri/gfx/frame/presentation_aa_plan.h"
-#include "nuri/gfx/pipeline/features/opaque_feature.h"
+#include "nuri/gfx/renderers/opaque_renderer.h"
 #define private public
 #include "nuri/gfx/renderers/shadow_renderer.h"
 #undef private
-#include "nuri/gfx/pipeline/features/shadow_feature.h"
 #include "nuri/gfx/pipeline/features/skybox_feature.h"
 #include "nuri/gfx/pipeline/providers/frame_composition_provider.h"
 #include "nuri/gfx/pipeline/providers/material_table_gpu_provider.h"
 #include "nuri/gfx/pipeline/providers/scene_lighting_provider.h"
-#include "nuri/gfx/pipeline/render_feature.h"
-#include "nuri/gfx/pipeline/render_feature_pass.h"
 #include "nuri/gfx/pipeline/render_pipeline.h"
 #include "nuri/gfx/renderer.h"
 #include "nuri/gfx/renderers/detail/opaque_lod_selection.h"
 #include "nuri/gfx/renderers/detail/opaque_meshlet_routing.h"
 #include "nuri/gfx/renderers/detail/shadow_math.h"
+#include "nuri/gfx/renderers/shadow_renderer.h"
 #include "nuri/gfx/visibility/visibility.h"
 #include "nuri/resources/gpu/resource_manager.h"
 #include "nuri/scene/light.h"
@@ -250,7 +248,7 @@ public:
                               .generation = 1u});
   }
 
-  Result<SubmissionHandle, std::string> submitRecordedGraphicsFrame(
+  Result<SubmittedGraphicsFrame, std::string> submitRecordedGraphicsFrame(
       std::span<const RecordedCommandBufferHandle> commandBuffers,
       std::span<const SubmitBatchMeta> batches) override {
     auto baseResult =
@@ -596,7 +594,7 @@ void writeTextFile(const std::filesystem::path &path, std::string_view text) {
   ASSERT_TRUE(out.good());
 }
 
-class SinglePassFeaturePass final : public RenderFeaturePass {
+class SinglePassFeaturePass final {
 public:
   struct Config {
     std::string_view passName{};
@@ -607,14 +605,13 @@ public:
 
   explicit SinglePassFeaturePass(Config config) : config_(config) {}
 
-  std::string_view name() const noexcept override { return config_.passName; }
-  bool isEnabled(const FrameBuildContext &) const override { return true; }
+  bool isEnabled(const FrameBuildContext &) const { return true; }
 
-  Result<bool, std::string> prepare(FrameBuildContext &) override {
+  Result<bool, std::string> prepare(FrameBuildContext &) {
     return Result<bool, std::string>::makeResult(true);
   }
 
-  Result<bool, std::string> build(FrameBuildContext &ctx) override {
+  Result<bool, std::string> build(FrameBuildContext &ctx) {
     if (config_.useExplicitFrameOutput) {
       auto importResult =
           ctx.graph.importTexture(config_.outputTexture, "layer_output_tex");
@@ -648,49 +645,18 @@ private:
   Config config_{};
 };
 
-class BaseImplicitOutputFeature final : public RenderFeature {
-public:
-  BaseImplicitOutputFeature()
-      : pass_({.passName = "Base Implicit Output Pass",
-               .outputTexture = {},
-               .useExplicitFrameOutput = false,
-               .debugColor = 0xff778899u}),
-        passes_{&pass_} {}
+void addTestStage(RenderPipeline &pipeline, std::string_view featureName,
+                  SinglePassFeaturePass::Config config) {
+  const std::string_view passName = config.passName;
+  pipeline.addStage(std::make_unique<SinglePassFeaturePass>(config),
+                    featureName, passName);
+}
 
-  std::string_view name() const noexcept override {
-    return "BaseImplicitOutputFeature";
-  }
-
-  std::span<RenderFeaturePass *const> passes() noexcept override {
-    return std::span<RenderFeaturePass *const>(passes_.data(), passes_.size());
-  }
-
-private:
-  SinglePassFeaturePass pass_;
-  std::array<RenderFeaturePass *, 1> passes_{};
-};
-
-class ExplicitFrameOutputFeature final : public RenderFeature {
-public:
-  explicit ExplicitFrameOutputFeature(TextureHandle outputTexture)
-      : pass_({.passName = "Layer Explicit Output Pass",
-               .outputTexture = outputTexture,
-               .useExplicitFrameOutput = true,
-               .debugColor = 0xffffffffu}),
-        passes_{&pass_} {}
-
-  std::string_view name() const noexcept override {
-    return "ExplicitFrameOutputFeature";
-  }
-
-  std::span<RenderFeaturePass *const> passes() noexcept override {
-    return std::span<RenderFeaturePass *const>(passes_.data(), passes_.size());
-  }
-
-private:
-  SinglePassFeaturePass pass_;
-  std::array<RenderFeaturePass *, 1> passes_{};
-};
+void addBaseImplicitOutput(RenderPipeline &pipeline) {
+  addTestStage(
+      pipeline, "BaseImplicitOutputFeature",
+      {.passName = "Base Implicit Output Pass", .debugColor = 0xff778899u});
+}
 
 TEST(OpaqueMeshletRoutingTest, OpportunisticHybridUsesResolvedLodBoundary) {
   using detail::shouldUseMeshletsForOpaqueBatch;
@@ -789,13 +755,12 @@ TEST(RenderGraphRendererTest,
   Renderer renderer(gpu, memory);
   RenderPipeline pipeline(&memory);
 
-  auto *baseFeature =
-      pipeline.addFeature(std::make_unique<BaseImplicitOutputFeature>());
-  ASSERT_NE(baseFeature, nullptr) << "addFeature for base pass should succeed";
+  addBaseImplicitOutput(pipeline);
   const TextureHandle explicitOutputTexture{.index = 501u, .generation = 1u};
-  auto *feature = pipeline.addFeature(
-      std::make_unique<ExplicitFrameOutputFeature>(explicitOutputTexture));
-  ASSERT_NE(feature, nullptr) << "addFeature should succeed";
+  addTestStage(pipeline, "ExplicitFrameOutputFeature",
+               {.passName = "Layer Explicit Output Pass",
+                .outputTexture = explicitOutputTexture,
+                .useExplicitFrameOutput = true});
 
   RenderFrameContext frameContext{};
   frameContext.frameIndex = 1u;
@@ -828,8 +793,7 @@ TEST(RenderGraphRendererTest, RendererCapturesGraphTelemetryOnlyOnRequest) {
   FakeRendererGPUDevice gpu;
   Renderer renderer(gpu, memory);
   RenderPipeline pipeline(&memory);
-  ASSERT_NE(pipeline.addFeature(std::make_unique<BaseImplicitOutputFeature>()),
-            nullptr);
+  addBaseImplicitOutput(pipeline);
 
   RenderFrameContext frameContext{};
   frameContext.frameIndex = 1u;
@@ -861,8 +825,7 @@ TEST(RenderGraphRendererTest, RendererPublishesOneGpuTimingSnapshotPerFrame) {
       gpuTimingScopeToBit(GpuTimingScope::Opaque);
   Renderer renderer(gpu, memory);
   RenderPipeline pipeline(&memory);
-  ASSERT_NE(pipeline.addFeature(std::make_unique<BaseImplicitOutputFeature>()),
-            nullptr);
+  addBaseImplicitOutput(pipeline);
 
   RenderFrameContext frameContext{};
   frameContext.frameIndex = 42u;
@@ -884,8 +847,7 @@ TEST(RenderGraphRendererTest,
   FakeRendererGPUDevice gpu;
   Renderer renderer(gpu, memory);
   RenderPipeline pipeline(&memory);
-  ASSERT_NE(pipeline.addFeature(std::make_unique<BaseImplicitOutputFeature>()),
-            nullptr);
+  addBaseImplicitOutput(pipeline);
 
   RenderSettings authored{};
   authored.hdrPostProcess.bloomStrength =
@@ -1819,9 +1781,12 @@ TEST(RenderGraphRendererTest,
   std::pmr::unsynchronized_pool_resource memory;
   FakeMeshletPipelineGpuDevice gpu;
 
-  OpaqueFeature feature(
-      gpu, makeOpaqueConfig(std::filesystem::path(PROJECT_SOURCE_DIR)),
-      &memory);
+  RenderPipeline pipeline(&memory);
+  ASSERT_NE(registerOpaquePrepassStages(
+                pipeline, gpu,
+                makeOpaqueConfig(std::filesystem::path(PROJECT_SOURCE_DIR)),
+                &memory),
+            nullptr);
 
   const auto meshletIt =
       std::find(gpu.createdMeshletPipelineNames.begin(),
@@ -1861,8 +1826,7 @@ TEST(RenderGraphRendererTest, ShadowFeatureBuildsNoGraphPassesWhenDisabled) {
   FakeRendererGPUDevice gpu;
   Renderer renderer(gpu, memory);
   RenderPipeline pipeline(&memory);
-  auto *shadow =
-      pipeline.addFeature(std::make_unique<ShadowFeature>(gpu, &memory));
+  auto *shadow = registerShadowStage(pipeline, gpu, &memory);
   ASSERT_NE(shadow, nullptr);
 
   RenderScene scene(&memory);
@@ -1946,6 +1910,10 @@ TEST(RenderGraphRendererTest,
   ShadowRenderer shadow(
       gpu, makeOpaqueConfig(std::filesystem::path(PROJECT_SOURCE_DIR)),
       &memory);
+  SceneDrawDatabase drawDatabase(gpu, &memory);
+  auto drawDatabaseResult = drawDatabase.update(scene, resources);
+  ASSERT_FALSE(drawDatabaseResult.hasError()) << drawDatabaseResult.error();
+  frame.sharedResources.sceneDrawDatabase = &drawDatabase;
   auto publishResult = shadow.publishFrameData(frame);
   ASSERT_FALSE(publishResult.hasError()) << publishResult.error();
   auto prepareResult = shadow.prepareShadowGraphPasses(frame);
@@ -1962,6 +1930,8 @@ TEST(RenderGraphRendererTest,
       sameHandle(previousVertexBuffer, relocationResult.value().vertexBuffer));
   ASSERT_FALSE(
       sameHandle(previousIndexBuffer, relocationResult.value().indexBuffer));
+  drawDatabaseResult = drawDatabase.update(scene, resources);
+  ASSERT_FALSE(drawDatabaseResult.hasError()) << drawDatabaseResult.error();
 
   frame.frameIndex = 2u;
   publishResult = shadow.publishFrameData(frame);
@@ -1985,7 +1955,7 @@ TEST(RenderGraphRendererTest,
   FakeNoComputeFullscreenGpuDevice gpu;
   Renderer renderer(gpu, memory);
   RenderPipeline pipeline(&memory);
-  pipeline.addFeature(std::make_unique<ShadowFeature>(gpu, &memory));
+  registerShadowStage(pipeline, gpu, &memory);
 
   RenderScene scene(&memory);
   scene.bindResources(&renderer.resources());
@@ -2038,9 +2008,9 @@ TEST(RenderGraphRendererTest,
   FakeFullscreenGpuDevice gpu;
   Renderer renderer(gpu, memory);
   RenderPipeline pipeline(&memory);
-  pipeline.addFeature(std::make_unique<ShadowFeature>(
-      gpu, makeShadowConfig(std::filesystem::path(PROJECT_SOURCE_DIR)),
-      &memory));
+  registerShadowStage(
+      pipeline, gpu,
+      makeShadowConfig(std::filesystem::path(PROJECT_SOURCE_DIR)), &memory);
 
   RenderScene scene(&memory);
   scene.bindResources(&renderer.resources());
@@ -2142,9 +2112,9 @@ TEST(RenderGraphRendererTest,
   FakeFullscreenGpuDevice gpu;
   Renderer renderer(gpu, memory);
   RenderPipeline pipeline(&memory);
-  pipeline.addFeature(std::make_unique<ShadowFeature>(
-      gpu, makeShadowConfig(std::filesystem::path(PROJECT_SOURCE_DIR)),
-      &memory));
+  registerShadowStage(
+      pipeline, gpu,
+      makeShadowConfig(std::filesystem::path(PROJECT_SOURCE_DIR)), &memory);
 
   RenderScene scene(&memory);
   scene.bindResources(&renderer.resources());
@@ -2242,9 +2212,9 @@ TEST(RenderGraphRendererTest,
   RenderPipeline pipeline(&memory);
   pipeline.addProvider(std::make_unique<MaterialTableGpuProvider>(gpu));
   pipeline.addProvider(std::make_unique<SceneLightingProvider>(gpu));
-  pipeline.addFeature(std::make_unique<ShadowFeature>(
-      gpu, makeOpaqueConfig(std::filesystem::path(PROJECT_SOURCE_DIR)),
-      &memory));
+  registerShadowStage(
+      pipeline, gpu,
+      makeOpaqueConfig(std::filesystem::path(PROJECT_SOURCE_DIR)), &memory);
 
   const std::filesystem::path tempDir =
       makeTempRendererPath("shadow_static_cache_scene");
@@ -2362,9 +2332,9 @@ TEST(RenderGraphRendererTest,
   RenderPipeline pipeline(&memory);
   pipeline.addProvider(std::make_unique<MaterialTableGpuProvider>(gpu));
   pipeline.addProvider(std::make_unique<SceneLightingProvider>(gpu));
-  pipeline.addFeature(std::make_unique<ShadowFeature>(
-      gpu, makeOpaqueConfig(std::filesystem::path(PROJECT_SOURCE_DIR)),
-      &memory));
+  registerShadowStage(
+      pipeline, gpu,
+      makeOpaqueConfig(std::filesystem::path(PROJECT_SOURCE_DIR)), &memory);
 
   const std::filesystem::path tempDir =
       makeTempRendererPath("shadow_static_only_disable_invalidate_scene");

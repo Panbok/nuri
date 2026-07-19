@@ -1,6 +1,6 @@
 #include "tests_pch.h"
 
-#include "nuri/resources/gltf_scene_importer.h"
+#include "nuri/resources/scene_importer.h"
 
 #include <chrono>
 #include <thread>
@@ -154,7 +154,7 @@ TEST(GltfLightImport, LoadsDirectionalDefaultsFromGltf) {
   const std::filesystem::path gltfPath = dir.path / "directional.gltf";
   writeTextFile(gltfPath, json);
 
-  auto result = nuri::GltfSceneImporter::loadLightsFromFile(gltfPath.string());
+  auto result = nuri::SceneImporter::loadLightsFromFile(gltfPath.string());
   ASSERT_FALSE(result.hasError()) << result.error();
   ASSERT_EQ(result.value().size(), 1u);
 
@@ -214,7 +214,7 @@ TEST(GltfLightImport, AppliesHierarchyAndSanitizesSpotValues) {
   const std::filesystem::path gltfPath = dir.path / "spot.gltf";
   writeTextFile(gltfPath, json);
 
-  auto result = nuri::GltfSceneImporter::loadLightsFromFile(gltfPath.string());
+  auto result = nuri::SceneImporter::loadLightsFromFile(gltfPath.string());
   ASSERT_FALSE(result.hasError()) << result.error();
   ASSERT_EQ(result.value().size(), 1u);
 
@@ -267,7 +267,7 @@ TEST(GltfLightImport, LoadsLightsFromGlb) {
   const std::filesystem::path glbPath =
       writeMinimalGlb(dir, "lights.glb", json);
 
-  auto result = nuri::GltfSceneImporter::loadLightsFromFile(glbPath.string());
+  auto result = nuri::SceneImporter::loadLightsFromFile(glbPath.string());
   ASSERT_FALSE(result.hasError()) << result.error();
   ASSERT_EQ(result.value().size(), 1u);
   EXPECT_EQ(result.value().front().desc.type, nuri::LightType::Directional);

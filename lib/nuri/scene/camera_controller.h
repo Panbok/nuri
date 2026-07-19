@@ -1,18 +1,15 @@
 #pragma once
-
 #include "nuri/core/input_events.h"
 #include "nuri/core/input_system.h"
 #include "nuri/core/result.h"
 #include "nuri/core/window.h"
 #include "nuri/defines.h"
 #include "nuri/scene/camera.h"
-
+#include <array>
 #include <cstdint>
-#include <string>
-
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
-
+#include <string>
 namespace nuri {
 
 enum class CameraPreset : uint8_t {
@@ -55,16 +52,13 @@ struct CameraControllerConfig {
 class NURI_API CameraController final {
 public:
   explicit CameraController(const CameraControllerConfig &config = {});
-
   bool onInput(const InputEvent &event, Window &window);
   void onActivate(Window &window);
   void onDeactivate(Window &window);
   void update(double deltaTime, const InputSystem &input, Camera &camera);
   void reset();
-
   void setPreset(CameraPreset preset);
   [[nodiscard]] CameraPreset preset() const noexcept { return preset_; }
-
   Result<bool, std::string> startMoveTo(const MoveToRequest &request);
   void cancelMoveTo() noexcept;
   [[nodiscard]] bool isMoveToActive() const noexcept {
@@ -72,17 +66,6 @@ public:
   }
 
 private:
-  struct MovementState {
-    bool forward = false;
-    bool backward = false;
-    bool left = false;
-    bool right = false;
-    bool up = false;
-    bool down = false;
-    bool shiftLeft = false;
-    bool shiftRight = false;
-  };
-
   struct MoveToState {
     bool queued = false;
     bool active = false;
@@ -95,7 +78,6 @@ private:
     float targetYawRadians = 0.0f;
     float targetPitchRadians = 0.0f;
   };
-
   [[nodiscard]] bool *stateForKey(Key key);
   bool handleKeyEvent(const InputKeyData &data);
   bool handleMouseButtonEvent(const InputMouseButtonData &data, Window &window);
@@ -104,16 +86,13 @@ private:
   void clearInputState();
   void initializeAnglesFromCamera(const Camera &camera);
   void beginMoveToFromCamera(const Camera &camera);
-
   CameraControllerConfig config_{};
   CameraPreset preset_ = CameraPreset::FpsDirect;
-  MovementState movement_{};
+  std::array<bool, 8u> movement_{};
   MoveToState moveTo_{};
-
   bool looking_ = false;
   bool ignoreNextMouseDelta_ = false;
   bool anglesInitialized_ = false;
-
   float yawRadians_ = 0.0f;
   float pitchRadians_ = 0.0f;
   glm::vec3 velocity_{0.0f, 0.0f, 0.0f};

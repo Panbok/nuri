@@ -1,21 +1,17 @@
-#include "nuri/pch.h"
-
 #include "nuri/gfx/pipeline/features/reference_taa_feature.h"
-
 #include "nuri/gfx/frame/presentation_aa_plan.h"
-
+#include "nuri/gfx/fullscreen.h"
+#include "nuri/gfx/pipeline/render_pipeline.h"
+#include "nuri/pch.h"
 #include <bit>
-
 namespace nuri {
 namespace {
-
 constexpr uint32_t kInvalidBindlessIndex = 0xffffffffu;
 constexpr uint32_t kReferenceFlagHistoryValid = 1u << 0u;
 constexpr uint32_t kReferenceFlagPreviousDepthValid = 1u << 1u;
 constexpr uint32_t kReferenceFlagOrthographicProjection = 1u << 2u;
 constexpr uint32_t kReferenceModeResolve = 0u;
 constexpr uint32_t kReferenceModeCopy = 1u;
-
 struct ReferenceTAAPushConstants {
   uint32_t currentTexId = 0u;
   uint32_t opaqueSceneTexId = 0u;
@@ -37,7 +33,6 @@ struct ReferenceTAAPushConstants {
   uint32_t sharpenStrengthBits = 0u;
 };
 static_assert(sizeof(ReferenceTAAPushConstants) <= 128u);
-
 [[nodiscard]] std::filesystem::path
 shaderBasePath(const RuntimeCompositeConfig &config) {
   if (!config.shaderBasePath.empty()) {
@@ -45,22 +40,6 @@ shaderBasePath(const RuntimeCompositeConfig &config) {
   }
   return config.fullscreenVertex.parent_path();
 }
-
-[[nodiscard]] RenderPipelineDesc fullscreenPipelineDesc(ShaderHandle vertex,
-                                                        ShaderHandle fragment) {
-  return RenderPipelineDesc{
-      .vertexInput = {},
-      .vertexShader = vertex,
-      .fragmentShader = fragment,
-      .colorFormats = {kFrameCompositionFrameColorFormat},
-      .depthFormat = Format::Count,
-      .cullMode = CullMode::None,
-      .polygonMode = PolygonMode::Fill,
-      .topology = Topology::Triangle,
-      .blendEnabled = false,
-  };
-}
-
 [[nodiscard]] DrawItem
 makeFullscreenDraw(RenderPipelineHandle pipeline,
                    const ReferenceTAAPushConstants &constants,
@@ -75,7 +54,6 @@ makeFullscreenDraw(RenderPipelineHandle pipeline,
   draw.debugColor = 0xff55ccff;
   return draw;
 }
-
 [[nodiscard]] float referenceCurrentWeight(TemporalAAQualityPreset preset) {
   switch (sanitizeTemporalAAQualityPreset(preset)) {
   case TemporalAAQualityPreset::Performance:
@@ -91,7 +69,6 @@ makeFullscreenDraw(RenderPipelineHandle pipeline,
   }
   return 0.10f;
 }
-
 } // namespace
 
 ReferenceTAAResolvePass::ReferenceTAAResolvePass(GPUDevice &gpu,
@@ -125,13 +102,9 @@ bool ReferenceTAAResolvePass::isEnabled(const FrameBuildContext &ctx) const {
 
 Result<bool, std::string>
 ReferenceTAAResolvePass::prepare(FrameBuildContext &ctx) {
-  if (!isEnabled(ctx)) {
-    return Result<bool, std::string>::makeResult(false);
-  }
   if (initialized_) {
     return Result<bool, std::string>::makeResult(true);
   }
-
   shader_ = Shader::create("taa_reference", gpu_);
   if (!shader_) {
     return Result<bool, std::string>::makeError(
@@ -150,7 +123,6 @@ ReferenceTAAResolvePass::prepare(FrameBuildContext &ctx) {
   }
   vertexShader_ = vertexResult.value();
   fragmentShader_ = fragmentResult.value();
-
   const SamplerDesc samplerDesc{
       .minFilter = SamplerFilter::Linear,
       .magFilter = SamplerFilter::Linear,
@@ -169,7 +141,9 @@ ReferenceTAAResolvePass::prepare(FrameBuildContext &ctx) {
   }
   linearClampSampler_ = samplerResult.value();
   auto pipelineResult = gpu_.createRenderPipeline(
-      fullscreenPipelineDesc(vertexShader_, fragmentShader_), "taa_reference");
+      fullscreenPipelineDesc(kFrameCompositionFrameColorFormat, vertexShader_,
+                             fragmentShader_),
+      "taa_reference");
   if (pipelineResult.hasError()) {
     return Result<bool, std::string>::makeError(pipelineResult.error());
   }
@@ -191,7 +165,6 @@ ReferenceTAAResolvePass::build(FrameBuildContext &ctx) {
       !nuri::isValid(ctx.shared.reactiveMaskTexture)) {
     return Result<bool, std::string>::makeResult(false);
   }
-
   const bool historyValid =
       ctx.frame.camera.historyValid && ctx.shared.historyColorReadValid;
   const bool previousDepthValid =
@@ -231,7 +204,6 @@ ReferenceTAAResolvePass::build(FrameBuildContext &ctx) {
     return Result<bool, std::string>::makeError(
         "ReferenceTAAResolvePass::build: invalid bindless resource");
   }
-
   auto historyOutput = ctx.graph.importTexture(
       ctx.shared.historyColorWriteTexture, "reference_taa_history_write");
   if (historyOutput.hasError()) {
@@ -242,7 +214,6 @@ ReferenceTAAResolvePass::build(FrameBuildContext &ctx) {
   if (frameOutput.hasError()) {
     return Result<bool, std::string>::makeError(frameOutput.error());
   }
-
   const TextureDimensions dimensions =
       gpu_.getTextureDimensions(ctx.shared.frameColorTexture);
   const float inverseWidth =
@@ -305,7 +276,6 @@ ReferenceTAAResolvePass::build(FrameBuildContext &ctx) {
   if (addResolve.hasError()) {
     return Result<bool, std::string>::makeError(addResolve.error());
   }
-
   constants.currentTexId =
       gpu_.getTextureBindlessIndex(ctx.shared.historyColorWriteTexture);
   constants.mode = kReferenceModeCopy;
@@ -331,7 +301,6 @@ ReferenceTAAResolvePass::build(FrameBuildContext &ctx) {
   ctx.frame.sharedResources.frameColorGraphTexture = frameOutput.value();
   ctx.shared.historyWriteRequirements |=
       FrameTextureRequirementFlags::HistoryColor;
-
   AntiAliasingFrameMetrics &metrics = ctx.frame.metrics.antiAliasing;
   ++metrics.taaResolvePassCount;
   ++metrics.taaCopyBackPassCount;
@@ -356,7 +325,7 @@ ReferenceTAAResolvePass::build(FrameBuildContext &ctx) {
 }
 
 Result<bool, std::string>
-ReferenceTAAFeature::publishFrameData(FrameBuildContext &ctx) {
+ReferenceTAAResolvePass::publishFrameData(FrameBuildContext &ctx) {
   if (presentationAAPlanForFrame(ctx.frame).reconstruction ==
       ColorReconstruction::ReferenceTAA) {
     ctx.shared.textureRequirements |=
@@ -366,6 +335,17 @@ ReferenceTAAFeature::publishFrameData(FrameBuildContext &ctx) {
         FrameTextureRequirementFlags::MotionClass;
   }
   return Result<bool, std::string>::makeResult(true);
+}
+
+void registerReferenceTAAStage(RenderPipeline &pipeline, GPUDevice &gpu,
+                               RuntimeCompositeConfig config) {
+  pipeline.addStage(
+      std::make_unique<ReferenceTAAResolvePass>(gpu, std::move(config)),
+      "ReferenceTAAFeature", "ReferenceTAAResolvePass", false,
+      PipelineComponentDesc{.publish = [](void *state, FrameBuildContext &ctx) {
+        return static_cast<ReferenceTAAResolvePass *>(state)->publishFrameData(
+            ctx);
+      }});
 }
 
 } // namespace nuri

@@ -1,12 +1,9 @@
 #pragma once
-
 #include "nuri/defines.h"
 #include "nuri/gfx/gpu_types.h"
-
 #include <cstdint>
 #include <memory_resource>
 #include <string>
-
 namespace nuri {
 
 enum class SimulationBufferUsage : uint8_t {
@@ -31,11 +28,6 @@ struct NURI_API SimulationPersistentBufferDesc {
   explicit SimulationPersistentBufferDesc(
       std::pmr::memory_resource *memory = std::pmr::get_default_resource())
       : debugName(memory) {}
-
-  // NOTE: std::pmr::string does not propagate its allocator on copy
-  // construction, so copying this descriptor may rebind debugName to the
-  // default memory resource. Allocator propagation is intentionally not
-  // customized here.
   std::pmr::string debugName;
   SimulationBufferUsage usage = SimulationBufferUsage::None;
   size_t sizeBytes = 0u;
@@ -46,7 +38,6 @@ struct NURI_API SimulationTransientBufferDesc {
   explicit SimulationTransientBufferDesc(
       std::pmr::memory_resource *memory = std::pmr::get_default_resource())
       : debugName(memory) {}
-
   std::pmr::string debugName;
   SimulationBufferUsage usage = SimulationBufferUsage::None;
   size_t sizeBytes = 0u;

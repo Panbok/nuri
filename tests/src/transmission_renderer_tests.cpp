@@ -9,6 +9,7 @@
 #undef private
 
 #include "nuri/gfx/frame/render_frame_context.h"
+#include "nuri/gfx/renderers/scene_draw_database.h"
 #include "nuri/resources/gpu/resource_manager.h"
 #include "nuri/resources/gpu/texture.h"
 #include "nuri/scene/render_scene.h"
@@ -362,6 +363,10 @@ TEST(TransmissionRendererTest,
   frame.sharedResources.frameColorTexture = frameColorTexture->handle();
   frame.sharedResources.materialTableGpuData = materialGpu;
   frame.sharedResources.forwardSceneGpuData = sceneGpu;
+  SceneDrawDatabase drawDatabase(gpu, &memory);
+  auto drawDatabaseResult = drawDatabase.update(scene, resources);
+  ASSERT_FALSE(drawDatabaseResult.hasError()) << drawDatabaseResult.error();
+  frame.sharedResources.sceneDrawDatabase = &drawDatabase;
 
   TransmissionRenderer renderer(gpu, makeTransmissionConfig(), &memory);
   auto firstPrepare = renderer.prepareTransmissionPasses(frame);
@@ -408,18 +413,22 @@ TEST(TransmissionRendererTest,
       createForwardSceneGpuData(gpu, materialGpu, sceneColorTexture->handle());
   frame.sharedResources.materialTableGpuData = materialGpu;
   frame.sharedResources.forwardSceneGpuData = sceneGpu;
+  drawDatabaseResult = drawDatabase.update(scene, resources);
+  ASSERT_FALSE(drawDatabaseResult.hasError()) << drawDatabaseResult.error();
 
   gpu.bufferDeviceAddressCallCount = 0u;
   frame.frameIndex = 3u;
   auto materialPrepare = renderer.prepareTransmissionPasses(frame);
   ASSERT_FALSE(materialPrepare.hasError()) << materialPrepare.error();
   ASSERT_TRUE(materialPrepare.value());
-  EXPECT_GT(gpu.bufferDeviceAddressCallCount, 2u);
+  EXPECT_LE(gpu.bufferDeviceAddressCallCount, 2u);
   EXPECT_EQ(renderer.cachedMaterialVersion_,
             resources.materialSnapshot().version);
 
   gpu.bumpGeometryMutationVersion();
   gpu.bufferDeviceAddressCallCount = 0u;
+  drawDatabaseResult = drawDatabase.update(scene, resources);
+  ASSERT_FALSE(drawDatabaseResult.hasError()) << drawDatabaseResult.error();
   frame.frameIndex = 4u;
   auto geometryPrepare = renderer.prepareTransmissionPasses(frame);
   ASSERT_FALSE(geometryPrepare.hasError()) << geometryPrepare.error();
@@ -489,6 +498,10 @@ TEST(TransmissionRendererTest,
   frame.sharedResources.frameColorTexture = frameColorTexture->handle();
   frame.sharedResources.materialTableGpuData = materialGpu;
   frame.sharedResources.forwardSceneGpuData = sceneGpu;
+  SceneDrawDatabase drawDatabase(gpu, &memory);
+  auto drawDatabaseResult = drawDatabase.update(scene, resources);
+  ASSERT_FALSE(drawDatabaseResult.hasError()) << drawDatabaseResult.error();
+  frame.sharedResources.sceneDrawDatabase = &drawDatabase;
 
   TransmissionRenderer renderer(gpu, makeTransmissionConfig(), &memory);
   auto fallbackPrepare = renderer.prepareTransmissionPasses(frame);
@@ -503,6 +516,8 @@ TEST(TransmissionRendererTest,
                                           transmissionMaterialResult.value());
   ASSERT_EQ(scene.topologyVersion(), topologyVersion);
   ASSERT_EQ(scene.transformVersion(), transformVersion);
+  drawDatabaseResult = drawDatabase.update(scene, resources);
+  ASSERT_FALSE(drawDatabaseResult.hasError()) << drawDatabaseResult.error();
 
   frame.frameIndex = 1u;
   auto transmissionPrepare = renderer.prepareTransmissionPasses(frame);
@@ -572,6 +587,10 @@ TEST(TransmissionRendererTest, StableSortedTransmissionRecomputesSortDepths) {
   frame.sharedResources.frameColorTexture = frameColorTexture->handle();
   frame.sharedResources.materialTableGpuData = materialGpu;
   frame.sharedResources.forwardSceneGpuData = sceneGpu;
+  SceneDrawDatabase drawDatabase(gpu, &memory);
+  auto drawDatabaseResult = drawDatabase.update(scene, resources);
+  ASSERT_FALSE(drawDatabaseResult.hasError()) << drawDatabaseResult.error();
+  frame.sharedResources.sceneDrawDatabase = &drawDatabase;
 
   TransmissionRenderer renderer(gpu, makeTransmissionConfig(), &memory);
   auto firstPrepare = renderer.prepareTransmissionPasses(frame);

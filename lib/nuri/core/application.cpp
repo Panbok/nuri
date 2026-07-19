@@ -1,5 +1,3 @@
-#include "nuri/pch.h"
-
 #include "nuri/core/application.h"
 #include "nuri/core/log.h"
 #include "nuri/core/profiling.h"
@@ -7,23 +5,18 @@
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/gfx/pipeline/default_render_pipeline.h"
 #include "nuri/gfx/renderer.h"
-
+#include "nuri/pch.h"
 #include <thread>
-
 namespace nuri {
 namespace {
-
 using FrameClock = std::chrono::steady_clock;
-
 [[nodiscard]] FrameClock::duration
 frameIntervalForRate(uint32_t framesPerSecond) {
-  NURI_ASSERT(framesPerSecond != 0u, "Frame rate limit must be non-zero");
   return std::max(FrameClock::duration{1},
                   std::chrono::duration_cast<FrameClock::duration>(
                       std::chrono::duration<double>(
                           1.0 / static_cast<double>(framesPerSecond))));
 }
-
 } // namespace
 
 ApplicationConfig makeApplicationConfig(const RuntimeConfig &config) {
@@ -63,14 +56,8 @@ Application::Application(const ApplicationConfig &config)
       input_(eventManager_) {
   inputDispatchSubscription_ = eventManager_.subscribe<InputEvent>(
       EventChannel::Input, &Application::dispatchInputEvent, this);
-
   window_ = Window::create(appConfig_.title, width_, height_, windowMode_);
-  NURI_ASSERT(window_ != nullptr, "Failed to create window");
   window_->bindEventManager(&eventManager_);
-
-  // Sync initial size to the actual window framebuffer size (important for
-  // fullscreen / monitor-sized window creation which can ignore the requested
-  // width/height).
   int32_t fbw = 0;
   int32_t fbh = 0;
   window_->getFramebufferSize(fbw, fbh);
@@ -78,16 +65,10 @@ Application::Application(const ApplicationConfig &config)
     width_ = fbw;
     height_ = fbh;
   }
-
   gpu_ = GPUDevice::create(*window_);
-  NURI_ASSERT(gpu_ != nullptr, "Failed to create GPU device");
   renderer_ = Renderer::create(*gpu_, rendererMemory_);
-  NURI_ASSERT(renderer_ != nullptr, "Failed to create renderer");
   renderPipeline_ = std::make_unique<RenderPipeline>(&rendererMemory_);
   auto pipelineResult = registerConfiguredDefaultRenderPipeline();
-  NURI_ASSERT(!pipelineResult.hasError(),
-              "Failed to register default render pipeline: %s",
-              pipelineResult.error().c_str());
 }
 
 Application::Application(const std::string &title, std::int32_t width,
@@ -111,14 +92,11 @@ Application::~Application() {
 void Application::run() {
   NURI_LOG_DEBUG("Application::run: Application started");
   NURI_PROFILER_THREAD("Main");
-
   onInit();
   double lastTime = getTime();
-
   while (!window_->shouldClose()) {
     NURI_PROFILER_FRAME("Frame");
     waitForFrameRateLimit();
-
     input_.beginFrame();
     {
       NURI_PROFILER_ZONE("Window::pollEvents", NURI_PROFILER_COLOR_WAIT);
@@ -137,7 +115,6 @@ void Application::run() {
       eventManager_.dispatch(EventChannel::Input);
       NURI_PROFILER_ZONE_END();
     }
-
     std::int32_t newWidth = 0;
     std::int32_t newHeight = 0;
     {
@@ -152,7 +129,6 @@ void Application::run() {
       input_.endFrame();
       continue;
     }
-
     if (newWidth != width_ || newHeight != height_) {
       NURI_PROFILER_ZONE("Resize", NURI_PROFILER_COLOR_CREATE);
       width_ = newWidth;
@@ -161,7 +137,6 @@ void Application::run() {
       renderer_->onResize(width_, height_);
       NURI_PROFILER_ZONE_END();
     }
-
     double currentTime = getTime();
     double deltaTime = currentTime - lastTime;
     lastTime = currentTime;
@@ -175,10 +150,8 @@ void Application::run() {
       onDraw();
       NURI_PROFILER_ZONE_END();
     }
-
     input_.endFrame();
   }
-
   NURI_LOG_DEBUG("Application::run: Application shutdown");
   gpu_->waitIdle();
   onShutdown();
@@ -212,7 +185,6 @@ void Application::waitForFrameRateLimit() {
   if (frameRateLimit_ == 0u) {
     return;
   }
-
   const FrameClock::duration frameInterval =
       frameIntervalForRate(frameRateLimit_);
   FrameClock::time_point now = FrameClock::now();
@@ -220,14 +192,12 @@ void Application::waitForFrameRateLimit() {
     nextFrameDeadline_ = now + frameInterval;
     return;
   }
-
   if (now < nextFrameDeadline_) {
     NURI_PROFILER_ZONE("Application::FrameRateLimit", NURI_PROFILER_COLOR_WAIT);
     std::this_thread::sleep_until(nextFrameDeadline_);
     NURI_PROFILER_ZONE_END();
     now = FrameClock::now();
   }
-
   const auto elapsedIntervals = (now - nextFrameDeadline_) / frameInterval + 1;
   nextFrameDeadline_ += frameInterval * elapsedIntervals;
 }
@@ -244,13 +214,9 @@ Renderer &Application::getRenderer() { return *renderer_; }
 
 const Renderer &Application::getRenderer() const { return *renderer_; }
 
-RenderPipeline &Application::getRenderPipeline() {
-  NURI_ASSERT(renderPipeline_ != nullptr, "Render pipeline is null");
-  return *renderPipeline_;
-}
+RenderPipeline &Application::getRenderPipeline() { return *renderPipeline_; }
 
 const RenderPipeline &Application::getRenderPipeline() const {
-  NURI_ASSERT(renderPipeline_ != nullptr, "Render pipeline is null");
   return *renderPipeline_;
 }
 
@@ -303,7 +269,6 @@ Result<bool, std::string> Application::registerDefaultRenderPipeline(
     return Result<bool, std::string>::makeError(
         "Application::registerDefaultRenderPipeline: render pipeline is null");
   }
-
   return nuri::registerDefaultRenderPipeline(
       *renderPipeline_, getGPU(), shaderConfig, pipelineMemoryResource());
 }

@@ -1,8 +1,6 @@
 #pragma once
-
 #include "nuri/core/result.h"
 #include "nuri/defines.h"
-
 #include <array>
 #include <condition_variable>
 #include <cstddef>
@@ -16,7 +14,6 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
-
 namespace nuri {
 
 enum class AssetPriority : uint8_t {
@@ -39,12 +36,7 @@ enum class AssetWorkClass : uint8_t {
 
 struct AssetCpuSchedulerConfig {
   uint32_t workerCount = 0u;
-  // Auto-sized pools leave this many logical processors for the editor,
-  // render submission, driver, and OS.
   uint32_t reservedLogicalThreads = 4u;
-  // Zero keeps the resolved worker pool available while interactive loading is
-  // active. Set an explicit lower value only when a measured workload needs an
-  // additional admission limit beyond reservedLogicalThreads.
   uint32_t interactiveWorkerCount = 0u;
   uint32_t maxInFlightJobs = 4096u;
   uint64_t maxInFlightBytes = 512ull * 1024ull * 1024ull;
@@ -53,8 +45,6 @@ struct AssetCpuSchedulerConfig {
   uint32_t cookConcurrency = 0u;
   uint32_t transcodeConcurrency = 1u;
   uint32_t metadataConcurrency = 0u;
-  // GPU driver allocation is isolated from the render thread and serialized
-  // unless a backend-specific design proves a wider safe concurrency.
   uint32_t gpuMaterializationConcurrency = 1u;
 };
 
@@ -92,12 +82,10 @@ class NURI_API AssetCpuScheduler final {
 public:
   explicit AssetCpuScheduler(AssetCpuSchedulerConfig config = {});
   ~AssetCpuScheduler();
-
   AssetCpuScheduler(const AssetCpuScheduler &) = delete;
   AssetCpuScheduler &operator=(const AssetCpuScheduler &) = delete;
   AssetCpuScheduler(AssetCpuScheduler &&) = delete;
   AssetCpuScheduler &operator=(AssetCpuScheduler &&) = delete;
-
   [[nodiscard]] Result<AssetCpuTaskHandle, std::string>
   enqueue(AssetCpuJob job);
   [[nodiscard]] bool cancel(AssetCpuTaskHandle handle);
@@ -106,7 +94,6 @@ public:
   void setInteractiveMode(bool enabled);
   void requestStop();
   void waitIdle();
-
   [[nodiscard]] AssetCpuSchedulerStats stats() const;
 
 private:
@@ -114,23 +101,18 @@ private:
     std::stop_source stop{};
     AssetPriority priority = AssetPriority::Normal;
   };
-
   struct QueuedJob {
     AssetCpuTaskHandle handle{};
     AssetCpuJob job{};
     std::shared_ptr<JobControl> control{};
   };
-
   static constexpr size_t kPriorityCount =
       static_cast<size_t>(AssetPriority::Count);
   static constexpr size_t kWorkClassCount =
       static_cast<size_t>(AssetWorkClass::Count);
-
-  [[nodiscard]] bool hasQueuedJobsLocked() const noexcept;
   [[nodiscard]] bool hasRunnableJobLocked() const noexcept;
   [[nodiscard]] QueuedJob popNextJobLocked();
   void workerMain(std::stop_token stopToken, uint32_t workerIndex);
-
   AssetCpuSchedulerConfig config_{};
   mutable std::mutex mutex_{};
   std::condition_variable_any workCv_{};

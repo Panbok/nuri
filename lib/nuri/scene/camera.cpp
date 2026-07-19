@@ -1,17 +1,12 @@
-#include "nuri/pch.h"
-
 #include "nuri/scene/camera.h"
-
 #include "nuri/core/log.h"
-
+#include "nuri/pch.h"
 namespace nuri {
 
 namespace {
-
 const PerspectiveParams kDefaultPerspective{};
 const OrthographicParams kDefaultOrthographic{};
 constexpr float kEpsilon = 1e-6f;
-
 float sanitizeAspect(float aspect) {
   if (!std::isfinite(aspect) || aspect <= kEpsilon) {
     NURI_LOG_WARNING(
@@ -21,7 +16,6 @@ float sanitizeAspect(float aspect) {
   }
   return aspect;
 }
-
 } // namespace
 
 Camera::Camera(const glm::vec3 &position, const glm::quat &orientation)
@@ -76,7 +70,6 @@ glm::mat4 Camera::projectionMatrix(float aspect) const {
     return glm::ortho(-halfWidth, halfWidth, -halfHeight, halfHeight,
                       orthographic_.nearPlane, orthographic_.farPlane);
   }
-
   return glm::perspective(perspective_.fovYRadians, safeAspect,
                           perspective_.nearPlane, perspective_.farPlane);
 }
@@ -93,14 +86,12 @@ void Camera::setLookAt(const glm::vec3 &eye, const glm::vec3 &target,
     position_ = eye;
     return;
   }
-
   glm::vec3 up = worldUp;
   const float upLengthSquared = glm::dot(up, up);
   if (!std::isfinite(upLengthSquared) || upLengthSquared <= kEpsilon) {
     NURI_LOG_WARNING("Camera::setLookAt: worldUp is invalid or zero, using +Y");
     up = glm::vec3(0.0f, 1.0f, 0.0f);
   }
-
   const glm::vec3 normalizedDirection = glm::normalize(direction);
   glm::vec3 normalizedUp = glm::normalize(up);
   if (std::abs(glm::dot(normalizedDirection, normalizedUp)) >=
@@ -113,7 +104,6 @@ void Camera::setLookAt(const glm::vec3 &eye, const glm::vec3 &target,
       normalizedUp = glm::vec3(1.0f, 0.0f, 0.0f);
     }
   }
-
   position_ = eye;
   const glm::mat4 view = glm::lookAt(eye, target, normalizedUp);
   const glm::mat4 world = glm::inverse(view);
@@ -122,14 +112,12 @@ void Camera::setLookAt(const glm::vec3 &eye, const glm::vec3 &target,
 
 PerspectiveParams Camera::sanitizePerspective(const PerspectiveParams &params) {
   PerspectiveParams out = params;
-
   if (!std::isfinite(out.fovYRadians) || out.fovYRadians <= kEpsilon ||
       out.fovYRadians >= glm::pi<float>() - kEpsilon) {
     NURI_LOG_WARNING("Camera: Invalid perspective FOV %.6f, using default %.6f",
                      out.fovYRadians, kDefaultPerspective.fovYRadians);
     out.fovYRadians = kDefaultPerspective.fovYRadians;
   }
-
   if (!std::isfinite(out.nearPlane) || out.nearPlane <= kEpsilon) {
     NURI_LOG_WARNING(
         "Camera: Invalid perspective near plane %.6f, using default "
@@ -137,7 +125,6 @@ PerspectiveParams Camera::sanitizePerspective(const PerspectiveParams &params) {
         out.nearPlane, kDefaultPerspective.nearPlane);
     out.nearPlane = kDefaultPerspective.nearPlane;
   }
-
   if (!std::isfinite(out.farPlane) ||
       out.farPlane <= out.nearPlane + kEpsilon) {
     NURI_LOG_WARNING(
@@ -146,27 +133,23 @@ PerspectiveParams Camera::sanitizePerspective(const PerspectiveParams &params) {
         out.farPlane, kDefaultPerspective.farPlane);
     out.farPlane = std::max(kDefaultPerspective.farPlane, out.nearPlane + 1.0f);
   }
-
   return out;
 }
 
 OrthographicParams
 Camera::sanitizeOrthographic(const OrthographicParams &params) {
   OrthographicParams out = params;
-
   if (!std::isfinite(out.height) || out.height <= kEpsilon) {
     NURI_LOG_WARNING("Camera: Invalid ortho height %.6f, using default %.6f",
                      out.height, kDefaultOrthographic.height);
     out.height = kDefaultOrthographic.height;
   }
-
   if (!std::isfinite(out.nearPlane) || out.nearPlane <= kEpsilon) {
     NURI_LOG_WARNING(
         "Camera: Invalid ortho near plane %.6f, using default %.6f",
         out.nearPlane, kDefaultOrthographic.nearPlane);
     out.nearPlane = kDefaultOrthographic.nearPlane;
   }
-
   if (!std::isfinite(out.farPlane) ||
       out.farPlane <= out.nearPlane + kEpsilon) {
     NURI_LOG_WARNING("Camera: Invalid ortho far plane %.6f, using default %.6f",
@@ -174,7 +157,6 @@ Camera::sanitizeOrthographic(const OrthographicParams &params) {
     out.farPlane =
         std::max(kDefaultOrthographic.farPlane, out.nearPlane + 1.0f);
   }
-
   return out;
 }
 

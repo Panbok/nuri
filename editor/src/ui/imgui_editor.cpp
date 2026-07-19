@@ -24,10 +24,10 @@
 #include "nuri/ui/file_dialog_widget.h"
 #include "nuri/ui/linear_graph.h"
 #include "nuri/utils/frame_time_display.h"
-#include "nuri/utils/fsp_counter.h"
 #include "scene_light_editor.h"
 
 #include <limits>
+#include <unordered_set>
 
 #include <ImGuizmo.h>
 
@@ -1142,19 +1142,19 @@ buildMaterialSourceEntries(const Renderable &renderable,
 buildMaterialTextureEntries(const MaterialRecord &record) {
   struct Spec {
     const char *label;
-    TextureRef MaterialRequest::TextureRefs::*member;
+    MaterialTextureSlot slot;
   };
   constexpr Spec kSpecs[] = {
-      {"Base Color", &MaterialRequest::TextureRefs::baseColor},
-      {"Metallic Roughness", &MaterialRequest::TextureRefs::metallicRoughness},
-      {"Normal", &MaterialRequest::TextureRefs::normal},
-      {"Emissive", &MaterialRequest::TextureRefs::emissive},
-      {"Occlusion", &MaterialRequest::TextureRefs::occlusion},
+      {"Base Color", kMaterialTextureSlotBaseColor},
+      {"Metallic Roughness", kMaterialTextureSlotMetallicRoughness},
+      {"Normal", kMaterialTextureSlotNormal},
+      {"Emissive", kMaterialTextureSlotEmissive},
+      {"Occlusion", kMaterialTextureSlotOcclusion},
   };
 
   std::vector<MaterialTextureEntry> entries;
   for (const Spec &spec : kSpecs) {
-    const TextureRef ref = record.textureRefs.*(spec.member);
+    const TextureRef ref = record.textureRefs[spec.slot];
     if (!isValid(ref)) {
       continue;
     }
@@ -2327,7 +2327,6 @@ antiAliasingMetricsSummary(const AntiAliasingFrameMetrics &metrics) {
       "transparentPostTaaDraws={} transparentMesh={} "
       "transparentContributors={} "
       "transparentFixed={} transparentEdgeJitter={:.3f} "
-      "overlayPostTaaDraws={} overlayContaminationFrames={} "
       "jitterScale={:.2f} preset={} currentWeight={:.3f} "
       "historyWeight={:.3f} motionWeight={:.3f} clampWeight={:.3f} "
       "historyFilter={} historyTextureValid={} "
@@ -2418,9 +2417,7 @@ antiAliasingMetricsSummary(const AntiAliasingFrameMetrics &metrics) {
       metrics.taaTransparentPostTaaMeshDrawCount,
       metrics.taaTransparentPostTaaContributorDrawCount,
       metrics.taaTransparentPostTaaFixedDrawCount,
-      metrics.taaTransparentEdgeJitterEstimate,
-      metrics.taaOverlayPostTaaDrawCount,
-      metrics.taaOverlayHistoryContaminationFrameCount, metrics.taaJitterScale,
+      metrics.taaTransparentEdgeJitterEstimate, metrics.taaJitterScale,
       temporalAAQualityPresetDisplayName(metrics.taaQualityPreset),
       metrics.taaCurrentFrameWeight, metrics.taaHistoryFrameWeight,
       metrics.taaMotionCurrentWeight, metrics.taaClampCurrentWeight,
@@ -3074,9 +3071,6 @@ void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
         metrics.taaTransparentPostTaaMeshDrawCount,
         metrics.taaTransparentPostTaaContributorDrawCount,
         metrics.taaTransparentPostTaaFixedDrawCount);
-    ImGui::Text("Overlay Contamination: %u frames, %u post-TAA draws",
-                metrics.taaOverlayHistoryContaminationFrameCount,
-                metrics.taaOverlayPostTaaDrawCount);
     ImGui::Text("Resolve Dimensions: %u x %u", metrics.taaResolveWidth,
                 metrics.taaResolveHeight);
     ImGui::Text("Jitter Scale: %.2f", metrics.taaJitterScale);
@@ -4280,10 +4274,10 @@ void drawBakeryWindow(bool &open, BakeryUiState &state,
 [[nodiscard]] std::string_view
 resolveTelemetryPassName(const RenderGraphTelemetrySnapshot &snapshot,
                          uint32_t passIndex) {
-  if (passIndex >= snapshot.passNames.size()) {
+  if (passIndex >= snapshot.compile.passDebugNames.size()) {
     return "unnamed_pass";
   }
-  const std::pmr::string &name = snapshot.passNames[passIndex];
+  const std::pmr::string &name = snapshot.compile.passDebugNames[passIndex];
   return name.empty() ? std::string_view("unnamed_pass")
                       : std::string_view(name.data(), name.size());
 }
@@ -4341,14 +4335,15 @@ void drawTextView(std::string_view text) {
 [[nodiscard]] std::optional<float>
 findPassCpuTimingMs(const RenderGraphTelemetrySnapshot &snapshot,
                     uint32_t orderedPassIndex) {
-  if (orderedPassIndex < snapshot.passTimings.size()) {
+  if (orderedPassIndex < snapshot.execution.passTimings.size()) {
     const RenderGraphPassExecutionTiming &timing =
-        snapshot.passTimings[orderedPassIndex];
+        snapshot.execution.passTimings[orderedPassIndex];
     if (timing.orderedPassIndex == orderedPassIndex) {
       return timing.cpuTimeMs;
     }
   }
-  for (const RenderGraphPassExecutionTiming &timing : snapshot.passTimings) {
+  for (const RenderGraphPassExecutionTiming &timing :
+       snapshot.execution.passTimings) {
     if (timing.orderedPassIndex == orderedPassIndex) {
       return timing.cpuTimeMs;
     }
@@ -4456,7 +4451,7 @@ void recordCpuPassMetricSamples(PassMetricsUiState &state,
   }
 
   const uint32_t passCount =
-      static_cast<uint32_t>(snapshot.orderedPassIndices.size());
+      static_cast<uint32_t>(snapshot.compile.orderedPassIndices.size());
   for (uint32_t orderedPassIndex = 0u; orderedPassIndex < passCount;
        ++orderedPassIndex) {
     const std::optional<float> cpuMs =
@@ -4465,7 +4460,7 @@ void recordCpuPassMetricSamples(PassMetricsUiState &state,
       continue;
     }
     const uint32_t declaredPassIndex =
-        snapshot.orderedPassIndices[orderedPassIndex];
+        snapshot.compile.orderedPassIndices[orderedPassIndex];
     const std::string_view passName =
         resolveTelemetryPassName(snapshot, declaredPassIndex);
     PassMetricAggregate &aggregate =
@@ -4573,14 +4568,14 @@ void refreshPassMetrics(PassMetricsUiState &state,
   }
 
   const uint32_t passCount =
-      static_cast<uint32_t>(snapshot->orderedPassIndices.size());
+      static_cast<uint32_t>(snapshot->compile.orderedPassIndices.size());
   std::vector<uint8_t> claimedGpuTimings(gpuReport.passTimings.size(), 0u);
   state.rows.reserve(passCount);
 
   for (uint32_t orderedPassIndex = 0u; orderedPassIndex < passCount;
        ++orderedPassIndex) {
     const uint32_t declaredPassIndex =
-        snapshot->orderedPassIndices[orderedPassIndex];
+        snapshot->compile.orderedPassIndices[orderedPassIndex];
     const std::string_view passName =
         resolveTelemetryPassName(*snapshot, declaredPassIndex);
 
@@ -4897,14 +4892,14 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
   drawTelemetrySummary(snapshot->summary);
 
   drawTelemetryTableSection(
-      "Passes", "RenderGraphTelemetryPasses", 2, !snapshot->passNames.empty(),
-      160.0f, [&]() {
+      "Passes", "RenderGraphTelemetryPasses", 2,
+      !snapshot->compile.passDebugNames.empty(), 160.0f, [&]() {
         ImGui::TableSetupColumn("Pass", ImGuiTableColumnFlags_WidthFixed,
                                 64.0f);
         ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
         ImGui::TableHeadersRow();
-        for (uint32_t passIndex = 0; passIndex < snapshot->passNames.size();
-             ++passIndex) {
+        for (uint32_t passIndex = 0;
+             passIndex < snapshot->compile.passDebugNames.size(); ++passIndex) {
           ImGui::TableNextRow();
           ImGui::TableNextColumn();
           ImGui::Text("%u", passIndex);
@@ -4914,8 +4909,8 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
       });
 
   drawTelemetryTableSection(
-      "Edges", "RenderGraphTelemetryEdges", 4, !snapshot->edges.empty(), 140.0f,
-      [&]() {
+      "Edges", "RenderGraphTelemetryEdges", 4, !snapshot->compile.edges.empty(),
+      140.0f, [&]() {
         ImGui::TableSetupColumn("Before", ImGuiTableColumnFlags_WidthFixed,
                                 60.0f);
         ImGui::TableSetupColumn("Before Name",
@@ -4925,7 +4920,7 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
         ImGui::TableSetupColumn("After Name",
                                 ImGuiTableColumnFlags_WidthStretch);
         ImGui::TableHeadersRow();
-        for (const auto &edge : snapshot->edges) {
+        for (const auto &edge : snapshot->compile.edges) {
           ImGui::TableNextRow();
           ImGui::TableNextColumn();
           ImGui::Text("%u", edge.before);
@@ -4940,16 +4935,16 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
 
   drawTelemetryTableSection(
       "Execution Order", "RenderGraphTelemetryExecution", 3,
-      !snapshot->orderedPassIndices.empty(), 140.0f, [&]() {
+      !snapshot->compile.orderedPassIndices.empty(), 140.0f, [&]() {
         ImGui::TableSetupColumn("Rank", ImGuiTableColumnFlags_WidthFixed,
                                 60.0f);
         ImGui::TableSetupColumn("Pass", ImGuiTableColumnFlags_WidthFixed,
                                 60.0f);
         ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
         ImGui::TableHeadersRow();
-        for (uint32_t rank = 0; rank < snapshot->orderedPassIndices.size();
-             ++rank) {
-          const uint32_t passIndex = snapshot->orderedPassIndices[rank];
+        for (uint32_t rank = 0;
+             rank < snapshot->compile.orderedPassIndices.size(); ++rank) {
+          const uint32_t passIndex = snapshot->compile.orderedPassIndices[rank];
           ImGui::TableNextRow();
           ImGui::TableNextColumn();
           ImGui::Text("%u", rank);
@@ -4962,8 +4957,8 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
 
   drawTelemetryTableSection(
       "Transient Lifetimes", "RenderGraphTelemetryTextureLifetimes", 4,
-      !snapshot->transientTextureLifetimes.empty() ||
-          !snapshot->transientBufferLifetimes.empty(),
+      !snapshot->compile.transientTextureLifetimes.empty() ||
+          !snapshot->compile.transientBufferLifetimes.empty(),
       180.0f, [&]() {
         ImGui::TableSetupColumn("Kind", ImGuiTableColumnFlags_WidthFixed,
                                 70.0f);
@@ -4974,7 +4969,8 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
         ImGui::TableSetupColumn("Last", ImGuiTableColumnFlags_WidthFixed,
                                 70.0f);
         ImGui::TableHeadersRow();
-        for (const auto &lifetime : snapshot->transientTextureLifetimes) {
+        for (const auto &lifetime :
+             snapshot->compile.transientTextureLifetimes) {
           ImGui::TableNextRow();
           ImGui::TableNextColumn();
           ImGui::TextUnformatted("tex");
@@ -4985,7 +4981,8 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
           ImGui::TableNextColumn();
           ImGui::Text("%u", lifetime.lastExecutionIndex);
         }
-        for (const auto &lifetime : snapshot->transientBufferLifetimes) {
+        for (const auto &lifetime :
+             snapshot->compile.transientBufferLifetimes) {
           ImGui::TableNextRow();
           ImGui::TableNextColumn();
           ImGui::TextUnformatted("buf");
@@ -5000,8 +4997,8 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
 
   drawTelemetryTableSection(
       "Allocations", "RenderGraphTelemetryAllocations", 4,
-      !snapshot->transientTextureAllocations.empty() ||
-          !snapshot->transientBufferAllocations.empty(),
+      !snapshot->compile.transientTextureAllocations.empty() ||
+          !snapshot->compile.transientBufferAllocations.empty(),
       180.0f, [&]() {
         ImGui::TableSetupColumn("Kind", ImGuiTableColumnFlags_WidthFixed,
                                 70.0f);
@@ -5011,7 +5008,8 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
                                 70.0f);
         ImGui::TableSetupColumn("Map", ImGuiTableColumnFlags_WidthStretch);
         ImGui::TableHeadersRow();
-        for (const auto &allocation : snapshot->transientTextureAllocations) {
+        for (const auto &allocation :
+             snapshot->compile.transientTextureAllocations) {
           ImGui::TableNextRow();
           ImGui::TableNextColumn();
           ImGui::TextUnformatted("tex");
@@ -5023,7 +5021,8 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
           ImGui::Text("tex[%u] -> phys[%u]", allocation.resourceIndex,
                       allocation.allocationIndex);
         }
-        for (const auto &allocation : snapshot->transientBufferAllocations) {
+        for (const auto &allocation :
+             snapshot->compile.transientBufferAllocations) {
           ImGui::TableNextRow();
           ImGui::TableNextColumn();
           ImGui::TextUnformatted("buf");
@@ -5039,8 +5038,8 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
 
   drawTelemetryTableSection(
       "Allocation Maps", "RenderGraphTelemetryAllocationMaps", 3,
-      !snapshot->transientTextureAllocationByResource.empty() ||
-          !snapshot->transientBufferAllocationByResource.empty(),
+      !snapshot->compile.transientTextureAllocationByResource.empty() ||
+          !snapshot->compile.transientBufferAllocationByResource.empty(),
       180.0f, [&]() {
         ImGui::TableSetupColumn("Kind", ImGuiTableColumnFlags_WidthFixed,
                                 70.0f);
@@ -5050,9 +5049,10 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
                                 70.0f);
         ImGui::TableHeadersRow();
         for (uint32_t i = 0;
-             i < snapshot->transientTextureAllocationByResource.size(); ++i) {
+             i < snapshot->compile.transientTextureAllocationByResource.size();
+             ++i) {
           const uint32_t physical =
-              snapshot->transientTextureAllocationByResource[i];
+              snapshot->compile.transientTextureAllocationByResource[i];
           if (physical == UINT32_MAX) {
             continue;
           }
@@ -5065,9 +5065,10 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
           ImGui::Text("%u", physical);
         }
         for (uint32_t i = 0;
-             i < snapshot->transientBufferAllocationByResource.size(); ++i) {
+             i < snapshot->compile.transientBufferAllocationByResource.size();
+             ++i) {
           const uint32_t physical =
-              snapshot->transientBufferAllocationByResource[i];
+              snapshot->compile.transientBufferAllocationByResource[i];
           if (physical == UINT32_MAX) {
             continue;
           }
@@ -5083,8 +5084,8 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
 
   drawTelemetryTableSection(
       "Physical Allocations", "RenderGraphTelemetryPhysicalAllocations", 5,
-      !snapshot->transientTexturePhysicalAllocations.empty() ||
-          !snapshot->transientBufferPhysicalAllocations.empty(),
+      !snapshot->compile.transientTexturePhysicalAllocations.empty() ||
+          !snapshot->compile.transientBufferPhysicalAllocations.empty(),
       200.0f, [&]() {
         ImGui::TableSetupColumn("Kind", ImGuiTableColumnFlags_WidthFixed,
                                 70.0f);
@@ -5097,7 +5098,7 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
         ImGui::TableSetupColumn("Details", ImGuiTableColumnFlags_WidthStretch);
         ImGui::TableHeadersRow();
         for (const auto &physical :
-             snapshot->transientTexturePhysicalAllocations) {
+             snapshot->compile.transientTexturePhysicalAllocations) {
           ImGui::TableNextRow();
           ImGui::TableNextColumn();
           ImGui::TextUnformatted("tex");
@@ -5115,7 +5116,7 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
                       physical.desc.numSamples, physical.desc.numMipLevels);
         }
         for (const auto &physical :
-             snapshot->transientBufferPhysicalAllocations) {
+             snapshot->compile.transientBufferPhysicalAllocations) {
           ImGui::TableNextRow();
           ImGui::TableNextColumn();
           ImGui::TextUnformatted("buf");
@@ -5134,11 +5135,12 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
 
   drawTelemetryTableSection(
       "Bindings", "RenderGraphTelemetryBindings", 5,
-      !snapshot->unresolvedTextureBindings.empty() ||
-          !snapshot->resolvedDependencyBuffers.empty() ||
-          !snapshot->unresolvedDependencyBufferBindings.empty() ||
-          !snapshot->unresolvedPreDispatchDependencyBufferBindings.empty() ||
-          !snapshot->unresolvedDrawBufferBindings.empty(),
+      !snapshot->compile.unresolvedTextureBindings.empty() ||
+          !snapshot->compile.resolvedDependencyBuffers.empty() ||
+          !snapshot->compile.unresolvedDependencyBufferBindings.empty() ||
+          !snapshot->compile.unresolvedPreDispatchDependencyBufferBindings
+               .empty() ||
+          !snapshot->compile.unresolvedDrawBufferBindings.empty(),
       220.0f, [&]() {
         ImGui::TableSetupColumn("Section", ImGuiTableColumnFlags_WidthFixed,
                                 110.0f);
@@ -5150,7 +5152,8 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
                                 110.0f);
         ImGui::TableSetupColumn("Resource", ImGuiTableColumnFlags_WidthStretch);
         ImGui::TableHeadersRow();
-        for (const auto &binding : snapshot->unresolvedTextureBindings) {
+        for (const auto &binding :
+             snapshot->compile.unresolvedTextureBindings) {
           ImGui::TableNextRow();
           ImGui::TableNextColumn();
           ImGui::TextUnformatted("pass_tex");
@@ -5164,8 +5167,10 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
           ImGui::Text("tex[%u]", binding.textureResourceIndex);
         }
         for (uint32_t slot = 0;
-             slot < snapshot->resolvedDependencyBuffers.size(); ++slot) {
-          const BufferHandle handle = snapshot->resolvedDependencyBuffers[slot];
+             slot < snapshot->compile.resolvedDependencyBuffers.size();
+             ++slot) {
+          const BufferHandle handle =
+              snapshot->compile.resolvedDependencyBuffers[slot];
           if (!nuri::isValid(handle)) {
             continue;
           }
@@ -5182,7 +5187,7 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
           ImGui::Text("handle=(%u,%u)", handle.index, handle.generation);
         }
         for (const auto &binding :
-             snapshot->unresolvedDependencyBufferBindings) {
+             snapshot->compile.unresolvedDependencyBufferBindings) {
           ImGui::TableNextRow();
           ImGui::TableNextColumn();
           ImGui::TextUnformatted("dep_buf");
@@ -5196,7 +5201,7 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
           ImGui::Text("buf[%u]", binding.bufferResourceIndex);
         }
         for (const auto &binding :
-             snapshot->unresolvedPreDispatchDependencyBufferBindings) {
+             snapshot->compile.unresolvedPreDispatchDependencyBufferBindings) {
           ImGui::TableNextRow();
           ImGui::TableNextColumn();
           ImGui::TextUnformatted("pre_dep");
@@ -5210,7 +5215,8 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
           ImGui::TableNextColumn();
           ImGui::Text("buf[%u]", binding.bufferResourceIndex);
         }
-        for (const auto &binding : snapshot->unresolvedDrawBufferBindings) {
+        for (const auto &binding :
+             snapshot->compile.unresolvedDrawBufferBindings) {
           ImGui::TableNextRow();
           ImGui::TableNextColumn();
           ImGui::TextUnformatted("draw_buf");
@@ -5227,10 +5233,10 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
 
   drawTelemetryTableSection(
       "Ranges", "RenderGraphTelemetryRanges", 4,
-      !snapshot->dependencyBufferRangesByPass.empty() ||
-          !snapshot->preDispatchRangesByPass.empty() ||
-          !snapshot->preDispatchDependencyRanges.empty() ||
-          !snapshot->drawRangesByPass.empty(),
+      !snapshot->compile.dependencyBufferRangesByPass.empty() ||
+          !snapshot->compile.preDispatchRangesByPass.empty() ||
+          !snapshot->compile.preDispatchDependencyRanges.empty() ||
+          !snapshot->compile.drawRangesByPass.empty(),
       220.0f, [&]() {
         ImGui::TableSetupColumn("Section", ImGuiTableColumnFlags_WidthFixed,
                                 110.0f);
@@ -5241,9 +5247,9 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
         ImGui::TableSetupColumn("Count", ImGuiTableColumnFlags_WidthFixed,
                                 70.0f);
         ImGui::TableHeadersRow();
-        for (uint32_t i = 0; i < snapshot->dependencyBufferRangesByPass.size();
-             ++i) {
-          const auto &range = snapshot->dependencyBufferRangesByPass[i];
+        for (uint32_t i = 0;
+             i < snapshot->compile.dependencyBufferRangesByPass.size(); ++i) {
+          const auto &range = snapshot->compile.dependencyBufferRangesByPass[i];
           ImGui::TableNextRow();
           ImGui::TableNextColumn();
           ImGui::TextUnformatted("dep_pass");
@@ -5254,9 +5260,9 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
           ImGui::TableNextColumn();
           ImGui::Text("%u", range.count);
         }
-        for (uint32_t i = 0; i < snapshot->preDispatchRangesByPass.size();
-             ++i) {
-          const auto &range = snapshot->preDispatchRangesByPass[i];
+        for (uint32_t i = 0;
+             i < snapshot->compile.preDispatchRangesByPass.size(); ++i) {
+          const auto &range = snapshot->compile.preDispatchRangesByPass[i];
           ImGui::TableNextRow();
           ImGui::TableNextColumn();
           ImGui::TextUnformatted("pre_pass");
@@ -5267,9 +5273,9 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
           ImGui::TableNextColumn();
           ImGui::Text("%u", range.count);
         }
-        for (uint32_t i = 0; i < snapshot->preDispatchDependencyRanges.size();
-             ++i) {
-          const auto &range = snapshot->preDispatchDependencyRanges[i];
+        for (uint32_t i = 0;
+             i < snapshot->compile.preDispatchDependencyRanges.size(); ++i) {
+          const auto &range = snapshot->compile.preDispatchDependencyRanges[i];
           ImGui::TableNextRow();
           ImGui::TableNextColumn();
           ImGui::TextUnformatted("pre_dep");
@@ -5280,8 +5286,9 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
           ImGui::TableNextColumn();
           ImGui::Text("%u", range.count);
         }
-        for (uint32_t i = 0; i < snapshot->drawRangesByPass.size(); ++i) {
-          const auto &range = snapshot->drawRangesByPass[i];
+        for (uint32_t i = 0; i < snapshot->compile.drawRangesByPass.size();
+             ++i) {
+          const auto &range = snapshot->compile.drawRangesByPass[i];
           ImGui::TableNextRow();
           ImGui::TableNextColumn();
           ImGui::TextUnformatted("draw_pass");
@@ -5328,8 +5335,7 @@ overlayGpuFrameTimeSample(const GpuTimingReport &report) {
   };
 }
 
-void drawFpsOverlay(const FPSCounter &fpsCounter, LinearGraph &fpsGraph,
-                    LinearGraph &frametimeGraph,
+void drawFpsOverlay(LinearGraph &fpsGraph, LinearGraph &frametimeGraph,
                     const FrameTimeDisplayValues &frameTimes,
                     const RenderFrameMetrics &frameMetrics,
                     const RenderSettings &renderSettings,
@@ -5357,7 +5363,7 @@ void drawFpsOverlay(const FPSCounter &fpsCounter, LinearGraph &fpsGraph,
                        ImGuiWindowFlags_NoSavedSettings |
                        ImGuiWindowFlags_NoFocusOnAppearing |
                        ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoMove)) {
-    const float fps = fpsCounter.getFPS();
+    const float fps = frameTimes.framesPerSecond;
     bool drewStats = false;
     if (telemetryState.showFpsMs) {
       ImGui::Text("FPS: %i", static_cast<int>(fps));
@@ -7026,7 +7032,6 @@ struct ImGuiEditor::Impl {
 
     NURI_PROFILER_ZONE("ImGuiEditor::UpdateMetricsAndLogs",
                        NURI_PROFILER_COLOR_CMD_DRAW);
-    fpsCounter.tick(frameDeltaSeconds, true);
     frameTimeDisplaySampler.tick(
         frameDeltaSeconds,
         overlayGpuFrameTimeSample(gpu.getLatestCompletedGpuTimingReport()));
@@ -7256,9 +7261,8 @@ struct ImGuiEditor::Impl {
         overlayRightBoundaryX = inspectorWindowMinX;
       }
     }
-    drawFpsOverlay(fpsCounter, *fpsGraph, *frametimeGraph,
-                   frameTimeDisplaySampler.values(), frameMetrics,
-                   renderSettings, telemetryOverlayState,
+    drawFpsOverlay(*fpsGraph, *frametimeGraph, frameTimeDisplaySampler.values(),
+                   frameMetrics, renderSettings, telemetryOverlayState,
                    overlayRightBoundaryX);
     NURI_PROFILER_ZONE_END();
 
@@ -7317,7 +7321,6 @@ struct ImGuiEditor::Impl {
   GPUDevice &gpu;
   std::unique_ptr<ImGuiGlfwPlatform> platform;
   std::unique_ptr<ImGuiGpuRenderer> renderer;
-  FPSCounter fpsCounter{0.5f};
   FrameTimeDisplaySampler frameTimeDisplaySampler{
       kFrameTimeDisplayUpdateIntervalSeconds};
   std::unique_ptr<LinearGraph> fpsGraph =

@@ -13,9 +13,6 @@ layout(push_constant) uniform HDRExposurePushConstants {
   float minEv;
   float maxEv;
   float deltaSeconds;
-  float reserved0;
-  float reserved1;
-  float reserved2;
 }
 pc;
 

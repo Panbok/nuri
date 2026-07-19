@@ -1,17 +1,14 @@
 #pragma once
-
 #include "nuri/core/result.h"
 #include "nuri/defines.h"
 #include "nuri/gfx/gpu_types.h"
 #include "nuri/resources/cpu/material_data.h"
 #include "nuri/resources/storage/texture/texture_cache_utils.h"
 #include "nuri/resources/storage/texture/texture_processing.h"
-
 #include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <span>
-
 namespace nuri {
 
 enum class TextureArtifactEncoding : uint8_t { Etc1s, Uastc };
@@ -26,9 +23,6 @@ struct TextureArtifactBuildOptions {
 
 struct TextureArtifactBuildResult {
   std::filesystem::path artifactPath{};
-  Format targetFormat = Format::RGBA8_UNORM;
-  NativeTextureCacheProbeStatus previousStatus =
-      NativeTextureCacheProbeStatus::Missing;
   bool built = false;
   uint64_t artifactSizeBytes = 0u;
 };
@@ -49,20 +43,12 @@ struct TextureArtifactCacheTelemetry {
 class NURI_API SceneTextureArtifactBuilder final {
 public:
   ~SceneTextureArtifactBuilder();
-
-  SceneTextureArtifactBuilder(const SceneTextureArtifactBuilder &) = delete;
-  SceneTextureArtifactBuilder &
-  operator=(const SceneTextureArtifactBuilder &) = delete;
   SceneTextureArtifactBuilder(SceneTextureArtifactBuilder &&) noexcept;
   SceneTextureArtifactBuilder &
   operator=(SceneTextureArtifactBuilder &&) noexcept;
-
-  [[nodiscard]] static Result<SceneTextureArtifactBuilder, std::string>
-  create(const std::filesystem::path &sceneSourcePath);
   [[nodiscard]] static Result<SceneTextureArtifactBuilder, std::string>
   create(const std::filesystem::path &sceneSourcePath,
-         std::span<const EmbeddedSceneTextureData> embeddedTextures);
-
+         std::span<const EmbeddedSceneTextureData> embeddedTextures = {});
   [[nodiscard]] Result<TextureArtifactBuildResult, std::string>
   ensure(const MaterialTextureSlotData &source, uint64_t sourceIdentityHash,
          Format targetFormat, const TextureArtifactBuildOptions &options,
@@ -70,9 +56,7 @@ public:
 
 private:
   struct Impl;
-
   explicit SceneTextureArtifactBuilder(std::unique_ptr<Impl> impl);
-
   std::unique_ptr<Impl> impl_;
 };
 

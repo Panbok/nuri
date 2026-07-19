@@ -17,19 +17,6 @@
 namespace nuri::bakery::detail {
 namespace {
 
-[[nodiscard]] TextureArtifactTarget
-toArtifactTarget(SceneTextureArtifactTarget target) noexcept {
-  switch (target) {
-  case SceneTextureArtifactTarget::BC7:
-    return TextureArtifactTarget::BC7;
-  case SceneTextureArtifactTarget::ETC2:
-    return TextureArtifactTarget::ETC2;
-  case SceneTextureArtifactTarget::RGBA8:
-    return TextureArtifactTarget::RGBA8;
-  }
-  return TextureArtifactTarget::RGBA8;
-}
-
 [[nodiscard]] Result<bool, std::string>
 writeSceneMaterialCacheToDisk(const SceneTextureArtifactBakePlan &plan,
                               const SceneMaterialCacheData &cacheData) {
@@ -37,8 +24,8 @@ writeSceneMaterialCacheToDisk(const SceneTextureArtifactBakePlan &plan,
   if (cacheKey.hasError()) {
     return Result<bool, std::string>::makeError(cacheKey.error());
   }
-  const SceneSourceFingerprint sourceFingerprint =
-      querySceneSourceFingerprint(cacheKey.value().normalizedSourcePath);
+  const SourceFingerprint sourceFingerprint =
+      querySourceFingerprint(cacheKey.value().normalizedSourcePath);
   auto bytes = materialBinarySerialize(MaterialBinarySerializeInput{
       .sourcePathHash = cacheKey.value().sourcePathHash,
       .sourceSizeBytes = sourceFingerprint.sizeBytes,
@@ -70,9 +57,7 @@ collectDdsTexturePackSources(const SceneMaterialCacheData &cacheData) {
   std::vector<DdsTexturePackSource> sources{};
   std::unordered_set<std::string> seen{};
   for (const SceneMaterialRecord &record : cacheData.materials) {
-    for (const MaterialTextureArtifactSpec &spec :
-         kMaterialTextureArtifactSpecs) {
-      const MaterialTextureSlotData &slot = record.sourceMaterial.*(spec.slot);
+    for (const MaterialTextureSlotData &slot : record.sourceMaterial.textures) {
       if (slot.sourceKind != MaterialTextureSourceKind::ExternalFile) {
         continue;
       }
@@ -151,7 +136,7 @@ bakeSceneTextureArtifactsToDisk(const SceneTextureArtifactBakePlan &plan) {
          slotIndex < kMaterialTextureArtifactSpecs.size(); ++slotIndex) {
       const MaterialTextureArtifactSpec &spec =
           kMaterialTextureArtifactSpecs[slotIndex];
-      const MaterialTextureSlotData &slot = material.*(spec.slot);
+      const MaterialTextureSlotData &slot = material.textures[slotIndex];
       if (slot.sourceKind == MaterialTextureSourceKind::None) {
         continue;
       }
@@ -178,8 +163,10 @@ bakeSceneTextureArtifactsToDisk(const SceneTextureArtifactBakePlan &plan) {
       size_t builtFormatCount = 0u;
       for (SceneTextureArtifactTarget requestedTarget :
            plan.prebuildNativeTargets) {
-        const Format targetFormat = resolveTextureArtifactTargetFormat(
-            toArtifactTarget(requestedTarget), options.loadOptions.srgb, 4u);
+        const Format targetFormat = selectTextureArtifactTargetFormat(
+            requestedTarget == SceneTextureArtifactTarget::BC7,
+            requestedTarget == SceneTextureArtifactTarget::ETC2,
+            options.loadOptions.srgb, 4u);
         if (std::find(builtFormats.begin(),
                       builtFormats.begin() +
                           static_cast<ptrdiff_t>(builtFormatCount),

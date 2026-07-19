@@ -1,10 +1,7 @@
-#include "nuri/pch.h"
-
 #include "nuri/resources/storage/mesh/mesh_cache_writer.h"
-
 #include "nuri/core/log.h"
-#include "nuri/resources/storage/mesh/mesh_cache_utils.h"
-
+#include "nuri/pch.h"
+#include "nuri/resources/storage/cache_utils.h"
 namespace nuri {
 
 MeshCacheWriterService &MeshCacheWriterService::instance() {
@@ -21,7 +18,6 @@ MeshCacheWriterService::~MeshCacheWriterService() {
     stopRequested_ = true;
   }
   cv_.notify_one();
-
   const auto deadline =
       std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
   {
@@ -32,7 +28,6 @@ MeshCacheWriterService::~MeshCacheWriterService() {
       queue_.clear();
     }
   }
-
   if (worker_.joinable()) {
     worker_.join();
   }
@@ -43,7 +38,6 @@ void MeshCacheWriterService::enqueue(std::filesystem::path destinationPath,
   if (destinationPath.empty() || fileBytes.empty()) {
     return;
   }
-
   constexpr size_t kMaxQueueEntries = 32;
   {
     std::scoped_lock lock(mutex_);
@@ -69,7 +63,6 @@ void MeshCacheWriterService::workerLoop() {
     {
       std::unique_lock<std::mutex> lock(mutex_);
       cv_.wait(lock, [this]() { return stopRequested_ || !queue_.empty(); });
-
       if (queue_.empty()) {
         drainedCv_.notify_all();
         if (stopRequested_) {
@@ -77,15 +70,12 @@ void MeshCacheWriterService::workerLoop() {
         }
         continue;
       }
-
       job = std::move(queue_.front());
       queue_.pop_front();
       activeWrite_ = true;
     }
-
     const auto writeResult =
         writeBinaryFileAtomic(job.destinationPath, job.fileBytes);
-
     bool logWriteError = false;
     {
       std::scoped_lock lock(mutex_);
@@ -96,7 +86,6 @@ void MeshCacheWriterService::workerLoop() {
           "MeshCacheWriterService::workerLoop: failed to write cache '%s': %s",
           job.destinationPath.string().c_str(), writeResult.error().c_str());
     }
-
     {
       std::scoped_lock lock(mutex_);
       activeWrite_ = false;

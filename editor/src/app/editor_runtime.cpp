@@ -5,7 +5,6 @@
 #include "nuri/app/editor_scene_catalog.h"
 #include "nuri/core/log.h"
 #include "nuri/core/profiling.h"
-#include "nuri/gfx/pipeline/features/text_feature.h"
 #include "nuri/gfx/sim/animation_gpu_services.h"
 #include "nuri/gfx/sim/animation_scene_frame_provider.h"
 #include "nuri/resources/gpu/material.h"
@@ -435,26 +434,28 @@ EnvironmentAssetHandle loadSharedEnvironment(EditorRuntime &runtime) {
   };
 
   auto requested = runtime.assets().requestEnvironment(EnvironmentAssetRequest{
-      .cubemap =
-          TextureRequest{
-              .path = environmentHdrPath,
-              .loadOptions = TextureLoadOptions{},
-              .kind = TextureRequestKind::EquirectHdrCubemap,
-              .debugName = "editor_cubemap",
+      .textures =
+          {
+              TextureRequest{
+                  .path = environmentHdrPath,
+                  .loadOptions = TextureLoadOptions{},
+                  .kind = TextureRequestKind::EquirectHdrCubemap,
+                  .debugName = "editor_cubemap",
+              },
+              optionalKtxRequest(irradianceCandidates,
+                                 TextureRequestKind::Ktx2Cubemap,
+                                 "ibl_irradiance"),
+              optionalKtxRequest(prefilteredGgxCandidates,
+                                 TextureRequestKind::Ktx2Cubemap,
+                                 "ibl_prefilter_ggx"),
+              optionalKtxRequest(prefilteredCharlieCandidates,
+                                 TextureRequestKind::Ktx2Cubemap,
+                                 "ibl_prefilter_charlie"),
+              optionalKtxRequest(brdfLutCandidates,
+                                 TextureRequestKind::Ktx2Texture2D,
+                                 "ibl_brdf_lut"),
           },
-      .irradiance =
-          optionalKtxRequest(irradianceCandidates,
-                             TextureRequestKind::Ktx2Cubemap, "ibl_irradiance"),
-      .prefilteredGgx = optionalKtxRequest(prefilteredGgxCandidates,
-                                           TextureRequestKind::Ktx2Cubemap,
-                                           "ibl_prefilter_ggx"),
-      .prefilteredCharlie = optionalKtxRequest(prefilteredCharlieCandidates,
-                                               TextureRequestKind::Ktx2Cubemap,
-                                               "ibl_prefilter_charlie"),
-      .brdfLut = optionalKtxRequest(
-          brdfLutCandidates, TextureRequestKind::Ktx2Texture2D, "ibl_brdf_lut"),
       .priority = AssetPriority::Visible,
-      .prefilteredCharlieOptional = true,
       .debugName = "editor_shared_environment",
   });
   if (requested.hasError()) {
@@ -532,13 +533,9 @@ void EditorRuntime::initialize() {
       activeDocument_->scene, activeDocument_->sceneRuntime,
       sceneEditorSelectionState_, [this]() { return timeSeconds(); },
       [this]() { return advanceSimulationFrameIndex(); }, &pipelineMemory_);
-  auto *animationProvider = app_.getRenderPipeline().addProvider(
+  animationFrameProvider_ = app_.getRenderPipeline().addProvider(
       std::make_unique<AnimationSceneFrameProvider>(
           activeDocument_->sceneRuntime));
-  animationFrameProvider_ =
-      dynamic_cast<AnimationSceneFrameProvider *>(animationProvider);
-  NURI_ASSERT(animationFrameProvider_ != nullptr,
-              "Failed to register animation scene frame provider");
 
   auto bakeryResult = bakery::BakerySystem::create({
       .gpu = app_.getGPU(),
@@ -630,7 +627,7 @@ void EditorRuntime::shutdown() {
   activeDocument_->sceneRuntime.reset();
   activeDocument_->sceneRuntime.bindScene(nullptr);
   activeDocument_->scene.graph().clear();
-  if (isValidAssetHandle(sharedEnvironmentLoad_)) {
+  if (isValid(sharedEnvironmentLoad_)) {
     assets().cancel(sharedEnvironmentLoad_);
     sharedEnvironmentLoad_ = {};
   }
@@ -1097,10 +1094,10 @@ std::optional<BoundingBox> EditorRuntime::computeImportedPrefabBounds(
   bool hasBounds = false;
   for (const ScenePrefabRenderable &renderable : sceneIn.prefab.renderables) {
     if (renderable.nodeIndex >= worldMatrices.size() ||
-        renderable.meshIndex >= sceneIn.assets.models.size()) {
+        renderable.meshAssetIndex >= sceneIn.assets.models.size()) {
       continue;
     }
-    const ModelRef modelRef = sceneIn.assets.models[renderable.meshIndex];
+    const ModelRef modelRef = sceneIn.assets.models[renderable.meshAssetIndex];
     const ModelRecord *modelRecord = resources().tryGet(modelRef);
     if (modelRecord == nullptr || modelRecord->model == nullptr) {
       continue;
@@ -1132,14 +1129,14 @@ std::optional<BoundingBox> EditorRuntime::computeImportedPrefabNodeBounds(
   bool hasBounds = false;
   for (const ScenePrefabRenderable &renderable : sceneIn.prefab.renderables) {
     if (renderable.nodeIndex >= worldMatrices.size() ||
-        renderable.meshIndex >= sceneIn.assets.models.size()) {
+        renderable.meshAssetIndex >= sceneIn.assets.models.size()) {
       continue;
     }
     const ScenePrefabNode &node = sceneIn.prefab.nodes[renderable.nodeIndex];
     if (node.name != nodeName) {
       continue;
     }
-    const ModelRef modelRef = sceneIn.assets.models[renderable.meshIndex];
+    const ModelRef modelRef = sceneIn.assets.models[renderable.meshAssetIndex];
     const ModelRecord *modelRecord = resources().tryGet(modelRef);
     if (modelRecord == nullptr || modelRecord->model == nullptr) {
       continue;
@@ -1414,23 +1411,15 @@ void EditorRuntime::initializeTextSystem() {
   textSystem_ = std::move(textSystemResult.value());
   NURI_ASSERT(textSystem_ != nullptr, "Text system was not created");
 
-  auto *text3DFeature = app_.getRenderPipeline().addFeature(
-      std::make_unique<Text3DFeature>(*textSystem_));
-  NURI_ASSERT(text3DFeature != nullptr, "Failed to register 3D text feature");
-  auto *text2DFeature = app_.getRenderPipeline().addFeature(
-      std::make_unique<Text2DFeature>(*textSystem_));
-  NURI_ASSERT(text2DFeature != nullptr, "Failed to register 2D text feature");
+  registerText3DStage(app_.getRenderPipeline(), *textSystem_);
+  registerText2DStage(app_.getRenderPipeline(), *textSystem_);
 }
 
 void EditorRuntime::initializeEditorRenderFeature() {
   if (editorRenderFeature_ != nullptr) {
     return;
   }
-  auto feature = std::make_unique<EditorOverlayFeature>();
-  editorRenderFeature_ = feature.get();
-  auto *registered = app_.getRenderPipeline().addFeature(std::move(feature));
-  NURI_ASSERT(registered != nullptr,
-              "Failed to register editor overlay feature");
+  editorRenderFeature_ = registerEditorOverlayStage(app_.getRenderPipeline());
 }
 
 void EditorRuntime::initializeEditorOverlay() {
@@ -1626,12 +1615,7 @@ void EditorRuntime::queueTextSamples() {
   if (textSystem_ == nullptr) {
     return;
   }
-  auto begin = textSystem_->renderer().beginFrame(frameContext_.frameIndex);
-  if (begin.hasError()) {
-    NURI_LOG_WARNING("EditorRuntime: failed to begin text frame: %s",
-                     begin.error().c_str());
-    return;
-  }
+  textSystem_->beginFrame(frameContext_.frameIndex);
 
   const FontHandle defaultFont = textSystem_->defaultFont();
   if (!isValid(defaultFont)) {
@@ -1655,7 +1639,7 @@ bool EditorRuntime::enqueue2DTextSamples(FontHandle defaultFont,
                                          std::pmr::memory_resource &scratch) {
   auto enqueueSample =
       [&](const Text2DDesc &sample) -> std::optional<TextBounds> {
-    auto enqueue = textSystem_->renderer().enqueue2D(sample, scratch);
+    auto enqueue = textSystem_->enqueue2D(sample, scratch);
     return enqueue.hasError() ? std::nullopt
                               : std::optional<TextBounds>(enqueue.value());
   };
@@ -1710,7 +1694,7 @@ bool EditorRuntime::enqueue3DTextSamples(FontHandle defaultFont,
                                          std::pmr::memory_resource &scratch) {
   auto enqueueSample =
       [&](const Text3DDesc &sample) -> std::optional<TextBounds> {
-    auto enqueue = textSystem_->renderer().enqueue3D(sample, scratch);
+    auto enqueue = textSystem_->enqueue3D(sample, scratch);
     return enqueue.hasError() ? std::nullopt
                               : std::optional<TextBounds>(enqueue.value());
   };

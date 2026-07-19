@@ -3,8 +3,8 @@
 #include "nuri/core/event_manager.h"
 #include "nuri/core/log.h"
 #include "nuri/core/result.h"
+#include "nuri/math/utils.h"
 #include "nuri/utils/frame_time_display.h"
-#include "nuri/utils/utils.h"
 
 #include <chrono>
 #include <cstdint>

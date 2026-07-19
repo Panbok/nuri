@@ -1,7 +1,5 @@
-#include "nuri/pch.h"
-
 #include "nuri/core/thread_priority.h"
-
+#include "nuri/pch.h"
 #if defined(_WIN32)
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -15,7 +13,6 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 #endif
-
 namespace nuri {
 
 void setCurrentThreadBackgroundPriority() noexcept {
@@ -24,18 +21,6 @@ void setCurrentThreadBackgroundPriority() noexcept {
 #elif defined(__linux__)
   const auto threadId = static_cast<id_t>(::syscall(SYS_gettid));
   (void)::setpriority(PRIO_PROCESS, threadId, 5);
-#endif
-}
-
-void setCurrentThreadInteractivePriority() noexcept {
-#if defined(_WIN32)
-  (void)::SetThreadPriority(::GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
-#endif
-}
-
-void setCurrentThreadNormalPriority() noexcept {
-#if defined(_WIN32)
-  (void)::SetThreadPriority(::GetCurrentThread(), THREAD_PRIORITY_NORMAL);
 #endif
 }
 

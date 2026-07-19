@@ -1,9 +1,6 @@
 #pragma once
-
 #include "nuri/gfx/gpu_types.h"
-
 #include <vector>
-
 namespace nuri {
 
 struct BufferDesc {
@@ -41,11 +38,12 @@ struct SamplerDesc {
   uint8_t maxAnisotropy = 1;
   bool depthCompareEnabled = false;
   CompareOp depthCompareOp = CompareOp::LessEqual;
+  constexpr bool operator==(const SamplerDesc &) const noexcept = default;
 };
 
 struct ShaderDesc {
   std::string_view moduleName{};
-  std::string_view source{}; // GLSL source code
+  std::string_view source{};
   ShaderStage stage = ShaderStage::Vertex;
 };
 
@@ -69,9 +67,6 @@ struct RenderPipelineDesc {
   bool blendEnabled = false;
   SpecializationInfo specInfo{};
   RasterPipelineState rasterState{};
-  // Additional immutable raster variants expected by this pipeline. Backends
-  // that bake raster state create these synchronously; dynamic-state backends
-  // may ignore the declaration.
   std::span<const RasterPipelineState> prewarmRasterStates{};
 };
 

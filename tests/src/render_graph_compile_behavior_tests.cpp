@@ -228,7 +228,7 @@ TEST(RenderGraphCompileBehaviorTest,
        .buffer = countResult.value()},
   }};
 
-  RenderGraphPreparedGraphicsPassDesc desc{};
+  RenderGraphGraphicsPassDesc desc{};
   desc.meshDispatches =
       std::span<const MeshDispatchItem>(dispatches.data(), dispatches.size());
   desc.meshDispatchBufferBindings =
@@ -236,7 +236,7 @@ TEST(RenderGraphCompileBehaviorTest,
           bindings.data(), bindings.size());
   desc.debugLabel = "mesh_indirect_transient";
 
-  auto passResult = builder.addPreparedGraphicsPass(desc);
+  auto passResult = builder.addGraphicsPass(desc);
   ASSERT_FALSE(passResult.hasError()) << passResult.error();
 
   auto compileResult = compileBuilder(builder);

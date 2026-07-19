@@ -1,14 +1,11 @@
 #pragma once
-
+#include "nuri/core/result.h"
+#include "nuri/text/font_types.h"
 #include <cstddef>
 #include <cstdint>
 #include <span>
 #include <string>
 #include <vector>
-
-#include "nuri/core/result.h"
-#include "nuri/text/font_types.h"
-
 namespace nuri {
 
 struct NFontBinaryCmapEntry {

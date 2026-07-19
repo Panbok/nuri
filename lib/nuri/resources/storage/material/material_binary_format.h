@@ -1,9 +1,6 @@
 #pragma once
-
 #include <array>
 #include <cstdint>
-#include <type_traits>
-
 namespace nuri {
 
 constexpr uint16_t kMaterialBinaryFormatMajorVersion = 5;
@@ -27,6 +24,4 @@ struct MaterialBinaryHeader {
 #pragma pack(pop)
 
 static_assert(sizeof(MaterialBinaryHeader) == 48);
-static_assert(std::is_trivially_copyable_v<MaterialBinaryHeader>);
-
 } // namespace nuri

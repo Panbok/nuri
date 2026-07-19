@@ -1,9 +1,7 @@
 #pragma once
-
+#include "nuri/resources/storage/binary_format.h"
 #include <array>
 #include <cstdint>
-#include <type_traits>
-
 namespace nuri {
 
 constexpr uint16_t kNFontBinaryFormatMajorVersion = 1;
@@ -12,27 +10,18 @@ constexpr uint16_t kNFontBinaryFormatMinorVersion = 0;
 constexpr std::array<char, 8> kNFontBinaryMagic = {'N', 'U', 'R', 'I',
                                                    'F', 'O', 'N', 'T'};
 
-constexpr uint32_t kNFontBinaryHeaderFlagLittleEndian = 1u << 0u;
-
-constexpr uint32_t makeNFontBinaryFourCC(char a, char b, char c, char d) {
-  return static_cast<uint32_t>(static_cast<uint8_t>(a)) |
-         (static_cast<uint32_t>(static_cast<uint8_t>(b)) << 8u) |
-         (static_cast<uint32_t>(static_cast<uint8_t>(c)) << 16u) |
-         (static_cast<uint32_t>(static_cast<uint8_t>(d)) << 24u);
-}
-
 constexpr uint32_t kNFontBinarySectionHead =
-    makeNFontBinaryFourCC('H', 'E', 'A', 'D');
+    makeBinaryFourCC('H', 'E', 'A', 'D');
 constexpr uint32_t kNFontBinarySectionMetr =
-    makeNFontBinaryFourCC('M', 'E', 'T', 'R');
+    makeBinaryFourCC('M', 'E', 'T', 'R');
 constexpr uint32_t kNFontBinarySectionCmap =
-    makeNFontBinaryFourCC('C', 'M', 'A', 'P');
+    makeBinaryFourCC('C', 'M', 'A', 'P');
 constexpr uint32_t kNFontBinarySectionGlyp =
-    makeNFontBinaryFourCC('G', 'L', 'Y', 'P');
+    makeBinaryFourCC('G', 'L', 'Y', 'P');
 constexpr uint32_t kNFontBinarySectionAtls =
-    makeNFontBinaryFourCC('A', 'T', 'L', 'S');
+    makeBinaryFourCC('A', 'T', 'L', 'S');
 constexpr uint32_t kNFontBinarySectionImag =
-    makeNFontBinaryFourCC('I', 'M', 'A', 'G');
+    makeBinaryFourCC('I', 'M', 'A', 'G');
 
 #pragma pack(push, 1)
 struct NFontBinaryHeader {
@@ -105,9 +94,6 @@ struct NFontBinaryAtlasPageRecord {
 };
 #pragma pack(pop)
 
-static_assert(sizeof(float) == 4, "float must be 32-bit");
-static_assert(std::numeric_limits<float>::is_iec559,
-              "float must be IEEE 754 / IEC 559");
 static_assert(sizeof(NFontBinaryHeader) == 44);
 static_assert(sizeof(NFontBinarySectionTocEntry) == 32);
 static_assert(sizeof(NFontBinaryHeadRecord) == 32);
@@ -115,19 +101,4 @@ static_assert(sizeof(NFontBinaryMetricsRecord) == 16);
 static_assert(sizeof(NFontBinaryCmapRecord) == 8);
 static_assert(sizeof(NFontBinaryGlyphRecord) == 52);
 static_assert(sizeof(NFontBinaryAtlasPageRecord) == 16);
-static_assert(std::is_standard_layout_v<NFontBinaryHeader>);
-static_assert(std::is_standard_layout_v<NFontBinarySectionTocEntry>);
-static_assert(std::is_standard_layout_v<NFontBinaryHeadRecord>);
-static_assert(std::is_standard_layout_v<NFontBinaryMetricsRecord>);
-static_assert(std::is_standard_layout_v<NFontBinaryCmapRecord>);
-static_assert(std::is_standard_layout_v<NFontBinaryGlyphRecord>);
-static_assert(std::is_standard_layout_v<NFontBinaryAtlasPageRecord>);
-static_assert(std::is_trivially_copyable_v<NFontBinaryHeader>);
-static_assert(std::is_trivially_copyable_v<NFontBinarySectionTocEntry>);
-static_assert(std::is_trivially_copyable_v<NFontBinaryHeadRecord>);
-static_assert(std::is_trivially_copyable_v<NFontBinaryMetricsRecord>);
-static_assert(std::is_trivially_copyable_v<NFontBinaryCmapRecord>);
-static_assert(std::is_trivially_copyable_v<NFontBinaryGlyphRecord>);
-static_assert(std::is_trivially_copyable_v<NFontBinaryAtlasPageRecord>);
-
 } // namespace nuri

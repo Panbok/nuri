@@ -1,15 +1,11 @@
-#include "nuri/pch.h"
-
 #include "nuri/gfx/sim/animation_scene_frame_provider.h"
-
+#include "nuri/pch.h"
 #include "nuri/scene_runtime/scene_runtime_host.h"
-
 namespace nuri {
 
 Result<bool, std::string>
 AnimationSceneFrameProvider::prepare(FrameBuildContext &ctx) {
   ctx.frame.sharedResources.animationSceneGpuData.reset();
-
   if (runtime_ == nullptr) {
     return Result<bool, std::string>::makeResult(true);
   }

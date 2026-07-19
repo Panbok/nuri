@@ -1,17 +1,12 @@
-#include "nuri/pch.h"
-
 #include "nuri/resources/async/asset_cpu_scheduler.h"
-
 #include "nuri/core/log.h"
 #include "nuri/core/profiling.h"
-
+#include "nuri/pch.h"
 #include <algorithm>
 #include <exception>
 #include <limits>
-
 namespace nuri {
 namespace {
-
 [[nodiscard]] uint32_t
 resolveWorkerCount(const AssetCpuSchedulerConfig &config) noexcept {
   if (config.workerCount != 0u) {
@@ -22,17 +17,14 @@ resolveWorkerCount(const AssetCpuSchedulerConfig &config) noexcept {
                           ? hardware - config.reservedLogicalThreads
                           : 1u);
 }
-
 [[nodiscard]] size_t priorityIndex(AssetPriority priority) noexcept {
   return std::min(static_cast<size_t>(priority),
                   static_cast<size_t>(AssetPriority::Background));
 }
-
 [[nodiscard]] size_t workClassIndex(AssetWorkClass workClass) noexcept {
   return std::min(static_cast<size_t>(workClass),
                   static_cast<size_t>(AssetWorkClass::GpuMaterialization));
 }
-
 } // namespace
 
 AssetCpuScheduler::AssetCpuScheduler(AssetCpuSchedulerConfig config)
@@ -77,23 +69,17 @@ AssetCpuScheduler::enqueue(AssetCpuJob job) {
     return Result<AssetCpuTaskHandle, std::string>::makeError(
         "AssetCpuScheduler::enqueue: execute callback is empty");
   }
-
   std::lock_guard lock(mutex_);
   if (stopping_) {
     return Result<AssetCpuTaskHandle, std::string>::makeError(
         "AssetCpuScheduler::enqueue: scheduler is stopping");
   }
-  if (queuedJobs_ + runningJobs_ >= config_.maxInFlightJobs) {
+  if (queuedJobs_ + runningJobs_ >= config_.maxInFlightJobs ||
+      job.estimatedBytes > config_.maxInFlightBytes) {
     ++rejectedJobs_;
     return Result<AssetCpuTaskHandle, std::string>::makeError(
-        "AssetCpuScheduler::enqueue: in-flight job budget exhausted");
+        "AssetCpuScheduler::enqueue: in-flight budget exhausted");
   }
-  if (job.estimatedBytes > config_.maxInFlightBytes) {
-    ++rejectedJobs_;
-    return Result<AssetCpuTaskHandle, std::string>::makeError(
-        "AssetCpuScheduler::enqueue: job exceeds the in-flight byte budget");
-  }
-
   const AssetCpuTaskHandle handle{.value = nextTaskId_++};
   auto control = std::make_shared<JobControl>();
   control->priority = job.priority;
@@ -110,21 +96,17 @@ AssetCpuScheduler::enqueue(AssetCpuJob job) {
 }
 
 bool AssetCpuScheduler::cancel(AssetCpuTaskHandle handle) {
-  if (handle.value == 0u) {
-    return false;
-  }
   std::lock_guard lock(mutex_);
   auto it = controls_.find(handle.value);
   if (it == controls_.end()) {
     return false;
   }
-  const std::shared_ptr<JobControl> control = it->second.lock();
-  return control != nullptr && control->stop.request_stop();
+  return it->second.lock()->stop.request_stop();
 }
 
 bool AssetCpuScheduler::setPriority(AssetCpuTaskHandle handle,
                                     AssetPriority priority) {
-  if (handle.value == 0u || priority == AssetPriority::Count) {
+  if (priority == AssetPriority::Count) {
     return false;
   }
   std::lock_guard lock(mutex_);
@@ -133,13 +115,9 @@ bool AssetCpuScheduler::setPriority(AssetCpuTaskHandle handle,
     return false;
   }
   const std::shared_ptr<JobControl> control = controlIt->second.lock();
-  if (!control) {
-    return false;
-  }
   if (control->priority == priority) {
     return true;
   }
-
   for (auto &queue : queues_) {
     auto jobIt = std::find_if(
         queue.begin(), queue.end(),
@@ -155,7 +133,6 @@ bool AssetCpuScheduler::setPriority(AssetCpuTaskHandle handle,
     workCv_.notify_one();
     return true;
   }
-
   control->priority = priority;
   return true;
 }
@@ -230,11 +207,6 @@ AssetCpuSchedulerStats AssetCpuScheduler::stats() const {
   };
 }
 
-bool AssetCpuScheduler::hasQueuedJobsLocked() const noexcept {
-  return std::any_of(queues_.begin(), queues_.end(),
-                     [](const auto &queue) { return !queue.empty(); });
-}
-
 bool AssetCpuScheduler::hasRunnableJobLocked() const noexcept {
   if (runningJobs_ >= activeWorkerLimit_) {
     return false;
@@ -253,8 +225,6 @@ bool AssetCpuScheduler::hasRunnableJobLocked() const noexcept {
 }
 
 AssetCpuScheduler::QueuedJob AssetCpuScheduler::popNextJobLocked() {
-  NURI_ASSERT(runningJobs_ < activeWorkerLimit_,
-              "AssetCpuScheduler::popNextJobLocked: worker limit reached");
   for (auto &queue : queues_) {
     auto jobIt = std::find_if(
         queue.begin(), queue.end(), [this](const QueuedJob &queued) {
@@ -275,7 +245,6 @@ AssetCpuScheduler::QueuedJob AssetCpuScheduler::popNextJobLocked() {
     inFlightBytes_ += job.job.estimatedBytes;
     return job;
   }
-  NURI_ASSERT(false, "AssetCpuScheduler::popNextJobLocked: no runnable job");
   return {};
 }
 
@@ -289,12 +258,11 @@ void AssetCpuScheduler::workerMain(std::stop_token stopToken,
       std::unique_lock lock(mutex_);
       workCv_.wait(lock, stopToken,
                    [this] { return stopping_ || hasRunnableJobLocked(); });
-      if (stopToken.stop_requested() || (stopping_ && !hasQueuedJobsLocked())) {
+      if (stopToken.stop_requested() || (stopping_ && queuedJobs_ == 0u)) {
         break;
       }
       queued = popNextJobLocked();
     }
-
     const bool cancelledBeforeRun = queued.control->stop.stop_requested();
     if (cancelledBeforeRun) {
       if (queued.job.onCancelled) {
@@ -314,15 +282,10 @@ void AssetCpuScheduler::workerMain(std::stop_token stopToken,
                        queued.job.debugName.c_str());
       }
     }
-
     {
       std::lock_guard lock(mutex_);
-      NURI_ASSERT(runningJobs_ > 0u,
-                  "AssetCpuScheduler: running job count underflow");
       --runningJobs_;
       const size_t classIndex = workClassIndex(queued.job.workClass);
-      NURI_ASSERT(runningByClass_[classIndex] > 0u,
-                  "AssetCpuScheduler: running work-class count underflow");
       --runningByClass_[classIndex];
       inFlightBytes_ -= queued.job.estimatedBytes;
       controls_.erase(queued.handle.value);

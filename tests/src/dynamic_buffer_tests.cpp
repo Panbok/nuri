@@ -82,7 +82,7 @@ TEST(DynamicBufferTest, GrowthIsAlignedGeometricAndNeverWaitsForIdle) {
   EXPECT_EQ(gpu.destroyedBufferCount, 1u);
   EXPECT_EQ(gpu.waitIdleCallCount, 0u);
 
-  retireDynamicBuffer(gpu, slot);
+  retireDynamicBuffer(slot);
   EXPECT_EQ(slot.buffer, nullptr);
   EXPECT_EQ(slot.capacityBytes, 0u);
   EXPECT_EQ(gpu.destroyedBufferCount, 2u);
@@ -111,7 +111,7 @@ TEST(DynamicBufferTest, FailedGrowthPreservesPublishedBuffer) {
   EXPECT_EQ(gpu.destroyedBufferCount, 0u);
   EXPECT_EQ(gpu.waitIdleCallCount, 0u);
 
-  retireDynamicBuffer(gpu, slot);
+  retireDynamicBuffer(slot);
 }
 
 TEST(OwnedBufferTest, ScopeExitDestroysExactlyOnce) {

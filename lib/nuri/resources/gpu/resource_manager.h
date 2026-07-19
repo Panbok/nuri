@@ -1,5 +1,4 @@
 #pragma once
-
 #include "nuri/core/containers/hash_map.h"
 #include "nuri/core/containers/slot_pool.h"
 #include "nuri/core/result.h"
@@ -12,7 +11,6 @@
 #include "nuri/resources/gpu/texture.h"
 #include "nuri/resources/storage/texture/dds_texture_pack.h"
 #include "nuri/scene/scene_prefab.h"
-
 #include <cstdint>
 #include <limits>
 #include <memory>
@@ -20,8 +18,8 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <variant>
 #include <vector>
-
 namespace nuri {
 
 struct NURI_API TextureRequest {
@@ -41,70 +39,20 @@ struct NURI_API ModelRequest {
 
 struct NURI_API MaterialRequest {
   MaterialDesc desc{};
-  struct TextureRefs {
-    TextureRef baseColor = kInvalidTextureRef;
-    TextureRef metallicRoughness = kInvalidTextureRef;
-    TextureRef normal = kInvalidTextureRef;
-    TextureRef occlusion = kInvalidTextureRef;
-    TextureRef emissive = kInvalidTextureRef;
-    TextureRef clearcoat = kInvalidTextureRef;
-    TextureRef clearcoatRoughness = kInvalidTextureRef;
-    TextureRef clearcoatNormal = kInvalidTextureRef;
-    TextureRef specular = kInvalidTextureRef;
-    TextureRef specularColor = kInvalidTextureRef;
-    TextureRef sheenColor = kInvalidTextureRef;
-    TextureRef sheenRoughness = kInvalidTextureRef;
-    TextureRef transmission = kInvalidTextureRef;
-    TextureRef thickness = kInvalidTextureRef;
-  } textureRefs{};
+  using TextureRefs = MaterialTextureSlots<TextureRef>;
+  TextureRefs textureRefs{};
   std::string debugName{};
   std::string sourceIdentity{};
 };
 
 template <typename Fn>
-constexpr void forEachMaterialTextureRef(
-    const MaterialRequest::TextureRefs &refs,
-    Fn &&fn) noexcept(noexcept(fn(refs.baseColor)) &&
-                      noexcept(fn(refs.metallicRoughness)) &&
-                      noexcept(fn(refs.normal)) &&
-                      noexcept(fn(refs.occlusion)) &&
-                      noexcept(fn(refs.emissive)) &&
-                      noexcept(fn(refs.clearcoat)) &&
-                      noexcept(fn(refs.clearcoatRoughness)) &&
-                      noexcept(fn(refs.clearcoatNormal)) &&
-                      noexcept(fn(refs.specular)) &&
-                      noexcept(fn(refs.specularColor)) &&
-                      noexcept(fn(refs.sheenColor)) &&
-                      noexcept(fn(refs.sheenRoughness)) &&
-                      noexcept(fn(refs.transmission)) &&
-                      noexcept(fn(refs.thickness))) {
-  // Keep this enumeration in sync with MaterialRequest::TextureRefs.
-  fn(refs.baseColor);
-  fn(refs.metallicRoughness);
-  fn(refs.normal);
-  fn(refs.occlusion);
-  fn(refs.emissive);
-  fn(refs.clearcoat);
-  fn(refs.clearcoatRoughness);
-  fn(refs.clearcoatNormal);
-  fn(refs.specular);
-  fn(refs.specularColor);
-  fn(refs.sheenColor);
-  fn(refs.sheenRoughness);
-  fn(refs.transmission);
-  fn(refs.thickness);
+constexpr void
+forEachMaterialTextureRef(const MaterialRequest::TextureRefs &refs,
+                          Fn &&fn) noexcept(noexcept(fn(refs.front()))) {
+  for (TextureRef ref : refs) {
+    fn(ref);
+  }
 }
-
-struct NURI_API ImportedMaterialRequest {
-  std::string modelPath{};
-  ModelRef model = kInvalidModelRef;
-  std::string debugNamePrefix{};
-};
-
-struct NURI_API ImportedMaterialBatch {
-  MaterialRef firstMaterial = kInvalidMaterialRef;
-  uint32_t createdMaterialCount = 0;
-};
 
 struct NURI_API TextureRecord {
   TextureRef ref = kInvalidTextureRef;
@@ -122,7 +70,6 @@ struct NURI_API TextureRecord {
   TextureLoadOptions loadOptions{};
   std::pmr::string canonicalPath;
   std::pmr::string debugName;
-
   explicit TextureRecord(
       std::pmr::memory_resource *memory = std::pmr::get_default_resource())
       : canonicalPath(memory), debugName(memory) {}
@@ -136,7 +83,6 @@ struct NURI_API MaterialRecord {
   uint64_t descHash = 0;
   std::pmr::string debugName;
   std::pmr::string sourceIdentity;
-
   explicit MaterialRecord(
       std::pmr::memory_resource *memory = std::pmr::get_default_resource())
       : debugName(memory), sourceIdentity(memory) {}
@@ -149,30 +95,21 @@ struct NURI_API ModelRecord {
   uint64_t importOptionsHash = 0;
   uint32_t sceneMeshIndex = std::numeric_limits<uint32_t>::max();
   std::pmr::vector<MaterialRef> sourceMaterialToRuntime;
-
   explicit ModelRecord(
       std::pmr::memory_resource *memory = std::pmr::get_default_resource())
       : canonicalPath(memory), sourceMaterialToRuntime(memory) {}
-
   [[nodiscard]] MaterialRef materialForSource(uint32_t sourceMaterial) const {
     if (sourceMaterial >= sourceMaterialToRuntime.size()) {
       return kInvalidMaterialRef;
     }
     return sourceMaterialToRuntime[sourceMaterial];
   }
-
   [[nodiscard]] MaterialRef materialForSubmesh(uint32_t submeshIndex) const;
 };
 
-// headers is indexed by material table slot; clearcoat, sheen, transmission,
-// and specular are compact extension tables keyed by indices stored in headers,
-// so those spans are not required to have equal lengths. Empty/missing
-// extension components use kInvalidMaterialExtensionIndex in headers. version
-// identifies the snapshot contents and changes when any table changes.
 struct NURI_API MaterialTableDirtyRange {
   uint32_t first = 0u;
   uint32_t count = 0u;
-
   [[nodiscard]] bool empty() const noexcept { return count == 0u; }
 };
 
@@ -198,27 +135,6 @@ struct NURI_API PoolStats {
   uint32_t retiredTextures = 0;
   uint32_t retiredMaterials = 0;
   uint32_t retiredModels = 0;
-  uint64_t textureCacheEntries = 0;
-  uint64_t materialCacheEntries = 0;
-  uint64_t modelCacheEntries = 0;
-  uint64_t textureAcquireHits = 0;
-  uint64_t textureAcquireMisses = 0;
-  uint64_t modelAcquireHits = 0;
-  uint64_t modelAcquireMisses = 0;
-  uint64_t materialAcquireHits = 0;
-  uint64_t materialAcquireMisses = 0;
-  uint64_t invalidTextureLookups = 0;
-  uint64_t staleTextureLookups = 0;
-  uint64_t invalidMaterialLookups = 0;
-  uint64_t staleMaterialLookups = 0;
-  uint64_t invalidModelLookups = 0;
-  uint64_t staleModelLookups = 0;
-  uint64_t staleTextureReleases = 0;
-  uint64_t staleMaterialReleases = 0;
-  uint64_t staleModelReleases = 0;
-  TextureCacheTelemetry textureCache{};
-  DdsTexturePackTelemetry ddsTexturePacks{};
-  TextureUploadTelemetry textureUploads{};
 };
 
 class NURI_API ResourceManager final {
@@ -227,12 +143,10 @@ public:
       GPUDevice &gpu,
       std::pmr::memory_resource *memory = std::pmr::get_default_resource());
   ~ResourceManager();
-
   ResourceManager(const ResourceManager &) = delete;
   ResourceManager &operator=(const ResourceManager &) = delete;
   ResourceManager(ResourceManager &&) = delete;
   ResourceManager &operator=(ResourceManager &&) = delete;
-
   [[nodiscard]] Result<TextureRef, std::string>
   acquireTexture(const TextureRequest &request);
   [[nodiscard]] std::optional<TextureRef>
@@ -251,26 +165,20 @@ public:
                         std::string_view debugName = {});
   [[nodiscard]] Result<MaterialRef, std::string>
   acquireMaterial(const MaterialRequest &request);
-  [[nodiscard]] Result<ImportedMaterialBatch, std::string>
-  acquireMaterialsFromModel(const ImportedMaterialRequest &request);
   [[nodiscard]] Result<ScenePrefabAssets, std::string>
   acquireScenePrefabAssets(const ScenePrefab &prefab);
-
   void retain(TextureRef ref);
   void release(TextureRef ref);
   void retain(ModelRef ref);
   void release(ModelRef ref);
   void retain(MaterialRef ref);
   void release(MaterialRef ref);
-
   [[nodiscard]] bool owns(TextureRef ref) const noexcept;
   [[nodiscard]] bool owns(ModelRef ref) const noexcept;
   [[nodiscard]] bool owns(MaterialRef ref) const noexcept;
-
   [[nodiscard]] const TextureRecord *tryGet(TextureRef ref) const;
   [[nodiscard]] const ModelRecord *tryGet(ModelRef ref) const;
   [[nodiscard]] const MaterialRecord *tryGet(MaterialRef ref) const;
-
   [[nodiscard]] MaterialTableSnapshot materialSnapshot() const noexcept {
     return MaterialTableSnapshot{
         .headers = std::span<const MaterialHeaderGpuData>(
@@ -305,14 +213,10 @@ public:
   [[nodiscard]] TextureCompressionCaps textureCompressionCaps() const {
     return gpu_.getTextureCompressionCaps();
   }
-
-  void beginFrame(uint64_t frameIndex);
   void beginPublicationBatch();
   void endPublicationBatch();
-  void collectGarbage(uint64_t completedFrameIndex);
-
+  void collectGarbage();
   [[nodiscard]] PoolStats stats() const;
-
   [[nodiscard]] uint32_t materialTableIndex(MaterialRef ref) const;
   [[nodiscard]] MaterialRef
   modelMaterialForSubmesh(ModelRef model, uint32_t submeshIndex) const;
@@ -321,64 +225,35 @@ public:
   void setModelMaterialForAllSources(ModelRef model, MaterialRef material);
 
 private:
-  static constexpr uint64_t kRetireFrameUnset =
-      std::numeric_limits<uint64_t>::max();
-
-  struct TextureSlot {
-    uint32_t refCount = 0;
-    uint64_t retireAfterFrame = kRetireFrameUnset;
-    OwnedTextureHandle owner;
-    TextureRecord record;
-
-    explicit TextureSlot(
-        std::pmr::memory_resource *memory = std::pmr::get_default_resource())
-        : record(memory) {}
+  template <typename Record, typename Ref, typename Owner = std::monostate>
+  struct ResourcePool {
+    struct Slot {
+      uint32_t refCount = 0;
+      Owner owner{};
+      Record record;
+      explicit Slot(std::pmr::memory_resource *memory) : record(memory) {}
+    };
+    explicit ResourcePool(std::pmr::memory_resource *memory)
+        : slots(memory), meta(memory), pending(memory) {}
+    std::pmr::vector<Slot> slots;
+    SlotPool<MaskedNonZeroGenerationPolicy<kResourceHandleGenerationMask>> meta;
+    std::pmr::vector<Ref> pending;
   };
-
-  struct MaterialSlot {
-    uint32_t refCount = 0;
-    uint64_t retireAfterFrame = kRetireFrameUnset;
-    MaterialRecord record;
-
-    explicit MaterialSlot(
-        std::pmr::memory_resource *memory = std::pmr::get_default_resource())
-        : record(memory) {}
-  };
-
-  struct ModelSlot {
-    uint32_t refCount = 0;
-    uint64_t retireAfterFrame = kRetireFrameUnset;
-    ModelRecord record;
-
-    explicit ModelSlot(
-        std::pmr::memory_resource *memory = std::pmr::get_default_resource())
-        : record(memory) {}
-  };
-
-  [[nodiscard]] uint64_t retireLagFrames() const;
-  [[nodiscard]] TextureRef makeTextureRefForSlot(uint32_t index) const;
-  [[nodiscard]] MaterialRef makeMaterialRefForSlot(uint32_t index) const;
-  [[nodiscard]] ModelRef makeModelRefForSlot(uint32_t index) const;
-
-  [[nodiscard]] TextureSlot *tryGetSlot(TextureRef ref);
-  [[nodiscard]] MaterialSlot *tryGetSlot(MaterialRef ref);
-  [[nodiscard]] ModelSlot *tryGetSlot(ModelRef ref);
-  [[nodiscard]] const TextureSlot *tryGetSlot(TextureRef ref) const;
-  [[nodiscard]] const MaterialSlot *tryGetSlot(MaterialRef ref) const;
-  [[nodiscard]] const ModelSlot *tryGetSlot(ModelRef ref) const;
-
-  [[nodiscard]] Result<SlotReservation, std::string> allocateTextureSlot();
+  using TexturePool =
+      ResourcePool<TextureRecord, TextureRef, OwnedTextureHandle>;
+  using MaterialPool = ResourcePool<MaterialRecord, MaterialRef>;
+  using ModelPool = ResourcePool<ModelRecord, ModelRef>;
+  using TextureSlot = TexturePool::Slot;
+  using MaterialSlot = MaterialPool::Slot;
+  using ModelSlot = ModelPool::Slot;
   [[nodiscard]] Result<SlotReservation, std::string> allocateMaterialSlot();
-  [[nodiscard]] Result<SlotReservation, std::string> allocateModelSlot();
-
   void destroyTextureSlot(uint32_t index);
-  void destroyMaterialSlot(uint32_t index, bool skipRebuild = false);
+  void destroyMaterialSlot(uint32_t index);
   void destroyModelSlot(uint32_t index);
   void rebuildPackedMaterialTables();
   void markMaterialTablesDirty();
   void markModelMaterialBindingsDirty();
   void flushPublicationVersions();
-
   [[nodiscard]] Result<TextureRef, std::string>
   storeAcquiredTexture(const TextureKey &key, std::string_view canonicalPath,
                        const TextureRequest &request,
@@ -388,26 +263,11 @@ private:
   storeAcquiredModel(const ModelKey &key, std::string_view canonicalPath,
                      uint64_t optionsHash, const ModelRequest &request,
                      std::unique_ptr<Model> model);
-
-  [[nodiscard]] static MaterialDesc
-  materialDescFromImported(const ImportedMaterialInfo &imported,
-                           const MaterialTextureHandles &textures);
-
   GPUDevice &gpu_;
   std::pmr::memory_resource *memory_ = std::pmr::get_default_resource();
-  uint64_t currentFrameIndex_ = 0;
-
-  std::pmr::vector<TextureSlot> textureSlots_;
-  std::pmr::vector<MaterialSlot> materialSlots_;
-  std::pmr::vector<ModelSlot> modelSlots_;
-
-  SlotPool<MaskedNonZeroGenerationPolicy<kResourceHandleGenerationMask>>
-      textureSlotsMeta_;
-  SlotPool<MaskedNonZeroGenerationPolicy<kResourceHandleGenerationMask>>
-      materialSlotsMeta_;
-  SlotPool<MaskedNonZeroGenerationPolicy<kResourceHandleGenerationMask>>
-      modelSlotsMeta_;
-
+  TexturePool textures_;
+  MaterialPool materials_;
+  ModelPool models_;
   std::pmr::vector<MaterialHeaderGpuData> materialHeaderTable_;
   std::pmr::vector<MaterialClearcoatGpuData> materialClearcoatTable_;
   std::pmr::vector<MaterialSheenGpuData> materialSheenTable_;
@@ -424,32 +284,9 @@ private:
   uint32_t publicationBatchDepth_ = 0u;
   bool materialTablesDirty_ = false;
   bool modelMaterialBindingsDirty_ = false;
-
   HashMap<TextureKey, TextureRef, TextureKeyHash> textureCache_;
   HashMap<MaterialKey, MaterialRef, MaterialKeyHash> materialCache_;
   HashMap<ModelKey, ModelRef, ModelKeyHash> modelCache_;
-
-  std::pmr::vector<TextureRef> pendingRetireTextures_;
-  std::pmr::vector<MaterialRef> pendingRetireMaterials_;
-  std::pmr::vector<ModelRef> pendingRetireModels_;
-  struct Telemetry {
-    uint64_t textureAcquireHits = 0;
-    uint64_t textureAcquireMisses = 0;
-    uint64_t modelAcquireHits = 0;
-    uint64_t modelAcquireMisses = 0;
-    uint64_t materialAcquireHits = 0;
-    uint64_t materialAcquireMisses = 0;
-    uint64_t invalidTextureLookups = 0;
-    uint64_t staleTextureLookups = 0;
-    uint64_t invalidMaterialLookups = 0;
-    uint64_t staleMaterialLookups = 0;
-    uint64_t invalidModelLookups = 0;
-    uint64_t staleModelLookups = 0;
-    uint64_t staleTextureReleases = 0;
-    uint64_t staleMaterialReleases = 0;
-    uint64_t staleModelReleases = 0;
-  };
-  mutable Telemetry telemetry_{};
 };
 
 } // namespace nuri

@@ -1,88 +1,50 @@
-#include "nuri/pch.h"
-
 #include "nuri/gfx/pipeline/render_pipeline.h"
-
 #include "nuri/core/profiling.h"
 #include "nuri/gfx/frame/presentation_aa_plan.h"
+#include "nuri/pch.h"
 #include "nuri/resources/gpu/resource_manager.h"
-
 namespace nuri {
 
 RenderPipeline::RenderPipeline(std::pmr::memory_resource *memory)
-    : providers_(memory != nullptr ? memory : std::pmr::get_default_resource()),
-      features_(memory != nullptr ? memory : std::pmr::get_default_resource()),
-      passes_(memory != nullptr ? memory : std::pmr::get_default_resource()) {}
+    : components_(memory ? memory : std::pmr::get_default_resource()),
+      stages_(memory ? memory : std::pmr::get_default_resource()) {}
 
-FrameDataProvider *
-RenderPipeline::addProvider(std::unique_ptr<FrameDataProvider> provider) {
-  if (!provider) {
-    return nullptr;
-  }
-  providers_.push_back(std::move(provider));
-  return providers_.back().get();
-}
-
-RenderFeature *
-RenderPipeline::addFeature(std::unique_ptr<RenderFeature> feature) {
-  if (!feature) {
-    return nullptr;
-  }
-  features_.push_back(std::move(feature));
-  registerFeaturePasses(*features_.back());
-  return features_.back().get();
+void RenderPipeline::addStage(PipelineStageDesc stage) {
+  auto position = stage.terminal ? stages_.end()
+                                 : std::find_if(stages_.begin(), stages_.end(),
+                                                [](const Stage &entry) {
+                                                  return entry.desc.terminal;
+                                                });
+  stages_.insert(position, Stage{.desc = stage});
 }
 
 std::optional<RenderPipelinePassInfo>
 RenderPipeline::passInfo(size_t index) const noexcept {
-  if (index >= passes_.size()) {
+  if (index >= stages_.size()) {
     return std::nullopt;
   }
-  const RegisteredPass &entry = passes_[index];
+  const Stage &entry = stages_[index];
   return RenderPipelinePassInfo{
       .index = index,
-      .featureName =
-          entry.feature != nullptr ? entry.feature->name() : std::string_view{},
-      .passName =
-          entry.pass != nullptr ? entry.pass->name() : std::string_view{},
+      .featureName = entry.desc.componentName,
+      .passName = entry.desc.name,
       .enabled = entry.enabled,
   };
 }
 
 std::optional<bool> RenderPipeline::isPassEnabled(size_t index) const noexcept {
-  if (index >= passes_.size()) {
+  if (index >= stages_.size()) {
     return std::nullopt;
   }
-  return passes_[index].enabled;
+  return stages_[index].enabled;
 }
 
 bool RenderPipeline::setPassEnabled(size_t index, bool enabled) noexcept {
-  if (index >= passes_.size()) {
+  if (index >= stages_.size()) {
     return false;
   }
-  passes_[index].enabled = enabled;
+  stages_[index].enabled = enabled;
   return true;
-}
-
-void RenderPipeline::registerFeaturePasses(RenderFeature &feature) {
-  size_t insertIndex = passes_.size();
-  if (!feature.isTerminalFeature()) {
-    while (insertIndex > 0u) {
-      const RegisteredPass &entry = passes_[insertIndex - 1u];
-      if (entry.feature == nullptr || !entry.feature->isTerminalFeature()) {
-        break;
-      }
-      --insertIndex;
-    }
-  }
-  for (RenderFeaturePass *const pass : feature.passes()) {
-    if (pass == nullptr) {
-      continue;
-    }
-    passes_.insert(
-        passes_.begin() + static_cast<std::ptrdiff_t>(insertIndex),
-        RegisteredPass{.feature = &feature, .pass = pass, .enabled = true});
-    ++insertIndex;
-  }
 }
 
 Result<bool, std::string>
@@ -90,7 +52,6 @@ RenderPipeline::buildRenderGraph(RenderFrameContext &frame,
                                  ResourceManager &resources,
                                  RenderGraphBuilder &graph) {
   NURI_PROFILER_FUNCTION();
-
   const PresentationAAGpuCapabilities gpuCapabilities =
       resources.gpuMultisampleCapabilities();
   AntiAliasingFrameMetrics &aaMetrics = frame.metrics.antiAliasing;
@@ -113,92 +74,52 @@ RenderPipeline::buildRenderGraph(RenderFrameContext &frame,
   frame.presentationAA = presentationPlan.value();
   aaMetrics.msaaAlphaCoveragePolicy = frame.presentationAA.alphaCoverage;
   aaMetrics.msaaTransparencyPolicy = frame.presentationAA.transparency;
-
   FrameBuildContext ctx{
       .frame = frame,
       .graph = graph,
       .resources = resources,
       .shared = frame.sharedResources,
   };
-
   {
-    NURI_PROFILER_ZONE("RenderPipeline.publish_features",
+    NURI_PROFILER_ZONE("RenderPipeline.prepare_components",
                        NURI_PROFILER_COLOR_CMD_COPY);
-    for (const std::unique_ptr<RenderFeature> &feature : features_) {
-      if (!feature) {
-        continue;
-      }
-      auto publishResult = feature->publishFrameData(ctx);
-      if (publishResult.hasError()) {
-        return Result<bool, std::string>::makeError(publishResult.error());
+    constexpr std::array phases{&PipelineComponentDesc::publish,
+                                &PipelineComponentDesc::provide,
+                                &PipelineComponentDesc::prepare};
+    for (auto phase : phases) {
+      for (Component &component : components_) {
+        PipelineFrameCallback callback = component.desc.*phase;
+        if (!callback) {
+          continue;
+        }
+        auto result = callback(component.owner.get(), ctx);
+        if (result.hasError()) {
+          return Result<bool, std::string>::makeError(result.error());
+        }
       }
     }
     NURI_PROFILER_ZONE_END();
   }
-
   {
-    NURI_PROFILER_ZONE("RenderPipeline.prepare_providers",
-                       NURI_PROFILER_COLOR_CMD_COPY);
-    for (const std::unique_ptr<FrameDataProvider> &provider : providers_) {
-      if (!provider) {
-        continue;
-      }
-      auto result = provider->prepare(ctx);
-      if (result.hasError()) {
-        return Result<bool, std::string>::makeError(result.error());
-      }
-    }
-    NURI_PROFILER_ZONE_END();
-  }
-
-  {
-    NURI_PROFILER_ZONE("RenderPipeline.prepare_features",
-                       NURI_PROFILER_COLOR_CMD_COPY);
-    for (const std::unique_ptr<RenderFeature> &feature : features_) {
-      if (!feature) {
-        continue;
-      }
-      auto prepareResult = feature->prepare(ctx);
-      if (prepareResult.hasError()) {
-        return Result<bool, std::string>::makeError(prepareResult.error());
-      }
-    }
-    NURI_PROFILER_ZONE_END();
-  }
-
-  {
-    NURI_PROFILER_ZONE("RenderPipeline.prepare_build_passes",
+    NURI_PROFILER_ZONE("RenderPipeline.build_stages",
                        NURI_PROFILER_COLOR_CMD_DRAW);
-    for (const RegisteredPass &entry : passes_) {
-      if (entry.feature == nullptr || entry.pass == nullptr || !entry.enabled) {
+    for (const Stage &entry : stages_) {
+      const PipelineStageDesc &stage = entry.desc;
+      if (!entry.enabled ||
+          (stage.enabled && !stage.enabled(stage.state, ctx))) {
         continue;
       }
-      RenderFeaturePass &pass = *entry.pass;
-      if (!pass.isEnabled(ctx)) {
-        continue;
-      }
-      {
-        NURI_PROFILER_ZONE("RenderPipeline.pass_prepare",
-                           NURI_PROFILER_COLOR_CMD_COPY);
-        auto prepareResult = pass.prepare(ctx);
-        if (prepareResult.hasError()) {
-          return Result<bool, std::string>::makeError(prepareResult.error());
+      for (PipelineFrameCallback callback : {stage.prepare, stage.build}) {
+        if (callback) {
+          auto result = callback(stage.state, ctx);
+          if (result.hasError()) {
+            return Result<bool, std::string>::makeError(result.error());
+          }
         }
-        NURI_PROFILER_ZONE_END();
-      }
-      {
-        NURI_PROFILER_ZONE("RenderPipeline.pass_build",
-                           NURI_PROFILER_COLOR_CMD_DRAW);
-        auto buildResult = pass.build(ctx);
-        if (buildResult.hasError()) {
-          return Result<bool, std::string>::makeError(buildResult.error());
-        }
-        NURI_PROFILER_ZONE_END();
       }
     }
     NURI_PROFILER_ZONE_END();
   }
-
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -218,11 +139,11 @@ Result<bool, std::string> RenderPipeline::prepareSceneStep(
       .renderHeight = renderHeight,
   };
   bool complete = true;
-  for (const std::unique_ptr<RenderFeature> &feature : features_) {
-    if (!feature) {
+  for (Component &component : components_) {
+    if (!component.desc.prepareScene) {
       continue;
     }
-    auto result = feature->prepareSceneStep(ctx);
+    auto result = component.desc.prepareScene(component.owner.get(), ctx);
     if (result.hasError()) {
       return Result<bool, std::string>::makeError(result.error());
     }
@@ -233,28 +154,18 @@ Result<bool, std::string> RenderPipeline::prepareSceneStep(
 
 void RenderPipeline::onFrameSubmitted(
     const RenderFrameContext &frame) noexcept {
-  for (const std::unique_ptr<FrameDataProvider> &provider : providers_) {
-    if (provider) {
-      provider->onFrameSubmitted(frame);
-    }
-  }
-  for (const std::unique_ptr<RenderFeature> &feature : features_) {
-    if (feature) {
-      feature->onFrameSubmitted(frame);
+  for (Component &component : components_) {
+    if (component.desc.submitted) {
+      component.desc.submitted(component.owner.get(), frame);
     }
   }
 }
 
 void RenderPipeline::onFrameAbandoned(
     const RenderFrameContext &frame) noexcept {
-  for (const std::unique_ptr<FrameDataProvider> &provider : providers_) {
-    if (provider) {
-      provider->onFrameAbandoned(frame);
-    }
-  }
-  for (const std::unique_ptr<RenderFeature> &feature : features_) {
-    if (feature) {
-      feature->onFrameAbandoned(frame);
+  for (Component &component : components_) {
+    if (component.desc.abandoned) {
+      component.desc.abandoned(component.owner.get(), frame);
     }
   }
 }

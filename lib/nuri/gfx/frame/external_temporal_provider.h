@@ -1,17 +1,13 @@
 #pragma once
-
 #include "nuri/core/result.h"
 #include "nuri/defines.h"
 #include "nuri/gfx/frame/history_registry.h"
 #include "nuri/gfx/gpu_types.h"
-
 #include <cstdint>
+#include <glm/glm.hpp>
 #include <memory>
 #include <string>
 #include <string_view>
-
-#include <glm/glm.hpp>
-
 namespace nuri {
 
 inline constexpr std::string_view kFidelityFxSdkTag = "v1.1.4";
@@ -152,7 +148,6 @@ struct ExternalTemporalProviderBackendFramePlan {
 class NURI_API ExternalTemporalProviderBackend {
 public:
   virtual ~ExternalTemporalProviderBackend() = default;
-
   [[nodiscard]] virtual ExternalTemporalProviderBackendProbe probe() const = 0;
   [[nodiscard]] virtual Result<ExternalTemporalProviderBackendFramePlan,
                                std::string>
@@ -171,11 +166,9 @@ validateExternalTemporalExecuteDesc(
 class NURI_API ExternalTemporalProvider {
 public:
   virtual ~ExternalTemporalProvider() = default;
-
   ExternalTemporalProvider(const ExternalTemporalProvider &) = delete;
   ExternalTemporalProvider &
   operator=(const ExternalTemporalProvider &) = delete;
-
   [[nodiscard]] virtual ExternalTemporalProviderProbe
   probe() const noexcept = 0;
   [[nodiscard]] virtual ExternalTemporalProviderCapabilities

@@ -5,7 +5,6 @@ project(nuri_editor)
 set(NURI_EDITOR_SOURCES
   ${CMAKE_SOURCE_DIR}/lib/nuri/resources/stb_image.cpp
   ${CMAKE_SOURCE_DIR}/lib/nuri/resources/storage/font/nfont_binary_codec.cpp
-  ${CMAKE_SOURCE_DIR}/lib/nuri/utils/fsp_counter.cpp
   src/bakery/bakery_system.cpp
   src/bakery/brdf_lut_baker.cpp
   src/bakery/envmap_prefilter_baker.cpp

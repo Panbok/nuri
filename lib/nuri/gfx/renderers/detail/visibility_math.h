@@ -1,16 +1,12 @@
 #pragma once
-
 #include "nuri/gfx/frame/render_frame_context.h"
 #include "nuri/math/types.h"
-
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
-#include <limits>
-
 #include <glm/glm.hpp>
-
+#include <limits>
 namespace nuri::visibility_detail {
 
 enum class DepthClipConvention : uint8_t {
@@ -49,7 +45,6 @@ buildFrustumPlanes(const glm::mat4 &viewProj,
   const glm::vec4 row1 = matrixRow(viewProj, 1u);
   const glm::vec4 row2 = matrixRow(viewProj, 2u);
   const glm::vec4 row3 = matrixRow(viewProj, 3u);
-
   FrustumPlanes out{};
   out.planes[0] = normalizePlane(row3 + row0);
   out.planes[1] = normalizePlane(row3 - row0);
@@ -117,7 +112,6 @@ classifyAabb(const FrustumPlanes &frustum,
     if (glm::dot(normal, positive) + plane.w < 0.0f) {
       return VisibilityClassification::Outside;
     }
-
     const glm::vec3 negative(normal.x >= 0.0f ? min.x : max.x,
                              normal.y >= 0.0f ? min.y : max.y,
                              normal.z >= 0.0f ? min.z : max.z);

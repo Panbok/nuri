@@ -236,8 +236,7 @@ private:
   std::vector<EditorSceneSelectionOption> sceneSelectionOptions_{};
   uint64_t sceneSelectionVersion_ = std::numeric_limits<uint64_t>::max();
   std::unique_ptr<EditorOverlayController> editorOverlay_{};
-  // Non-owning observer; the render pipeline owns the EditorOverlayFeature.
-  EditorOverlayFeature *editorRenderFeature_ = nullptr;
+  EditorOverlayPass *editorRenderFeature_ = nullptr;
   CameraHandle mainCameraHandle_{};
   // Transient per-frame render settings after frame-local overrides.
   RenderSettings frameRenderSettings_{};

@@ -1,14 +1,9 @@
-#include "nuri/pch.h"
-
 #include "nuri/gfx/visibility/visibility.h"
-
 #include "nuri/gfx/frame/presentation_aa_plan.h"
-
+#include "nuri/pch.h"
 #include <limits>
-
 namespace nuri {
 namespace {
-
 VisibilityExecutionMode
 resolveMainVisibilityMode(const RenderSettings &settings) noexcept {
   switch (sanitizeVisibilityCullingMode(settings.visibility.mainViewMode)) {
@@ -17,8 +12,6 @@ resolveMainVisibilityMode(const RenderSettings &settings) noexcept {
   case VisibilityCullingMode::CpuCoarse:
     return VisibilityExecutionMode::Cpu;
   case VisibilityCullingMode::Hybrid:
-    // Hybrid remains the authored compatibility name for the diagnostic path:
-    // GPU owns rendering while the CPU independently checks the visible list.
     return settings.visibility.enableGpuInstanceCulling
                ? VisibilityExecutionMode::GpuWithValidation
                : VisibilityExecutionMode::Cpu;
@@ -29,7 +22,6 @@ resolveMainVisibilityMode(const RenderSettings &settings) noexcept {
   }
   return VisibilityExecutionMode::Disabled;
 }
-
 } // namespace
 
 VisibilityPassResult::VisibilityPassResult(std::pmr::memory_resource *memory)
@@ -59,7 +51,6 @@ VisibilityPassResult VisibilityFrameState::evaluateCpu(
       std::min(candidates.size(),
                static_cast<size_t>(std::numeric_limits<uint32_t>::max())));
   result.visibleCandidateIndices.reserve(candidates.size());
-
   for (size_t i = 0; i < candidates.size(); ++i) {
     const VisibilityCandidate &candidate = candidates[i];
     bool visible = true;
@@ -74,7 +65,6 @@ VisibilityPassResult VisibilityFrameState::evaluateCpu(
         visible = visibility_detail::isVisible(classification);
       }
     }
-
     if (!visible) {
       ++result.cpuRejected;
       continue;
@@ -85,7 +75,6 @@ VisibilityPassResult VisibilityFrameState::evaluateCpu(
       ++result.uncertainVisible;
     }
   }
-
   result.cpuVisibleCandidates = static_cast<uint32_t>(
       std::min(result.visibleCandidateIndices.size(),
                static_cast<size_t>(std::numeric_limits<uint32_t>::max())));
@@ -143,7 +132,6 @@ makeVisibilityCandidateGpu(const VisibilityCandidate &candidate) noexcept {
       candidate.localBounds, candidate.worldFromLocal);
   const BoundingBox worldBounds =
       candidate.localBounds.getTransformed(candidate.worldFromLocal);
-
   VisibilityCandidateGpu out{};
   out.ids = glm::uvec4(candidate.renderableIndex, candidate.templateIndex,
                        candidate.submeshIndex, candidate.materialIndex);

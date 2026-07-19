@@ -1,5 +1,4 @@
 #pragma once
-
 #if defined(_WIN32)
 #if defined(NURI_SHARED)
 #if defined(NURI_EXPORTS)

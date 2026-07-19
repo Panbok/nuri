@@ -184,18 +184,16 @@ requestToolEnvironment(const ToolRuntimeDesc &runtime, Renderer &renderer,
     return Result<bool, std::string>::makeResult(true);
   }
   auto requested = renderer.assets().requestEnvironment(EnvironmentAssetRequest{
-      .cubemap = std::move(cubemap.value()),
-      .irradiance = std::move(irradiance.value()),
-      .prefilteredGgx = std::move(prefilteredGgx.value()),
-      .prefilteredCharlie = std::move(prefilteredCharlie.value()),
-      .brdfLut = std::move(brdfLut.value()),
+      .textures = {std::move(cubemap.value()), std::move(irradiance.value()),
+                   std::move(prefilteredGgx.value()),
+                   std::move(prefilteredCharlie.value()),
+                   std::move(brdfLut.value())},
       .priority = AssetPriority::Critical,
-      .cubemapOptional = !runtime.environment.cubemap.required,
-      .irradianceOptional = !runtime.environment.irradiance.required,
-      .prefilteredGgxOptional = !runtime.environment.prefilteredGgx.required,
-      .prefilteredCharlieOptional =
-          !runtime.environment.prefilteredCharlie.required,
-      .brdfLutOptional = !runtime.environment.brdfLut.required,
+      .optionalTextures = {!runtime.environment.cubemap.required,
+                           !runtime.environment.irradiance.required,
+                           !runtime.environment.prefilteredGgx.required,
+                           !runtime.environment.prefilteredCharlie.required,
+                           !runtime.environment.brdfLut.required},
       .debugName = "tool_environment",
   });
   if (requested.hasError()) {
@@ -719,11 +717,11 @@ uint32_t ToolRendererRuntime::swapchainImageCount() const noexcept {
 }
 ToolAssetLoadStatus ToolRendererRuntime::assetLoadStatus() const {
   ToolAssetLoadStatus status{};
-  status.sceneRequested = isValidAssetHandle(impl_->sceneLoad);
+  status.sceneRequested = isValid(impl_->sceneLoad);
   if (status.sceneRequested) {
     status.scene = impl_->renderer->assets().query(impl_->sceneLoad);
   }
-  status.environmentRequested = isValidAssetHandle(impl_->environmentLoad);
+  status.environmentRequested = isValid(impl_->environmentLoad);
   if (status.environmentRequested) {
     status.environment =
         impl_->renderer->assets().query(impl_->environmentLoad);

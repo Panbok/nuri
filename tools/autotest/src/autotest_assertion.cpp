@@ -369,8 +369,6 @@ void flattenAutotestRendererMetrics(std::map<std::string, double> &out,
             aa.motionVectorTextureCount);
   addMetric(out, "renderer.aa.motion_class_textures",
             aa.motionClassTextureCount);
-  addBoolMetric(out, "renderer.aa.motion_class_coverage_available",
-                aa.motionClassCoverageAvailable);
   addMetric(out, "renderer.aa.history_color_textures",
             aa.historyColorTextureCount);
   addMetric(out, "renderer.aa.motion_vector_allocations",

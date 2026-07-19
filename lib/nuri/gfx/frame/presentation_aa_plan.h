@@ -1,11 +1,8 @@
 #pragma once
-
 #include "nuri/core/result.h"
 #include "nuri/gfx/frame/render_frame_context.h"
-
 #include <string>
 #include <string_view>
-
 namespace nuri {
 
 [[nodiscard]] constexpr PresentationAAUnsupportedReason msaa4xUnsupportedReason(
@@ -51,13 +48,11 @@ buildPresentationAAPlan(
   sanitizeAntiAliasingSettings(settings.antiAliasing);
   sanitizeAmbientOcclusionSettings(settings.ambientOcclusion, settings.opaque,
                                    settings.antiAliasing);
-
   PresentationAAPlan plan{};
   const AntiAliasingMode mode = settings.antiAliasing.mode;
   const TemporalReconstructionProvider temporalProvider =
       sanitizeTemporalReconstructionProvider(
           settings.antiAliasing.temporalProvider);
-
   switch (mode) {
   case AntiAliasingMode::None:
     break;
@@ -111,24 +106,15 @@ buildPresentationAAPlan(
     plan.needsMotion = true;
     plan.needsReactiveMask = providerCapabilities.reactiveMask;
     plan.needsMotionClass = true;
-    // Legacy owns its historical invalid-history spatial fallback. Reference
-    // TAA is deliberately a temporal-only quality oracle: an invalid history
-    // sample must resolve to the unfiltered current input, not silently route
-    // through the legacy cleanup policy inherited by the quality presets.
     if (temporalProvider == TemporalReconstructionProvider::Legacy &&
         settings.antiAliasing.debug.spatialPostTaaCleanup) {
       plan.spatialCleanup = SpatialCleanupPoint::PreComposition;
     }
     break;
   }
-
   plan.gtaoTemporal = settings.ambientOcclusion.active &&
                       settings.ambientOcclusion.temporalAccumulation;
   plan.needsMotion = plan.needsMotion || plan.gtaoTemporal;
-  // GTAO is an independent temporal consumer. Until motion producers publish
-  // MotionClass directly, the early classification pass uses the reactive mask
-  // as the per-pixel invalid-correspondence input. Request both resources even
-  // when color reconstruction is disabled.
   plan.needsMotionClass = plan.needsMotionClass || plan.gtaoTemporal;
   plan.needsReactiveMask = plan.needsReactiveMask || plan.gtaoTemporal;
   plan.valid = true;
@@ -151,9 +137,6 @@ presentationAAPlanForFrame(const RenderFrameContext &frame) {
 
 [[nodiscard]] constexpr bool
 hasTemporalCameraContinuity(const CameraFrameState &camera) noexcept {
-  // historyValid is retained as a compatibility alias for callers which build
-  // feature contexts directly. Runtime frame construction publishes the
-  // provider-independent cameraContinuityValid bit.
   return camera.cameraContinuityValid || camera.historyValid;
 }
 

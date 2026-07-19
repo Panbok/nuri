@@ -1,14 +1,10 @@
 #pragma once
-
 #include "nuri/math/utils.h"
 #include "nuri/scene/light.h"
-
 #include <algorithm>
 #include <cmath>
-
 #include <glm/gtc/constants.hpp>
 #include <glm/gtc/quaternion.hpp>
-
 namespace nuri {
 
 inline constexpr float kLightBasisMinLength = 1.0e-6f;
@@ -18,7 +14,6 @@ rotationFromMatrixOrIdentity(const glm::mat4 &matrix) {
   glm::vec3 basisX(matrix[0].x, matrix[0].y, matrix[0].z);
   glm::vec3 basisY(matrix[1].x, matrix[1].y, matrix[1].z);
   glm::vec3 basisZ(matrix[2].x, matrix[2].y, matrix[2].z);
-
   const float xLength = glm::length(basisX);
   const float yLength = glm::length(basisY);
   const float zLength = glm::length(basisZ);
@@ -27,11 +22,9 @@ rotationFromMatrixOrIdentity(const glm::mat4 &matrix) {
       yLength <= kLightBasisMinLength || zLength <= kLightBasisMinLength) {
     return glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
   }
-
   basisX /= xLength;
   basisY /= yLength;
   basisZ /= zLength;
-
   glm::mat3 basis(1.0f);
   basis[0] = basisX;
   basis[1] = basisY;
@@ -50,7 +43,6 @@ rotationFromMatrixOrIdentity(const glm::mat4 &matrix) {
                              glm::vec3(0.0f));
   sanitized.intensity = sanitizeNonNegative(desc.intensity, 1.0f);
   sanitized.enabled = desc.enabled;
-
   switch (sanitized.type) {
   case LightType::Directional:
     sanitized.range = 0.0f;
@@ -77,7 +69,6 @@ rotationFromMatrixOrIdentity(const glm::mat4 &matrix) {
     sanitized.angularRadiusDegrees = 0.0f;
     break;
   }
-
   return sanitized;
 }
 

@@ -1,9 +1,6 @@
-#include "nuri/pch.h"
-
 #include "nuri/gfx/frame/history_registry.h"
-
+#include "nuri/pch.h"
 #include <algorithm>
-
 namespace nuri {
 
 Result<HistoryLease, std::string>
@@ -15,7 +12,6 @@ HistoryRegistry::prepareFrame(uint64_t frameIndex, uint32_t slotCount) {
     return Result<HistoryLease, std::string>::makeError(
         "HistoryRegistry::prepareFrame: prior frame is still pending");
   }
-
   const uint32_t safeSlotCount = std::max(slotCount, 1u);
   uint32_t writeSlot = static_cast<uint32_t>(frameIndex % safeSlotCount);
   if (committedValid_ && safeSlotCount > 1u && writeSlot == committedSlot_) {

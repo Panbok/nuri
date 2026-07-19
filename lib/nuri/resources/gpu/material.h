@@ -1,25 +1,19 @@
 #pragma once
-
 #include "nuri/core/result.h"
 #include "nuri/defines.h"
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/resources/cpu/material_data.h"
-
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <glm/glm.hpp>
 #include <limits>
 #include <memory>
 #include <string>
 #include <string_view>
 #include <type_traits>
-
-#include <glm/glm.hpp>
-
 namespace nuri {
 
-inline constexpr uint32_t kInvalidTextureBindlessIndex =
-    std::numeric_limits<uint32_t>::max();
 inline constexpr uint32_t kInvalidMaterialIndex =
     std::numeric_limits<uint32_t>::max();
 inline constexpr uint32_t kInvalidMaterialExtensionIndex =
@@ -35,61 +29,10 @@ enum MaterialFeatureBits : uint32_t {
   kMaterialFeatureSpecular = 1u << 5u,
 };
 
-enum MaterialTextureSlot : uint32_t {
-  kMaterialTextureSlotBaseColor = 0u,
-  kMaterialTextureSlotMetallicRoughness = 1u,
-  kMaterialTextureSlotNormal = 2u,
-  kMaterialTextureSlotOcclusion = 3u,
-  kMaterialTextureSlotEmissive = 4u,
-  kMaterialTextureSlotClearcoat = 5u,
-  kMaterialTextureSlotClearcoatRoughness = 6u,
-  kMaterialTextureSlotClearcoatNormal = 7u,
-  kMaterialTextureSlotSpecular = 8u,
-  kMaterialTextureSlotSpecularColor = 9u,
-  kMaterialTextureSlotSheenColor = 10u,
-  kMaterialTextureSlotSheenRoughness = 11u,
-  kMaterialTextureSlotTransmission = 12u,
-  kMaterialTextureSlotThickness = 13u,
-  kMaterialTextureSlotCount = 14u,
-};
-
-struct MaterialTextureHandles {
-  TextureHandle baseColor{};
-  TextureHandle metallicRoughness{};
-  TextureHandle normal{};
-  TextureHandle occlusion{};
-  TextureHandle emissive{};
-  TextureHandle clearcoat{};
-  TextureHandle clearcoatRoughness{};
-  TextureHandle clearcoatNormal{};
-  TextureHandle specular{};
-  TextureHandle specularColor{};
-  TextureHandle sheenColor{};
-  TextureHandle sheenRoughness{};
-  TextureHandle transmission{};
-  TextureHandle thickness{};
-};
-
-struct MaterialTextureUvSets {
-  uint32_t baseColor = 0;
-  uint32_t metallicRoughness = 0;
-  uint32_t normal = 0;
-  uint32_t occlusion = 0;
-  uint32_t emissive = 0;
-  uint32_t clearcoat = 0;
-  uint32_t clearcoatRoughness = 0;
-  uint32_t clearcoatNormal = 0;
-  uint32_t specular = 0;
-  uint32_t specularColor = 0;
-  uint32_t sheenColor = 0;
-  uint32_t sheenRoughness = 0;
-  uint32_t transmission = 0;
-  uint32_t thickness = 0;
-};
-
-struct MaterialTextureTransforms {
-  std::array<MaterialTextureTransformData, kMaterialTextureSlotCount> slots{};
-};
+using MaterialTextureHandles = MaterialTextureSlots<TextureHandle>;
+using MaterialTextureUvSets = MaterialTextureSlots<uint32_t>;
+using MaterialTextureTransforms =
+    MaterialTextureSlots<MaterialTextureTransformData>;
 
 struct MaterialDesc {
   MaterialWorkflow workflow = MaterialWorkflow::MetallicRoughness;
@@ -111,7 +54,7 @@ struct MaterialDesc {
   float thicknessFactor = 0.0f;
   glm::vec3 attenuationColor{1.0f, 1.0f, 1.0f};
   float attenuationDistance = 0.0f;
-  float ior = 1.5f; // Valid domain: {0} U [1, +inf); 0 keeps glTF compat mode.
+  float ior = 1.5f;
   float normalScale = 1.0f;
   float occlusionStrength = 1.0f;
   float alphaCutoff = 0.5f;
@@ -177,9 +120,7 @@ static_assert(sizeof(MaterialSheenGpuData) % 16u == 0u);
 static_assert(std::is_trivially_copyable_v<MaterialSheenGpuData>);
 
 struct alignas(16) MaterialTransmissionGpuData {
-  glm::vec4 transmissionThicknessDistance{
-      0.0f, 0.0f, 0.0f,
-      0.0f}; // (transmission, thickness, attenuationDistance, reserved)
+  glm::vec4 transmissionThicknessDistance{0.0f, 0.0f, 0.0f, 0.0f};
   glm::vec4 attenuationColorReserved{1.0f, 1.0f, 1.0f, 0.0f};
   glm::uvec4 textureIndices{kInvalidTextureBindlessIndex,
                             kInvalidTextureBindlessIndex, 0u, 0u};
@@ -226,26 +167,21 @@ struct MaterialPackedTablesEntry {
 class NURI_API Material final {
 public:
   ~Material() = default;
-
   Material(const Material &) = delete;
   Material &operator=(const Material &) = delete;
   Material(Material &&) = delete;
   Material &operator=(Material &&) = delete;
-
   [[nodiscard]] static Result<std::unique_ptr<Material>, std::string>
   create(GPUDevice &gpu, const MaterialDesc &desc,
          std::string_view debugName = {});
-
   [[nodiscard]] static MaterialDesc
   descFromImported(const MaterialData &materialData,
                    const MaterialTextureHandles &textures = {});
   static void finalizeDesc(MaterialDesc &desc);
-
   [[nodiscard]] static Result<std::unique_ptr<Material>, std::string>
   createFromImported(GPUDevice &gpu, const MaterialData &materialData,
                      const MaterialTextureHandles &textures,
                      std::string_view debugName = {});
-
   [[nodiscard]] const MaterialDesc &desc() const noexcept { return desc_; }
   [[nodiscard]] const MaterialPackedGpuData &packedGpuData() const noexcept {
     return packedGpuData_;
@@ -259,7 +195,6 @@ private:
            std::string debugName)
       : desc_(desc), packedGpuData_(std::move(packedGpuData)),
         debugName_(std::move(debugName)) {}
-
   MaterialDesc desc_{};
   MaterialPackedGpuData packedGpuData_{};
   std::string debugName_{};

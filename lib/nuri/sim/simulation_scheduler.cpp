@@ -1,27 +1,20 @@
-#include "nuri/pch.h"
-
 #include "nuri/sim/simulation_scheduler.h"
-
 #include "nuri/core/log.h"
+#include "nuri/pch.h"
 #include "nuri/scene_runtime/scene_runtime_host.h"
-#include "nuri/sim/backends/simulation_backend.h"
 #include "nuri/sim/simulation_execution_context.h"
 #include "nuri/sim/simulation_registry.h"
-
 #include <algorithm>
 #include <cmath>
 #include <ranges>
-
 namespace nuri {
 namespace {
-
 [[nodiscard]] bool
 isSimulationRunnable(const SimulationRegistry::Record &record) noexcept {
-  return record.enabled && !record.faulted &&
+  return record.enabled && !record.stats.faulted &&
          (record.state == SimulationState::Running ||
           record.singleStepRequested);
 }
-
 [[nodiscard]] bool simulationLess(const SimulationRegistry &registry,
                                   SimulationHandle lhs,
                                   SimulationHandle rhs) noexcept {
@@ -35,7 +28,6 @@ isSimulationRunnable(const SimulationRegistry::Record &record) noexcept {
   }
   return lhsRecord->creationOrder < rhsRecord->creationOrder;
 }
-
 } // namespace
 
 void SimulationScheduler::reset() noexcept { clock_.reset(); }
@@ -71,7 +63,6 @@ SimulationScheduler::tick(SceneRuntimeHost &host,
   if (host.scene() == nullptr) {
     return result;
   }
-
   const FixedStepAdvanceResult advance =
       clock_.advance(input.frameDeltaSeconds, config_.fixedDeltaSeconds,
                      config_.maxStepsPerFrame, config_.maxAccumulatedSeconds,
@@ -83,7 +74,6 @@ SimulationScheduler::tick(SceneRuntimeHost &host,
   if (advance.stepCount == 0u) {
     return result;
   }
-
   std::pmr::vector<SimulationHandle> active(host.memoryResource());
   active.reserve(host.registry().liveCount());
   host.registry().forEachLive(
@@ -92,11 +82,9 @@ SimulationScheduler::tick(SceneRuntimeHost &host,
           active.push_back(handle);
         }
       });
-
   std::ranges::sort(active, [&](SimulationHandle lhs, SimulationHandle rhs) {
     return simulationLess(host.registry(), lhs, rhs);
   });
-
   for (uint32_t stepIndex = 0; stepIndex < advance.stepCount; ++stepIndex) {
     const double stepTime =
         input.absoluteTimeSeconds -
@@ -107,8 +95,6 @@ SimulationScheduler::tick(SceneRuntimeHost &host,
       if (record == nullptr || !isSimulationRunnable(*record)) {
         continue;
       }
-
-      ISimulationBackend &backend = host.backendFor(*record);
       SimulationExecutionContext context{};
       context.fixedDeltaSeconds = config_.fixedDeltaSeconds;
       context.absoluteStepTimeSeconds = stepTime;
@@ -117,17 +103,14 @@ SimulationScheduler::tick(SceneRuntimeHost &host,
       context.schedulerConfig = &config_;
       context.bindings = &host.bindings();
       context.gpuContext = &host.gpuContext();
-      context.writebacks = &host.writebacks();
-
-      auto phaseResult = backend.executePhase(
-          host, handle, SimulationPhase::PreSceneWrite, context);
+      auto phaseResult = host.executeSimulationPhase(
+          record->kind, handle, SimulationPhase::PreSceneWrite, context);
       if (phaseResult.hasError()) {
         host.faultSimulation(handle, phaseResult.error());
         continue;
       }
       (void)host.registry().notePhaseExecution(
           handle, SimulationPhase::PreSceneWrite, input.frameIndex);
-
       const uint32_t substepCount = std::max(1u, record->substepCount);
       const uint32_t solverIterations =
           std::max(1u, record->solverIterationCount);
@@ -136,9 +119,8 @@ SimulationScheduler::tick(SceneRuntimeHost &host,
         context.substepIndex = substepIndex;
         context.effectiveDeltaSeconds =
             (config_.fixedDeltaSeconds * record->timeScale) / substepCount;
-
-        phaseResult = backend.executePhase(host, handle,
-                                           SimulationPhase::Predict, context);
+        phaseResult = host.executeSimulationPhase(
+            record->kind, handle, SimulationPhase::Predict, context);
         if (phaseResult.hasError()) {
           host.faultSimulation(handle, phaseResult.error());
           break;
@@ -146,11 +128,10 @@ SimulationScheduler::tick(SceneRuntimeHost &host,
         result.anySimulationRan = true;
         (void)host.registry().notePhaseExecution(
             handle, SimulationPhase::Predict, input.frameIndex);
-
         for (uint32_t iteration = 0; iteration < solverIterations;
              ++iteration) {
-          phaseResult = backend.executePhase(host, handle,
-                                             SimulationPhase::Project, context);
+          phaseResult = host.executeSimulationPhase(
+              record->kind, handle, SimulationPhase::Project, context);
           if (phaseResult.hasError()) {
             host.faultSimulation(handle, phaseResult.error());
             break;
@@ -160,12 +141,11 @@ SimulationScheduler::tick(SceneRuntimeHost &host,
               handle, SimulationPhase::Project, input.frameIndex);
         }
         record = host.registry().tryGet(handle);
-        if (record == nullptr || record->faulted) {
+        if (record == nullptr || record->stats.faulted) {
           break;
         }
-
-        phaseResult = backend.executePhase(host, handle,
-                                           SimulationPhase::Finalize, context);
+        phaseResult = host.executeSimulationPhase(
+            record->kind, handle, SimulationPhase::Finalize, context);
         if (phaseResult.hasError()) {
           host.faultSimulation(handle, phaseResult.error());
           break;
@@ -174,20 +154,18 @@ SimulationScheduler::tick(SceneRuntimeHost &host,
         (void)host.registry().notePhaseExecution(
             handle, SimulationPhase::Finalize, input.frameIndex);
       }
-
       record = host.registry().tryGet(handle);
-      if (record == nullptr || record->faulted) {
+      if (record == nullptr || record->stats.faulted) {
         continue;
       }
-      phaseResult = backend.executePhase(
-          host, handle, SimulationPhase::PostSceneWrite, context);
+      phaseResult = host.executeSimulationPhase(
+          record->kind, handle, SimulationPhase::PostSceneWrite, context);
       if (phaseResult.hasError()) {
         host.faultSimulation(handle, phaseResult.error());
         continue;
       }
       (void)host.registry().notePhaseExecution(
           handle, SimulationPhase::PostSceneWrite, input.frameIndex);
-
       if (record->singleStepRequested) {
         (void)host.registry().clearSingleStepRequest(handle);
         if (record->state != SimulationState::Stopped) {
@@ -197,7 +175,6 @@ SimulationScheduler::tick(SceneRuntimeHost &host,
       }
     }
   }
-
   return result;
 }
 

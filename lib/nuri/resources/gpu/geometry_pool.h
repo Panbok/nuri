@@ -1,10 +1,9 @@
 #pragma once
-
 #include "nuri/core/containers/slot_pool.h"
 #include "nuri/core/result.h"
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/gfx/gpu_types.h"
-
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <future>
@@ -14,7 +13,6 @@
 #include <string>
 #include <string_view>
 #include <vector>
-
 namespace nuri {
 
 class NURI_API GeometryPool final {
@@ -23,12 +21,10 @@ public:
       GPUDevice &gpu, GeometryPoolConfig config = {},
       std::pmr::memory_resource *memory = std::pmr::get_default_resource());
   ~GeometryPool();
-
   GeometryPool(const GeometryPool &) = delete;
   GeometryPool &operator=(const GeometryPool &) = delete;
   GeometryPool(GeometryPool &&) = delete;
   GeometryPool &operator=(GeometryPool &&) = delete;
-
   [[nodiscard]] Result<bool, std::string> beginFrame(uint64_t frameIndex);
   [[nodiscard]] Result<GeometryAllocationHandle, std::string>
   allocate(std::span<const std::byte> vertexBytes, uint32_t vertexCount,
@@ -49,17 +45,19 @@ public:
 private:
   static constexpr size_t kVertexAlignment = 16;
   static constexpr size_t kIndexAlignment = 4;
-
+  enum class PoolKind : uint8_t { Vertex, Index, Count };
+  static constexpr size_t kPoolCount = static_cast<size_t>(PoolKind::Count);
+  [[nodiscard]] static constexpr size_t poolIndex(PoolKind kind) noexcept {
+    return static_cast<size_t>(kind);
+  }
   struct ChunkHandle {
     uint32_t index = 0;
     uint32_t generation = 0;
   };
-
   struct Block {
     size_t offset = 0;
     size_t size = 0;
   };
-
   enum class ChunkRole : uint8_t {
     Dead,
     ActiveAllocatable,
@@ -67,76 +65,58 @@ private:
     Replacement,
     Retired,
   };
-
   struct Chunk {
     BufferHandle buffer{};
     size_t sizeBytes = 0;
     size_t freeBytes = 0;
-    uint64_t retireFrame = 0;
+    SubmissionHandle retirementSubmission{};
     ChunkRole role = ChunkRole::Dead;
     bool mutableSuballocations = true;
     std::pmr::vector<Block> freeBlocks;
-
     explicit Chunk(std::pmr::memory_resource *memory)
         : freeBlocks(ensureMemory(memory)) {}
-
     void reset() {
       buffer = {};
       sizeBytes = 0;
       freeBytes = 0;
-      retireFrame = 0;
+      retirementSubmission = {};
       role = ChunkRole::Dead;
       mutableSuballocations = true;
       freeBlocks.clear();
     }
   };
-
   struct SubAllocation {
     ChunkHandle chunk{};
     size_t offset = 0;
     size_t size = 0;
   };
-
   struct AllocationEntry {
     enum class State : uint8_t { Dead, Live, PendingFree };
-
     State state = State::Dead;
-    SubAllocation vertex{};
-    SubAllocation index{};
-    uint32_t vertexCount = 0;
-    uint32_t indexCount = 0;
-    uint64_t retireFrame = 0;
+    std::array<SubAllocation, kPoolCount> allocations{};
+    std::array<uint32_t, kPoolCount> counts{};
     SubmissionHandle retirementSubmission{};
     bool retirementCaptureFailed = false;
     std::pmr::string debugName;
-
     explicit AllocationEntry(std::pmr::memory_resource *memory)
         : debugName(ensureMemory(memory)) {}
   };
-
   struct SnapshotAllocation {
     uint32_t allocationIndex = 0;
     uint32_t allocationGeneration = 0;
-    SubAllocation vertex{};
-    SubAllocation index{};
+    std::array<SubAllocation, kPoolCount> allocations{};
   };
-
   struct CompactionMove {
     uint32_t allocationIndex = 0;
     uint32_t allocationGeneration = 0;
-    uint32_t dstVertexChunkIndex = 0;
-    size_t dstVertexOffset = 0;
-    size_t dstVertexSize = 0;
-    uint32_t dstIndexChunkIndex = 0;
-    size_t dstIndexOffset = 0;
-    size_t dstIndexSize = 0;
+    std::array<uint32_t, kPoolCount> dstChunkIndices{};
+    std::array<size_t, kPoolCount> dstOffsets{};
+    std::array<size_t, kPoolCount> dstSizes{};
   };
-
   struct PreparedReplacementChunk {
     size_t sizeBytes = 0;
     size_t usedBytes = 0;
   };
-
   struct PreparedCopy {
     size_t snapshotIndex = 0;
     ChunkHandle srcChunk{};
@@ -144,17 +124,14 @@ private:
     size_t size = 0;
     uint32_t dstChunkIndex = 0;
     size_t dstOffset = 0;
-    bool isVertex = true;
+    PoolKind pool = PoolKind::Vertex;
   };
-
   struct PreparedCompactionPlan {
     bool worthwhile = false;
-    std::vector<PreparedReplacementChunk> vertexChunks;
-    std::vector<PreparedReplacementChunk> indexChunks;
+    std::array<std::vector<PreparedReplacementChunk>, kPoolCount> chunks;
     std::vector<PreparedCopy> copies;
     std::vector<CompactionMove> moves;
   };
-
   enum class CompactionJobState : uint8_t {
     Idle,
     Planning,
@@ -163,94 +140,71 @@ private:
     WaitingForCopy,
     ReadyToCommit,
   };
-
   struct CompactionJob {
     CompactionJobState state = CompactionJobState::Idle;
-    std::pmr::vector<ChunkHandle> frozenVertexChunks;
-    std::pmr::vector<ChunkHandle> frozenIndexChunks;
-    std::pmr::vector<ChunkHandle> replacementVertexChunks;
-    std::pmr::vector<ChunkHandle> replacementIndexChunks;
+    std::array<std::pmr::vector<ChunkHandle>, kPoolCount> frozenChunks;
+    std::array<std::pmr::vector<ChunkHandle>, kPoolCount> replacementChunks;
     std::shared_future<Result<PreparedCompactionPlan, std::string>>
         planningFuture;
     std::optional<PreparedCompactionPlan> preparedPlan;
-    size_t nextReplacementVertexChunkIndex = 0;
-    size_t nextReplacementIndexChunkIndex = 0;
+    std::array<size_t, kPoolCount> nextReplacementChunkIndices{};
     size_t nextCopyIndex = 0;
     SubmissionHandle inFlightSubmission{};
-
     explicit CompactionJob(std::pmr::memory_resource *memory)
-        : frozenVertexChunks(ensureMemory(memory)),
-          frozenIndexChunks(ensureMemory(memory)),
-          replacementVertexChunks(ensureMemory(memory)),
-          replacementIndexChunks(ensureMemory(memory)) {}
-
+        : frozenChunks{std::pmr::vector<ChunkHandle>(ensureMemory(memory)),
+                       std::pmr::vector<ChunkHandle>(ensureMemory(memory))},
+          replacementChunks{
+              std::pmr::vector<ChunkHandle>(ensureMemory(memory)),
+              std::pmr::vector<ChunkHandle>(ensureMemory(memory))} {}
     [[nodiscard]] bool active() const noexcept {
       return state != CompactionJobState::Idle;
     }
-
     void reset() {
       state = CompactionJobState::Idle;
-      frozenVertexChunks.clear();
-      frozenIndexChunks.clear();
-      replacementVertexChunks.clear();
-      replacementIndexChunks.clear();
+      for (auto &handles : frozenChunks)
+        handles.clear();
+      for (auto &handles : replacementChunks)
+        handles.clear();
       planningFuture = {};
       preparedPlan.reset();
-      nextReplacementVertexChunkIndex = 0;
-      nextReplacementIndexChunkIndex = 0;
+      nextReplacementChunkIndices = {};
       nextCopyIndex = 0;
       inFlightSubmission = {};
     }
   };
-
+  struct ChunkPool {
+    std::pmr::vector<Chunk> chunks;
+    SlotPool<UnmaskedNonZeroGenerationPolicy> slots;
+    explicit ChunkPool(std::pmr::memory_resource *memory)
+        : chunks(ensureMemory(memory)) {}
+  };
   static std::pmr::memory_resource *
   ensureMemory(std::pmr::memory_resource *memory) {
     return memory != nullptr ? memory : std::pmr::get_default_resource();
   }
-
   [[nodiscard]] static bool isValid(ChunkHandle handle) noexcept {
     return handle.generation != 0u;
   }
-
   [[nodiscard]] Result<ChunkHandle, std::string>
-  createChunk(std::pmr::vector<Chunk> &chunks,
-              SlotPool<UnmaskedNonZeroGenerationPolicy> &chunkSlots,
-              size_t minimumSize, BufferUsage usage,
+  createChunk(ChunkPool &pool, size_t minimumSize, BufferUsage usage,
               std::string_view debugPrefix, ChunkRole role);
   [[nodiscard]] Result<SubAllocation, std::string>
-  allocateFromPool(std::pmr::vector<Chunk> &chunks,
-                   SlotPool<UnmaskedNonZeroGenerationPolicy> &chunkSlots,
-                   size_t sizeBytes, size_t alignment, size_t defaultChunkSize,
-                   BufferUsage usage, std::string_view debugPrefix);
-  void freeInPool(std::pmr::vector<Chunk> &chunks,
-                  SlotPool<UnmaskedNonZeroGenerationPolicy> &chunkSlots,
-                  const SubAllocation &allocation);
-
-  [[nodiscard]] uint64_t reclaimLagFrames() const;
+  allocateFromPool(ChunkPool &pool, size_t sizeBytes, size_t alignment,
+                   size_t defaultChunkSize, BufferUsage usage,
+                   std::string_view debugPrefix);
+  void freeInPool(ChunkPool &pool, const SubAllocation &allocation);
   void reclaimRetiredAllocations();
-  void
-  reclaimRetiredChunks(std::pmr::vector<Chunk> &chunks,
-                       SlotPool<UnmaskedNonZeroGenerationPolicy> &chunkSlots);
-  void
-  freezeAllocatableChunks(std::pmr::vector<Chunk> &chunks,
-                          SlotPool<UnmaskedNonZeroGenerationPolicy> &chunkSlots,
-                          std::pmr::vector<ChunkHandle> &frozenHandles);
-  void promoteChunks(std::pmr::vector<Chunk> &chunks,
-                     SlotPool<UnmaskedNonZeroGenerationPolicy> &chunkSlots,
-                     std::span<const ChunkHandle> handles);
-  void retireChunks(std::pmr::vector<Chunk> &chunks,
-                    SlotPool<UnmaskedNonZeroGenerationPolicy> &chunkSlots,
-                    std::span<const ChunkHandle> handles, uint64_t retireFrame);
-  void
-  restoreFrozenChunks(std::pmr::vector<Chunk> &chunks,
-                      SlotPool<UnmaskedNonZeroGenerationPolicy> &chunkSlots,
-                      std::span<const ChunkHandle> handles);
-  void destroyChunks(std::pmr::vector<Chunk> &chunks,
-                     SlotPool<UnmaskedNonZeroGenerationPolicy> &chunkSlots,
-                     std::span<const ChunkHandle> handles);
-
+  void reclaimRetiredChunks(ChunkPool &pool);
+  void freezeAllocatableChunks(ChunkPool &pool,
+                               std::pmr::vector<ChunkHandle> &frozenHandles);
+  void promoteChunks(ChunkPool &pool, std::span<const ChunkHandle> handles);
+  void retireChunks(ChunkPool &pool, std::span<const ChunkHandle> handles,
+                    SubmissionHandle retirementSubmission);
+  void restoreFrozenChunks(ChunkPool &pool,
+                           std::span<const ChunkHandle> handles);
+  void destroyChunks(ChunkPool &pool, std::span<const ChunkHandle> handles);
   [[nodiscard]] bool shouldStartCompaction() const;
-  [[nodiscard]] static size_t poolBytes(const std::pmr::vector<Chunk> &chunks,
+  [[nodiscard]] static size_t poolBytes(const ChunkPool &pool,
                                         ChunkRole role) noexcept;
   [[nodiscard]] static Result<PreparedCompactionPlan, std::string>
   buildPreparedCompactionPlan(std::span<const SnapshotAllocation> snapshot,
@@ -263,31 +217,17 @@ private:
   [[nodiscard]] Result<bool, std::string> pollCompactionJob();
   [[nodiscard]] Result<bool, std::string> commitCompactionJob();
   void abortCompactionJob();
-
   [[nodiscard]] bool isHandleLive(GeometryAllocationHandle handle) const;
   void bumpMutationVersion() noexcept;
-
-  [[nodiscard]] Chunk *
-  findChunk(std::pmr::vector<Chunk> &chunks,
-            const SlotPool<UnmaskedNonZeroGenerationPolicy> &chunkSlots,
-            ChunkHandle handle);
-  [[nodiscard]] const Chunk *
-  findChunk(const std::pmr::vector<Chunk> &chunks,
-            const SlotPool<UnmaskedNonZeroGenerationPolicy> &chunkSlots,
-            ChunkHandle handle) const;
-
+  [[nodiscard]] Chunk *findChunk(ChunkPool &pool, ChunkHandle handle);
+  [[nodiscard]] const Chunk *findChunk(const ChunkPool &pool,
+                                       ChunkHandle handle) const;
   GPUDevice &gpu_;
   GeometryPoolConfig config_{};
   uint64_t currentFrameIndex_ = 0;
   uint64_t lastCompactionStartFrame_ = 0;
-
   std::pmr::memory_resource *memory_ = nullptr;
-
-  std::pmr::vector<Chunk> vertexChunks_;
-  std::pmr::vector<Chunk> indexChunks_;
-  SlotPool<UnmaskedNonZeroGenerationPolicy> vertexChunkSlots_;
-  SlotPool<UnmaskedNonZeroGenerationPolicy> indexChunkSlots_;
-
+  std::array<ChunkPool, kPoolCount> pools_;
   std::pmr::vector<AllocationEntry> allocations_;
   SlotPool<UnmaskedNonZeroGenerationPolicy> allocationSlots_;
   CompactionJob compactionJob_;

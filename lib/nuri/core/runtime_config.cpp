@@ -1,143 +1,309 @@
-#include "nuri/pch.h"
-
-#include "nuri/core/profiling.h"
 #include "nuri/core/runtime_config.h"
-
+#include "nuri/core/profiling.h"
+#include "nuri/pch.h"
 namespace nuri {
 namespace {
-
-constexpr std::string_view kDefaultDebugGridVertexShader = "grid.vert";
-constexpr std::string_view kDefaultDebugGridFragmentShader = "grid.frag";
-constexpr std::string_view kDefaultSkyboxVertexShader = "skybox.vert";
-constexpr std::string_view kDefaultSkyboxFragmentShader = "skybox.frag";
-constexpr std::string_view kDefaultOpaqueMeshVertexShader = "main.vert";
-constexpr std::string_view kDefaultOpaqueMeshFragmentShader = "main.frag";
-constexpr std::string_view kDefaultOpaqueMeshletTaskShader =
-    "opaque_meshlet.task.glsl";
-constexpr std::string_view kDefaultOpaqueMeshletMeshShader =
-    "opaque_meshlet.mesh.glsl";
-constexpr std::string_view kDefaultOpaqueMeshletFragmentShader =
-    "opaque_meshlet.frag";
-constexpr std::string_view kDefaultOpaqueMeshletDepthFragmentShader =
-    "opaque_meshlet_depth.frag";
-constexpr std::string_view kDefaultOpaqueMeshletDepthAlphaFragmentShader =
-    "opaque_meshlet_depth_alpha.frag";
-constexpr std::string_view kDefaultOpaquePickFragmentShader = "main_id.frag";
-constexpr std::string_view kDefaultOpaqueShadowInspectFragmentShader =
-    "shadow_inspect.frag";
-constexpr std::string_view kDefaultOpaqueComputeShader = "duck_instances.comp";
-constexpr std::string_view kDefaultOpaqueTessVertexShader = "main_tess.vert";
-constexpr std::string_view kDefaultOpaqueTessControlShader = "main.tesc";
-constexpr std::string_view kDefaultOpaqueTessEvalShader = "main.tese";
-constexpr std::string_view kDefaultOpaqueOverlayGeometryShader =
-    "mesh_debug_overlay.geom";
-constexpr std::string_view kDefaultOpaqueOverlayFragmentShader =
-    "mesh_debug_overlay.frag";
-constexpr std::string_view kDefaultTextMtsdfUiVertexShader =
-    "text_2d_mtsdf.vert";
-constexpr std::string_view kDefaultTextMtsdfUiFragmentShader =
-    "text_2d_mtsdf.frag";
-constexpr std::string_view kDefaultTextMtsdfWorldVertexShader =
-    "text_3d_mtsdf.vert";
-constexpr std::string_view kDefaultTextMtsdfWorldFragmentShader =
-    "text_3d_mtsdf.frag";
-constexpr std::string_view kDefaultCompositeFullscreenVertexShader =
-    "fullscreen_copy.vert";
-constexpr std::string_view kDefaultCompositeSceneCopyFragmentShader =
-    "scene_copy.frag";
-constexpr std::string_view kDefaultCompositePresentFragmentShader =
-    "tonemap_present.frag";
-constexpr std::string_view kDefaultCompositeHdrLuminanceReduceFragmentShader =
-    "hdr_luminance_reduce.frag";
-constexpr std::string_view kDefaultCompositeHdrExposureAdaptFragmentShader =
-    "hdr_exposure_adapt.frag";
-constexpr std::string_view kDefaultCompositeHdrBloomFragmentShader =
-    "hdr_bloom.frag";
-constexpr std::string_view kDefaultCompositeHdrBloomCompositeFragmentShader =
-    "hdr_bloom_composite.frag";
-constexpr std::string_view kDefaultCompositeAces2SdrLut =
-    "tonemap_aces2_sdr_64.ktx2";
-constexpr std::string_view kDefaultCompositeAgxLut = "tonemap_agx_sdr_64.ktx2";
 constexpr std::string_view kDefaultConfigPath = "app.config.json";
-constexpr const char kAppConfigEnvVarCStr[] = "NURI_APP_CONFIG";
-constexpr std::string_view kAppConfigEnvVar = kAppConfigEnvVarCStr;
-
-constexpr std::array<std::string_view, 3> kRootObjectKeys = {"window", "roots",
-                                                             "shaders"};
-constexpr std::array<std::string_view, 4> kWindowKeys = {"title", "width",
-                                                         "height", "mode"};
-constexpr std::array<std::string_view, 5> kRootsKeys = {
-    "assets", "shaders", "models", "textures", "fonts"};
-constexpr std::array<std::string_view, 5> kShadersKeys = {
-    "debug_grid", "skybox", "opaque", "composite", "text_mtsdf"};
-constexpr std::array<std::string_view, 2> kDebugGridShaderKeys = {"vertex",
-                                                                  "fragment"};
-constexpr std::array<std::string_view, 2> kSkyboxShaderKeys = {"vertex",
-                                                               "fragment"};
-constexpr std::array<std::string_view, 15> kOpaqueShaderKeys = {
-    "mesh_vertex",
-    "mesh_fragment",
-    "meshlet_task",
-    "meshlet_mesh",
-    "meshlet_fragment",
-    "meshlet_depth_fragment",
-    "meshlet_depth_alpha_fragment",
-    "pick_fragment",
-    "shadow_inspect_fragment",
-    "compute_instances",
-    "tess_vertex",
-    "tess_control",
-    "tess_eval",
-    "overlay_geometry",
-    "overlay_fragment",
+constexpr const char kAppConfigEnvVar[] = "NURI_APP_CONFIG";
+template <typename T> struct PathField {
+  const char *key;
+  const char *fallback;
+  std::filesystem::path T::*member;
+  bool textureRoot = false;
 };
-constexpr std::array<std::string_view, 9> kCompositeShaderKeys = {
-    "fullscreen_vertex",
-    "scene_copy_fragment",
-    "present_fragment",
-    "hdr_luminance_reduce_fragment",
-    "hdr_exposure_adapt_fragment",
-    "hdr_bloom_fragment",
-    "hdr_bloom_composite_fragment",
-    "aces2_sdr_lut",
-    "agx_lut"};
-constexpr std::array<std::string_view, 4> kTextMtsdfShaderKeys = {
-    "ui_vertex", "ui_fragment", "world_vertex", "world_fragment"};
-
+template <typename T> struct RootField {
+  const char *key;
+  std::filesystem::path T::*member;
+};
+constexpr std::array kRootFields = {
+    RootField<RuntimeRootsConfig>{"assets", &RuntimeRootsConfig::assets},
+    RootField<RuntimeRootsConfig>{"shaders", &RuntimeRootsConfig::shaders},
+    RootField<RuntimeRootsConfig>{"models", &RuntimeRootsConfig::models},
+    RootField<RuntimeRootsConfig>{"textures", &RuntimeRootsConfig::textures},
+    RootField<RuntimeRootsConfig>{"fonts", &RuntimeRootsConfig::fonts},
+};
+constexpr std::array kDebugFields = {
+    PathField<RuntimeRasterShaderConfig>{"vertex", "grid.vert",
+                                         &RuntimeRasterShaderConfig::vertex},
+    PathField<RuntimeRasterShaderConfig>{"fragment", "grid.frag",
+                                         &RuntimeRasterShaderConfig::fragment},
+};
+constexpr std::array kSkyboxFields = {
+    PathField<RuntimeRasterShaderConfig>{"vertex", "skybox.vert",
+                                         &RuntimeRasterShaderConfig::vertex},
+    PathField<RuntimeRasterShaderConfig>{"fragment", "skybox.frag",
+                                         &RuntimeRasterShaderConfig::fragment},
+};
+constexpr std::array kOpaqueFields = {
+    PathField<RuntimeOpaqueShaderConfig>{
+        "mesh_vertex", "main.vert", &RuntimeOpaqueShaderConfig::meshVertex},
+    PathField<RuntimeOpaqueShaderConfig>{
+        "mesh_fragment", "main.frag", &RuntimeOpaqueShaderConfig::meshFragment},
+    PathField<RuntimeOpaqueShaderConfig>{
+        "meshlet_task", "opaque_meshlet.task.glsl",
+        &RuntimeOpaqueShaderConfig::meshletTask},
+    PathField<RuntimeOpaqueShaderConfig>{
+        "meshlet_mesh", "opaque_meshlet.mesh.glsl",
+        &RuntimeOpaqueShaderConfig::meshletMesh},
+    PathField<RuntimeOpaqueShaderConfig>{
+        "meshlet_fragment", "opaque_meshlet.frag",
+        &RuntimeOpaqueShaderConfig::meshletFragment},
+    PathField<RuntimeOpaqueShaderConfig>{
+        "meshlet_depth_fragment", "opaque_meshlet_depth.frag",
+        &RuntimeOpaqueShaderConfig::meshletDepthFragment},
+    PathField<RuntimeOpaqueShaderConfig>{
+        "meshlet_depth_alpha_fragment", "opaque_meshlet_depth_alpha.frag",
+        &RuntimeOpaqueShaderConfig::meshletDepthAlphaFragment},
+    PathField<RuntimeOpaqueShaderConfig>{
+        "pick_fragment", "main_id.frag",
+        &RuntimeOpaqueShaderConfig::pickFragment},
+    PathField<RuntimeOpaqueShaderConfig>{
+        "shadow_inspect_fragment", "shadow_inspect.frag",
+        &RuntimeOpaqueShaderConfig::shadowInspectFragment},
+    PathField<RuntimeOpaqueShaderConfig>{
+        "compute_instances", "duck_instances.comp",
+        &RuntimeOpaqueShaderConfig::computeInstances},
+    PathField<RuntimeOpaqueShaderConfig>{
+        "tess_vertex", "main_tess.vert",
+        &RuntimeOpaqueShaderConfig::tessVertex},
+    PathField<RuntimeOpaqueShaderConfig>{
+        "tess_control", "main.tesc", &RuntimeOpaqueShaderConfig::tessControl},
+    PathField<RuntimeOpaqueShaderConfig>{"tess_eval", "main.tese",
+                                         &RuntimeOpaqueShaderConfig::tessEval},
+    PathField<RuntimeOpaqueShaderConfig>{
+        "overlay_geometry", "mesh_debug_overlay.geom",
+        &RuntimeOpaqueShaderConfig::overlayGeometry},
+    PathField<RuntimeOpaqueShaderConfig>{
+        "overlay_fragment", "mesh_debug_overlay.frag",
+        &RuntimeOpaqueShaderConfig::overlayFragment},
+};
+constexpr std::array kCompositeFields = {
+    PathField<RuntimeCompositeConfig>{
+        "fullscreen_vertex", "fullscreen_copy.vert",
+        &RuntimeCompositeConfig::fullscreenVertex},
+    PathField<RuntimeCompositeConfig>{
+        "scene_copy_fragment", "scene_copy.frag",
+        &RuntimeCompositeConfig::sceneCopyFragment},
+    PathField<RuntimeCompositeConfig>{"present_fragment",
+                                      "tonemap_present.frag",
+                                      &RuntimeCompositeConfig::presentFragment},
+    PathField<RuntimeCompositeConfig>{
+        "hdr_luminance_reduce_fragment", "hdr_luminance_reduce.frag",
+        &RuntimeCompositeConfig::hdrLuminanceReduceFragment},
+    PathField<RuntimeCompositeConfig>{
+        "hdr_exposure_adapt_fragment", "hdr_exposure_adapt.frag",
+        &RuntimeCompositeConfig::hdrExposureAdaptFragment},
+    PathField<RuntimeCompositeConfig>{
+        "hdr_bloom_fragment", "hdr_bloom.frag",
+        &RuntimeCompositeConfig::hdrBloomFragment},
+    PathField<RuntimeCompositeConfig>{
+        "hdr_bloom_composite_fragment", "hdr_bloom_composite.frag",
+        &RuntimeCompositeConfig::hdrBloomCompositeFragment},
+    PathField<RuntimeCompositeConfig>{
+        "aces2_sdr_lut", "tonemap_aces2_sdr_64.ktx2",
+        &RuntimeCompositeConfig::aces2SdrLut, true},
+    PathField<RuntimeCompositeConfig>{"agx_lut", "tonemap_agx_sdr_64.ktx2",
+                                      &RuntimeCompositeConfig::agxLut, true},
+};
+constexpr std::array kTextFields = {
+    PathField<RuntimeTextMtsdfShaderConfig>{
+        "ui_vertex", "text_2d_mtsdf.vert",
+        &RuntimeTextMtsdfShaderConfig::uiVertex},
+    PathField<RuntimeTextMtsdfShaderConfig>{
+        "ui_fragment", "text_2d_mtsdf.frag",
+        &RuntimeTextMtsdfShaderConfig::uiFragment},
+    PathField<RuntimeTextMtsdfShaderConfig>{
+        "world_vertex", "text_3d_mtsdf.vert",
+        &RuntimeTextMtsdfShaderConfig::worldVertex},
+    PathField<RuntimeTextMtsdfShaderConfig>{
+        "world_fragment", "text_3d_mtsdf.frag",
+        &RuntimeTextMtsdfShaderConfig::worldFragment},
+};
 template <typename T>
 [[nodiscard]] Result<T, std::string> makeError(std::string message) {
   return Result<T, std::string>::makeError(std::move(message));
 }
-
 [[nodiscard]] std::filesystem::path
-normalizePath(const std::filesystem::path &filePath) {
+normalizePath(const std::filesystem::path &path) {
   std::error_code ec;
-  auto normalized = std::filesystem::weakly_canonical(filePath, ec);
+  auto normalized = std::filesystem::weakly_canonical(path, ec);
   if (ec) {
-    normalized = std::filesystem::absolute(filePath, ec);
+    normalized = std::filesystem::absolute(path, ec);
   }
-  if (ec) {
-    return filePath.lexically_normal();
-  }
-  return normalized.lexically_normal();
+  return ec ? path.lexically_normal() : normalized.lexically_normal();
 }
-
 [[nodiscard]] std::string fieldPath(std::string_view parent,
                                     std::string_view child) {
-  if (parent.empty()) {
-    return std::string(child);
-  }
-  return std::string(parent) + "." + std::string(child);
+  return parent.empty() ? std::string(child)
+                        : std::string(parent) + "." + std::string(child);
 }
+class ConfigReader {
+public:
+  void fail(std::string message) {
+    if (error_.empty()) {
+      error_ = std::move(message);
+    }
+  }
+  template <typename Allowed>
+  void validate(yyjson_val *object, std::string_view name,
+                const Allowed &allowed) {
+    if (!object || !error_.empty()) {
+      return;
+    }
+    size_t index = 0;
+    size_t count = 0;
+    yyjson_val *key = nullptr;
+    yyjson_val *value = nullptr;
+    yyjson_obj_foreach(object, index, count, key, value) {
+      (void)value;
+      const std::string_view keyName{yyjson_get_str(key)};
+      if (!allowed(keyName)) {
+        fail("Unknown config field '" + fieldPath(name, keyName) + "'");
+        return;
+      }
+    }
+  }
+  [[nodiscard]] yyjson_val *object(yyjson_val *parent, const char *key,
+                                   std::string_view parentName, bool required) {
+    if (!parent || !error_.empty()) {
+      return nullptr;
+    }
+    yyjson_val *value = yyjson_obj_get(parent, key);
+    if (!value) {
+      if (required) {
+        fail("Missing required config field '" + fieldPath(parentName, key) +
+             "'");
+      }
+      return nullptr;
+    }
+    if (!yyjson_is_obj(value)) {
+      fail("Config field '" + fieldPath(parentName, key) +
+           "' must be a JSON object");
+      return nullptr;
+    }
+    return value;
+  }
+  [[nodiscard]] std::string text(yyjson_val *object, const char *key,
+                                 std::string_view parentName,
+                                 const char *fallback = nullptr) {
+    if (!error_.empty() || !object) {
+      return fallback ? std::string(fallback) : std::string{};
+    }
+    yyjson_val *value = yyjson_obj_get(object, key);
+    if (!value) {
+      if (fallback) {
+        return fallback;
+      }
+      fail("Missing required config field '" + fieldPath(parentName, key) +
+           "'");
+      return {};
+    }
+    const char *raw = yyjson_is_str(value) ? yyjson_get_str(value) : nullptr;
+    if (!raw || raw[0] == '\0') {
+      fail("Config field '" + fieldPath(parentName, key) +
+           (raw ? "' must not be empty" : "' must be a string"));
+      return {};
+    }
+    return raw;
+  }
+  [[nodiscard]] int32_t positiveInt(yyjson_val *object, const char *key,
+                                    std::string_view parentName) {
+    if (!object || !error_.empty()) {
+      return 0;
+    }
+    yyjson_val *value = yyjson_obj_get(object, key);
+    if (!value) {
+      fail("Missing required config field '" + fieldPath(parentName, key) +
+           "'");
+      return 0;
+    }
+    if (!yyjson_is_sint(value) && !yyjson_is_uint(value)) {
+      fail("Config field '" + fieldPath(parentName, key) +
+           "' must be an integer");
+      return 0;
+    }
+    const uint64_t raw = yyjson_is_uint(value)
+                             ? yyjson_get_uint(value)
+                             : static_cast<uint64_t>(yyjson_get_sint(value));
+    if (raw == 0 || raw > std::numeric_limits<int32_t>::max()) {
+      fail("Config field '" + fieldPath(parentName, key) +
+           "' must be in range [1, 2147483647]");
+      return 0;
+    }
+    return static_cast<int32_t>(raw);
+  }
+  [[nodiscard]] std::filesystem::path path(std::string_view raw,
+                                           const std::filesystem::path &base,
+                                           std::string_view fieldName,
+                                           bool directory) {
+    if (!error_.empty()) {
+      return {};
+    }
+    std::filesystem::path resolved{raw};
+    if (!resolved.is_absolute()) {
+      resolved = base / resolved;
+    }
+    resolved = normalizePath(resolved);
+    std::error_code ec;
+    const auto status = std::filesystem::status(resolved, ec);
+    if (ec || !std::filesystem::exists(status)) {
+      fail("Config field '" + std::string(fieldName) + "' resolves to '" +
+           resolved.string() + "' but it does not exist");
+    } else if (directory != std::filesystem::is_directory(status)) {
+      fail("Config field '" + std::string(fieldName) + "' resolves to '" +
+           resolved.string() +
+           (directory ? "' but it is not a directory"
+                      : "' but it is not a regular file"));
+    } else if (!directory && !std::filesystem::is_regular_file(status)) {
+      fail("Config field '" + std::string(fieldName) + "' resolves to '" +
+           resolved.string() + "' but it is not a regular file");
+    }
+    return resolved;
+  }
+  [[nodiscard]] const std::string &error() const { return error_; }
 
+private:
+  std::string error_;
+};
+template <typename Fields>
+[[nodiscard]] auto fieldPredicate(const Fields &fields) {
+  return [&fields](std::string_view key) {
+    return std::ranges::any_of(
+        fields, [key](const auto &field) { return key == field.key; });
+  };
+}
+template <typename T, size_t N>
+void readRoots(ConfigReader &reader, yyjson_val *object,
+               const std::filesystem::path &base, T &target,
+               const std::array<RootField<T>, N> &fields) {
+  reader.validate(object, "roots", fieldPredicate(fields));
+  for (const auto &field : fields) {
+    target.*field.member =
+        reader.path(reader.text(object, field.key, "roots"), base,
+                    fieldPath("roots", field.key), true);
+  }
+}
+template <typename T, size_t N>
+void readPaths(ConfigReader &reader, yyjson_val *object,
+               std::string_view section,
+               const std::filesystem::path &shaderRoot,
+               const std::filesystem::path &textureRoot, T &target,
+               const std::array<PathField<T>, N> &fields) {
+  reader.validate(object, section, fieldPredicate(fields));
+  for (const auto &field : fields) {
+    const auto &root = field.textureRoot ? textureRoot : shaderRoot;
+    target.*field.member =
+        reader.path(reader.text(object, field.key, section, field.fallback),
+                    root, fieldPath(section, field.key), false);
+  }
+}
 [[nodiscard]] Result<std::string, std::string>
 readTextFile(const std::filesystem::path &path) {
   std::ifstream input(path, std::ios::binary);
-  if (!input.is_open()) {
+  if (!input) {
     return makeError<std::string>("Failed to open config file '" +
                                   path.string() + "'");
   }
-
   std::ostringstream stream;
   stream << input.rdbuf();
   if (input.bad()) {
@@ -146,745 +312,90 @@ readTextFile(const std::filesystem::path &path) {
   }
   return Result<std::string, std::string>::makeResult(stream.str());
 }
-
-template <size_t N>
-[[nodiscard]] bool
-isAllowedKey(std::string_view key,
-             const std::array<std::string_view, N> &allowed) {
-  return std::find(allowed.begin(), allowed.end(), key) != allowed.end();
-}
-
-template <size_t N>
-[[nodiscard]] Result<bool, std::string>
-validateUnknownKeys(yyjson_val *obj, std::string_view objectName,
-                    const std::array<std::string_view, N> &allowedKeys) {
-  if (!yyjson_is_obj(obj)) {
-    return makeError<bool>("Config field '" + std::string(objectName) +
-                           "' must be a JSON object");
-  }
-
-  size_t idx = 0;
-  size_t max = 0;
-  yyjson_val *key = nullptr;
-  yyjson_val *value = nullptr;
-  yyjson_obj_foreach(obj, idx, max, key, value) {
-    (void)value;
-    const char *keyRaw = yyjson_get_str(key);
-    if (!keyRaw) {
-      continue;
-    }
-    const std::string_view keyView{keyRaw};
-    if (!isAllowedKey(keyView, allowedKeys)) {
-      return makeError<bool>("Unknown config field '" +
-                             fieldPath(objectName, keyView) + "'");
-    }
-  }
-  return Result<bool, std::string>::makeResult(true);
-}
-
-[[nodiscard]] Result<yyjson_val *, std::string>
-requireObjectField(yyjson_val *obj, const char *key,
-                   std::string_view objectName) {
-  yyjson_val *value = yyjson_obj_get(obj, key);
-  if (!value) {
-    return makeError<yyjson_val *>("Missing required config field '" +
-                                   fieldPath(objectName, key) + "'");
-  }
-  if (!yyjson_is_obj(value)) {
-    return makeError<yyjson_val *>("Config field '" +
-                                   fieldPath(objectName, key) +
-                                   "' must be a JSON object");
-  }
-  return Result<yyjson_val *, std::string>::makeResult(value);
-}
-
-[[nodiscard]] Result<yyjson_val *, std::string>
-optionalObjectField(yyjson_val *obj, const char *key,
-                    std::string_view objectName) {
-  if (obj == nullptr) {
-    return Result<yyjson_val *, std::string>::makeResult(nullptr);
-  }
-  yyjson_val *value = yyjson_obj_get(obj, key);
-  if (!value) {
-    return Result<yyjson_val *, std::string>::makeResult(nullptr);
-  }
-  if (!yyjson_is_obj(value)) {
-    return makeError<yyjson_val *>("Config field '" +
-                                   fieldPath(objectName, key) +
-                                   "' must be a JSON object");
-  }
-  return Result<yyjson_val *, std::string>::makeResult(value);
-}
-
-[[nodiscard]] Result<std::string, std::string>
-requireStringField(yyjson_val *obj, const char *key,
-                   std::string_view objectName) {
-  yyjson_val *value = yyjson_obj_get(obj, key);
-  if (!value) {
-    return makeError<std::string>("Missing required config field '" +
-                                  fieldPath(objectName, key) + "'");
-  }
-  if (!yyjson_is_str(value)) {
-    return makeError<std::string>(
-        "Config field '" + fieldPath(objectName, key) + "' must be a string");
-  }
-  const char *text = yyjson_get_str(value);
-  if (!text || text[0] == '\0') {
-    return makeError<std::string>(
-        "Config field '" + fieldPath(objectName, key) + "' must not be empty");
-  }
-  return Result<std::string, std::string>::makeResult(std::string(text));
-}
-
-[[nodiscard]] Result<std::string, std::string>
-stringFieldOrDefault(yyjson_val *obj, const char *key,
-                     std::string_view objectName,
-                     std::string_view defaultValue) {
-  if (obj == nullptr) {
-    return Result<std::string, std::string>::makeResult(
-        std::string(defaultValue));
-  }
-  yyjson_val *value = yyjson_obj_get(obj, key);
-  if (!value) {
-    return Result<std::string, std::string>::makeResult(
-        std::string(defaultValue));
-  }
-  if (!yyjson_is_str(value)) {
-    return makeError<std::string>(
-        "Config field '" + fieldPath(objectName, key) + "' must be a string");
-  }
-  const char *text = yyjson_get_str(value);
-  if (!text || text[0] == '\0') {
-    return makeError<std::string>(
-        "Config field '" + fieldPath(objectName, key) + "' must not be empty");
-  }
-  return Result<std::string, std::string>::makeResult(std::string(text));
-}
-
-[[nodiscard]] Result<int32_t, std::string>
-requirePositiveIntField(yyjson_val *obj, const char *key,
-                        std::string_view objectName) {
-  yyjson_val *value = yyjson_obj_get(obj, key);
-  if (!value) {
-    return makeError<int32_t>("Missing required config field '" +
-                              fieldPath(objectName, key) + "'");
-  }
-  if (!yyjson_is_sint(value) && !yyjson_is_uint(value)) {
-    return makeError<int32_t>("Config field '" + fieldPath(objectName, key) +
-                              "' must be an integer");
-  }
-
-  if (yyjson_is_uint(value)) {
-    const uint64_t raw = yyjson_get_uint(value);
-    if (raw == 0 ||
-        raw > static_cast<uint64_t>(std::numeric_limits<int32_t>::max())) {
-      return makeError<int32_t>("Config field '" + fieldPath(objectName, key) +
-                                "' must be in range [1, 2147483647]");
-    }
-    return Result<int32_t, std::string>::makeResult(static_cast<int32_t>(raw));
-  }
-
-  const int64_t raw = yyjson_get_sint(value);
-  if (raw <= 0 ||
-      raw > static_cast<int64_t>(std::numeric_limits<int32_t>::max())) {
-    return makeError<int32_t>("Config field '" + fieldPath(objectName, key) +
-                              "' must be in range [1, 2147483647]");
-  }
-  return Result<int32_t, std::string>::makeResult(static_cast<int32_t>(raw));
-}
-
-[[nodiscard]] Result<WindowMode, std::string>
-parseWindowMode(std::string_view modeValue) {
-  if (modeValue == "windowed") {
-    return Result<WindowMode, std::string>::makeResult(WindowMode::Windowed);
-  }
-  if (modeValue == "fullscreen") {
-    return Result<WindowMode, std::string>::makeResult(WindowMode::Fullscreen);
-  }
-  if (modeValue == "borderless_fullscreen") {
-    return Result<WindowMode, std::string>::makeResult(
-        WindowMode::BorderlessFullscreen);
-  }
-  return makeError<WindowMode>(
-      "Invalid window.mode '" + std::string(modeValue) +
-      "'. Allowed values: windowed, fullscreen, borderless_fullscreen");
-}
-
-[[nodiscard]] Result<std::filesystem::path, std::string>
-resolvePath(std::string_view rawPath, const std::filesystem::path &baseDir,
-            std::string_view fieldName) {
-  if (rawPath.empty()) {
-    return makeError<std::filesystem::path>(
-        "Config field '" + std::string(fieldName) + "' must not be empty");
-  }
-
-  std::filesystem::path resolved = std::filesystem::path(rawPath);
-  if (!resolved.is_absolute()) {
-    resolved = baseDir / resolved;
-  }
-  return Result<std::filesystem::path, std::string>::makeResult(
-      normalizePath(resolved));
-}
-
-[[nodiscard]] Result<std::filesystem::path, std::string>
-resolveDirectory(std::string_view rawPath, const std::filesystem::path &baseDir,
-                 std::string_view fieldName) {
-  auto resolvedResult = resolvePath(rawPath, baseDir, fieldName);
-  if (resolvedResult.hasError()) {
-    return resolvedResult;
-  }
-  const std::filesystem::path &resolved = resolvedResult.value();
-
-  std::error_code ec;
-  const bool exists = std::filesystem::exists(resolved, ec);
-  if (ec || !exists) {
-    return makeError<std::filesystem::path>(
-        "Config field '" + std::string(fieldName) + "' resolves to '" +
-        resolved.string() + "' but it does not exist");
-  }
-  if (!std::filesystem::is_directory(resolved, ec) || ec) {
-    return makeError<std::filesystem::path>(
-        "Config field '" + std::string(fieldName) + "' resolves to '" +
-        resolved.string() + "' but it is not a directory");
-  }
-  return resolvedResult;
-}
-
-[[nodiscard]] Result<std::filesystem::path, std::string>
-resolveFile(std::string_view rawPath, const std::filesystem::path &baseDir,
-            std::string_view fieldName) {
-  auto resolvedResult = resolvePath(rawPath, baseDir, fieldName);
-  if (resolvedResult.hasError()) {
-    return resolvedResult;
-  }
-  const std::filesystem::path &resolved = resolvedResult.value();
-
-  std::error_code ec;
-  const bool exists = std::filesystem::exists(resolved, ec);
-  if (ec || !exists) {
-    return makeError<std::filesystem::path>(
-        "Config field '" + std::string(fieldName) + "' resolves to '" +
-        resolved.string() + "' but it does not exist");
-  }
-  if (!std::filesystem::is_regular_file(resolved, ec) || ec) {
-    return makeError<std::filesystem::path>(
-        "Config field '" + std::string(fieldName) + "' resolves to '" +
-        resolved.string() + "' but it is not a regular file");
-  }
-  return resolvedResult;
-}
-
-[[nodiscard]] Result<std::filesystem::path, std::string>
-resolveShaderFileWithDefault(yyjson_val *sectionObj, const char *key,
-                             std::string_view sectionFieldName,
-                             std::string_view defaultRelativePath,
-                             const std::filesystem::path &shadersRoot) {
-  auto shaderPathText = stringFieldOrDefault(sectionObj, key, sectionFieldName,
-                                             defaultRelativePath);
-  if (shaderPathText.hasError()) {
-    return makeError<std::filesystem::path>(shaderPathText.error());
-  }
-
-  const std::string resolvedFieldName = fieldPath(sectionFieldName, key);
-  return resolveFile(shaderPathText.value(), shadersRoot, resolvedFieldName);
-}
-
 } // namespace
 
 Result<RuntimeConfig, std::string>
 loadRuntimeConfig(const std::filesystem::path &configPath) {
   NURI_PROFILER_FUNCTION();
-  const std::filesystem::path normalizedConfigPath = normalizePath(configPath);
-
-  std::error_code ec;
-  if (!std::filesystem::exists(normalizedConfigPath, ec) || ec) {
-    return makeError<RuntimeConfig>("App config file does not exist: '" +
-                                    normalizedConfigPath.string() + "'");
+  const auto normalizedPath = normalizePath(configPath);
+  auto text = readTextFile(normalizedPath);
+  if (text.hasError()) {
+    return makeError<RuntimeConfig>(text.error());
   }
-  if (!std::filesystem::is_regular_file(normalizedConfigPath, ec) || ec) {
-    return makeError<RuntimeConfig>("App config path is not a file: '" +
-                                    normalizedConfigPath.string() + "'");
-  }
-
-  auto textResult = readTextFile(normalizedConfigPath);
-  if (textResult.hasError()) {
-    return makeError<RuntimeConfig>(textResult.error());
-  }
-
-  std::string jsonText = std::move(textResult.value());
   yyjson_read_err parseError{};
-  yyjson_doc *rawDoc = yyjson_read_opts(jsonText.data(), jsonText.size(), 0,
-                                        nullptr, &parseError);
-  if (!rawDoc) {
-    const std::string message =
-        parseError.msg != nullptr ? parseError.msg : "unknown parse error";
+  yyjson_doc *rawDocument = yyjson_read_opts(
+      text.value().data(), text.value().size(), 0, nullptr, &parseError);
+  if (!rawDocument) {
     return makeError<RuntimeConfig>(
-        "Failed to parse app config '" + normalizedConfigPath.string() +
-        "': " + std::to_string(parseError.pos) + ": " + message);
+        "Failed to parse app config '" + normalizedPath.string() +
+        "': " + std::to_string(parseError.pos) + ": " +
+        (parseError.msg ? parseError.msg : "unknown parse error"));
   }
-
-  std::unique_ptr<yyjson_doc, decltype(&yyjson_doc_free)> doc(rawDoc,
-                                                              &yyjson_doc_free);
-  yyjson_val *root = yyjson_doc_get_root(doc.get());
+  std::unique_ptr<yyjson_doc, decltype(&yyjson_doc_free)> document(
+      rawDocument, &yyjson_doc_free);
+  ConfigReader reader;
+  yyjson_val *root = yyjson_doc_get_root(document.get());
   if (!yyjson_is_obj(root)) {
-    return makeError<RuntimeConfig>("App config root must be a JSON object");
-  }
-
-  auto rootKeysResult = validateUnknownKeys(root, "", kRootObjectKeys);
-  if (rootKeysResult.hasError()) {
-    return makeError<RuntimeConfig>(rootKeysResult.error());
-  }
-
-  auto windowObjResult = requireObjectField(root, "window", "");
-  if (windowObjResult.hasError()) {
-    return makeError<RuntimeConfig>(windowObjResult.error());
-  }
-  auto rootsObjResult = requireObjectField(root, "roots", "");
-  if (rootsObjResult.hasError()) {
-    return makeError<RuntimeConfig>(rootsObjResult.error());
-  }
-  auto shadersObjResult = optionalObjectField(root, "shaders", "");
-  if (shadersObjResult.hasError()) {
-    return makeError<RuntimeConfig>(shadersObjResult.error());
-  }
-
-  yyjson_val *windowObj = windowObjResult.value();
-  yyjson_val *rootsObj = rootsObjResult.value();
-  yyjson_val *shadersObj = shadersObjResult.value();
-
-  {
-    auto result = validateUnknownKeys(windowObj, "window", kWindowKeys);
-    if (result.hasError()) {
-      return makeError<RuntimeConfig>(result.error());
-    }
-  }
-  {
-    auto result = validateUnknownKeys(rootsObj, "roots", kRootsKeys);
-    if (result.hasError()) {
-      return makeError<RuntimeConfig>(result.error());
-    }
-  }
-  if (shadersObj != nullptr) {
-    auto result = validateUnknownKeys(shadersObj, "shaders", kShadersKeys);
-    if (result.hasError()) {
-      return makeError<RuntimeConfig>(result.error());
-    }
-  }
-
-  auto debugGridObjResult =
-      optionalObjectField(shadersObj, "debug_grid", "shaders");
-  if (debugGridObjResult.hasError()) {
-    return makeError<RuntimeConfig>(debugGridObjResult.error());
-  }
-  auto skyboxObjResult = optionalObjectField(shadersObj, "skybox", "shaders");
-  if (skyboxObjResult.hasError()) {
-    return makeError<RuntimeConfig>(skyboxObjResult.error());
-  }
-  auto opaqueObjResult = optionalObjectField(shadersObj, "opaque", "shaders");
-  if (opaqueObjResult.hasError()) {
-    return makeError<RuntimeConfig>(opaqueObjResult.error());
-  }
-  auto compositeObjResult =
-      optionalObjectField(shadersObj, "composite", "shaders");
-  if (compositeObjResult.hasError()) {
-    return makeError<RuntimeConfig>(compositeObjResult.error());
-  }
-  auto textMtsdfObjResult =
-      optionalObjectField(shadersObj, "text_mtsdf", "shaders");
-  if (textMtsdfObjResult.hasError()) {
-    return makeError<RuntimeConfig>(textMtsdfObjResult.error());
-  }
-
-  yyjson_val *debugGridObj = debugGridObjResult.value();
-  yyjson_val *skyboxObj = skyboxObjResult.value();
-  yyjson_val *opaqueObj = opaqueObjResult.value();
-  yyjson_val *compositeObj = compositeObjResult.value();
-  yyjson_val *textMtsdfObj = textMtsdfObjResult.value();
-
-  if (debugGridObj != nullptr) {
-    auto result = validateUnknownKeys(debugGridObj, "shaders.debug_grid",
-                                      kDebugGridShaderKeys);
-    if (result.hasError()) {
-      return makeError<RuntimeConfig>(result.error());
-    }
-  }
-  if (skyboxObj != nullptr) {
-    auto result =
-        validateUnknownKeys(skyboxObj, "shaders.skybox", kSkyboxShaderKeys);
-    if (result.hasError()) {
-      return makeError<RuntimeConfig>(result.error());
-    }
-  }
-  if (opaqueObj != nullptr) {
-    auto result =
-        validateUnknownKeys(opaqueObj, "shaders.opaque", kOpaqueShaderKeys);
-    if (result.hasError()) {
-      return makeError<RuntimeConfig>(result.error());
-    }
-  }
-  if (compositeObj != nullptr) {
-    auto result = validateUnknownKeys(compositeObj, "shaders.composite",
-                                      kCompositeShaderKeys);
-    if (result.hasError()) {
-      return makeError<RuntimeConfig>(result.error());
-    }
-  }
-  if (textMtsdfObj != nullptr) {
-    auto result = validateUnknownKeys(textMtsdfObj, "shaders.text_mtsdf",
-                                      kTextMtsdfShaderKeys);
-    if (result.hasError()) {
-      return makeError<RuntimeConfig>(result.error());
-    }
-  }
-
-  auto windowTitle = requireStringField(windowObj, "title", "window");
-  if (windowTitle.hasError()) {
-    return makeError<RuntimeConfig>(windowTitle.error());
-  }
-  auto windowWidth = requirePositiveIntField(windowObj, "width", "window");
-  if (windowWidth.hasError()) {
-    return makeError<RuntimeConfig>(windowWidth.error());
-  }
-  auto windowHeight = requirePositiveIntField(windowObj, "height", "window");
-  if (windowHeight.hasError()) {
-    return makeError<RuntimeConfig>(windowHeight.error());
-  }
-  auto windowModeText = requireStringField(windowObj, "mode", "window");
-  if (windowModeText.hasError()) {
-    return makeError<RuntimeConfig>(windowModeText.error());
-  }
-  auto windowMode = parseWindowMode(windowModeText.value());
-  if (windowMode.hasError()) {
-    return makeError<RuntimeConfig>(windowMode.error());
-  }
-
-  auto assetsRootText = requireStringField(rootsObj, "assets", "roots");
-  if (assetsRootText.hasError()) {
-    return makeError<RuntimeConfig>(assetsRootText.error());
-  }
-  auto shadersRootText = requireStringField(rootsObj, "shaders", "roots");
-  if (shadersRootText.hasError()) {
-    return makeError<RuntimeConfig>(shadersRootText.error());
-  }
-  auto modelsRootText = requireStringField(rootsObj, "models", "roots");
-  if (modelsRootText.hasError()) {
-    return makeError<RuntimeConfig>(modelsRootText.error());
-  }
-  auto texturesRootText = requireStringField(rootsObj, "textures", "roots");
-  if (texturesRootText.hasError()) {
-    return makeError<RuntimeConfig>(texturesRootText.error());
-  }
-  auto fontsRootText = requireStringField(rootsObj, "fonts", "roots");
-  if (fontsRootText.hasError()) {
-    return makeError<RuntimeConfig>(fontsRootText.error());
-  }
-
-  const std::filesystem::path configDir = normalizedConfigPath.parent_path();
-  auto assetsRoot =
-      resolveDirectory(assetsRootText.value(), configDir, "roots.assets");
-  if (assetsRoot.hasError()) {
-    return makeError<RuntimeConfig>(assetsRoot.error());
-  }
-  auto shadersRoot =
-      resolveDirectory(shadersRootText.value(), configDir, "roots.shaders");
-  if (shadersRoot.hasError()) {
-    return makeError<RuntimeConfig>(shadersRoot.error());
-  }
-  auto modelsRoot =
-      resolveDirectory(modelsRootText.value(), configDir, "roots.models");
-  if (modelsRoot.hasError()) {
-    return makeError<RuntimeConfig>(modelsRoot.error());
-  }
-  auto texturesRoot =
-      resolveDirectory(texturesRootText.value(), configDir, "roots.textures");
-  if (texturesRoot.hasError()) {
-    return makeError<RuntimeConfig>(texturesRoot.error());
-  }
-  auto fontsRoot =
-      resolveDirectory(fontsRootText.value(), configDir, "roots.fonts");
-  if (fontsRoot.hasError()) {
-    return makeError<RuntimeConfig>(fontsRoot.error());
-  }
-
-  auto debugGridVertexPath = resolveShaderFileWithDefault(
-      debugGridObj, "vertex", "shaders.debug_grid",
-      kDefaultDebugGridVertexShader, shadersRoot.value());
-  if (debugGridVertexPath.hasError()) {
-    return makeError<RuntimeConfig>(debugGridVertexPath.error());
-  }
-  auto debugGridFragmentPath = resolveShaderFileWithDefault(
-      debugGridObj, "fragment", "shaders.debug_grid",
-      kDefaultDebugGridFragmentShader, shadersRoot.value());
-  if (debugGridFragmentPath.hasError()) {
-    return makeError<RuntimeConfig>(debugGridFragmentPath.error());
-  }
-  auto skyboxVertexPath = resolveShaderFileWithDefault(
-      skyboxObj, "vertex", "shaders.skybox", kDefaultSkyboxVertexShader,
-      shadersRoot.value());
-  if (skyboxVertexPath.hasError()) {
-    return makeError<RuntimeConfig>(skyboxVertexPath.error());
-  }
-  auto skyboxFragmentPath = resolveShaderFileWithDefault(
-      skyboxObj, "fragment", "shaders.skybox", kDefaultSkyboxFragmentShader,
-      shadersRoot.value());
-  if (skyboxFragmentPath.hasError()) {
-    return makeError<RuntimeConfig>(skyboxFragmentPath.error());
-  }
-
-  auto meshVertexPath = resolveShaderFileWithDefault(
-      opaqueObj, "mesh_vertex", "shaders.opaque",
-      kDefaultOpaqueMeshVertexShader, shadersRoot.value());
-  if (meshVertexPath.hasError()) {
-    return makeError<RuntimeConfig>(meshVertexPath.error());
-  }
-  auto meshFragmentPath = resolveShaderFileWithDefault(
-      opaqueObj, "mesh_fragment", "shaders.opaque",
-      kDefaultOpaqueMeshFragmentShader, shadersRoot.value());
-  if (meshFragmentPath.hasError()) {
-    return makeError<RuntimeConfig>(meshFragmentPath.error());
-  }
-  auto meshletTaskPath = resolveShaderFileWithDefault(
-      opaqueObj, "meshlet_task", "shaders.opaque",
-      kDefaultOpaqueMeshletTaskShader, shadersRoot.value());
-  if (meshletTaskPath.hasError()) {
-    return makeError<RuntimeConfig>(meshletTaskPath.error());
-  }
-  auto meshletMeshPath = resolveShaderFileWithDefault(
-      opaqueObj, "meshlet_mesh", "shaders.opaque",
-      kDefaultOpaqueMeshletMeshShader, shadersRoot.value());
-  if (meshletMeshPath.hasError()) {
-    return makeError<RuntimeConfig>(meshletMeshPath.error());
-  }
-  auto meshletFragmentPath = resolveShaderFileWithDefault(
-      opaqueObj, "meshlet_fragment", "shaders.opaque",
-      kDefaultOpaqueMeshletFragmentShader, shadersRoot.value());
-  if (meshletFragmentPath.hasError()) {
-    return makeError<RuntimeConfig>(meshletFragmentPath.error());
-  }
-  auto meshletDepthFragmentPath = resolveShaderFileWithDefault(
-      opaqueObj, "meshlet_depth_fragment", "shaders.opaque",
-      kDefaultOpaqueMeshletDepthFragmentShader, shadersRoot.value());
-  if (meshletDepthFragmentPath.hasError()) {
-    return makeError<RuntimeConfig>(meshletDepthFragmentPath.error());
-  }
-  auto meshletDepthAlphaFragmentPath = resolveShaderFileWithDefault(
-      opaqueObj, "meshlet_depth_alpha_fragment", "shaders.opaque",
-      kDefaultOpaqueMeshletDepthAlphaFragmentShader, shadersRoot.value());
-  if (meshletDepthAlphaFragmentPath.hasError()) {
-    return makeError<RuntimeConfig>(meshletDepthAlphaFragmentPath.error());
-  }
-  auto pickFragmentPath = resolveShaderFileWithDefault(
-      opaqueObj, "pick_fragment", "shaders.opaque",
-      kDefaultOpaquePickFragmentShader, shadersRoot.value());
-  if (pickFragmentPath.hasError()) {
-    return makeError<RuntimeConfig>(pickFragmentPath.error());
-  }
-  auto shadowInspectFragmentPath = resolveShaderFileWithDefault(
-      opaqueObj, "shadow_inspect_fragment", "shaders.opaque",
-      kDefaultOpaqueShadowInspectFragmentShader, shadersRoot.value());
-  if (shadowInspectFragmentPath.hasError()) {
-    return makeError<RuntimeConfig>(shadowInspectFragmentPath.error());
-  }
-  auto computeInstancesPath = resolveShaderFileWithDefault(
-      opaqueObj, "compute_instances", "shaders.opaque",
-      kDefaultOpaqueComputeShader, shadersRoot.value());
-  if (computeInstancesPath.hasError()) {
-    return makeError<RuntimeConfig>(computeInstancesPath.error());
-  }
-  auto tessVertexPath = resolveShaderFileWithDefault(
-      opaqueObj, "tess_vertex", "shaders.opaque",
-      kDefaultOpaqueTessVertexShader, shadersRoot.value());
-  if (tessVertexPath.hasError()) {
-    return makeError<RuntimeConfig>(tessVertexPath.error());
-  }
-  auto tessControlPath = resolveShaderFileWithDefault(
-      opaqueObj, "tess_control", "shaders.opaque",
-      kDefaultOpaqueTessControlShader, shadersRoot.value());
-  if (tessControlPath.hasError()) {
-    return makeError<RuntimeConfig>(tessControlPath.error());
-  }
-  auto tessEvalPath = resolveShaderFileWithDefault(
-      opaqueObj, "tess_eval", "shaders.opaque", kDefaultOpaqueTessEvalShader,
-      shadersRoot.value());
-  if (tessEvalPath.hasError()) {
-    return makeError<RuntimeConfig>(tessEvalPath.error());
-  }
-  auto overlayGeometryPath = resolveShaderFileWithDefault(
-      opaqueObj, "overlay_geometry", "shaders.opaque",
-      kDefaultOpaqueOverlayGeometryShader, shadersRoot.value());
-  if (overlayGeometryPath.hasError()) {
-    return makeError<RuntimeConfig>(overlayGeometryPath.error());
-  }
-  auto overlayFragmentPath = resolveShaderFileWithDefault(
-      opaqueObj, "overlay_fragment", "shaders.opaque",
-      kDefaultOpaqueOverlayFragmentShader, shadersRoot.value());
-  if (overlayFragmentPath.hasError()) {
-    return makeError<RuntimeConfig>(overlayFragmentPath.error());
-  }
-  auto textMtsdfUiVertexPath = resolveShaderFileWithDefault(
-      textMtsdfObj, "ui_vertex", "shaders.text_mtsdf",
-      kDefaultTextMtsdfUiVertexShader, shadersRoot.value());
-  if (textMtsdfUiVertexPath.hasError()) {
-    return makeError<RuntimeConfig>(textMtsdfUiVertexPath.error());
-  }
-  auto textMtsdfUiFragmentPath = resolveShaderFileWithDefault(
-      textMtsdfObj, "ui_fragment", "shaders.text_mtsdf",
-      kDefaultTextMtsdfUiFragmentShader, shadersRoot.value());
-  if (textMtsdfUiFragmentPath.hasError()) {
-    return makeError<RuntimeConfig>(textMtsdfUiFragmentPath.error());
-  }
-  auto textMtsdfWorldVertexPath = resolveShaderFileWithDefault(
-      textMtsdfObj, "world_vertex", "shaders.text_mtsdf",
-      kDefaultTextMtsdfWorldVertexShader, shadersRoot.value());
-  if (textMtsdfWorldVertexPath.hasError()) {
-    return makeError<RuntimeConfig>(textMtsdfWorldVertexPath.error());
-  }
-  auto textMtsdfWorldFragmentPath = resolveShaderFileWithDefault(
-      textMtsdfObj, "world_fragment", "shaders.text_mtsdf",
-      kDefaultTextMtsdfWorldFragmentShader, shadersRoot.value());
-  if (textMtsdfWorldFragmentPath.hasError()) {
-    return makeError<RuntimeConfig>(textMtsdfWorldFragmentPath.error());
-  }
-  auto compositeFullscreenVertexPath = resolveShaderFileWithDefault(
-      compositeObj, "fullscreen_vertex", "shaders.composite",
-      kDefaultCompositeFullscreenVertexShader, shadersRoot.value());
-  if (compositeFullscreenVertexPath.hasError()) {
-    return makeError<RuntimeConfig>(compositeFullscreenVertexPath.error());
-  }
-  auto compositeSceneCopyFragmentPath = resolveShaderFileWithDefault(
-      compositeObj, "scene_copy_fragment", "shaders.composite",
-      kDefaultCompositeSceneCopyFragmentShader, shadersRoot.value());
-  if (compositeSceneCopyFragmentPath.hasError()) {
-    return makeError<RuntimeConfig>(compositeSceneCopyFragmentPath.error());
-  }
-  auto compositePresentFragmentPath = resolveShaderFileWithDefault(
-      compositeObj, "present_fragment", "shaders.composite",
-      kDefaultCompositePresentFragmentShader, shadersRoot.value());
-  if (compositePresentFragmentPath.hasError()) {
-    return makeError<RuntimeConfig>(compositePresentFragmentPath.error());
-  }
-  auto compositeHdrLuminanceReduceFragmentPath = resolveShaderFileWithDefault(
-      compositeObj, "hdr_luminance_reduce_fragment", "shaders.composite",
-      kDefaultCompositeHdrLuminanceReduceFragmentShader, shadersRoot.value());
-  if (compositeHdrLuminanceReduceFragmentPath.hasError()) {
-    return makeError<RuntimeConfig>(
-        compositeHdrLuminanceReduceFragmentPath.error());
-  }
-  auto compositeHdrExposureAdaptFragmentPath = resolveShaderFileWithDefault(
-      compositeObj, "hdr_exposure_adapt_fragment", "shaders.composite",
-      kDefaultCompositeHdrExposureAdaptFragmentShader, shadersRoot.value());
-  if (compositeHdrExposureAdaptFragmentPath.hasError()) {
-    return makeError<RuntimeConfig>(
-        compositeHdrExposureAdaptFragmentPath.error());
-  }
-  auto compositeHdrBloomFragmentPath = resolveShaderFileWithDefault(
-      compositeObj, "hdr_bloom_fragment", "shaders.composite",
-      kDefaultCompositeHdrBloomFragmentShader, shadersRoot.value());
-  if (compositeHdrBloomFragmentPath.hasError()) {
-    return makeError<RuntimeConfig>(compositeHdrBloomFragmentPath.error());
-  }
-  auto compositeHdrBloomCompositeFragmentPath = resolveShaderFileWithDefault(
-      compositeObj, "hdr_bloom_composite_fragment", "shaders.composite",
-      kDefaultCompositeHdrBloomCompositeFragmentShader, shadersRoot.value());
-  if (compositeHdrBloomCompositeFragmentPath.hasError()) {
-    return makeError<RuntimeConfig>(
-        compositeHdrBloomCompositeFragmentPath.error());
-  }
-  auto compositeAces2SdrLutPath =
-      stringFieldOrDefault(compositeObj, "aces2_sdr_lut", "shaders.composite",
-                           kDefaultCompositeAces2SdrLut);
-  if (compositeAces2SdrLutPath.hasError()) {
-    return makeError<RuntimeConfig>(compositeAces2SdrLutPath.error());
-  }
-  auto compositeAgxLutPath = stringFieldOrDefault(
-      compositeObj, "agx_lut", "shaders.composite", kDefaultCompositeAgxLut);
-  if (compositeAgxLutPath.hasError()) {
-    return makeError<RuntimeConfig>(compositeAgxLutPath.error());
-  }
-  auto aces2SdrLutPath =
-      resolveFile(compositeAces2SdrLutPath.value(), texturesRoot.value(),
-                  "shaders.composite.aces2_sdr_lut");
-  if (aces2SdrLutPath.hasError()) {
-    return makeError<RuntimeConfig>(aces2SdrLutPath.error());
-  }
-  auto agxLutPath =
-      resolveFile(compositeAgxLutPath.value(), texturesRoot.value(),
-                  "shaders.composite.agx_lut");
-  if (agxLutPath.hasError()) {
-    return makeError<RuntimeConfig>(agxLutPath.error());
-  }
-
+    reader.fail("App config root must be a JSON object");
+    root = nullptr;
+  }
+  constexpr auto rootKeys =
+      std::to_array<std::string_view>({"window", "roots", "shaders"});
+  constexpr auto windowKeys =
+      std::to_array<std::string_view>({"title", "width", "height", "mode"});
+  constexpr auto shaderKeys = std::to_array<std::string_view>(
+      {"debug_grid", "skybox", "opaque", "composite", "text_mtsdf"});
+  const auto listed = [](const auto &keys) {
+    return [&keys](std::string_view key) {
+      return std::ranges::find(keys, key) != keys.end();
+    };
+  };
+  reader.validate(root, "", listed(rootKeys));
+  yyjson_val *window = reader.object(root, "window", "", true);
+  yyjson_val *roots = reader.object(root, "roots", "", true);
+  yyjson_val *shaders = reader.object(root, "shaders", "", false);
+  reader.validate(window, "window", listed(windowKeys));
+  reader.validate(shaders, "shaders", listed(shaderKeys));
   RuntimeConfig config{};
-  config.sourcePath = normalizedConfigPath;
-  config.window = RuntimeWindowConfig{
-      .title = std::move(windowTitle.value()),
-      .width = windowWidth.value(),
-      .height = windowHeight.value(),
-      .mode = windowMode.value(),
-  };
-  config.roots = RuntimeRootsConfig{
-      .assets = assetsRoot.value(),
-      .shaders = shadersRoot.value(),
-      .models = modelsRoot.value(),
-      .textures = texturesRoot.value(),
-      .fonts = fontsRoot.value(),
-  };
-  config.shaders = RuntimeShaderConfig{
-      .debugGrid =
-          RuntimeDebugShaderConfig{
-              .vertex = debugGridVertexPath.value(),
-              .fragment = debugGridFragmentPath.value(),
-          },
-      .skybox =
-          RuntimeSkyboxShaderConfig{
-              .vertex = skyboxVertexPath.value(),
-              .fragment = skyboxFragmentPath.value(),
-          },
-      .opaque =
-          RuntimeOpaqueShaderConfig{
-              .shaderBasePath = shadersRoot.value(),
-              .meshVertex = meshVertexPath.value(),
-              .meshFragment = meshFragmentPath.value(),
-              .meshletTask = meshletTaskPath.value(),
-              .meshletMesh = meshletMeshPath.value(),
-              .meshletFragment = meshletFragmentPath.value(),
-              .meshletDepthFragment = meshletDepthFragmentPath.value(),
-              .meshletDepthAlphaFragment =
-                  meshletDepthAlphaFragmentPath.value(),
-              .pickFragment = pickFragmentPath.value(),
-              .shadowInspectFragment = shadowInspectFragmentPath.value(),
-              .computeInstances = computeInstancesPath.value(),
-              .tessVertex = tessVertexPath.value(),
-              .tessControl = tessControlPath.value(),
-              .tessEval = tessEvalPath.value(),
-              .overlayGeometry = overlayGeometryPath.value(),
-              .overlayFragment = overlayFragmentPath.value(),
-          },
-      .composite =
-          RuntimeCompositeConfig{
-              .shaderBasePath = shadersRoot.value(),
-              .fullscreenVertex = compositeFullscreenVertexPath.value(),
-              .sceneCopyFragment = compositeSceneCopyFragmentPath.value(),
-              .presentFragment = compositePresentFragmentPath.value(),
-              .hdrLuminanceReduceFragment =
-                  compositeHdrLuminanceReduceFragmentPath.value(),
-              .hdrExposureAdaptFragment =
-                  compositeHdrExposureAdaptFragmentPath.value(),
-              .hdrBloomFragment = compositeHdrBloomFragmentPath.value(),
-              .hdrBloomCompositeFragment =
-                  compositeHdrBloomCompositeFragmentPath.value(),
-              .aces2SdrLut = aces2SdrLutPath.value(),
-              .agxLut = agxLutPath.value(),
-          },
-      .textMtsdf =
-          RuntimeTextMtsdfShaderConfig{
-              .uiVertex = textMtsdfUiVertexPath.value(),
-              .uiFragment = textMtsdfUiFragmentPath.value(),
-              .worldVertex = textMtsdfWorldVertexPath.value(),
-              .worldFragment = textMtsdfWorldFragmentPath.value(),
-          },
-  };
-
+  config.sourcePath = normalizedPath;
+  config.window.title = reader.text(window, "title", "window");
+  config.window.width = reader.positiveInt(window, "width", "window");
+  config.window.height = reader.positiveInt(window, "height", "window");
+  const std::string mode = reader.text(window, "mode", "window");
+  if (mode == "windowed") {
+    config.window.mode = WindowMode::Windowed;
+  } else if (mode == "fullscreen") {
+    config.window.mode = WindowMode::Fullscreen;
+  } else if (mode == "borderless_fullscreen") {
+    config.window.mode = WindowMode::BorderlessFullscreen;
+  } else if (reader.error().empty()) {
+    reader.fail(
+        "Invalid window.mode '" + mode +
+        "'. Allowed values: windowed, fullscreen, borderless_fullscreen");
+  }
+  const auto configDirectory = normalizedPath.parent_path();
+  readRoots(reader, roots, configDirectory, config.roots, kRootFields);
+  yyjson_val *debug = reader.object(shaders, "debug_grid", "shaders", false);
+  yyjson_val *skybox = reader.object(shaders, "skybox", "shaders", false);
+  yyjson_val *opaque = reader.object(shaders, "opaque", "shaders", false);
+  yyjson_val *composite = reader.object(shaders, "composite", "shaders", false);
+  yyjson_val *textMtsdf =
+      reader.object(shaders, "text_mtsdf", "shaders", false);
+  readPaths(reader, debug, "shaders.debug_grid", config.roots.shaders,
+            config.roots.textures, config.shaders.debugGrid, kDebugFields);
+  readPaths(reader, skybox, "shaders.skybox", config.roots.shaders,
+            config.roots.textures, config.shaders.skybox, kSkyboxFields);
+  config.shaders.opaque.shaderBasePath = config.roots.shaders;
+  readPaths(reader, opaque, "shaders.opaque", config.roots.shaders,
+            config.roots.textures, config.shaders.opaque, kOpaqueFields);
+  config.shaders.composite.shaderBasePath = config.roots.shaders;
+  readPaths(reader, composite, "shaders.composite", config.roots.shaders,
+            config.roots.textures, config.shaders.composite, kCompositeFields);
+  readPaths(reader, textMtsdf, "shaders.text_mtsdf", config.roots.shaders,
+            config.roots.textures, config.shaders.textMtsdf, kTextFields);
+  if (!reader.error().empty()) {
+    return makeError<RuntimeConfig>(reader.error());
+  }
   return Result<RuntimeConfig, std::string>::makeResult(std::move(config));
 }
 
@@ -894,29 +405,22 @@ Result<RuntimeConfig, std::string> loadRuntimeConfig() {
 
 Result<RuntimeConfig, std::string> loadRuntimeConfigFromEnvOrDefault() {
 #if defined(_WIN32)
-  struct CFreeDeleter {
-    void operator()(char *value) const noexcept { std::free(value); }
-  };
-
-  char *envConfigPathRaw = nullptr;
-  size_t envConfigPathSize = 0;
-  const int envReadError =
-      _dupenv_s(&envConfigPathRaw, &envConfigPathSize, kAppConfigEnvVarCStr);
-  std::unique_ptr<char, CFreeDeleter> envConfigPath(envConfigPathRaw);
-  if (envReadError != 0) {
+  char *raw = nullptr;
+  size_t size = 0;
+  const int error = _dupenv_s(&raw, &size, kAppConfigEnvVar);
+  std::unique_ptr<char, decltype(&std::free)> value(raw, &std::free);
+  if (error != 0) {
     return makeError<RuntimeConfig>("Failed to read environment variable '" +
                                     std::string(kAppConfigEnvVar) +
-                                    "' (error " + std::to_string(envReadError) +
-                                    ")");
+                                    "' (error " + std::to_string(error) + ")");
   }
-
-  if (envConfigPath != nullptr && envConfigPath.get()[0] != '\0') {
-    return loadRuntimeConfig(std::filesystem::path{envConfigPath.get()});
+  if (value && value.get()[0] != '\0') {
+    return loadRuntimeConfig(value.get());
   }
 #else
-  const char *envConfigPath = std::getenv(kAppConfigEnvVarCStr);
-  if (envConfigPath != nullptr && envConfigPath[0] != '\0') {
-    return loadRuntimeConfig(std::filesystem::path{envConfigPath});
+  const char *value = std::getenv(kAppConfigEnvVar);
+  if (value && value[0] != '\0') {
+    return loadRuntimeConfig(value);
   }
 #endif
   return loadRuntimeConfig();

@@ -1,5 +1,4 @@
 #pragma once
-
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -19,6 +18,13 @@
 #include <fstream>
 #include <functional>
 #include <future>
+#include <glm/common.hpp>
+#include <glm/ext.hpp>
+#include <glm/glm.hpp>
+#include <glm/gtc/constants.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/packing.hpp>
+#include <glm/gtc/quaternion.hpp>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -37,17 +43,7 @@
 #include <utility>
 #include <variant>
 #include <vector>
-
-#include <glm/common.hpp>
-#include <glm/ext.hpp>
-#include <glm/glm.hpp>
-#include <glm/gtc/constants.hpp>
-#include <glm/gtc/matrix_transform.hpp>
-#include <glm/gtc/packing.hpp>
-#include <glm/gtc/quaternion.hpp>
-
 #include <yyjson.h>
-
 #if __has_include(<meshoptimizer.h>)
 #include <meshoptimizer.h>
 #elif __has_include(<meshoptimizer/meshoptimizer.h>)

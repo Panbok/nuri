@@ -1,14 +1,11 @@
 #pragma once
-
 #include "nuri/defines.h"
 #include "nuri/scene/scene_handles.h"
-
 #include <cstdint>
 #include <limits>
 #include <memory_resource>
 #include <string>
 #include <vector>
-
 namespace nuri {
 
 inline constexpr uint32_t kInvalidSimulationBindingIndex =
@@ -68,7 +65,6 @@ struct NURI_API SimulationBindingTarget {
   RenderableId renderable = kInvalidRenderableId;
   NodeId prefabRoot = kInvalidNodeId;
   uint32_t runtimeBindingIndex = kInvalidSimulationBindingIndex;
-
   [[nodiscard]] static constexpr SimulationBindingTarget
   makeNode(NodeId nodeId) noexcept {
     SimulationBindingTarget target{};
@@ -76,7 +72,6 @@ struct NURI_API SimulationBindingTarget {
     target.node = nodeId;
     return target;
   }
-
   [[nodiscard]] static constexpr SimulationBindingTarget
   makeRenderable(RenderableId renderableId) noexcept {
     SimulationBindingTarget target{};
@@ -84,7 +79,6 @@ struct NURI_API SimulationBindingTarget {
     target.renderable = renderableId;
     return target;
   }
-
   [[nodiscard]] static constexpr SimulationBindingTarget
   makePrefabRoot(NodeId rootNodeId) noexcept {
     SimulationBindingTarget target{};
@@ -103,7 +97,6 @@ struct NURI_API SimulationBindingDesc {
   explicit SimulationBindingDesc(
       std::pmr::memory_resource *memory = std::pmr::get_default_resource())
       : secondaryTargets(memory), debugName(memory), attachmentSlots(memory) {}
-
   SimulationBindingTarget primaryTarget{};
   std::pmr::vector<SimulationBindingTarget> secondaryTargets;
   std::pmr::string debugName;

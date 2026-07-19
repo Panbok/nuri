@@ -1,18 +1,13 @@
 #pragma once
-
 #include "nuri/defines.h"
+#include "nuri/math/utils.h"
 #include "nuri/resources/gpu/resource_handles.h"
-
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
-#include <string>
-
-#include "nuri/math/utils.h"
-
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
-
+#include <string>
 namespace nuri {
 
 enum class LightType : uint8_t {
@@ -24,12 +19,8 @@ enum class LightType : uint8_t {
 struct NURI_API LightId {
   LightType type = LightType::Directional;
   uint32_t value = 0;
-
   constexpr bool operator==(LightId other) const noexcept {
     return type == other.type && value == other.value;
-  }
-  constexpr bool operator!=(LightId other) const noexcept {
-    return !(*this == other);
   }
 };
 
@@ -40,11 +31,11 @@ inline constexpr LightId kInvalidLightId{};
 }
 
 [[nodiscard]] constexpr uint32_t indexOf(LightId id) noexcept {
-  return unpackResourceHandle(id.value).index;
+  return id.value & kResourceHandleIndexMask;
 }
 
 [[nodiscard]] constexpr uint32_t generationOf(LightId id) noexcept {
-  return unpackResourceHandle(id.value).generation;
+  return id.value >> kResourceHandleIndexBits;
 }
 
 [[nodiscard]] constexpr LightId makeLightId(LightType type, uint32_t index,
@@ -52,9 +43,6 @@ inline constexpr LightId kInvalidLightId{};
   return LightId{type, packResourceHandle(index, generation)};
 }
 
-// LocalLightGpuType starts at zero because directional lights are packed in a
-// separate GPU buffer. Do not cast directly between LocalLightGpuType and
-// LightType: LightType::Point is 1 while LocalLightGpuType::Point is 0.
 enum class LocalLightGpuType : uint32_t {
   Point = 0u,
   Spot = 1u,
@@ -85,10 +73,6 @@ struct alignas(16) LocalLightGpuData {
   glm::vec4 positionRange{0.0f, 0.0f, 0.0f, 0.0f};
   glm::vec4 directionOuterCos{0.0f, 0.0f, -1.0f, -1.0f};
   glm::vec4 colorIntensity{1.0f, 1.0f, 1.0f, 1.0f};
-  // LocalLightGpuData::innerCosTypeEnabledReserved must stay std430-friendly
-  // and match the shader unpacking: .x stores inner cone cosine as float bits,
-  // .y stores LocalLightGpuType, .z stores the enabled flag plus future packed
-  // bits, and .w is reserved. Mirror any layout changes in shader decode code.
   glm::uvec4 innerCosTypeEnabledReserved{0u, 0u, 0u, 0u};
 };
 static_assert(sizeof(LocalLightGpuData) == 4u * sizeof(glm::vec4),
@@ -96,8 +80,6 @@ static_assert(sizeof(LocalLightGpuData) == 4u * sizeof(glm::vec4),
 
 [[nodiscard]] inline glm::vec3
 lightDirectionFromRotationForLocalLights(const glm::quat &rotation) {
-  // Keep a local implementation here to avoid including `nuri/math/light.h`
-  // (which already includes this header and would create a cycle).
   constexpr float kMinLength = 1.0e-6f;
   const glm::vec3 direction =
       sanitizeRotation(rotation) * glm::vec3(0.0f, 0.0f, -1.0f);
@@ -160,29 +142,21 @@ packSpotLight(const glm::vec3 &position, const glm::quat &rotation,
   };
 }
 
-template <typename Store>
-[[nodiscard]] inline LightDesc
-makeLocalLightDesc(const Store &store, uint32_t index, LightType type) {
+template <typename Record>
+[[nodiscard]] inline LightDesc makeLocalLightDesc(const Record &record,
+                                                  LightType type) {
   LightDesc out{};
   out.type = type;
-  out.name = store.names[index];
-  out.position = store.localPositions[index];
-  out.rotation = store.localRotations[index];
-  out.color = store.colors[index];
-  out.intensity = store.intensities[index];
-  if constexpr (requires { store.ranges[index]; }) {
-    out.range = store.ranges[index];
-  }
-  if constexpr (requires { store.innerConeAngles[index]; }) {
-    out.innerConeAngleRadians = store.innerConeAngles[index];
-  }
-  if constexpr (requires { store.outerConeAngles[index]; }) {
-    out.outerConeAngleRadians = store.outerConeAngles[index];
-  }
-  if constexpr (requires { store.angularRadiusDegrees[index]; }) {
-    out.angularRadiusDegrees = store.angularRadiusDegrees[index];
-  }
-  out.enabled = store.enabled[index] != 0u;
+  out.name = record.name;
+  out.position = record.localPosition;
+  out.rotation = record.localRotation;
+  out.color = record.color;
+  out.intensity = record.intensity;
+  out.range = record.range;
+  out.innerConeAngleRadians = record.innerConeAngle;
+  out.outerConeAngleRadians = record.outerConeAngle;
+  out.angularRadiusDegrees = record.angularRadiusDegrees;
+  out.enabled = record.enabled;
   return out;
 }
 

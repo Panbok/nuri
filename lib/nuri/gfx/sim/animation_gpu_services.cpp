@@ -1,10 +1,7 @@
-#include "nuri/pch.h"
-
 #include "nuri/gfx/sim/animation_gpu_services.h"
-
+#include "nuri/pch.h"
 namespace nuri {
 namespace {
-
 constexpr std::string_view kSampleShaderName = "animation_pose_sample.comp";
 constexpr std::string_view kBlendShaderName = "animation_pose_blend.comp";
 constexpr std::string_view kWorldShaderName = "animation_pose_world.comp";
@@ -14,7 +11,6 @@ constexpr std::string_view kMorphShaderName = "animation_pose_morph.comp";
 constexpr std::string_view kSkinPaletteShaderName =
     "animation_pose_skin_palette.comp";
 constexpr std::string_view kSkinShaderName = "animation_pose_skin.comp";
-
 Result<bool, std::string>
 createComputePipeline(GPUDevice &gpu, ShaderHandle shader,
                       std::string_view debugName,
@@ -27,7 +23,6 @@ createComputePipeline(GPUDevice &gpu, ShaderHandle shader,
   outPipeline.reset(gpu, result.value());
   return Result<bool, std::string>::makeResult(true);
 }
-
 } // namespace
 
 AnimationGpuServices::AnimationGpuServices(GPUDevice &gpu,
@@ -65,7 +60,6 @@ Result<bool, std::string> AnimationGpuServices::createShaders() {
     return Result<bool, std::string>::makeError(
         "AnimationGpuServices::createShaders: failed to create shader wrapper");
   }
-
   const std::array shaderNames = {
       kSampleShaderName,  kBlendShaderName, kWorldShaderName,
       kScatterShaderName, kMorphShaderName, kSkinPaletteShaderName,
@@ -82,7 +76,6 @@ Result<bool, std::string> AnimationGpuServices::createShaders() {
     }
     compiledShaders[shaderIndex].reset(gpu_, result.value());
   }
-
   shader_ = std::move(shader);
   sampleShaderHandle_ = std::move(compiledShaders[0u]);
   blendShaderHandle_ = std::move(compiledShaders[1u]);
@@ -97,7 +90,6 @@ Result<bool, std::string> AnimationGpuServices::createShaders() {
 Result<bool, std::string> AnimationGpuServices::createPipelines() {
   destroyPipelines();
   std::array<OwnedComputePipelineHandle, 7u> pipelines{};
-
   const std::array pipelineSpecs = {
       std::pair{sampleShaderHandle_.get(),
                 std::string_view{"animation_pose_sample"}},
@@ -123,7 +115,6 @@ Result<bool, std::string> AnimationGpuServices::createPipelines() {
       return result;
     }
   }
-
   samplePipelineHandle_ = std::move(pipelines[0u]);
   blendPipelineHandle_ = std::move(pipelines[1u]);
   worldPipelineHandle_ = std::move(pipelines[2u]);

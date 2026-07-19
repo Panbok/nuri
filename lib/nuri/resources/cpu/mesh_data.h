@@ -1,9 +1,7 @@
 #pragma once
-
 #include "nuri/math/types.h"
 #include "nuri/pch.h"
 #include "nuri/resources/cpu/animation_data.h"
-
 namespace nuri {
 
 struct Vertex {
@@ -24,7 +22,6 @@ struct MorphTarget {
   std::pmr::vector<glm::vec3> positionDeltas;
   std::pmr::vector<glm::vec3> normalDeltas;
   std::pmr::vector<glm::vec3> tangentDeltas;
-
   explicit MorphTarget(
       std::pmr::memory_resource *mem = std::pmr::get_default_resource())
       : name(mem), positionDeltas(mem), normalDeltas(mem), tangentDeltas(mem) {}
@@ -50,7 +47,6 @@ struct MeshletDescriptor {
 
 struct Submesh {
   static constexpr uint32_t kMaxLodCount = 4;
-
   uint32_t vertexOffset = 0;
   uint32_t vertexCount = 0;
   uint32_t indexOffset = 0;
@@ -74,7 +70,6 @@ struct MeshData {
   std::pmr::vector<uint8_t> meshletPrimitiveIndices;
   std::pmr::vector<MorphTarget> morphTargets;
   std::pmr::string name;
-
   explicit MeshData(
       std::pmr::memory_resource *mem = std::pmr::get_default_resource())
       : vertices(mem), skinInfluences(mem), indices(mem), submeshes(mem),

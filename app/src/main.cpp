@@ -6,13 +6,13 @@
 #include "nuri/core/profiling.h"
 #include "nuri/core/runtime_config.h"
 #include "nuri/gfx/frame/render_frame_context.h"
-#include "nuri/gfx/pipeline/features/text_feature.h"
+#include "nuri/gfx/frame/temporal_frame_service.h"
 #include "nuri/math/light.h"
+#include "nuri/resources/async/asset_system.h"
 #include "nuri/resources/gpu/material.h"
 #include "nuri/resources/gpu/model.h"
 #include "nuri/resources/gpu/resource_manager.h"
 #include "nuri/resources/gpu/texture.h"
-#include "nuri/resources/scene_importer.h"
 #include "nuri/scene/camera_system.h"
 #include "nuri/scene/render_scene.h"
 #include "nuri/scene_runtime/scene_runtime_host.h"
@@ -27,6 +27,22 @@ constexpr std::string_view kDamagedHelmetModelRelativePath =
 constexpr std::string_view kSampleEnvironmentHdrRelativePath =
     "qwantani_moon_noon_puresky_4k.hdr";
 constexpr float kHelmetRotationSpeedRadians = glm::radians(35.0f);
+
+struct VisibilityReadbackOverlayState {
+  uint32_t available = 0;
+  uint32_t sourceFrame = 0;
+  uint32_t staleFrameCount = 0;
+  uint32_t errorCount = 0;
+  uint32_t occlusionAvailable = 0;
+};
+
+[[nodiscard]] const char *
+visibilityReadbackStatus(const VisibilityReadbackOverlayState &state) {
+  if (state.errorCount != 0u) {
+    return "error";
+  }
+  return state.available != 0u ? "ready" : "waiting";
+}
 
 [[nodiscard]] glm::mat4 makeTransformMatrix(const glm::vec3 &position,
                                             const glm::quat &rotation) {
@@ -112,7 +128,7 @@ public:
     sceneRuntime_.bindScene(&scene_);
     initializeCamera();
     initializeTextSystem();
-    loadSceneResources();
+    requestSceneResources();
     initializeTextOverlayFeature();
 
     NURI_LOG_INFO("Application was initialized");
@@ -121,6 +137,7 @@ public:
   void onDraw() override {
     NURI_PROFILER_FUNCTION();
 
+    pollSceneResources();
     const nuri::Camera *activeCamera = cameraSystem_.activeCamera();
     NURI_ASSERT(activeCamera != nullptr, "No active camera");
     auto commitResult = scene_.commit();
@@ -158,7 +175,7 @@ public:
     scene_.graph().clearRenderables();
     scene_.graph().clearLights();
     scene_.setEnvironment(nuri::EnvironmentHandles{});
-    releaseOwnedResourceHandles();
+    cancelSceneResourceRequests();
     scene_.bindResources(nullptr);
     getWindow().setCursorMode(nuri::CursorMode::Normal);
     NURI_LOG_INFO("Application was shutdown");
@@ -183,9 +200,7 @@ private:
     if (textOverlayEnabled_ || textSystem_ == nullptr) {
       return;
     }
-    auto *feature = getRenderPipeline().addFeature(
-        std::make_unique<nuri::Text2DFeature>(*textSystem_));
-    NURI_ASSERT(feature != nullptr, "Failed to register 2D text feature");
+    nuri::registerText2DStage(getRenderPipeline(), *textSystem_);
     textOverlayEnabled_ = true;
   }
 
@@ -221,12 +236,7 @@ private:
       return;
     }
 
-    auto begin = textSystem_->renderer().beginFrame(frameContext_.frameIndex);
-    if (begin.hasError()) {
-      NURI_LOG_WARNING("NuriApplication: failed to begin text frame: %s",
-                       begin.error().c_str());
-      return;
-    }
+    textSystem_->beginFrame(frameContext_.frameIndex);
 
     const nuri::FontHandle defaultFont = textSystem_->defaultFont();
     if (!nuri::isValid(defaultFont)) {
@@ -235,9 +245,38 @@ private:
 
     const float baseFontSizePx =
         std::clamp(textSystem_->defaultFontSizePx(), 8.0f, 256.0f);
-    std::array<char, 64> perfText{};
-    std::snprintf(perfText.data(), perfText.size(), "FPS: %.1f\nFT: %.2f ms",
-                  currentFps_, static_cast<float>(frameDeltaSeconds_ * 1000.0));
+    const bool meshletsRequested =
+        renderSettings_.opaque.meshletMode != nuri::MeshletRenderMode::Disabled;
+    const char *meshletStatus = "Off";
+    if (meshletActiveLastFrame_) {
+      meshletStatus = "Active";
+    } else if (meshletFallbackLastFrame_) {
+      meshletStatus = "Fallback";
+    } else if (meshletsRequested) {
+      meshletStatus = meshletMetricsInitialized_ ? "Waiting" : "Pending";
+    }
+
+    const char *mainReadbackStatus =
+        visibilityReadbackStatus(mainVisibilityLastFrame_);
+    const char *meshletReadbackStatus =
+        visibilityReadbackStatus(meshletVisibilityLastFrame_);
+
+    std::array<char, 512> perfText{};
+    std::snprintf(perfText.data(), perfText.size(),
+                  "FPS: %.1f\nFT: %.2f ms\nMeshlets: %s (%u GPU groups)\n"
+                  "Vis main: %s src=%u stale=%u err=%u occ=%u\n"
+                  "Vis mesh: %s src=%u stale=%u err=%u occ=%u",
+                  currentFps_, static_cast<float>(frameDeltaSeconds_ * 1000.0),
+                  meshletStatus, meshletTaskGroupsLastFrame_,
+                  mainReadbackStatus, mainVisibilityLastFrame_.sourceFrame,
+                  mainVisibilityLastFrame_.staleFrameCount,
+                  mainVisibilityLastFrame_.errorCount,
+                  mainVisibilityLastFrame_.occlusionAvailable,
+                  meshletReadbackStatus,
+                  meshletVisibilityLastFrame_.sourceFrame,
+                  meshletVisibilityLastFrame_.staleFrameCount,
+                  meshletVisibilityLastFrame_.errorCount,
+                  meshletVisibilityLastFrame_.occlusionAvailable);
 
     nuri::ScopedScratch scopedScratch(textScratchArena_);
     std::pmr::memory_resource &scratch = *scopedScratch.resource();
@@ -252,19 +291,19 @@ private:
     perf.x = 20.0f;
     perf.y = 20.0f;
 
-    auto enqueue = textSystem_->renderer().enqueue2D(perf, scratch);
+    auto enqueue = textSystem_->enqueue2D(perf, scratch);
     if (enqueue.hasError()) {
       NURI_LOG_WARNING("NuriApplication: failed to enqueue overlay text: %s",
                        enqueue.error().c_str());
     }
   }
 
-  void loadSceneResources() {
-    nuri::ResourceManager &resources = getRenderer().resources();
+  void requestSceneResources() {
+    nuri::AssetSystem &assets = getRenderer().assets();
     scene_.graph().clearRenderables();
     scene_.graph().clearLights();
     scene_.setEnvironment(nuri::EnvironmentHandles{});
-    releaseOwnedResourceHandles();
+    cancelSceneResourceRequests();
 
     const std::string helmetModelPath =
         (config_.roots.models / kDamagedHelmetModelRelativePath).string();
@@ -273,30 +312,22 @@ private:
 
     nuri::MeshImportOptions helmetImportOptions{};
     helmetImportOptions.flipUVs = true;
-    auto helmetPrefabResult = nuri::SceneImporter::loadScenePrefabFromFile(
-        helmetModelPath, nuri::SceneImportOptions{
-                             .assetBuildOptions = helmetImportOptions,
-                         });
-    NURI_ASSERT(!helmetPrefabResult.hasError(),
-                "Failed to load DamagedHelmet scene prefab: %s",
-                helmetPrefabResult.error().c_str());
-    helmetPrefab_ = std::move(helmetPrefabResult.value());
-
-    auto helmetAssetsResult = resources.acquireScenePrefabAssets(helmetPrefab_);
-    NURI_ASSERT(!helmetAssetsResult.hasError(),
-                "Failed to acquire DamagedHelmet scene prefab assets: %s",
-                helmetAssetsResult.error().c_str());
-    helmetSceneAssets_ = std::move(helmetAssetsResult.value());
-
-    auto cubemapResult = resources.acquireTexture(nuri::TextureRequest{
-        .path = environmentHdrPath,
-        .loadOptions = nuri::TextureLoadOptions{},
-        .kind = nuri::TextureRequestKind::EquirectHdrCubemap,
-        .debugName = "cubemap",
+    helmetImportOptions.generateMeshlets = true;
+    auto helmetRequest = assets.requestScene(nuri::SceneLoadRequest{
+        .path = helmetModelPath,
+        .importOptions =
+            nuri::SceneImportOptions{
+                .assetBuildOptions = helmetImportOptions,
+            },
+        .priority = nuri::AssetPriority::Critical,
+        .publication = nuri::ScenePublicationPolicy::Progressive,
+        .failurePolicy = nuri::SceneFailurePolicy::BestEffort,
+        .debugName = "sample_damaged_helmet",
     });
-    NURI_ASSERT(!cubemapResult.hasError(),
-                "Failed to create cubemap texture: %s",
-                cubemapResult.error().c_str());
+    NURI_ASSERT(!helmetRequest.hasError(),
+                "Failed to request DamagedHelmet scene: %s",
+                helmetRequest.error().c_str());
+    helmetSceneLoad_ = helmetRequest.value();
 
     const std::filesystem::path environmentHdrFile{environmentHdrPath};
     const std::string environmentStem = environmentHdrFile.stem().string();
@@ -338,7 +369,8 @@ private:
         if (std::filesystem::exists(candidate, ec) &&
             std::filesystem::is_regular_file(candidate, ec)) {
           NURI_LOG_WARNING(
-              "NuriApplication::loadSceneResources: using fallback IBL asset "
+              "NuriApplication::requestSceneResources: using fallback IBL "
+              "asset "
               "'%s' (preferred '%s' not found)",
               candidate.string().c_str(), preferredPath.string().c_str());
           return candidate;
@@ -367,12 +399,13 @@ private:
       return resolveIblAssetPath(candidates.front());
     };
 
-    const auto tryLoadKtxCubemap =
-        [&resources, &resolveFirstExistingIblAssetPath](
+    const auto makeOptionalKtxRequest =
+        [&resolveFirstExistingIblAssetPath](
             std::span<const std::filesystem::path> candidates,
-            std::string_view debugName) -> nuri::TextureRef {
+            nuri::TextureRequestKind kind,
+            std::string_view debugName) -> std::optional<nuri::TextureRequest> {
       if (candidates.empty()) {
-        return nuri::kInvalidTextureRef;
+        return std::nullopt;
       }
       const std::filesystem::path resolvedPath =
           resolveFirstExistingIblAssetPath(candidates);
@@ -380,104 +413,56 @@ private:
       if (!std::filesystem::exists(resolvedPath, ec) ||
           !std::filesystem::is_regular_file(resolvedPath, ec)) {
         NURI_LOG_WARNING(
-            "NuriApplication::loadSceneResources: missing IBL cubemap '%s'",
+            "NuriApplication::requestSceneResources: missing optional IBL "
+            "asset '%s'",
             candidates.front().string().c_str());
-        return nuri::kInvalidTextureRef;
+        return std::nullopt;
       }
-
-      auto result = resources.acquireTexture(nuri::TextureRequest{
+      return nuri::TextureRequest{
           .path = resolvedPath.string(),
-          .kind = nuri::TextureRequestKind::Ktx2Cubemap,
+          .kind = kind,
           .debugName = std::string(debugName),
-      });
-      if (result.hasError()) {
-        NURI_LOG_WARNING("NuriApplication::loadSceneResources: failed to load "
-                         "IBL cubemap '%s': %s",
-                         resolvedPath.string().c_str(), result.error().c_str());
-        return nuri::kInvalidTextureRef;
-      }
-      return result.value();
+      };
     };
 
-    const auto tryLoadKtxTexture2D =
-        [&resources, &resolveFirstExistingIblAssetPath](
-            std::span<const std::filesystem::path> candidates,
-            std::string_view debugName) -> nuri::TextureRef {
-      if (candidates.empty()) {
-        return nuri::kInvalidTextureRef;
-      }
-      const std::filesystem::path resolvedPath =
-          resolveFirstExistingIblAssetPath(candidates);
-      std::error_code ec;
-      if (!std::filesystem::exists(resolvedPath, ec) ||
-          !std::filesystem::is_regular_file(resolvedPath, ec)) {
-        NURI_LOG_WARNING("NuriApplication::loadSceneResources: missing BRDF "
-                         "LUT '%s'",
-                         candidates.front().string().c_str());
-        return nuri::kInvalidTextureRef;
-      }
-
-      auto result = resources.acquireTexture(nuri::TextureRequest{
-          .path = resolvedPath.string(),
-          .kind = nuri::TextureRequestKind::Ktx2Texture2D,
-          .debugName = std::string(debugName),
-      });
-      if (result.hasError()) {
-        NURI_LOG_WARNING("NuriApplication::loadSceneResources: failed to load "
-                         "BRDF LUT '%s': %s",
-                         resolvedPath.string().c_str(), result.error().c_str());
-        return nuri::kInvalidTextureRef;
-      }
-      return result.value();
-    };
-
-    nuri::TextureRef irradianceCubemap =
-        tryLoadKtxCubemap(irradianceCandidates, "ibl_irradiance");
-    nuri::TextureRef prefilteredGgxCubemap =
-        tryLoadKtxCubemap(prefilteredGgxCandidates, "ibl_prefilter_ggx");
-    nuri::TextureRef prefilteredCharlieCubemap = tryLoadKtxCubemap(
-        prefilteredCharlieCandidates, "ibl_prefilter_charlie");
-    nuri::TextureRef brdfLutTexture =
-        tryLoadKtxTexture2D(brdfLutCandidates, "ibl_brdf_lut");
-    scene_.setEnvironment(nuri::EnvironmentHandles{
-        .cubemap = cubemapResult.value(),
-        .irradiance = irradianceCubemap,
-        .prefilteredGgx = prefilteredGgxCubemap,
-        .prefilteredCharlie = prefilteredCharlieCubemap,
-        .brdfLut = brdfLutTexture,
-    });
-    resources.release(cubemapResult.value());
-    if (nuri::isValid(irradianceCubemap)) {
-      resources.release(irradianceCubemap);
-    }
-    if (nuri::isValid(prefilteredGgxCubemap)) {
-      resources.release(prefilteredGgxCubemap);
-    }
-    if (nuri::isValid(prefilteredCharlieCubemap)) {
-      resources.release(prefilteredCharlieCubemap);
-    }
-    if (nuri::isValid(brdfLutTexture)) {
-      resources.release(brdfLutTexture);
-    }
-
-    nuri::ModelRef helmetPrimaryModel = nuri::kInvalidModelRef;
-    for (nuri::ModelRef model : helmetSceneAssets_.models) {
-      if (nuri::isValid(model)) {
-        helmetPrimaryModel = model;
-        break;
-      }
-    }
-    NURI_ASSERT(nuri::isValid(helmetPrimaryModel),
-                "DamagedHelmet prefab did not resolve any model assets");
-
-    const nuri::ModelRecord *helmetRecord =
-        resources.tryGet(helmetPrimaryModel);
-    NURI_ASSERT(helmetRecord != nullptr && helmetRecord->model != nullptr,
-                "DamagedHelmet model record lookup failed");
-    const nuri::Model &helmetModel = *helmetRecord->model;
+    auto environmentRequest =
+        assets.requestEnvironment(nuri::EnvironmentAssetRequest{
+            .textures =
+                {
+                    nuri::TextureRequest{
+                        .path = environmentHdrPath,
+                        .kind = nuri::TextureRequestKind::EquirectHdrCubemap,
+                        .debugName = "cubemap",
+                    },
+                    makeOptionalKtxRequest(
+                        irradianceCandidates,
+                        nuri::TextureRequestKind::Ktx2Cubemap,
+                        "ibl_irradiance"),
+                    makeOptionalKtxRequest(
+                        prefilteredGgxCandidates,
+                        nuri::TextureRequestKind::Ktx2Cubemap,
+                        "ibl_prefilter_ggx"),
+                    makeOptionalKtxRequest(
+                        prefilteredCharlieCandidates,
+                        nuri::TextureRequestKind::Ktx2Cubemap,
+                        "ibl_prefilter_charlie"),
+                    makeOptionalKtxRequest(
+                        brdfLutCandidates,
+                        nuri::TextureRequestKind::Ktx2Texture2D,
+                        "ibl_brdf_lut"),
+                },
+            .priority = nuri::AssetPriority::Visible,
+            .optionalTextures = {false, true, true, true, true},
+            .debugName = "sample_environment",
+        });
+    NURI_ASSERT(!environmentRequest.hasError(),
+                "Failed to request sample environment: %s",
+                environmentRequest.error().c_str());
+    environmentLoad_ = environmentRequest.value();
 
     renderSettings_.opaque.enableInstanceCompute = false;
     renderSettings_.opaque.enableMeshLod = true;
+    renderSettings_.opaque.meshletMode = nuri::MeshletRenderMode::Opportunistic;
     renderSettings_.opaque.enableTessellation = false;
     renderSettings_.opaque.forcedMeshLod = -1;
     renderSettings_.opaque.meshLodDistanceThresholds =
@@ -485,51 +470,120 @@ private:
     renderSettings_.opaque.enableInstanceAnimation = false;
 
     helmetRotationRadians_ = 0.0f;
-    auto helmetNodeResult = scene_.graph().createNode(
-        scene_.graph().rootNode(), "DamagedHelmet", helmetBaseModel_);
-    NURI_ASSERT(!helmetNodeResult.hasError(),
-                "Failed to create DamagedHelmet node: %s",
-                helmetNodeResult.error().c_str());
-    helmetNode_ = helmetNodeResult.value();
+    helmetNode_ = nuri::kInvalidNodeId;
+    helmetRootLocal_ = glm::mat4(1.0f);
+    helmetTransformBound_ = false;
+    helmetCameraConfigured_ = false;
+    defaultLightAdded_ = false;
+  }
 
-    nuri::SceneInstantiationMap instantiated;
-    auto instantiateResult = scene_.graph().instantiatePrefab(
-        helmetPrefab_, helmetNode_, helmetSceneAssets_, &instantiated);
-    NURI_ASSERT(!instantiateResult.hasError(),
-                "Failed to instantiate DamagedHelmet prefab: %s",
-                instantiateResult.error().c_str());
-    for (nuri::RenderableId renderable : instantiated.renderables) {
-      if (nuri::isValid(renderable)) {
-        helmetRenderableId_ = renderable;
+  void pollSceneResources() {
+    nuri::AssetSystem &assets = getRenderer().assets();
+    if (nuri::isValid(environmentLoad_)) {
+      const nuri::AssetLoadSnapshot environment =
+          assets.query(environmentLoad_);
+      NURI_ASSERT(environment.state != nuri::AssetState::Failed,
+                  "Sample environment load failed: %s",
+                  environment.error.c_str());
+    }
+    if (!nuri::isValid(helmetSceneLoad_)) {
+      return;
+    }
+
+    const nuri::SceneLoadSnapshot sceneLoad = assets.query(helmetSceneLoad_);
+    NURI_ASSERT(sceneLoad.state != nuri::SceneLoadState::Failed,
+                "DamagedHelmet scene load failed: %s", sceneLoad.error.c_str());
+
+    const nuri::ScenePrefab *prefab =
+        assets.tryGetScenePrefab(helmetSceneLoad_);
+    const std::optional<nuri::SceneInstantiationMap> instantiation =
+        assets.tryGetSceneInstantiation(helmetSceneLoad_);
+    if (!helmetTransformBound_ && prefab != nullptr &&
+        instantiation.has_value()) {
+      for (uint32_t nodeIndex = 0u; nodeIndex < prefab->nodes.size();
+           ++nodeIndex) {
+        if (prefab->nodes[nodeIndex].parentIndex !=
+                nuri::kInvalidScenePrefabIndex ||
+            nodeIndex >= instantiation->nodes.size() ||
+            !nuri::isValid(instantiation->nodes[nodeIndex])) {
+          continue;
+        }
+        helmetNode_ = instantiation->nodes[nodeIndex];
+        helmetRootLocal_ = prefab->nodes[nodeIndex].localFromParent;
+        const bool transformed = scene_.graph().setNodeLocalTransform(
+            helmetNode_, helmetBaseModel_ * helmetRootLocal_);
+        NURI_ASSERT(transformed,
+                    "Failed to apply DamagedHelmet root transform");
+        helmetTransformBound_ = true;
         break;
       }
     }
-    NURI_ASSERT(nuri::isValid(helmetRenderableId_),
-                "DamagedHelmet prefab did not produce any renderables");
 
-    const nuri::BoundingBox &bounds = helmetModel.bounds();
-    const float rawRadius =
-        std::max(0.5f * glm::length(bounds.getSize()), 0.25f);
-    const glm::vec3 center =
-        glm::vec3(helmetBaseModel_ * glm::vec4(bounds.getCenter(), 1.0f));
-    const float radius = std::max(0.25f, rawRadius);
-    const float cameraDistance = std::max(radius * 2.4f, 2.0f);
+    if (!helmetCameraConfigured_) {
+      const std::optional<nuri::ScenePrefabAssets> readyAssets =
+          assets.tryGetSceneAssets(helmetSceneLoad_);
+      nuri::ModelRef helmetPrimaryModel = nuri::kInvalidModelRef;
+      if (readyAssets.has_value()) {
+        for (const nuri::ModelRef model : readyAssets->models) {
+          if (nuri::isValid(model)) {
+            helmetPrimaryModel = model;
+            break;
+          }
+        }
+      }
+      if (nuri::isValid(helmetPrimaryModel)) {
+        const nuri::ModelRecord *helmetRecord =
+            getRenderer().resources().tryGet(helmetPrimaryModel);
+        NURI_ASSERT(helmetRecord != nullptr && helmetRecord->model != nullptr,
+                    "DamagedHelmet model record lookup failed");
+        const nuri::BoundingBox &bounds = helmetRecord->model->bounds();
+        const float rawRadius =
+            std::max(0.5f * glm::length(bounds.getSize()), 0.25f);
+        const glm::vec3 center =
+            glm::vec3(helmetBaseModel_ * glm::vec4(bounds.getCenter(), 1.0f));
+        const float radius = std::max(0.25f, rawRadius);
+        const float cameraDistance = std::max(radius * 2.4f, 2.0f);
 
-    nuri::Camera *camera = cameraSystem_.camera(mainCameraHandle_);
-    NURI_ASSERT(camera != nullptr, "Failed to get main camera");
-    nuri::PerspectiveParams perspective = camera->perspective();
-    perspective.nearPlane = std::max(0.01f, cameraDistance / 3000.0f);
-    perspective.farPlane = std::max(500.0f, cameraDistance + radius * 12.0f);
-    camera->setProjectionType(nuri::ProjectionType::Perspective);
-    camera->setPerspective(perspective);
-    camera->setLookAt(center + glm::vec3(-cameraDistance * 0.38f,
-                                         radius * 0.18f + 0.2f,
-                                         -cameraDistance),
-                      center + glm::vec3(0.0f, radius * 0.03f, 0.0f),
-                      glm::vec3(0.0f, 1.0f, 0.0f));
-    if (instantiated.lights.empty()) {
-      addDefaultDirectionalLight();
+        nuri::Camera *camera = cameraSystem_.camera(mainCameraHandle_);
+        NURI_ASSERT(camera != nullptr, "Failed to get main camera");
+        nuri::PerspectiveParams perspective = camera->perspective();
+        perspective.nearPlane = std::max(0.01f, cameraDistance / 3000.0f);
+        perspective.farPlane =
+            std::max(500.0f, cameraDistance + radius * 12.0f);
+        camera->setProjectionType(nuri::ProjectionType::Perspective);
+        camera->setPerspective(perspective);
+        camera->setLookAt(center + glm::vec3(-cameraDistance * 0.38f,
+                                             radius * 0.18f + 0.2f,
+                                             -cameraDistance),
+                          center + glm::vec3(0.0f, radius * 0.03f, 0.0f),
+                          glm::vec3(0.0f, 1.0f, 0.0f));
+        helmetCameraConfigured_ = true;
+      }
     }
+
+    if (sceneLoad.terminal() && !defaultLightAdded_ &&
+        instantiation.has_value()) {
+      if (instantiation->lights.empty()) {
+        addDefaultDirectionalLight();
+      }
+      defaultLightAdded_ = true;
+    }
+  }
+
+  void cancelSceneResourceRequests() {
+    nuri::AssetSystem &assets = getRenderer().assets();
+    if (nuri::isValid(helmetSceneLoad_)) {
+      assets.cancel(helmetSceneLoad_);
+      helmetSceneLoad_ = {};
+    }
+    if (nuri::isValid(environmentLoad_)) {
+      assets.cancel(environmentLoad_);
+      environmentLoad_ = {};
+    }
+    helmetNode_ = nuri::kInvalidNodeId;
+    helmetTransformBound_ = false;
+    helmetCameraConfigured_ = false;
+    defaultLightAdded_ = false;
   }
 
   void addDefaultDirectionalLight() {
@@ -560,31 +614,6 @@ private:
                 addResult.error().c_str());
   }
 
-  void releaseOwnedResourceHandles() {
-    nuri::ResourceManager &resources = getRenderer().resources();
-    const auto releaseRef = [&resources](auto &ref, const auto invalidRef) {
-      if (nuri::isValid(ref)) {
-        resources.release(ref);
-      }
-      ref = invalidRef;
-    };
-
-    for (nuri::ModelRef model : helmetSceneAssets_.models) {
-      if (nuri::isValid(model)) {
-        resources.release(model);
-      }
-    }
-    for (nuri::MaterialRef material : helmetSceneAssets_.materials) {
-      if (nuri::isValid(material)) {
-        resources.release(material);
-      }
-    }
-    helmetSceneAssets_ = nuri::ScenePrefabAssets{};
-    helmetPrefab_ = nuri::ScenePrefab{};
-    helmetRenderableId_ = nuri::kInvalidRenderableId;
-    helmetNode_ = nuri::kInvalidNodeId;
-  }
-
   void updatePerformanceMetrics(double deltaTime) {
     frameDeltaSeconds_ =
         (std::isfinite(deltaTime) && deltaTime >= 0.0) ? deltaTime : 0.0;
@@ -613,8 +642,10 @@ private:
       helmetRotationRadians_ -= glm::radians(360.0f);
     }
 
-    const glm::mat4 modelMatrix = glm::rotate(
-        helmetBaseModel_, helmetRotationRadians_, glm::vec3(0.0f, 0.0f, 1.0f));
+    const glm::mat4 modelMatrix =
+        glm::rotate(helmetBaseModel_, helmetRotationRadians_,
+                    glm::vec3(0.0f, 0.0f, 1.0f)) *
+        helmetRootLocal_;
     const bool updated =
         scene_.graph().setNodeLocalTransform(helmetNode_, modelMatrix);
     NURI_ASSERT(updated, "Failed to update DamagedHelmet node transform");
@@ -639,15 +670,25 @@ private:
         .materialTableVersion = materialSnapshot.version,
         .environmentVersion = scene_.environmentVersion(),
     };
-    frameContext_.camera = nuri::makeTemporalCameraFrameState(
+    auto planResult = nuri::buildPresentationAAPlan(
+        renderSettings_, {}, getGPU().getMultisampleCapabilities());
+    NURI_ASSERT(!planResult.hasError(), "Invalid presentation AA plan: %s",
+                planResult.error().c_str());
+    frameContext_.presentationAA = planResult.value();
+    auto cameraResult = temporalFrameService_.prepareFrame(
         camera, getAspectRatio(), renderSettings_.antiAliasing,
+        frameContext_.presentationAA,
         nuri::TemporalCameraFrameDesc{
             .renderExtent =
                 glm::uvec2(static_cast<uint32_t>(std::max(getWidth(), 0)),
                            static_cast<uint32_t>(std::max(getHeight(), 0))),
             .sceneContent = sceneContent,
         },
-        temporalCameraHistory_);
+        frameContext_.frameIndex, timeSeconds, frameDeltaSeconds_);
+    NURI_ASSERT(!cameraResult.hasError(), "Temporal frame prepare failed: %s",
+                cameraResult.error().c_str());
+    frameContext_.camera = cameraResult.value();
+    frameContext_.temporalFrameService = &temporalFrameService_;
     renderSettings_.antiAliasing.debug.resetHistoryRequested = false;
     frameContext_.settings = &renderSettings_;
     frameContext_.metrics = {};
@@ -664,6 +705,34 @@ private:
         getRenderer().render(getRenderPipeline(), frameContext_);
     NURI_ASSERT(!renderResult.hasError(), "Render failed: %s",
                 renderResult.error().c_str());
+
+    const nuri::OpaqueFrameMetrics &opaqueMetrics =
+        frameContext_.metrics.opaque;
+    const nuri::VisibilityFrameMetrics &visibilityMetrics =
+        frameContext_.metrics.visibility;
+    meshletMetricsInitialized_ = true;
+    meshletActiveLastFrame_ = opaqueMetrics.meshletModeActive != 0u;
+    meshletFallbackLastFrame_ =
+        opaqueMetrics.meshletRejectedMissingFeature != 0u ||
+        opaqueMetrics.meshletRejectedMissingAssetData != 0u ||
+        opaqueMetrics.meshletRejectedIncompatibleFrame != 0u;
+    meshletTaskGroupsLastFrame_ =
+        nuri::resolveGeometryWorkMetrics(frameContext_.metrics)
+            .executedMeshletTaskGroups;
+    mainVisibilityLastFrame_ = {
+        .available = visibilityMetrics.gpuMainReadbackAvailable,
+        .sourceFrame = visibilityMetrics.gpuMainReadbackSourceFrame,
+        .staleFrameCount = visibilityMetrics.gpuMainReadbackStaleFrameCount,
+        .errorCount = visibilityMetrics.gpuMainReadbackErrorCount,
+        .occlusionAvailable = visibilityMetrics.occlusionAvailable,
+    };
+    meshletVisibilityLastFrame_ = {
+        .available = visibilityMetrics.meshletReadbackAvailable,
+        .sourceFrame = visibilityMetrics.meshletReadbackSourceFrame,
+        .staleFrameCount = visibilityMetrics.meshletReadbackStaleFrameCount,
+        .errorCount = visibilityMetrics.meshletReadbackErrorCount,
+        .occlusionAvailable = visibilityMetrics.meshletOcclusionAvailable,
+    };
   }
 
   const nuri::RuntimeConfig config_;
@@ -672,17 +741,17 @@ private:
   nuri::CameraSystem cameraSystem_;
   nuri::RenderScene scene_;
   nuri::SceneRuntimeHost sceneRuntime_;
-  nuri::ScenePrefab helmetPrefab_{};
-  nuri::ScenePrefabAssets helmetSceneAssets_{};
+  nuri::SceneLoadHandle helmetSceneLoad_{};
+  nuri::EnvironmentAssetHandle environmentLoad_{};
   nuri::CameraHandle mainCameraHandle_{};
   nuri::NodeId helmetNode_ = nuri::kInvalidNodeId;
-  nuri::RenderableId helmetRenderableId_ = nuri::kInvalidRenderableId;
   glm::mat4 helmetBaseModel_ =
       glm::rotate(glm::mat4(1.0f), glm::radians(90.0f), glm::vec3(1, 0, 0));
+  glm::mat4 helmetRootLocal_{1.0f};
 
   nuri::RenderSettings renderSettings_{};
   nuri::RenderFrameContext frameContext_{};
-  nuri::TemporalCameraHistoryState temporalCameraHistory_{};
+  nuri::TemporalFrameService temporalFrameService_{};
   uint64_t frameIndex_ = 0;
   uint64_t simulationFrameIndex_ = 0;
   double frameDeltaSeconds_ = 0.0;
@@ -690,9 +759,18 @@ private:
   uint32_t fpsFrameCount_ = 0;
   float currentFps_ = 0.0f;
   float helmetRotationRadians_ = 0.0f;
+  uint32_t meshletTaskGroupsLastFrame_ = 0;
+  VisibilityReadbackOverlayState mainVisibilityLastFrame_{};
+  VisibilityReadbackOverlayState meshletVisibilityLastFrame_{};
   std::unique_ptr<nuri::TextSystem> textSystem_{};
   nuri::ScratchArena textScratchArena_{};
   bool textOverlayEnabled_ = false;
+  bool meshletMetricsInitialized_ = false;
+  bool meshletActiveLastFrame_ = false;
+  bool meshletFallbackLastFrame_ = false;
+  bool helmetTransformBound_ = false;
+  bool helmetCameraConfigured_ = false;
+  bool defaultLightAdded_ = false;
 };
 
 int main() {

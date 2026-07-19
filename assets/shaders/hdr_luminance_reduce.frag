@@ -7,11 +7,8 @@ layout(push_constant) uniform HDRLuminanceReducePushConstants {
   uint sourceTexId;
   uint sourceSamplerId;
   uint mode;
-  uint reserved0;
   float texelSizeX;
   float texelSizeY;
-  float reserved1;
-  float reserved2;
 }
 pc;
 

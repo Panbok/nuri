@@ -1,12 +1,9 @@
 #pragma once
-
 #include "nuri/defines.h"
 #include "nuri/pch.h"
-
 #include <cstdint>
 #include <string>
 #include <vector>
-
 namespace nuri {
 
 enum class LogLevel : uint8_t {
@@ -34,13 +31,11 @@ public:
   static void initialize(const LogConfig &config);
   static void shutdown();
   static Log *get();
-
   virtual ~Log() = default;
   Log(const Log &) = delete;
   Log &operator=(const Log &) = delete;
   Log(Log &&) = delete;
   Log &operator=(Log &&) = delete;
-
   virtual void write(LogLevel level, std::string_view message) = 0;
 
 protected:

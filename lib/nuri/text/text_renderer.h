@@ -1,49 +1,44 @@
 #pragma once
-
 #include "nuri/core/result.h"
+#include "nuri/gfx/dynamic_buffer.h"
 #include "nuri/gfx/frame/render_frame_context.h"
 #include "nuri/gfx/gpu_render_types.h"
 #include "nuri/gfx/render_graph/render_graph.h"
 #include "nuri/text/text_layouter.h"
-
+#include "nuri/text/text_system.h"
 #include <filesystem>
 #include <limits>
 #include <memory_resource>
 #include <string>
 #include <string_view>
-#include <unordered_set>
 #include <vector>
-
 namespace nuri {
 
 class GPUDevice;
+class RenderPipeline;
+class TextSystem;
 
-class NURI_API TextRenderer {
-public:
-  struct ShaderPaths {
-    std::filesystem::path uiVertex;
-    std::filesystem::path uiFragment;
-    std::filesystem::path worldVertex;
-    std::filesystem::path worldFragment;
-  };
+class TextRenderer {
+  friend class TextSystem;
+  friend struct std::default_delete<TextRenderer>;
+  friend void registerText3DStage(RenderPipeline &, TextSystem &);
+  friend void registerText2DStage(RenderPipeline &, TextSystem &);
 
+private:
   struct CreateDesc {
     GPUDevice &gpu;
     FontManager &fonts;
     TextLayouter &layouter;
     std::pmr::memory_resource &memory;
-    ShaderPaths shaderPaths;
+    TextShaderPaths shaderPaths;
   };
-
   explicit TextRenderer(const CreateDesc &desc);
   ~TextRenderer();
-
   TextRenderer(const TextRenderer &) = delete;
   TextRenderer &operator=(const TextRenderer &) = delete;
   TextRenderer(TextRenderer &&) = delete;
   TextRenderer &operator=(TextRenderer &&) = delete;
-
-  Result<bool, std::string> beginFrame(uint64_t frameIndex);
+  void beginFrame(uint64_t frameIndex);
   Result<TextBounds, std::string> enqueue2D(const Text2DDesc &desc,
                                             std::pmr::memory_resource &scratch);
   Result<TextBounds, std::string> enqueue3D(const Text3DDesc &desc,
@@ -52,29 +47,18 @@ public:
   append3DGraphPass(RenderFrameContext &frame, RenderGraphBuilder &graph,
                     RenderGraphTextureId sceneDepthGraphTexture = {},
                     bool hasPriorColorPass = false);
-  // `out` contains non-owning spans into renderer-managed frame data and is
-  // valid only until the next clear()/beginFrame() reset.
   Result<bool, std::string>
   buildTransparentStageContribution(RenderFrameContext &frame,
                                     TransparentStageContribution &out);
   Result<bool, std::string> append2DGraphPass(RenderFrameContext &frame,
                                               RenderGraphBuilder &graph,
                                               bool hasPriorColorPass = false);
-  void setWorldAlphaDiscardThreshold(float threshold);
-  [[nodiscard]] float worldAlphaDiscardThreshold() const;
   void clear();
-
-private:
   struct FrameBuffers {
-    BufferHandle vb{};
-    BufferHandle ib{};
-    size_t vbBytes = 0;
-    size_t ibBytes = 0;
-    size_t ibQuadCapacity = 0;
+    DynamicBufferSlot vertex;
+    DynamicBufferSlot index;
     uint64_t lastUploadHash = 0;
-    bool hasUploadHash = false;
   };
-
   struct UiQuad {
     float minX = 0.0f, minY = 0.0f, maxX = 0.0f, maxY = 0.0f;
     float uvMinX = 0.0f, uvMinY = 0.0f, uvMaxX = 0.0f, uvMaxY = 0.0f;
@@ -82,7 +66,6 @@ private:
     uint32_t color = 0xffffffffu;
     uint32_t atlas = 0;
   };
-
   struct WorldQuad {
     float minX = 0.0f, minY = 0.0f, maxX = 0.0f, maxY = 0.0f;
     float uvMinX = 0.0f, uvMinY = 0.0f, uvMaxX = 0.0f, uvMaxY = 0.0f;
@@ -92,18 +75,15 @@ private:
     uint32_t transformId = 0;
     TextureHandle atlasTexture{};
   };
-
   struct WorldTransform {
     glm::mat4 worldFromText{1.0f};
     TextBillboardMode billboard = TextBillboardMode::None;
   };
-
   struct ResolvedWorldTransform {
     glm::vec4 basisX{1.0f, 0.0f, 0.0f, 0.0f};
     glm::vec4 basisY{0.0f, 1.0f, 0.0f, 0.0f};
     glm::vec4 translation{0.0f, 0.0f, 0.0f, 0.0f};
   };
-
   struct WorldGlyphInstance {
     glm::vec4 rectMinMax{0.0f};
     glm::vec4 uvMinMax{0.0f};
@@ -112,20 +92,17 @@ private:
     uint32_t _pad0 = 0;
     uint32_t _pad1 = 0;
   };
-
   struct UiVertex {
     glm::vec2 pos{0.0f};
     glm::vec2 uv{0.0f};
     uint32_t color = 0xffffffffu;
   };
-
   struct UiBatch {
     uint32_t atlas = 0;
     float pxRange = 4.0f;
     uint32_t firstIndex = 0;
     uint32_t indexCount = 0;
   };
-
   struct WorldBatch {
     uint32_t atlas = 0;
     float pxRange = 4.0f;
@@ -134,22 +111,6 @@ private:
     TextureHandle atlasTexture{};
     float sortDepth = 0.0f;
   };
-
-  struct TextureHandleHash {
-    [[nodiscard]] size_t operator()(TextureHandle handle) const noexcept {
-      const uint64_t key = (static_cast<uint64_t>(handle.generation) << 32u) |
-                           static_cast<uint64_t>(handle.index);
-      return std::hash<uint64_t>{}(key);
-    }
-  };
-
-  struct TextureHandleEqual {
-    [[nodiscard]] bool operator()(TextureHandle lhs,
-                                  TextureHandle rhs) const noexcept {
-      return lhs.index == rhs.index && lhs.generation == rhs.generation;
-    }
-  };
-
   struct UiPC {
     glm::mat4 proj{1.0f};
     uint32_t atlas = 0;
@@ -157,7 +118,6 @@ private:
     float pad0 = 0.0f;
     float pad1 = 0.0f;
   };
-
   struct WorldPC {
     glm::mat4 viewProj{1.0f};
     uint64_t glyphBufferAddress = 0;
@@ -167,33 +127,16 @@ private:
     float alphaDiscardThreshold = 1.0e-3f;
     float pad1 = 0.0f;
   };
-
-  struct PerfCounters {
-    uint32_t uiGlyphs = 0;
-    uint32_t uiBatches = 0;
-    uint32_t worldGlyphs = 0;
-    uint32_t worldBatches = 0;
-    size_t uiVertexUploadBytes = 0;
-    size_t uiIndexUploadBytes = 0;
-    size_t worldVertexUploadBytes = 0;
-    size_t worldIndexUploadBytes = 0;
-  };
-
   struct BillboardFrameBasis {
     glm::vec3 sphericalRight{1.0f, 0.0f, 0.0f};
     glm::vec3 sphericalUp{0.0f, -1.0f, 0.0f};
     glm::vec3 sphericalForward{0.0f, 0.0f, -1.0f};
     glm::vec3 cameraPos{0.0f};
   };
-
   static void hashWorldTransform(uint64_t &hash,
                                  const WorldTransform &transform);
   static void hashUiQuad(uint64_t &hash, const UiQuad &quad);
   static void hashWorldQuad(uint64_t &hash, const WorldQuad &quad);
-  static void resetUploadCache(FrameBuffers &frame) noexcept;
-  [[nodiscard]] static bool hasMatchingUploadCache(const FrameBuffers &frame,
-                                                   uint64_t hash) noexcept;
-  static void updateUploadCache(FrameBuffers &frame, uint64_t hash) noexcept;
   static uint64_t hashCameraFrameState(const CameraFrameState &camera);
   static bool uiBatchLess(const UiQuad &a, const UiQuad &b);
   static bool worldBatchLess(const WorldQuad &a, const WorldQuad &b);
@@ -201,20 +144,18 @@ private:
   buildBillboardFrameBasis(const CameraFrameState &camera);
   static glm::mat4 resolveWorldFromBillboard(const WorldTransform &transform,
                                              const BillboardFrameBasis &basis);
-
-  Result<bool, std::string> compileUiShaders();
-  Result<bool, std::string> compileWorldShaders();
+  Result<bool, std::string>
+  compileShaders(std::string_view name, const std::filesystem::path &vertexPath,
+                 const std::filesystem::path &fragmentPath,
+                 ShaderHandle &vertex, ShaderHandle &fragment);
   Result<bool, std::string> ensureUiPipeline(Format colorFormat);
   Result<bool, std::string> ensureWorldPipeline(Format colorFormat,
                                                 Format depthFormat);
   void syncFrames(std::pmr::vector<FrameBuffers> &frames);
   uint32_t frameSlot(std::pmr::vector<FrameBuffers> &frames);
-  Result<bool, std::string> ensureFrameBuffers(FrameBuffers &frame,
-                                               size_t vbBytes, size_t ibQuads,
-                                               std::string_view debugPrefix);
-  Result<bool, std::string>
-  ensureWorldInstanceBuffer(FrameBuffers &frame, size_t bytes,
-                            std::string_view debugPrefix);
+  Result<bool, std::string> ensureUiFrameBuffers(FrameBuffers &frame,
+                                                 size_t vertexBytes,
+                                                 size_t quadCount);
   Result<bool, std::string> uploadUi(uint32_t slot);
   Result<bool, std::string> uploadWorld(uint32_t slot);
   Result<bool, std::string> prepareWorldRenderState(RenderFrameContext &frame,
@@ -223,26 +164,18 @@ private:
   void buildUiGeometry();
   void buildWorldGeometry(const CameraFrameState &camera);
   void appendWorldTransparentTextureRead(TextureHandle texture);
-  void resetPerfCounters();
-  void emitPerfValidation(uint64_t frameIndex);
   void destroyGpu();
-
   static constexpr uint64_t kHashSeed = 1469598103934665603ull;
-
   GPUDevice &gpu_;
   FontManager &fonts_;
   TextLayouter &layouter_;
   std::pmr::memory_resource &memory_;
-  ShaderPaths shaderPaths_{};
-
+  TextShaderPaths shaderPaths_{};
   uint64_t frameIndex_ = std::numeric_limits<uint64_t>::max();
   bool uiAppended_ = false;
   bool worldAppended_ = false;
   bool uiQueueNeedsSort_ = false;
   bool worldQueueNeedsSort_ = false;
-  uint64_t lastPerfValidationFrame_ = 0;
-  PerfCounters perf_{};
-
   ShaderHandle uiVs_{};
   ShaderHandle uiFs_{};
   ShaderHandle worldVs_{};
@@ -252,7 +185,6 @@ private:
   Format uiPipelineColor_ = Format::Count;
   Format worldPipelineColor_ = Format::Count;
   Format worldPipelineDepth_ = Format::Count;
-
   std::pmr::vector<UiQuad> uiQueue_;
   std::pmr::vector<WorldQuad> worldQueue_;
   std::pmr::vector<WorldTransform> worldTransforms_;
@@ -269,10 +201,6 @@ private:
   std::pmr::vector<FrameBuffers> uiFrames_;
   std::pmr::vector<FrameBuffers> worldFrames_;
   std::pmr::vector<TextureHandle> worldTransparentTextureReadList_;
-  std::pmr::unordered_set<TextureHandle, TextureHandleHash, TextureHandleEqual>
-      worldTransparentTextureReadSet_;
-  std::pmr::vector<BufferHandle> worldTransparentDependencyBuffers_;
-
   uint64_t uiQueueHash_ = kHashSeed;
   uint64_t lastBuiltUiQueueHash_ = 0;
   bool uiGeometryValid_ = false;
@@ -283,7 +211,6 @@ private:
   bool worldHasBillboards_ = false;
   uint64_t worldGlyphBufferAddress_ = 0;
   uint64_t worldTransformBufferAddress_ = 0;
-  float worldAlphaDiscardThreshold_ = 1.0e-3f;
   BufferHandle worldDependencyBuffer_{};
   uint32_t worldPreparedSlot_ = 0;
 };

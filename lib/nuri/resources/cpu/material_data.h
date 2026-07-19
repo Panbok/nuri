@@ -1,17 +1,35 @@
 #pragma once
-
+#include <array>
 #include <cstddef>
 #include <cstdint>
+#include <glm/glm.hpp>
 #include <limits>
 #include <string>
 #include <vector>
-
-#include <glm/glm.hpp>
-
 namespace nuri {
 
 constexpr uint32_t kInvalidEmbeddedSceneTextureIndex =
     std::numeric_limits<uint32_t>::max();
+enum MaterialTextureSlot : uint32_t {
+  kMaterialTextureSlotBaseColor,
+  kMaterialTextureSlotMetallicRoughness,
+  kMaterialTextureSlotNormal,
+  kMaterialTextureSlotOcclusion,
+  kMaterialTextureSlotEmissive,
+  kMaterialTextureSlotClearcoat,
+  kMaterialTextureSlotClearcoatRoughness,
+  kMaterialTextureSlotClearcoatNormal,
+  kMaterialTextureSlotSpecular,
+  kMaterialTextureSlotSpecularColor,
+  kMaterialTextureSlotSheenColor,
+  kMaterialTextureSlotSheenRoughness,
+  kMaterialTextureSlotTransmission,
+  kMaterialTextureSlotThickness,
+  kMaterialTextureSlotCount,
+};
+
+template <typename T>
+using MaterialTextureSlots = std::array<T, kMaterialTextureSlotCount>;
 
 enum class MaterialAlphaMode : uint8_t {
   Opaque = 0,
@@ -36,17 +54,9 @@ struct MaterialTextureTransformData {
   float rotationRadians = 0.0f;
 };
 
-// `sourceKind` controls which source-identifying field is relevant: `path` is
-// used for `ExternalFile`, `embeddedIndex` is used for
-// `EmbeddedSceneTexture`, and `kInvalidEmbeddedSceneTextureIndex` is the
-// sentinel when there is no embedded texture. `uvSet`, `samplerIndex`,
-// `scale`, and `transform` apply regardless of source kind.
 struct MaterialTextureSlotData {
-  // Normalized file path for external textures.
   std::string path{};
-  // Selects whether `path` or `embeddedIndex` identifies the source texture.
   MaterialTextureSourceKind sourceKind = MaterialTextureSourceKind::None;
-  // Embedded scene texture index, or `kInvalidEmbeddedSceneTextureIndex`.
   uint32_t embeddedIndex = kInvalidEmbeddedSceneTextureIndex;
   uint32_t uvSet = 0;
   uint32_t samplerIndex = 0;
@@ -71,7 +81,6 @@ struct MaterialData {
   float roughnessFactor = 1.0f;
   glm::vec3 specularColorFactor{1.0f};
   float specularFactor = 1.0f;
-  // Spec-gloss glossiness factor; not used by metallic-roughness.
   float glossinessFactor = 1.0f;
   glm::vec3 sheenColorFactor{0.0f};
   float sheenWeight = 0.0f;
@@ -83,33 +92,13 @@ struct MaterialData {
   float thicknessFactor = 0.0f;
   glm::vec3 attenuationColor{1.0f};
   float attenuationDistance = 0.0f;
-  float ior = 1.5f; // Valid domain: {0} U [1, +inf); 0 keeps glTF compat mode.
+  float ior = 1.5f;
   float normalScale = 1.0f;
   float occlusionStrength = 1.0f;
   float alphaCutoff = 0.5f;
   bool doubleSided = false;
   MaterialAlphaMode alphaMode = MaterialAlphaMode::Opaque;
-  // `baseColor` carries `baseColorTexture` for metallic-roughness and
-  // `diffuseTexture` for spec-gloss.
-  MaterialTextureSlotData baseColor{};
-  MaterialTextureSlotData metallicRoughness{};
-  MaterialTextureSlotData normal{};
-  MaterialTextureSlotData occlusion{};
-  MaterialTextureSlotData emissive{};
-  MaterialTextureSlotData clearcoat{};
-  MaterialTextureSlotData clearcoatRoughness{};
-  MaterialTextureSlotData clearcoatNormal{};
-  // `specular` is reserved for `KHR_materials_specular::specularTexture` and
-  // is not used by the spec-gloss workflow.
-  MaterialTextureSlotData specular{};
-  // `specularColor` carries `specularColorTexture` for
-  // `KHR_materials_specular`, and the combined RGBA
-  // `specularGlossinessTexture` for spec-gloss.
-  MaterialTextureSlotData specularColor{};
-  MaterialTextureSlotData sheenColor{};
-  MaterialTextureSlotData sheenRoughness{};
-  MaterialTextureSlotData transmission{};
-  MaterialTextureSlotData thickness{};
+  MaterialTextureSlots<MaterialTextureSlotData> textures{};
 };
 
 struct MaterialDataSet {

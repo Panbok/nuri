@@ -1,20 +1,15 @@
-#include "nuri/pch.h"
-
 #include "nuri/resources/async/scene_asset_preparation.h"
-
 #include "nuri/core/profiling.h"
+#include "nuri/pch.h"
 #include "nuri/resources/mesh_importer.h"
 #include "nuri/resources/storage/texture/material_texture_artifact.h"
 #include "nuri/resources/storage/texture/texture_artifact_builder.h"
 #include "nuri/resources/storage/texture/texture_cache_utils.h"
-
 #include <array>
 #include <filesystem>
 #include <mutex>
-
 namespace nuri {
 namespace {
-
 constexpr std::array<std::string_view, kMaterialTextureSlotCount>
     kTextureDebugSuffixes{
         "base_color",          "metallic_roughness", "normal",
@@ -23,7 +18,6 @@ constexpr std::array<std::string_view, kMaterialTextureSlotCount>
         "specular_color",      "sheen_color",        "sheen_roughness",
         "transmission",        "thickness",
     };
-
 [[nodiscard]] bool hasExtensionCaseInsensitive(std::string_view path,
                                                std::string_view extension) {
   if (path.size() < extension.size()) {
@@ -41,28 +35,16 @@ constexpr std::array<std::string_view, kMaterialTextureSlotCount>
   }
   return true;
 }
-
-[[nodiscard]] TextureRequestKind
-requestKindForPath(std::string_view path) noexcept {
-  return hasExtensionCaseInsensitive(path, ".ktx2") ||
-                 hasExtensionCaseInsensitive(path, ".ktx")
-             ? TextureRequestKind::Ktx2Texture2D
-             : TextureRequestKind::Texture2D;
-}
-
 [[nodiscard]] std::string makeTextureDebugName(std::string_view prefix,
                                                std::string_view suffix,
                                                uint32_t materialIndex) {
   return std::string(prefix) + "_" + std::string(suffix) + "_" +
          std::to_string(materialIndex);
 }
-
 std::array<std::mutex, 64u> gArtifactBuildMutexes{};
-
 [[nodiscard]] std::mutex &artifactBuildMutex(uint64_t identity) noexcept {
   return gArtifactBuildMutexes[identity % gArtifactBuildMutexes.size()];
 }
-
 } // namespace
 
 Result<PreparedSceneManifest, std::string>
@@ -83,27 +65,16 @@ prepareSceneManifest(std::string_view path, const SceneImportOptions &options) {
   PreparedSceneManifest manifest{
       .prefab = std::move(prefab.value()),
   };
-  manifest.meshes.reserve(imported.value().adaptedMeshes.size());
-  for (AdaptedSceneMesh &mesh : imported.value().adaptedMeshes) {
-    manifest.meshes.push_back(std::move(mesh));
-  }
+  manifest.meshes.assign(
+      std::make_move_iterator(imported.value().adaptedMeshes.begin()),
+      std::make_move_iterator(imported.value().adaptedMeshes.end()));
   manifest.embeddedTextures =
       std::make_shared<const std::vector<EmbeddedSceneTextureData>>(
           std::move(imported.value().embeddedTextures));
   manifest.materials.reserve(manifest.prefab.materialAssets.size());
-  for (const ScenePrefabMaterialAssetRef &asset :
-       manifest.prefab.materialAssets) {
-    if (asset.sourceMaterialIndex <
-        imported.value().adaptedMaterials.materials.size()) {
-      manifest.materials.push_back(
-          imported.value()
-              .adaptedMaterials.materials[asset.sourceMaterialIndex]);
-      continue;
-    }
-    MaterialData fallback{};
-    fallback.name = asset.sourceName;
-    manifest.materials.push_back(std::move(fallback));
-  }
+  for (const ScenePrefabAssetRef &asset : manifest.prefab.materialAssets)
+    manifest.materials.push_back(
+        imported.value().adaptedMaterials.materials[asset.sourceIndex]);
   return Result<PreparedSceneManifest, std::string>::makeResult(
       std::move(manifest));
 }
@@ -118,7 +89,6 @@ Result<PreparedImportedMaterial, std::string> prepareImportedMaterial(
     return Result<PreparedImportedMaterial, std::string>::makeError(
         "prepareImportedMaterial: scene path is empty");
   }
-
   const std::string canonicalScenePath = canonicalizeResourcePath(scenePath);
   PreparedImportedMaterial prepared{
       .desc = Material::descFromImported(material),
@@ -129,7 +99,6 @@ Result<PreparedImportedMaterial, std::string> prepareImportedMaterial(
       .sourceIdentity =
           canonicalScenePath + "#" + std::to_string(sourceMaterialIndex),
   };
-
   auto builderResult = SceneTextureArtifactBuilder::create(
       std::filesystem::path(scenePath), embeddedTextures);
   if (builderResult.hasError()) {
@@ -137,16 +106,12 @@ Result<PreparedImportedMaterial, std::string> prepareImportedMaterial(
         builderResult.error());
   }
   SceneTextureArtifactBuilder builder = std::move(builderResult.value());
-
   for (size_t slotIndex = 0u; slotIndex < kMaterialTextureArtifactSpecs.size();
        ++slotIndex) {
-    const MaterialTextureArtifactSpec &spec =
-        kMaterialTextureArtifactSpecs[slotIndex];
-    const MaterialTextureSlotData &source = material.*(spec.slot);
+    const MaterialTextureSlotData &source = material.textures[slotIndex];
     if (source.sourceKind == MaterialTextureSourceKind::None) {
       continue;
     }
-
     const TextureArtifactBuildOptions buildOptions =
         makeMaterialTextureArtifactBuildOptions(material, slotIndex);
     const std::string debugName = makeTextureDebugName(
@@ -161,7 +126,6 @@ Result<PreparedImportedMaterial, std::string> prepareImportedMaterial(
       };
       continue;
     }
-
     const uint64_t identity = hashSceneTextureSourceIdentity(
         canonicalScenePath, source, buildOptions.loadOptions.srgb,
         textureArtifactProcessingTag(buildOptions));
@@ -188,7 +152,6 @@ Result<PreparedImportedMaterial, std::string> prepareImportedMaterial(
         .debugName = debugName,
     };
   }
-
   return Result<PreparedImportedMaterial, std::string>::makeResult(
       std::move(prepared));
 }

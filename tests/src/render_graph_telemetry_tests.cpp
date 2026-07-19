@@ -33,7 +33,6 @@ void populateTelemetryCompileResult(RenderGraphCompileResult &compiled,
   compiled.culledPassCount = 1u;
   compiled.rootPassCount = 2u;
   compiled.usedParallelCompile = true;
-  compiled.usedParallelValidation = true;
   compiled.usedParallelPayloadResolution = true;
   compiled.usedParallelHazardAnalysis = true;
   compiled.usedParallelLifetimeAnalysis = false;
@@ -210,25 +209,25 @@ TEST(RenderGraphTelemetryTest, CaptureDeepCopiesStructuredData) {
   EXPECT_EQ(snapshot->summary.frameIndex, 42u);
   EXPECT_EQ(snapshot->summary.declaredPassCount, 3u);
   EXPECT_EQ(snapshot->summary.importedTextures, 4u);
-  ASSERT_EQ(snapshot->passNames.size(), 2u);
-  EXPECT_EQ(snapshot->passNames[0], "first_pass");
-  EXPECT_EQ(snapshot->passNames[1], "second_pass");
-  ASSERT_EQ(snapshot->orderedPassIndices.size(), 2u);
-  EXPECT_EQ(snapshot->orderedPassIndices[0], 1u);
-  EXPECT_EQ(snapshot->orderedPassIndices[1], 0u);
-  ASSERT_EQ(snapshot->recordedCommandBuffers.size(), 2u);
-  EXPECT_EQ(snapshot->recordedCommandBuffers[0].firstOrderedPassIndex, 0u);
-  EXPECT_EQ(snapshot->submitBatches.size(), 1u);
-  EXPECT_TRUE(snapshot->submitBatches[0].presentsFrameOutput);
-  ASSERT_EQ(snapshot->passRanges.size(), 2u);
-  EXPECT_EQ(snapshot->passRanges[0].workerIndex, 0u);
-  EXPECT_EQ(snapshot->passRanges[0].firstOrderedPassIndex, 0u);
-  EXPECT_EQ(snapshot->passRanges[0].passCount, 1u);
-  EXPECT_EQ(snapshot->passRanges[1].workerIndex, 1u);
-  EXPECT_EQ(snapshot->passRanges[1].firstOrderedPassIndex, 1u);
-  EXPECT_EQ(snapshot->passRanges[1].passCount, 1u);
+  ASSERT_EQ(snapshot->compile.passDebugNames.size(), 2u);
+  EXPECT_EQ(snapshot->compile.passDebugNames[0], "first_pass");
+  EXPECT_EQ(snapshot->compile.passDebugNames[1], "second_pass");
+  ASSERT_EQ(snapshot->compile.orderedPassIndices.size(), 2u);
+  EXPECT_EQ(snapshot->compile.orderedPassIndices[0], 1u);
+  EXPECT_EQ(snapshot->compile.orderedPassIndices[1], 0u);
+  ASSERT_EQ(snapshot->execution.recordedCommandBuffers.size(), 2u);
+  EXPECT_EQ(snapshot->execution.recordedCommandBuffers[0].firstOrderedPassIndex,
+            0u);
+  EXPECT_EQ(snapshot->execution.submitBatches.size(), 1u);
+  EXPECT_TRUE(snapshot->execution.submitBatches[0].presentsFrameOutput);
+  ASSERT_EQ(snapshot->execution.passRanges.size(), 2u);
+  EXPECT_EQ(snapshot->execution.passRanges[0].workerIndex, 0u);
+  EXPECT_EQ(snapshot->execution.passRanges[0].firstOrderedPassIndex, 0u);
+  EXPECT_EQ(snapshot->execution.passRanges[0].passCount, 1u);
+  EXPECT_EQ(snapshot->execution.passRanges[1].workerIndex, 1u);
+  EXPECT_EQ(snapshot->execution.passRanges[1].firstOrderedPassIndex, 1u);
+  EXPECT_EQ(snapshot->execution.passRanges[1].passCount, 1u);
   EXPECT_TRUE(snapshot->summary.usedParallelCompile);
-  EXPECT_TRUE(snapshot->summary.usedParallelValidation);
   EXPECT_TRUE(snapshot->summary.usedParallelPayloadResolution);
   EXPECT_TRUE(snapshot->summary.usedParallelHazardAnalysis);
   EXPECT_FALSE(snapshot->summary.usedParallelLifetimeAnalysis);
@@ -238,12 +237,14 @@ TEST(RenderGraphTelemetryTest, CaptureDeepCopiesStructuredData) {
   EXPECT_NE(snapshot->summary.barrierFingerprint, 0ull);
   EXPECT_NE(snapshot->summary.executionFingerprint, 0ull);
   EXPECT_EQ(snapshot->summary.finalBarrierRecordCount, 1u);
-  EXPECT_EQ(snapshot->finalBarrierPlan.barrierCount, 1u);
-  ASSERT_EQ(snapshot->edges.size(), 1u);
-  EXPECT_EQ(snapshot->edges[0].before, 0u);
-  EXPECT_EQ(snapshot->edges[0].after, 1u);
-  ASSERT_EQ(snapshot->unresolvedDrawBufferBindings.size(), 1u);
-  EXPECT_EQ(snapshot->unresolvedDrawBufferBindings[0].bufferResourceIndex, 4u);
+  EXPECT_EQ(snapshot->compile.finalBarrierPlan.barrierCount, 1u);
+  ASSERT_EQ(snapshot->compile.edges.size(), 1u);
+  EXPECT_EQ(snapshot->compile.edges[0].before, 0u);
+  EXPECT_EQ(snapshot->compile.edges[0].after, 1u);
+  ASSERT_EQ(snapshot->compile.unresolvedDrawBufferBindings.size(), 1u);
+  EXPECT_EQ(
+      snapshot->compile.unresolvedDrawBufferBindings[0].bufferResourceIndex,
+      4u);
 }
 
 TEST(RenderGraphTelemetryTest, WriteDumpSerializesSnapshotAndValidatesInputs) {
@@ -279,15 +280,12 @@ TEST(RenderGraphTelemetryTest, WriteDumpSerializesSnapshotAndValidatesInputs) {
   EXPECT_NE(contents.find("first_pass"), std::string::npos);
   EXPECT_NE(contents.find("compile_fingerprint:"), std::string::npos);
   EXPECT_NE(contents.find("final_barrier_record_count: 1"), std::string::npos);
-  EXPECT_NE(contents.find("used_parallel_validation: 1"), std::string::npos);
   EXPECT_NE(contents.find("used_parallel_payload_resolution: 1"),
             std::string::npos);
   EXPECT_NE(contents.find("owned_draw_items: 2"), std::string::npos);
   EXPECT_NE(contents.find("Recorded Command Buffers:"), std::string::npos);
   EXPECT_NE(contents.find("Submit Batches:"), std::string::npos);
   EXPECT_NE(contents.find("Final Barrier Plan:"), std::string::npos);
-  EXPECT_NE(contents.find("pass_exec[0].draw[0].vertex <- buf[4]"),
-            std::string::npos);
 
   std::error_code ec;
   std::filesystem::remove(outputPath, ec);

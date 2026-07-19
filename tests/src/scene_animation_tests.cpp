@@ -147,22 +147,23 @@ TEST(SceneAnimationTests, PlayerSamplesNodeTransformsAndMorphWeights) {
   prefab.nodes[1].name = "MorphNode";
   prefab.nodes[1].parentIndex = 0u;
   prefab.nodes[1].morphWeights = {0.0f, 1.0f};
-  prefab.meshAssets.push_back(nuri::ScenePrefabMeshAssetRef{
-      .sourceSceneMeshIndex = 0u, .sourceName = "mesh"});
-  prefab.materialAssets.push_back(nuri::ScenePrefabMaterialAssetRef{
-      .sourceMaterialIndex = 0u,
-      .sourceName = "material",
-  });
+  prefab.meshAssets.emplace_back();
+  prefab.meshAssets.back().sourceIndex = 0u;
+  prefab.meshAssets.back().sourceName = "mesh";
+  prefab.materialAssets.emplace_back();
+  prefab.materialAssets.back().sourceIndex = 0u;
+  prefab.materialAssets.back().sourceName = "material";
   prefab.renderables.push_back(nuri::ScenePrefabRenderable{
       .nodeIndex = 1u,
-      .meshIndex = 0u,
-      .materialIndex = 0u,
+      .meshAssetIndex = 0u,
+      .materialAssetIndex = 0u,
   });
   prefab.animations.push_back(makeTestClip());
 
   nuri::ScenePrefabAssets assets;
-  assets.models.push_back(nuri::makeModelRef(1u, 1u));
-  assets.materials.push_back(nuri::makeMaterialRef(2u, 1u));
+  assets.models.push_back(nuri::ModelRef{nuri::packResourceHandle(1u, 1u)});
+  assets.materials.push_back(
+      nuri::MaterialRef{nuri::packResourceHandle(2u, 1u)});
 
   nuri::RenderScene scene;
   nuri::SceneInstantiationMap instantiation;
@@ -259,16 +260,16 @@ TEST(SceneAnimationTests, PlayerBuildsSkinPaletteFromJointWorldTransforms) {
   prefab.nodes[1].localFromParent =
       glm::translate(glm::mat4(1.0f), glm::vec3(1.0f, 2.0f, 0.0f));
 
-  prefab.meshAssets.push_back(nuri::ScenePrefabMeshAssetRef{
-      .sourceSceneMeshIndex = 0u, .sourceName = "mesh"});
-  prefab.materialAssets.push_back(nuri::ScenePrefabMaterialAssetRef{
-      .sourceMaterialIndex = 0u,
-      .sourceName = "material",
-  });
+  prefab.meshAssets.emplace_back();
+  prefab.meshAssets.back().sourceIndex = 0u;
+  prefab.meshAssets.back().sourceName = "mesh";
+  prefab.materialAssets.emplace_back();
+  prefab.materialAssets.back().sourceIndex = 0u;
+  prefab.materialAssets.back().sourceName = "material";
   prefab.renderables.push_back(nuri::ScenePrefabRenderable{
       .nodeIndex = 0u,
-      .meshIndex = 0u,
-      .materialIndex = 0u,
+      .meshAssetIndex = 0u,
+      .materialAssetIndex = 0u,
       .skinIndex = 0u,
   });
   prefab.skins.emplace_back();
@@ -278,8 +279,9 @@ TEST(SceneAnimationTests, PlayerBuildsSkinPaletteFromJointWorldTransforms) {
   prefab.animations[0].name = "Idle";
 
   nuri::ScenePrefabAssets assets;
-  assets.models.push_back(nuri::makeModelRef(1u, 1u));
-  assets.materials.push_back(nuri::makeMaterialRef(2u, 1u));
+  assets.models.push_back(nuri::ModelRef{nuri::packResourceHandle(1u, 1u)});
+  assets.materials.push_back(
+      nuri::MaterialRef{nuri::packResourceHandle(2u, 1u)});
 
   nuri::RenderScene scene;
   nuri::SceneInstantiationMap instantiation;

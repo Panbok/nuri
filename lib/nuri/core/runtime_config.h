@@ -1,13 +1,10 @@
 #pragma once
-
 #include "nuri/core/result.h"
 #include "nuri/core/window.h"
 #include "nuri/defines.h"
-
 #include <cstdint>
 #include <filesystem>
 #include <string>
-
 namespace nuri {
 
 struct NURI_API RuntimeWindowConfig {
@@ -25,12 +22,7 @@ struct NURI_API RuntimeRootsConfig {
   std::filesystem::path fonts;
 };
 
-struct NURI_API RuntimeDebugShaderConfig {
-  std::filesystem::path vertex;
-  std::filesystem::path fragment;
-};
-
-struct NURI_API RuntimeSkyboxShaderConfig {
+struct NURI_API RuntimeRasterShaderConfig {
   std::filesystem::path vertex;
   std::filesystem::path fragment;
 };
@@ -66,21 +58,17 @@ struct NURI_API RuntimeCompositeConfig {
   std::filesystem::path fullscreenVertex;
   std::filesystem::path sceneCopyFragment;
   std::filesystem::path presentFragment;
-  // Reduces scene luminance for average/auto-exposure.
   std::filesystem::path hdrLuminanceReduceFragment;
-  // Computes and adapts exposure over time.
   std::filesystem::path hdrExposureAdaptFragment;
-  // Extracts and blurs bright areas for bloom.
   std::filesystem::path hdrBloomFragment;
-  // Combines bloom with the base image.
   std::filesystem::path hdrBloomCompositeFragment;
   std::filesystem::path aces2SdrLut;
   std::filesystem::path agxLut;
 };
 
 struct NURI_API RuntimeShaderConfig {
-  RuntimeDebugShaderConfig debugGrid;
-  RuntimeSkyboxShaderConfig skybox;
+  RuntimeRasterShaderConfig debugGrid;
+  RuntimeRasterShaderConfig skybox;
   RuntimeOpaqueShaderConfig opaque;
   RuntimeCompositeConfig composite;
   RuntimeTextMtsdfShaderConfig textMtsdf;

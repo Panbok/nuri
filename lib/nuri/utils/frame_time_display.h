@@ -1,11 +1,7 @@
 #pragma once
-
-#include "nuri/core/log.h"
-
 #include <cmath>
 #include <cstdint>
 #include <optional>
-
 namespace nuri {
 
 struct GpuFrameTimeSample {
@@ -14,6 +10,7 @@ struct GpuFrameTimeSample {
 };
 
 struct FrameTimeDisplayValues {
+  float framesPerSecond = 0.0f;
   float cpuMilliseconds = 0.0f;
   float gpuMilliseconds = 0.0f;
   bool cpuAvailable = false;
@@ -23,12 +20,7 @@ struct FrameTimeDisplayValues {
 class FrameTimeDisplaySampler {
 public:
   explicit FrameTimeDisplaySampler(double updateIntervalSeconds) noexcept
-      : updateIntervalSeconds_(updateIntervalSeconds) {
-    NURI_ASSERT(std::isfinite(updateIntervalSeconds) &&
-                    updateIntervalSeconds > 0.0,
-                "Frame-time display interval must be finite and positive");
-  }
-
+      : updateIntervalSeconds_(updateIntervalSeconds) {}
   bool tick(double deltaSeconds,
             std::optional<GpuFrameTimeSample> gpuSample) noexcept {
     if (std::isfinite(deltaSeconds) && deltaSeconds > 0.0) {
@@ -36,7 +28,6 @@ public:
       cpuMillisecondsSum_ += deltaSeconds * 1000.0;
       ++cpuSampleCount_;
     }
-
     if (gpuSample.has_value() && std::isfinite(gpuSample->milliseconds) &&
         gpuSample->milliseconds >= 0.0f &&
         (!lastGpuSourceFrameAvailable_ ||
@@ -46,14 +37,14 @@ public:
       lastGpuSourceFrame_ = gpuSample->sourceFrame;
       lastGpuSourceFrameAvailable_ = true;
     }
-
     if (intervalSeconds_ < updateIntervalSeconds_) {
       return false;
     }
-
     if (cpuSampleCount_ != 0u) {
       values_.cpuMilliseconds = static_cast<float>(
           cpuMillisecondsSum_ / static_cast<double>(cpuSampleCount_));
+      values_.framesPerSecond =
+          static_cast<float>(cpuSampleCount_ / intervalSeconds_);
       values_.cpuAvailable = true;
     }
     if (gpuSampleCount_ != 0u) {
@@ -61,7 +52,6 @@ public:
           gpuMillisecondsSum_ / static_cast<double>(gpuSampleCount_));
       values_.gpuAvailable = true;
     }
-
     intervalSeconds_ = 0.0;
     cpuMillisecondsSum_ = 0.0;
     gpuMillisecondsSum_ = 0.0;
@@ -69,7 +59,6 @@ public:
     gpuSampleCount_ = 0u;
     return true;
   }
-
   [[nodiscard]] const FrameTimeDisplayValues &values() const noexcept {
     return values_;
   }

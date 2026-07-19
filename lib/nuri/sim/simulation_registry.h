@@ -1,5 +1,4 @@
 #pragma once
-
 #include "nuri/core/containers/slot_pool.h"
 #include "nuri/core/result.h"
 #include "nuri/defines.h"
@@ -7,7 +6,6 @@
 #include "nuri/sim/simulation_bindings.h"
 #include "nuri/sim/simulation_desc.h"
 #include "nuri/sim/simulation_stats.h"
-
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -17,26 +15,18 @@
 #include <string_view>
 #include <type_traits>
 #include <vector>
-
 namespace nuri {
 
-// Not thread-safe: callers must synchronize all access externally.
 class NURI_API SimulationRegistry {
 public:
   struct Record {
     explicit Record(
         std::pmr::memory_resource *memory = std::pmr::get_default_resource())
-        : debugName(memory), binding(memory), params(memory),
-          faultReason(memory), stats(memory) {}
-
+        : debugName(memory), binding(memory), params(memory), stats(memory) {}
     SimulationKind kind = SimulationKind::Unknown;
-    SimulationBackendPreference backendPreference =
-        SimulationBackendPreference::Auto;
     SimulationState state = SimulationState::Stopped;
     bool enabled = false;
-    bool allowGpuExecution = true;
     bool singleStepRequested = false;
-    bool faulted = false;
     float timeScale = 1.0f;
     uint32_t priority = 0u;
     uint32_t substepCount = 1u;
@@ -45,15 +35,11 @@ public:
     std::pmr::string debugName;
     SimulationBindingDesc binding;
     std::pmr::vector<std::byte> params;
-    std::pmr::string faultReason;
     SimulationStats stats;
   };
-
   explicit SimulationRegistry(
       std::pmr::memory_resource *memory = std::pmr::get_default_resource());
-
   void clear();
-
   [[nodiscard]] Result<SimulationHandle, std::string>
   create(const SimulationDesc &desc);
   [[nodiscard]] bool destroy(SimulationHandle handle);
@@ -62,7 +48,6 @@ public:
   [[nodiscard]] uint32_t liveCount() const noexcept {
     return slots_.liveCount();
   }
-
   template <typename Fn> void forEachLive(Fn &&fn) {
     for (uint32_t index = 0; index < slots_.slotCount(); ++index) {
       if (!slots_.isLive(index)) {
@@ -82,7 +67,6 @@ public:
       }
     }
   }
-
   template <typename Fn> void forEachLive(Fn &&fn) const {
     for (uint32_t index = 0; index < slots_.slotCount(); ++index) {
       if (!slots_.isLive(index)) {
@@ -102,7 +86,6 @@ public:
       }
     }
   }
-
   [[nodiscard]] bool setEnabled(SimulationHandle handle, bool enabled);
   [[nodiscard]] bool pause(SimulationHandle handle);
   [[nodiscard]] bool resume(SimulationHandle handle);
@@ -130,7 +113,6 @@ private:
   [[nodiscard]] static Result<void, std::string>
   validateCreateDesc(const SimulationDesc &desc);
   [[nodiscard]] bool slotValid(SimulationHandle handle) const noexcept;
-
   std::pmr::memory_resource *memory_ = std::pmr::get_default_resource();
   SlotPool<MaskedNonZeroGenerationPolicy<kResourceHandleGenerationMask>> slots_;
   std::pmr::vector<Record> records_;

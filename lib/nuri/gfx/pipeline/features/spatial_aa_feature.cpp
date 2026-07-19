@@ -1,24 +1,43 @@
-#include "nuri/pch.h"
-
 #include "nuri/gfx/pipeline/features/spatial_aa_feature.h"
-
 #include "nuri/gfx/frame/presentation_aa_plan.h"
 #include "nuri/gfx/frame/render_frame_context.h"
-
+#include "nuri/gfx/fullscreen.h"
+#include "nuri/gfx/pipeline/render_pipeline.h"
+#include "nuri/pch.h"
 #include <algorithm>
 #include <array>
 #include <bit>
 #include <cstddef>
 #include <filesystem>
+#include <fstream>
 #include <span>
-
-#include "detail/smaa_area_tex.h"
-#include "detail/smaa_search_tex.h"
-
 namespace nuri {
 namespace {
-
-constexpr uint32_t kInvalidTextureBindlessIndex = 0xFFFFFFFFu;
+enum SpatialAAStage : size_t {
+  EdgeStage,
+  BlendStage,
+  NeighborhoodStage,
+  StageCount
+};
+enum SpatialAASampler : size_t { LinearSampler, PointSampler, SamplerCount };
+enum SpatialAALut : size_t { AreaLut, SearchLut, LutCount };
+enum SpatialAAScratch : size_t {
+  EdgeScratch,
+  BlendScratch,
+  OutputScratch,
+  ScratchCount
+};
+struct SpatialAAStageSpec {
+  std::string_view name;
+  std::string_view fragment;
+  Format format;
+};
+constexpr std::array<SpatialAAStageSpec, StageCount> kSpatialAAStages{{
+    {"spatial_aa_edge", "spatial_aa_edge.frag", Format::RGBA8_UNORM},
+    {"spatial_aa_blend", "spatial_aa_blend.frag", Format::RGBA8_UNORM},
+    {"spatial_aa_neighborhood", "spatial_aa_neighborhood.frag",
+     kFrameCompositionFrameColorFormat},
+}};
 constexpr uint32_t kSpatialAAModeNeighborhood = 0u;
 constexpr uint32_t kSpatialAAModeCopy = 1u;
 constexpr uint32_t kSpatialAAModeCleanupMask = 2u;
@@ -37,7 +56,10 @@ constexpr float kSpatialAATaaCleanupLocalContrastFactor = 1.45f;
 constexpr float kSpatialAAFallbackCornerRounding = 0.25f;
 constexpr float kSpatialAATaaCleanupCornerRounding = 0.40f;
 constexpr uint32_t kSpatialAAMaxSearchSteps = 16u;
-
+constexpr uint32_t kAreaLutWidth = 160u;
+constexpr uint32_t kAreaLutHeight = 560u;
+constexpr uint32_t kSearchLutWidth = 64u;
+constexpr uint32_t kSearchLutHeight = 16u;
 struct SpatialAAPushConstants {
   uint32_t sourceTexId = 0u;
   uint32_t edgeTexId = 0u;
@@ -56,7 +78,6 @@ struct SpatialAAPushConstants {
   uint32_t cornerRoundingBits = 0u;
 };
 static_assert(sizeof(SpatialAAPushConstants) <= 128);
-
 struct SpatialAAProfile {
   float edgeThreshold = kSpatialAAEdgeThreshold;
   float resolveStrength = kSpatialAAFallbackResolveStrength;
@@ -64,7 +85,6 @@ struct SpatialAAProfile {
   float cornerRounding = kSpatialAAFallbackCornerRounding;
   uint32_t maxSearchSteps = kSpatialAAMaxSearchSteps;
 };
-
 [[nodiscard]] inline bool
 isSpatialAADebugView(AntiAliasingDebugView view) noexcept {
   return view == AntiAliasingDebugView::SpatialAAEdges ||
@@ -72,18 +92,15 @@ isSpatialAADebugView(AntiAliasingDebugView view) noexcept {
          view == AntiAliasingDebugView::SpatialAACleanupMask ||
          view == AntiAliasingDebugView::SpatialAASplitCompare;
 }
-
 [[nodiscard]] inline bool isTaaDebugView(AntiAliasingDebugView view) noexcept {
   return view != AntiAliasingDebugView::None &&
          view != AntiAliasingDebugView::Settings && !isSpatialAADebugView(view);
 }
-
 [[nodiscard]] inline bool
 isAADebugOutputView(AntiAliasingDebugView view) noexcept {
   return view != AntiAliasingDebugView::None &&
          view != AntiAliasingDebugView::Settings;
 }
-
 [[nodiscard]] inline bool
 shouldRunSpatialAA(const RenderFrameContext &frame) noexcept {
   const RenderSettings &settings = renderSettingsOrDefault(frame);
@@ -120,7 +137,6 @@ shouldRunSpatialAA(const RenderFrameContext &frame) noexcept {
   return fallbackWindow ||
          (!frame.camera.jitterEnabled && aaDebug.spatialPostTaaCleanup);
 }
-
 [[nodiscard]] inline bool
 shouldRunPostTransparentSpatialAA(const RenderFrameContext &frame) noexcept {
   const RenderSettings &settings = renderSettingsOrDefault(frame);
@@ -143,7 +159,6 @@ shouldRunPostTransparentSpatialAA(const RenderFrameContext &frame) noexcept {
          frame.metrics.antiAliasing.taaResolvedSceneColorPublished &&
          frame.metrics.antiAliasing.taaTransparentPostTaaDrawCount > 0u;
 }
-
 [[nodiscard]] inline bool
 isSpatialFallbackActive(const RenderFrameContext &frame) noexcept {
   const RenderSettings &settings = renderSettingsOrDefault(frame);
@@ -160,7 +175,6 @@ isSpatialFallbackActive(const RenderFrameContext &frame) noexcept {
          (!frame.camera.historyValid || frame.camera.framesSinceHistoryReset <
                                             frame.camera.jitterSequenceLength);
 }
-
 [[nodiscard]] inline bool
 isSpatialCleanupActive(const RenderFrameContext &frame) noexcept {
   const RenderSettings &settings = renderSettingsOrDefault(frame);
@@ -174,7 +188,6 @@ isSpatialCleanupActive(const RenderFrameContext &frame) noexcept {
   return mode == AntiAliasingMode::TAA && aaDebug.spatialPostTaaCleanup &&
          !frame.camera.jitterEnabled && !isSpatialFallbackActive(frame);
 }
-
 [[nodiscard]] inline bool
 isTaaPostSpatialCleanupActive(const RenderFrameContext &frame) noexcept {
   const RenderSettings &settings = renderSettingsOrDefault(frame);
@@ -182,7 +195,6 @@ isTaaPostSpatialCleanupActive(const RenderFrameContext &frame) noexcept {
              AntiAliasingMode::TAA &&
          isSpatialCleanupActive(frame);
 }
-
 [[nodiscard]] inline SpatialAAProfile
 spatialAAProfile(const RenderFrameContext &frame) noexcept {
   if (isTaaPostSpatialCleanupActive(frame)) {
@@ -205,7 +217,6 @@ spatialAAProfile(const RenderFrameContext &frame) noexcept {
   }
   return SpatialAAProfile{};
 }
-
 [[nodiscard]] inline std::filesystem::path
 resolveShaderBasePath(const RuntimeCompositeConfig &config) {
   if (!config.shaderBasePath.empty()) {
@@ -222,68 +233,6 @@ resolveShaderBasePath(const RuntimeCompositeConfig &config) {
   }
   return {};
 }
-
-[[nodiscard]] RenderPipelineDesc
-fullscreenPipelineDesc(Format colorFormat, ShaderHandle vertexShader,
-                       ShaderHandle fragmentShader) {
-  return RenderPipelineDesc{
-      .vertexInput = {},
-      .vertexShader = vertexShader,
-      .fragmentShader = fragmentShader,
-      .colorFormats = {colorFormat},
-      .depthFormat = Format::Count,
-      .cullMode = CullMode::None,
-      .polygonMode = PolygonMode::Fill,
-      .topology = Topology::Triangle,
-      .blendEnabled = false,
-  };
-}
-
-[[nodiscard]] DrawItem makeFullscreenDraw(RenderPipelineHandle pipeline,
-                                          std::span<const std::byte> constants,
-                                          std::string_view label) {
-  DrawItem draw{};
-  draw.pipeline = pipeline;
-  draw.vertexCount = 3u;
-  draw.instanceCount = 1u;
-  draw.pushConstants = constants;
-  draw.debugLabel = label;
-  draw.debugColor = kSpatialAADrawDebugColor;
-  return draw;
-}
-
-[[nodiscard]] uint64_t textureFormatBytesPerPixel(Format format) noexcept {
-  switch (format) {
-  case Format::R8_UNORM:
-    return 1u;
-  case Format::R16_UNORM:
-    return 2u;
-  case Format::R32_UINT:
-  case Format::R32_FLOAT:
-  case Format::RG16_FLOAT:
-  case Format::RGBA8_UNORM:
-  case Format::RGBA8_SRGB:
-  case Format::RGBA8_UINT:
-    return 4u;
-  case Format::RG32_FLOAT:
-  case Format::RGBA16_FLOAT:
-    return 8u;
-  case Format::RGBA32_FLOAT:
-    return 16u;
-  case Format::D16_UNORM:
-    return 2u;
-  case Format::D32_FLOAT:
-    return 4u;
-  case Format::BC7_RGBA_UNORM:
-  case Format::BC7_RGBA_SRGB:
-  case Format::ETC2_RGB8_UNORM:
-  case Format::ETC2_RGB8_SRGB:
-  case Format::Count:
-    break;
-  }
-  return 0u;
-}
-
 [[nodiscard]] uint64_t textureStorageBytes(GPUDevice &gpu,
                                            TextureHandle texture) {
   if (!nuri::isValid(texture)) {
@@ -293,262 +242,144 @@ fullscreenPipelineDesc(Format colorFormat, ShaderHandle vertexShader,
   return static_cast<uint64_t>(dimensions.width) *
          static_cast<uint64_t>(dimensions.height) *
          static_cast<uint64_t>(std::max(dimensions.depth, 1u)) *
-         textureFormatBytesPerPixel(gpu.getTextureFormat(texture));
+         formatTexelBytes(gpu.getTextureFormat(texture));
 }
-
-[[nodiscard]] std::vector<std::byte> expandAreaTexToRgba8() {
-  std::vector<std::byte> bytes;
-  bytes.resize(static_cast<size_t>(AREATEX_WIDTH) *
-               static_cast<size_t>(AREATEX_HEIGHT) * 4u);
-  for (size_t i = 0u; i < static_cast<size_t>(AREATEX_WIDTH) *
-                              static_cast<size_t>(AREATEX_HEIGHT);
-       ++i) {
-    bytes[i * 4u + 0u] = static_cast<std::byte>(areaTexBytes[i * 2u + 0u]);
-    bytes[i * 4u + 1u] = static_cast<std::byte>(areaTexBytes[i * 2u + 1u]);
-    bytes[i * 4u + 2u] = std::byte{0};
-    bytes[i * 4u + 3u] = std::byte{255};
+[[nodiscard]] Result<TextureHandle, std::string>
+createSmaaLut(GPUDevice &gpu, const std::filesystem::path &path, uint32_t width,
+              uint32_t height, std::string_view label) {
+  const size_t byteCount = static_cast<size_t>(width) * height * 4u;
+  std::ifstream input(path, std::ios::binary | std::ios::ate);
+  if (!input || input.tellg() != static_cast<std::streamoff>(byteCount)) {
+    return Result<TextureHandle, std::string>::makeError("Invalid SMAA LUT: " +
+                                                         path.string());
   }
-  return bytes;
-}
-
-[[nodiscard]] std::vector<std::byte> expandSearchTexToRgba8() {
-  std::vector<std::byte> bytes;
-  bytes.resize(static_cast<size_t>(SEARCHTEX_WIDTH) *
-               static_cast<size_t>(SEARCHTEX_HEIGHT) * 4u);
-  for (size_t i = 0u; i < static_cast<size_t>(SEARCHTEX_WIDTH) *
-                              static_cast<size_t>(SEARCHTEX_HEIGHT);
-       ++i) {
-    bytes[i * 4u + 0u] = static_cast<std::byte>(searchTexBytes[i]);
-    bytes[i * 4u + 1u] = std::byte{0};
-    bytes[i * 4u + 2u] = std::byte{0};
-    bytes[i * 4u + 3u] = std::byte{255};
+  std::vector<std::byte> bytes(byteCount);
+  input.seekg(0);
+  if (!input.read(reinterpret_cast<char *>(bytes.data()),
+                  static_cast<std::streamsize>(byteCount))) {
+    return Result<TextureHandle, std::string>::makeError(
+        "Failed to read SMAA LUT: " + path.string());
   }
-  return bytes;
+  return gpu.createTexture(
+      TextureDesc{.type = TextureType::Texture2D,
+                  .format = Format::RGBA8_UNORM,
+                  .dimensions = TextureDimensions{width, height, 1u},
+                  .usage = TextureUsage::Sampled,
+                  .storage = Storage::Device,
+                  .numLayers = 1u,
+                  .numSamples = 1u,
+                  .numMipLevels = 1u,
+                  .data = bytes,
+                  .dataNumMipLevels = 1u},
+      label);
 }
-
 } // namespace
 
 SpatialAAPass::SpatialAAPass(GPUDevice &gpu, RuntimeCompositeConfig config,
                              SpatialAAPlacement placement)
     : gpu_(gpu), config_(std::move(config)), placement_(placement) {
-  const std::filesystem::path basePath = resolveShaderBasePath(config_);
-  const std::filesystem::path vertexPath =
-      config_.fullscreenVertex.empty() ? basePath / "fullscreen_copy.vert"
-                                       : config_.fullscreenVertex;
-  edgeResources_.vertexPath = vertexPath;
-  edgeResources_.fragmentPath = basePath / "spatial_aa_edge.frag";
-  blendResources_.vertexPath = vertexPath;
-  blendResources_.fragmentPath = basePath / "spatial_aa_blend.frag";
-  neighborhoodResources_.vertexPath = vertexPath;
-  neighborhoodResources_.fragmentPath =
-      basePath / "spatial_aa_neighborhood.frag";
+  auto result = initialize();
+  if (result.hasError())
+    initializationError_ = result.error();
 }
 
 SpatialAAPass::~SpatialAAPass() { destroyResources(); }
 
-void SpatialAAPass::destroyFullscreenResources(FullscreenResources &resources) {
-  if (nuri::isValid(resources.pipeline)) {
-    gpu_.destroyRenderPipeline(resources.pipeline);
-  }
-  if (nuri::isValid(resources.vertexShader)) {
-    gpu_.destroyShaderModule(resources.vertexShader);
-  }
-  if (nuri::isValid(resources.fragmentShader)) {
-    gpu_.destroyShaderModule(resources.fragmentShader);
-  }
-  resources.pipeline = {};
-  resources.pipelineColorFormat = Format::Count;
-  resources.vertexShader = {};
-  resources.fragmentShader = {};
-  resources.shader.reset();
-  resources.initialized = false;
-}
-
 void SpatialAAPass::destroyResources() {
-  destroyFullscreenResources(edgeResources_);
-  destroyFullscreenResources(blendResources_);
-  destroyFullscreenResources(neighborhoodResources_);
-  for (TextureHandle texture : edgeTextures_) {
-    if (nuri::isValid(texture)) {
-      gpu_.destroyTexture(texture);
-    }
+  for (RenderPipelineHandle pipeline : pipelines_)
+    if (nuri::isValid(pipeline))
+      gpu_.destroyRenderPipeline(pipeline);
+  if (nuri::isValid(vertexShader_))
+    gpu_.destroyShaderModule(vertexShader_);
+  for (ShaderHandle shader : fragmentShaders_)
+    if (nuri::isValid(shader))
+      gpu_.destroyShaderModule(shader);
+  for (auto &textures : scratchTextures_) {
+    for (TextureHandle texture : textures)
+      if (nuri::isValid(texture))
+        gpu_.destroyTexture(texture);
+    textures.clear();
   }
-  for (TextureHandle texture : blendTextures_) {
-    if (nuri::isValid(texture)) {
-      gpu_.destroyTexture(texture);
-    }
-  }
-  for (TextureHandle texture : outputTextures_) {
-    if (nuri::isValid(texture)) {
-      gpu_.destroyTexture(texture);
-    }
-  }
-  edgeTextures_.clear();
-  blendTextures_.clear();
-  outputTextures_.clear();
   scratchWidth_ = 0u;
   scratchHeight_ = 0u;
   scratchRingCount_ = 0u;
   outputScratchFormat_ = Format::Count;
-  if (nuri::isValid(areaLutTexture_)) {
-    gpu_.destroyTexture(areaLutTexture_);
+  for (TextureHandle lut : luts_)
+    if (nuri::isValid(lut))
+      gpu_.destroyTexture(lut);
+  for (SamplerHandle sampler : samplers_)
+    if (nuri::isValid(sampler))
+      gpu_.destroySampler(sampler);
+}
+
+Result<bool, std::string> SpatialAAPass::initialize() {
+  const std::filesystem::path basePath = resolveShaderBasePath(config_);
+  const std::filesystem::path vertexPath =
+      config_.fullscreenVertex.empty() ? basePath / "fullscreen_copy.vert"
+                                       : config_.fullscreenVertex;
+  auto vertexCompiler = Shader::create("spatial_aa_vertex", gpu_);
+  if (!vertexCompiler)
+    return Result<bool, std::string>::makeError(
+        "SpatialAA: shader creation failed");
+  auto vertex =
+      vertexCompiler->compileFromFile(vertexPath.string(), ShaderStage::Vertex);
+  if (vertex.hasError())
+    return Result<bool, std::string>::makeError(vertex.error());
+  vertexShader_ = vertex.value();
+  for (size_t index = 0; index < kSpatialAAStages.size(); ++index) {
+    const SpatialAAStageSpec &spec = kSpatialAAStages[index];
+    auto compiler = Shader::create(spec.name, gpu_);
+    if (!compiler)
+      return Result<bool, std::string>::makeError(
+          "SpatialAA: shader creation failed");
+    auto fragment = compiler->compileFromFile(
+        (basePath / spec.fragment).string(), ShaderStage::Fragment);
+    if (fragment.hasError())
+      return Result<bool, std::string>::makeError(fragment.error());
+    fragmentShaders_[index] = fragment.value();
+    auto pipeline = gpu_.createRenderPipeline(
+        fullscreenPipelineDesc(spec.format, vertexShader_,
+                               fragmentShaders_[index]),
+        spec.name);
+    if (pipeline.hasError())
+      return Result<bool, std::string>::makeError(pipeline.error());
+    pipelines_[index] = pipeline.value();
   }
-  if (nuri::isValid(searchLutTexture_)) {
-    gpu_.destroyTexture(searchLutTexture_);
+  for (size_t index = 0; index < samplers_.size(); ++index) {
+    const SamplerFilter filter =
+        index == LinearSampler ? SamplerFilter::Linear : SamplerFilter::Nearest;
+    auto sampler =
+        gpu_.createSampler(SamplerDesc{.minFilter = filter,
+                                       .magFilter = filter,
+                                       .mipMode = SamplerMipMode::Disabled,
+                                       .wrapU = SamplerWrapMode::Clamp,
+                                       .wrapV = SamplerWrapMode::Clamp,
+                                       .wrapW = SamplerWrapMode::Clamp},
+                           index == LinearSampler ? "spatial_aa_linear_clamp"
+                                                  : "spatial_aa_point_clamp");
+    if (sampler.hasError())
+      return Result<bool, std::string>::makeError(sampler.error());
+    samplers_[index] = sampler.value();
   }
-  if (nuri::isValid(linearClampSampler_)) {
-    gpu_.destroySampler(linearClampSampler_);
-  }
-  if (nuri::isValid(pointClampSampler_)) {
-    gpu_.destroySampler(pointClampSampler_);
-  }
-  areaLutTexture_ = {};
-  searchLutTexture_ = {};
-  linearClampSampler_ = {};
-  pointClampSampler_ = {};
+  auto area =
+      createSmaaLut(gpu_, basePath / "smaa_area_rgba8.bin", kAreaLutWidth,
+                    kAreaLutHeight, "spatial_aa_smaa_area_lut");
+  if (area.hasError())
+    return Result<bool, std::string>::makeError(area.error());
+  luts_[AreaLut] = area.value();
+  auto search =
+      createSmaaLut(gpu_, basePath / "smaa_search_rgba8.bin", kSearchLutWidth,
+                    kSearchLutHeight, "spatial_aa_smaa_search_lut");
+  if (search.hasError())
+    return Result<bool, std::string>::makeError(search.error());
+  luts_[SearchLut] = search.value();
+  return Result<bool, std::string>::makeResult(true);
 }
 
 Result<bool, std::string>
-SpatialAAPass::ensureResources(FrameBuildContext &ctx) {
-  const auto ensureFullscreen =
-      [this](FullscreenResources &resources, std::string_view shaderName,
-             Format colorFormat,
-             std::string_view pipelineName) -> Result<bool, std::string> {
-    if (!resources.initialized) {
-      std::unique_ptr<Shader> shader = Shader::create(shaderName, gpu_);
-      if (!shader) {
-        return Result<bool, std::string>::makeError(
-            std::string(shaderName) + ": failed to create shader");
-      }
-      auto vertexResult = shader->compileFromFile(resources.vertexPath.string(),
-                                                  ShaderStage::Vertex);
-      if (vertexResult.hasError()) {
-        return Result<bool, std::string>::makeError(vertexResult.error());
-      }
-      auto fragmentResult = shader->compileFromFile(
-          resources.fragmentPath.string(), ShaderStage::Fragment);
-      if (fragmentResult.hasError()) {
-        if (nuri::isValid(vertexResult.value())) {
-          gpu_.destroyShaderModule(vertexResult.value());
-        }
-        return Result<bool, std::string>::makeError(fragmentResult.error());
-      }
-      resources.shader = std::move(shader);
-      resources.vertexShader = vertexResult.value();
-      resources.fragmentShader = fragmentResult.value();
-      resources.initialized = true;
-    }
-    if (nuri::isValid(resources.pipeline) &&
-        resources.pipelineColorFormat == colorFormat) {
-      return Result<bool, std::string>::makeResult(true);
-    }
-    if (nuri::isValid(resources.pipeline)) {
-      gpu_.destroyRenderPipeline(resources.pipeline);
-      resources.pipeline = {};
-    }
-    auto pipelineResult = gpu_.createRenderPipeline(
-        fullscreenPipelineDesc(colorFormat, resources.vertexShader,
-                               resources.fragmentShader),
-        pipelineName);
-    if (pipelineResult.hasError()) {
-      return Result<bool, std::string>::makeError(pipelineResult.error());
-    }
-    resources.pipeline = pipelineResult.value();
-    resources.pipelineColorFormat = colorFormat;
-    return Result<bool, std::string>::makeResult(true);
-  };
-
-  auto edgeResult = ensureFullscreen(edgeResources_, "spatial_aa_edge",
-                                     Format::RGBA8_UNORM, "spatial_aa_edge");
-  if (edgeResult.hasError()) {
-    return edgeResult;
-  }
-  auto blendResult = ensureFullscreen(blendResources_, "spatial_aa_blend",
-                                      Format::RGBA8_UNORM, "spatial_aa_blend");
-  if (blendResult.hasError()) {
-    return blendResult;
-  }
-  auto neighborhoodResult = ensureFullscreen(
-      neighborhoodResources_, "spatial_aa_neighborhood",
-      kFrameCompositionFrameColorFormat, "spatial_aa_neighborhood");
-  if (neighborhoodResult.hasError()) {
-    return neighborhoodResult;
-  }
-
-  if (!nuri::isValid(linearClampSampler_)) {
-    auto samplerResult =
-        gpu_.createSampler(SamplerDesc{.minFilter = SamplerFilter::Linear,
-                                       .magFilter = SamplerFilter::Linear,
-                                       .mipMode = SamplerMipMode::Disabled,
-                                       .wrapU = SamplerWrapMode::Clamp,
-                                       .wrapV = SamplerWrapMode::Clamp,
-                                       .wrapW = SamplerWrapMode::Clamp},
-                           "spatial_aa_linear_clamp");
-    if (samplerResult.hasError()) {
-      return Result<bool, std::string>::makeError(samplerResult.error());
-    }
-    linearClampSampler_ = samplerResult.value();
-  }
-  if (!nuri::isValid(pointClampSampler_)) {
-    auto samplerResult =
-        gpu_.createSampler(SamplerDesc{.minFilter = SamplerFilter::Nearest,
-                                       .magFilter = SamplerFilter::Nearest,
-                                       .mipMode = SamplerMipMode::Disabled,
-                                       .wrapU = SamplerWrapMode::Clamp,
-                                       .wrapV = SamplerWrapMode::Clamp,
-                                       .wrapW = SamplerWrapMode::Clamp},
-                           "spatial_aa_point_clamp");
-    if (samplerResult.hasError()) {
-      return Result<bool, std::string>::makeError(samplerResult.error());
-    }
-    pointClampSampler_ = samplerResult.value();
-  }
-
-  if (!nuri::isValid(areaLutTexture_)) {
-    std::vector<std::byte> areaBytes = expandAreaTexToRgba8();
-    auto textureResult = gpu_.createTexture(
-        TextureDesc{
-            .type = TextureType::Texture2D,
-            .format = Format::RGBA8_UNORM,
-            .dimensions = TextureDimensions{AREATEX_WIDTH, AREATEX_HEIGHT, 1u},
-            .usage = TextureUsage::Sampled,
-            .storage = Storage::Device,
-            .numLayers = 1u,
-            .numSamples = 1u,
-            .numMipLevels = 1u,
-            .data =
-                std::span<const std::byte>(areaBytes.data(), areaBytes.size()),
-            .dataNumMipLevels = 1u,
-            .generateMipmaps = false},
-        "spatial_aa_smaa_area_lut");
-    if (textureResult.hasError()) {
-      return Result<bool, std::string>::makeError(textureResult.error());
-    }
-    areaLutTexture_ = textureResult.value();
-  }
-  if (!nuri::isValid(searchLutTexture_)) {
-    std::vector<std::byte> searchBytes = expandSearchTexToRgba8();
-    auto textureResult = gpu_.createTexture(
-        TextureDesc{.type = TextureType::Texture2D,
-                    .format = Format::RGBA8_UNORM,
-                    .dimensions = TextureDimensions{SEARCHTEX_WIDTH,
-                                                    SEARCHTEX_HEIGHT, 1u},
-                    .usage = TextureUsage::Sampled,
-                    .storage = Storage::Device,
-                    .numLayers = 1u,
-                    .numSamples = 1u,
-                    .numMipLevels = 1u,
-                    .data = std::span<const std::byte>(searchBytes.data(),
-                                                       searchBytes.size()),
-                    .dataNumMipLevels = 1u,
-                    .generateMipmaps = false},
-        "spatial_aa_smaa_search_lut");
-    if (textureResult.hasError()) {
-      return Result<bool, std::string>::makeError(textureResult.error());
-    }
-    searchLutTexture_ = textureResult.value();
-  }
-
+SpatialAAPass::ensureScratchTextures(FrameBuildContext &ctx) {
+  if (!initializationError_.empty())
+    return Result<bool, std::string>::makeError(initializationError_);
   const TextureHandle sourceTexture =
       placement_ == SpatialAAPlacement::PostTransparent
           ? ctx.shared.frameColorTexture
@@ -559,43 +390,24 @@ SpatialAAPass::ensureResources(FrameBuildContext &ctx) {
       placement_ == SpatialAAPlacement::PostTransparent;
   const Format outputScratchFormat =
       needsOutputScratch ? gpu_.getTextureFormat(sourceTexture) : Format::Count;
-  const bool recreateScratch =
-      scratchWidth_ != dimensions.width ||
-      scratchHeight_ != dimensions.height || scratchRingCount_ != ringCount ||
-      edgeTextures_.size() != ringCount || blendTextures_.size() != ringCount ||
-      (needsOutputScratch && (outputTextures_.size() != ringCount ||
-                              outputScratchFormat_ != outputScratchFormat)) ||
-      (!needsOutputScratch && !outputTextures_.empty());
+  const bool recreateScratch = scratchWidth_ != dimensions.width ||
+                               scratchHeight_ != dimensions.height ||
+                               scratchRingCount_ != ringCount ||
+                               outputScratchFormat_ != outputScratchFormat;
   if (!recreateScratch) {
     return Result<bool, std::string>::makeResult(true);
   }
-
-  for (TextureHandle texture : edgeTextures_) {
-    if (nuri::isValid(texture)) {
-      gpu_.destroyTexture(texture);
-    }
+  for (auto &textures : scratchTextures_) {
+    for (TextureHandle texture : textures)
+      if (nuri::isValid(texture))
+        gpu_.destroyTexture(texture);
+    textures.clear();
   }
-  for (TextureHandle texture : blendTextures_) {
-    if (nuri::isValid(texture)) {
-      gpu_.destroyTexture(texture);
-    }
-  }
-  for (TextureHandle texture : outputTextures_) {
-    if (nuri::isValid(texture)) {
-      gpu_.destroyTexture(texture);
-    }
-  }
-  edgeTextures_.clear();
-  blendTextures_.clear();
-  outputTextures_.clear();
-  edgeTextures_.reserve(ringCount);
-  blendTextures_.reserve(ringCount);
+  scratchTextures_[EdgeScratch].reserve(ringCount);
+  scratchTextures_[BlendScratch].reserve(ringCount);
   if (needsOutputScratch) {
-    NURI_ASSERT(outputScratchFormat != Format::Count,
-                "SpatialAAPass output scratch format must be resolved");
-    outputTextures_.reserve(ringCount);
+    scratchTextures_[OutputScratch].reserve(ringCount);
   }
-
   const TextureDesc scratchDesc{
       .type = TextureType::Texture2D,
       .format = Format::RGBA8_UNORM,
@@ -610,38 +422,22 @@ SpatialAAPass::ensureResources(FrameBuildContext &ctx) {
       .dataNumMipLevels = 1u,
       .generateMipmaps = false};
   for (uint32_t i = 0u; i < ringCount; ++i) {
-    auto edgeTexture = gpu_.createTexture(scratchDesc, "spatial_aa_edges");
-    if (edgeTexture.hasError()) {
-      return Result<bool, std::string>::makeError(edgeTexture.error());
+    constexpr std::array names{"spatial_aa_edges", "spatial_aa_blend_weights"};
+    for (size_t kind = EdgeScratch; kind <= BlendScratch; ++kind) {
+      auto texture = gpu_.createTexture(scratchDesc, names[kind]);
+      if (texture.hasError())
+        return Result<bool, std::string>::makeError(texture.error());
+      scratchTextures_[kind].push_back(texture.value());
     }
-    auto blendTexture =
-        gpu_.createTexture(scratchDesc, "spatial_aa_blend_weights");
-    if (blendTexture.hasError()) {
-      gpu_.destroyTexture(edgeTexture.value());
-      return Result<bool, std::string>::makeError(blendTexture.error());
-    }
-    edgeTextures_.push_back(edgeTexture.value());
-    blendTextures_.push_back(blendTexture.value());
     if (needsOutputScratch) {
-      const TextureDesc outputDesc{
-          .type = TextureType::Texture2D,
-          .format = outputScratchFormat,
-          .dimensions = TextureDimensions{std::max(dimensions.width, 1u),
-                                          std::max(dimensions.height, 1u), 1u},
-          .usage = TextureUsage::AttachmentSampled,
-          .storage = Storage::Device,
-          .numLayers = 1u,
-          .numSamples = 1u,
-          .numMipLevels = 1u,
-          .data = {},
-          .dataNumMipLevels = 1u,
-          .generateMipmaps = false};
+      TextureDesc outputDesc = scratchDesc;
+      outputDesc.format = outputScratchFormat;
       auto outputTexture =
           gpu_.createTexture(outputDesc, "transparent_spatial_aa_output");
       if (outputTexture.hasError()) {
         return Result<bool, std::string>::makeError(outputTexture.error());
       }
-      outputTextures_.push_back(outputTexture.value());
+      scratchTextures_[OutputScratch].push_back(outputTexture.value());
     }
   }
   scratchWidth_ = dimensions.width;
@@ -676,59 +472,32 @@ Result<bool, std::string> SpatialAAPass::prepare(FrameBuildContext &ctx) {
           aaDebug.transparentPostTaaSpatialCleanup;
     }
   }
-  if (!isEnabled(ctx)) {
-    return Result<bool, std::string>::makeResult(true);
-  }
-  return ensureResources(ctx);
+  return ensureScratchTextures(ctx);
 }
 
 Result<bool, std::string> SpatialAAPass::build(FrameBuildContext &ctx) {
-  if (!isEnabled(ctx)) {
-    return Result<bool, std::string>::makeResult(false);
-  }
-  auto resourcesResult = ensureResources(ctx);
-  if (resourcesResult.hasError()) {
-    return resourcesResult;
-  }
   const bool postTransparent =
       placement_ == SpatialAAPlacement::PostTransparent;
-  if (edgeTextures_.empty() || blendTextures_.empty() ||
-      (postTransparent && outputTextures_.empty())) {
-    return Result<bool, std::string>::makeResult(false);
-  }
-
-  const uint32_t ringIndex =
-      static_cast<uint32_t>(ctx.frame.frameIndex % edgeTextures_.size());
-  const TextureHandle edgeTexture = edgeTextures_[ringIndex];
-  const TextureHandle blendTexture = blendTextures_[ringIndex];
+  const uint32_t ringIndex = static_cast<uint32_t>(
+      ctx.frame.frameIndex % scratchTextures_[EdgeScratch].size());
+  const TextureHandle edgeTexture = scratchTextures_[EdgeScratch][ringIndex];
+  const TextureHandle blendTexture = scratchTextures_[BlendScratch][ringIndex];
   const TextureHandle sourceTexture = postTransparent
                                           ? ctx.shared.frameColorTexture
                                           : ctx.shared.sceneColorTexture;
-  const TextureHandle outputTexture = postTransparent
-                                          ? outputTextures_[ringIndex]
-                                          : ctx.shared.frameColorTexture;
+  const TextureHandle outputTexture =
+      postTransparent ? scratchTextures_[OutputScratch][ringIndex]
+                      : ctx.shared.frameColorTexture;
   const uint32_t sourceTexId = gpu_.getTextureBindlessIndex(sourceTexture);
   const uint32_t edgeTexId = gpu_.getTextureBindlessIndex(edgeTexture);
   const uint32_t blendTexId = gpu_.getTextureBindlessIndex(blendTexture);
-  const uint32_t areaTexId = gpu_.getTextureBindlessIndex(areaLutTexture_);
-  const uint32_t searchTexId = gpu_.getTextureBindlessIndex(searchLutTexture_);
+  const uint32_t areaTexId = gpu_.getTextureBindlessIndex(luts_[AreaLut]);
+  const uint32_t searchTexId = gpu_.getTextureBindlessIndex(luts_[SearchLut]);
   const uint32_t outputTexId = gpu_.getTextureBindlessIndex(outputTexture);
   const uint32_t linearSamplerId =
-      gpu_.getSamplerBindlessIndex(linearClampSampler_);
+      gpu_.getSamplerBindlessIndex(samplers_[LinearSampler]);
   const uint32_t pointSamplerId =
-      gpu_.getSamplerBindlessIndex(pointClampSampler_);
-  if (sourceTexId == kInvalidTextureBindlessIndex ||
-      edgeTexId == kInvalidTextureBindlessIndex ||
-      blendTexId == kInvalidTextureBindlessIndex ||
-      areaTexId == kInvalidTextureBindlessIndex ||
-      searchTexId == kInvalidTextureBindlessIndex ||
-      outputTexId == kInvalidTextureBindlessIndex ||
-      linearSamplerId == kInvalidTextureBindlessIndex ||
-      pointSamplerId == kInvalidTextureBindlessIndex) {
-    return Result<bool, std::string>::makeError(
-        "SpatialAAPass::build: invalid bindless texture or sampler");
-  }
-
+      gpu_.getSamplerBindlessIndex(samplers_[PointSampler]);
   auto importSource = ctx.graph.importTexture(
       sourceTexture, postTransparent ? "transparent_spatial_aa_frame_color"
                                      : "spatial_aa_scene");
@@ -750,7 +519,6 @@ Result<bool, std::string> SpatialAAPass::build(FrameBuildContext &ctx) {
   if (importBlend.hasError()) {
     return Result<bool, std::string>::makeError(importBlend.error());
   }
-
   const TextureDimensions dimensions = gpu_.getTextureDimensions(sourceTexture);
   const float inverseWidth =
       1.0f / static_cast<float>(std::max(dimensions.width, 1u));
@@ -795,7 +563,6 @@ Result<bool, std::string> SpatialAAPass::build(FrameBuildContext &ctx) {
           std::bit_cast<uint32_t>(profile.localContrastFactor),
       .cornerRoundingBits = std::bit_cast<uint32_t>(profile.cornerRounding),
   };
-
   AntiAliasingFrameMetrics &aaMetrics = ctx.frame.metrics.antiAliasing;
   const GpuTimingReport &timingReport = ctx.frame.gpuTiming;
   if (hasGpuTimingScope(timingReport, GpuTimingScope::SpatialAA)) {
@@ -814,23 +581,16 @@ Result<bool, std::string> SpatialAAPass::build(FrameBuildContext &ctx) {
         aaMode == AntiAliasingMode::MSAA4x && cleanupActive;
     aaMetrics.spatialAAWidth = dimensions.width;
     aaMetrics.spatialAAHeight = dimensions.height;
-    aaMetrics.spatialAATextureCount =
-        static_cast<uint32_t>(edgeTextures_.size() + blendTextures_.size());
-    aaMetrics.spatialAALutTextureCount =
-        nuri::isValid(areaLutTexture_) && nuri::isValid(searchLutTexture_) ? 2u
-                                                                           : 0u;
     aaMetrics.spatialAATextureBytes = textureStorageBytes(gpu_, edgeTexture) +
                                       textureStorageBytes(gpu_, blendTexture);
-    aaMetrics.spatialAATotalBytes = aaMetrics.spatialAATextureBytes *
-                                    static_cast<uint64_t>(edgeTextures_.size());
+    aaMetrics.spatialAATotalBytes =
+        aaMetrics.spatialAATextureBytes *
+        static_cast<uint64_t>(scratchTextures_[EdgeScratch].size());
     aaMetrics.spatialAALutTextureBytes =
-        textureStorageBytes(gpu_, areaLutTexture_) +
-        textureStorageBytes(gpu_, searchLutTexture_);
+        textureStorageBytes(gpu_, luts_[AreaLut]) +
+        textureStorageBytes(gpu_, luts_[SearchLut]);
     aaMetrics.spatialAAEdgePixelEstimate = 0.0f;
     aaMetrics.spatialAAModifiedPixelEstimate = 0.0f;
-    if (fallbackActive) {
-      ++aaMetrics.spatialAAFallbackFrameCount;
-    }
     if (cleanupActive) {
       ++aaMetrics.spatialAACleanupFrameCount;
     }
@@ -845,13 +605,12 @@ Result<bool, std::string> SpatialAAPass::build(FrameBuildContext &ctx) {
   } else {
     aaMetrics.taaTransparentPostSpatialCleanupActive = true;
   }
-
   const DrawItem edgeDraw = makeFullscreenDraw(
-      edgeResources_.pipeline,
+      pipelines_[EdgeStage],
       std::span<const std::byte>(
           reinterpret_cast<const std::byte *>(&baseConstants),
           sizeof(baseConstants)),
-      "SpatialAAEdge");
+      "SpatialAAEdge", kSpatialAADrawDebugColor);
   const std::array<TextureHandle, 1> edgeReads{sourceTexture};
   RenderGraphGraphicsPassDesc edgePass{};
   edgePass.color = {.loadOp = LoadOp::Clear,
@@ -883,19 +642,18 @@ Result<bool, std::string> SpatialAAPass::build(FrameBuildContext &ctx) {
   aaMetrics.spatialAABandwidthEstimateBytes +=
       textureStorageBytes(gpu_, sourceTexture) +
       textureStorageBytes(gpu_, edgeTexture);
-
   const bool edgeDebug = debugView == AntiAliasingDebugView::SpatialAAEdges;
   const bool blendDebug =
       debugView == AntiAliasingDebugView::SpatialAABlendWeights;
   if (!edgeDebug) {
     const DrawItem blendDraw = makeFullscreenDraw(
-        blendResources_.pipeline,
+        pipelines_[BlendStage],
         std::span<const std::byte>(
             reinterpret_cast<const std::byte *>(&baseConstants),
             sizeof(baseConstants)),
-        "SpatialAABlend");
+        "SpatialAABlend", kSpatialAADrawDebugColor);
     const std::array<TextureHandle, 4> blendReads{
-        edgeTexture, sourceTexture, areaLutTexture_, searchLutTexture_};
+        edgeTexture, sourceTexture, luts_[AreaLut], luts_[SearchLut]};
     RenderGraphGraphicsPassDesc blendPass{};
     blendPass.color = {.loadOp = LoadOp::Clear,
                        .storeOp = StoreOp::Store,
@@ -926,11 +684,10 @@ Result<bool, std::string> SpatialAAPass::build(FrameBuildContext &ctx) {
     aaMetrics.spatialAABandwidthEstimateBytes +=
         textureStorageBytes(gpu_, edgeTexture) +
         textureStorageBytes(gpu_, sourceTexture) +
-        textureStorageBytes(gpu_, areaLutTexture_) +
-        textureStorageBytes(gpu_, searchLutTexture_) +
+        textureStorageBytes(gpu_, luts_[AreaLut]) +
+        textureStorageBytes(gpu_, luts_[SearchLut]) +
         textureStorageBytes(gpu_, blendTexture);
   }
-
   SpatialAAPushConstants outputConstants = baseConstants;
   std::string_view outputLabel = postTransparent
                                      ? "Transparent SpatialAA Neighborhood Pass"
@@ -960,13 +717,12 @@ Result<bool, std::string> SpatialAAPass::build(FrameBuildContext &ctx) {
     ++aaMetrics.spatialAADebugPassCount;
     aaMetrics.spatialAASplitCompareDebugViewRendered = true;
   }
-
   const DrawItem outputDraw = makeFullscreenDraw(
-      neighborhoodResources_.pipeline,
+      pipelines_[NeighborhoodStage],
       std::span<const std::byte>(
           reinterpret_cast<const std::byte *>(&outputConstants),
           sizeof(outputConstants)),
-      "SpatialAAOutput");
+      "SpatialAAOutput", kSpatialAADrawDebugColor);
   RenderGraphGraphicsPassDesc outputPass{};
   outputPass.color = {.loadOp = LoadOp::Clear,
                       .storeOp = StoreOp::Store,
@@ -999,16 +755,15 @@ Result<bool, std::string> SpatialAAPass::build(FrameBuildContext &ctx) {
       textureStorageBytes(gpu_, outputSource) +
       (outputReadCount > 1u ? textureStorageBytes(gpu_, blendTexture) : 0u) +
       textureStorageBytes(gpu_, outputTexture);
-
   SpatialAAPushConstants copyConstants = baseConstants;
   copyConstants.sourceTexId = outputTexId;
   copyConstants.mode = kSpatialAAModeCopy;
   const DrawItem copyDraw = makeFullscreenDraw(
-      neighborhoodResources_.pipeline,
+      pipelines_[NeighborhoodStage],
       std::span<const std::byte>(
           reinterpret_cast<const std::byte *>(&copyConstants),
           sizeof(copyConstants)),
-      "SpatialAACopyBack");
+      "SpatialAACopyBack", kSpatialAADrawDebugColor);
   const std::array<TextureHandle, 1> copyReads{outputTexture};
   RenderGraphGraphicsPassDesc copyPass{};
   copyPass.color = {.loadOp = LoadOp::Clear,
@@ -1040,7 +795,6 @@ Result<bool, std::string> SpatialAAPass::build(FrameBuildContext &ctx) {
   aaMetrics.spatialAABandwidthEstimateBytes +=
       textureStorageBytes(gpu_, outputTexture) +
       textureStorageBytes(gpu_, sourceTexture);
-
   if (postTransparent) {
     ctx.shared.frameColorGraphTexture = importSource.value();
     ctx.frame.sharedResources.frameColorGraphTexture = importSource.value();
@@ -1051,13 +805,12 @@ Result<bool, std::string> SpatialAAPass::build(FrameBuildContext &ctx) {
   return Result<bool, std::string>::makeResult(true);
 }
 
-SpatialAAFeature::SpatialAAFeature(GPUDevice &gpu,
-                                   RuntimeCompositeConfig config,
-                                   SpatialAAPlacement placement)
-    : spatialPass_(gpu, std::move(config), placement) {}
-
-std::span<RenderFeaturePass *const> SpatialAAFeature::passes() noexcept {
-  return std::span<RenderFeaturePass *const>(passes_.data(), passes_.size());
+void registerSpatialAAStage(RenderPipeline &pipeline, GPUDevice &gpu,
+                            RuntimeCompositeConfig config,
+                            SpatialAAPlacement placement) {
+  pipeline.addStage(
+      std::make_unique<SpatialAAPass>(gpu, std::move(config), placement),
+      "SpatialAAFeature", "SpatialAAPass");
 }
 
 } // namespace nuri

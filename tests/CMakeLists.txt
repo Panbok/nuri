@@ -311,12 +311,6 @@ nuri_add_gtest_suite(
 )
 
 nuri_add_gtest_suite(
-  nuri_renderable_material_resolution_tests
-  src/renderable_material_resolution_tests.cpp
-  "renderable_material_resolution::"
-)
-
-nuri_add_gtest_suite(
   nuri_gltf_light_import_tests
   src/gltf_light_import_tests.cpp
   "gltf_light_import::"

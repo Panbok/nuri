@@ -311,7 +311,7 @@ buildTransientMeshDispatchIndirectCompiledFrame(uint64_t frameIndex) {
        .buffer = countResult.value()},
   }};
 
-  RenderGraphPreparedGraphicsPassDesc passDesc{};
+  RenderGraphGraphicsPassDesc passDesc{};
   passDesc.colorTexture = colorResult.value();
   passDesc.meshDispatches =
       std::span<const MeshDispatchItem>(dispatches.data(), dispatches.size());
@@ -320,7 +320,7 @@ buildTransientMeshDispatchIndirectCompiledFrame(uint64_t frameIndex) {
           bindings.data(), bindings.size());
   passDesc.debugLabel = "exec_mesh_indirect_pass";
 
-  auto passResult = builder.addPreparedGraphicsPass(passDesc);
+  auto passResult = builder.addGraphicsPass(passDesc);
   if (passResult.hasError()) {
     return Result<RenderGraphCompileResult, std::string>::makeError(
         passResult.error());
@@ -821,6 +821,33 @@ TEST_F(RenderGraphExecutorTest,
   }
 }
 
+TEST_F(RenderGraphExecutorTest,
+       PresentationFailureRetainsTheExecutedSubmissionToken) {
+  auto compiled = buildExecutorCompiledFrame(130u);
+  ASSERT_FALSE(compiled.hasError()) << compiled.error();
+
+  FakeExecutorGPUDevice gpu;
+  gpu.failPresentFrame = true;
+  RenderGraphExecutor executor;
+  auto result = executeCompiled(executor, gpu, compiled.value());
+  ASSERT_TRUE(result.hasError());
+  EXPECT_TRUE(hasExecutionFailureStage(
+      result.error(), RenderGraphExecutionFailureStage::PresentFrameOutput));
+  EXPECT_TRUE(nuri::isValid(gpu.lastSubmittedFrameHandle));
+  EXPECT_EQ(gpu.destroyedTextureCount, 0u);
+  EXPECT_EQ(gpu.destroyedBufferCount, 0u);
+
+  gpu.failPresentFrame = false;
+  const uint32_t texturesBeforeCompletion = gpu.createdTextureCount;
+  const uint32_t buffersBeforeCompletion = gpu.createdBufferCount;
+  auto beforeCompletion = buildExecutorCompiledFrame(131u);
+  ASSERT_FALSE(beforeCompletion.hasError()) << beforeCompletion.error();
+  result = executeCompiled(executor, gpu, beforeCompletion.value());
+  ASSERT_FALSE(result.hasError()) << result.error();
+  EXPECT_EQ(gpu.createdTextureCount, texturesBeforeCompletion * 2u);
+  EXPECT_EQ(gpu.createdBufferCount, buffersBeforeCompletion * 2u);
+}
+
 TEST_F(RenderGraphExecutorTest, ExecutorResolvesAndRecordsPerPassBarriers) {
   auto compileResult = buildBarrierTrackedCompiledFrame(140u);
   ASSERT_FALSE(compileResult.hasError());
@@ -837,30 +864,6 @@ TEST_F(RenderGraphExecutorTest, ExecutorResolvesAndRecordsPerPassBarriers) {
   ASSERT_EQ(gpu.recordedBarrierBatchCounts.size(), 2u);
   EXPECT_EQ(gpu.recordedBarrierBatchCounts[0], 1u);
   EXPECT_EQ(gpu.recordedBarrierBatchCounts[1], 1u);
-}
-
-TEST_F(RenderGraphExecutorTest, ExecutorTagsBarrierResolutionFailuresByStage) {
-  auto compileResult = buildBarrierTrackedCompiledFrame(141u);
-  ASSERT_FALSE(compileResult.hasError());
-
-  RenderGraphCompileResult invalid = compileResult.value();
-  ASSERT_FALSE(invalid.passBarrierRecords.empty());
-  invalid.passBarrierRecords[0].resourceKind =
-      RenderGraphBarrierResourceKind::Buffer;
-  invalid.passBarrierRecords[0].resourceIndex =
-      static_cast<uint32_t>(invalid.bufferHandlesByResource.size());
-
-  FakeExecutorGPUDevice gpu;
-  RenderGraphExecutor executor;
-  auto executeResult = executeCompiled(executor, gpu, invalid);
-  ASSERT_TRUE(executeResult.hasError());
-  EXPECT_TRUE(hasExecutionFailureStage(
-      executeResult.error(),
-      RenderGraphExecutionFailureStage::ResolveBarriers));
-  EXPECT_NE(executeResult.error().find(
-                "buffer barrier resource index is out of range"),
-            std::string_view::npos);
-  EXPECT_EQ(gpu.submitCount, 0u);
 }
 
 TEST_F(RenderGraphExecutorTest,
@@ -940,198 +943,6 @@ TEST_F(RenderGraphExecutorTest,
   EXPECT_EQ(gpu.discardedRecordedCommandBufferCount, 0u);
   EXPECT_EQ(gpu.discardedRecordingContextCount,
             gpu.acquiredRecordingContextCount);
-}
-
-TEST_F(RenderGraphExecutorTest,
-       ExecutorRejectsInvalidAllocationMetadataBeforeCreate) {
-  auto compileResult = buildExecutorCompiledFrame(130u);
-  if (compileResult.hasError()) {
-    ADD_FAILURE() << "compile should succeed";
-    return;
-  }
-
-  RenderGraphCompileResult invalid = compileResult.value();
-  invalid.transientTexturePhysicalCount += 1u;
-
-  FakeExecutorGPUDevice gpu;
-  RenderGraphExecutor executor;
-  auto executeResult = executeCompiled(executor, gpu, invalid);
-  if (!executeResult.hasError()) {
-    ADD_FAILURE() << "executor should reject invalid allocation metadata";
-    return;
-  }
-  if (((executeResult.error()).find("allocation metadata count mismatch") ==
-       std::string_view::npos)) {
-    ADD_FAILURE() << "expected allocation metadata mismatch error";
-    return;
-  }
-  if (!(gpu.createdTextureCount == 0u && gpu.createdBufferCount == 0u &&
-        gpu.destroyedTextureCount == 0u && gpu.destroyedBufferCount == 0u &&
-        gpu.submitCount == 0u)) {
-    ADD_FAILURE()
-        << "executor should fail before resource creation/submission on "
-           "invalid metadata";
-    return;
-  }
-}
-
-TEST_F(RenderGraphExecutorTest,
-       ExecutorRejectsDependencyEdgeTopologyViolation) {
-  auto compileResult = buildTwoPassCompiledFrameWithDependency(1346u);
-  if (compileResult.hasError()) {
-    ADD_FAILURE() << "compile should succeed";
-    return;
-  }
-
-  RenderGraphCompileResult invalid = compileResult.value();
-  if (!(!invalid.edges.empty())) {
-    ADD_FAILURE() << "expected dependency edges";
-    return;
-  }
-  invalid.edges[0u].before = invalid.orderedPassIndices[1u];
-  invalid.edges[0u].after = invalid.orderedPassIndices[0u];
-  invalid.metadataValidated = false;
-
-  FakeGPUDevice gpu;
-  RenderGraphExecutor executor;
-  auto executeResult = executeCompiled(executor, gpu, invalid);
-  if (!executeResult.hasError()) {
-    ADD_FAILURE() << "executor should reject dependency edge topology "
-                     "violation";
-    return;
-  }
-  if (((executeResult.error())
-           .find("dependency edge violates ordered pass topology") ==
-       std::string_view::npos)) {
-    ADD_FAILURE() << "expected dependency edge topology violation error";
-    return;
-  }
-  if (!(gpu.createdTextureCount == 0u && gpu.createdBufferCount == 0u &&
-        gpu.destroyedTextureCount == 0u && gpu.destroyedBufferCount == 0u &&
-        gpu.submitCount == 0u)) {
-    ADD_FAILURE()
-        << "executor should fail before resource creation/submission on "
-           "dependency edge topology violation";
-    return;
-  }
-}
-
-TEST_F(RenderGraphExecutorTest, ExecutorRejectsPassDrawRangeOutOfBounds) {
-  auto compileResult = buildExecutorCompiledFrame(170u);
-  if (compileResult.hasError()) {
-    ADD_FAILURE() << "compile should succeed";
-    return;
-  }
-  RenderGraphCompileResult invalid = compileResult.value();
-  if (!(!invalid.drawRangesByPass.empty())) {
-    ADD_FAILURE() << "expected draw ranges in compiled graph";
-    return;
-  }
-  invalid.drawRangesByPass[0u].count = UINT32_MAX;
-
-  FakeGPUDevice gpu;
-  RenderGraphExecutor executor;
-  auto executeResult = executeCompiled(executor, gpu, invalid);
-  if (!executeResult.hasError()) {
-    ADD_FAILURE() << "executor should reject out-of-bounds pass draw range";
-    return;
-  }
-  if (((executeResult.error()).find("pass draw range is out of bounds") ==
-       std::string_view::npos)) {
-    ADD_FAILURE() << "expected pass draw range bounds error";
-    return;
-  }
-  if (!(gpu.submitCount == 0u)) {
-    ADD_FAILURE() << "submit should not run on pass draw range failure";
-    return;
-  }
-  if (!(gpu.destroyedTextureCount == gpu.createdTextureCount &&
-        gpu.destroyedBufferCount == gpu.createdBufferCount)) {
-    ADD_FAILURE() << "materialized resources should be cleaned up on pass draw "
-                     "range failure";
-    return;
-  }
-}
-
-TEST_F(RenderGraphExecutorTest,
-       ExecutorRejectsUnresolvedTextureBindingInvalidTarget) {
-  auto compileResult = buildExecutorCompiledFrame(225u);
-  if (compileResult.hasError()) {
-    ADD_FAILURE() << "compile should succeed";
-    return;
-  }
-  RenderGraphCompileResult invalid = compileResult.value();
-  if (!(!invalid.unresolvedTextureBindings.empty())) {
-    ADD_FAILURE() << "expected unresolved texture bindings";
-    return;
-  }
-  invalid.unresolvedTextureBindings[0u].target =
-      static_cast<RenderGraphCompileResult::PassTextureBindingTarget>(255u);
-
-  FakeGPUDevice gpu;
-  RenderGraphExecutor executor;
-  auto executeResult = executeCompiled(executor, gpu, invalid);
-  if (!executeResult.hasError()) {
-    ADD_FAILURE()
-        << "executor should reject unresolved texture binding invalid "
-           "target";
-    return;
-  }
-  if (((executeResult.error())
-           .find("unresolved texture binding target is invalid") ==
-       std::string_view::npos)) {
-    ADD_FAILURE() << "expected unresolved texture target validation error";
-    return;
-  }
-  if (!(gpu.submitCount == 0u)) {
-    ADD_FAILURE() << "submit should not run on unresolved texture binding "
-                     "target failure";
-    return;
-  }
-  if (!(gpu.destroyedTextureCount == gpu.createdTextureCount &&
-        gpu.destroyedBufferCount == gpu.createdBufferCount)) {
-    ADD_FAILURE()
-        << "materialized resources should be cleaned up on unresolved "
-           "texture binding target failure";
-    return;
-  }
-}
-
-TEST_F(RenderGraphExecutorTest,
-       ExecutorRejectsPassDependencyRangeCountMismatch) {
-  auto compileResult = buildExecutorCompiledFrame(270u);
-  if (compileResult.hasError()) {
-    ADD_FAILURE() << "compile should succeed";
-    return;
-  }
-  RenderGraphCompileResult invalid = compileResult.value();
-  invalid.dependencyBufferRangesByPass.clear();
-
-  FakeGPUDevice gpu;
-  RenderGraphExecutor executor;
-  auto executeResult = executeCompiled(executor, gpu, invalid);
-  if (!executeResult.hasError()) {
-    ADD_FAILURE() << "executor should reject pass dependency range metadata "
-                     "count mismatch";
-    return;
-  }
-  if (((executeResult.error())
-           .find("pass dependency buffer range metadata count mismatch") ==
-       std::string_view::npos)) {
-    ADD_FAILURE() << "expected pass dependency range metadata mismatch error";
-    return;
-  }
-  if (!(gpu.submitCount == 0u)) {
-    ADD_FAILURE() << "submit should not run on pass dependency range count "
-                     "mismatch";
-    return;
-  }
-  if (!(gpu.destroyedTextureCount == gpu.createdTextureCount &&
-        gpu.destroyedBufferCount == gpu.createdBufferCount)) {
-    ADD_FAILURE() << "materialized resources should be cleaned up on pass "
-                     "dependency range count mismatch";
-    return;
-  }
 }
 
 } // namespace

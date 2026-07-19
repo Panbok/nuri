@@ -1,19 +1,13 @@
-#include "nuri/pch.h"
-
 #include "nuri/gfx/pipeline/providers/scene_lighting_provider.h"
-
-#include "nuri/core/log.h"
 #include "nuri/core/profiling.h"
+#include "nuri/math/utils.h"
+#include "nuri/pch.h"
 #include "nuri/resources/gpu/resource_manager.h"
 #include "nuri/scene/render_scene.h"
-#include "nuri/utils/utils.h"
-
 #include <algorithm>
 #include <cmath>
-
 namespace nuri {
 namespace {
-
 enum ForwardSceneFlags : uint32_t {
   kForwardSceneHasIblDiffuse = 1u << 0u,
   kForwardSceneHasIblSpecular = 1u << 1u,
@@ -25,22 +19,19 @@ enum ForwardSceneFlags : uint32_t {
   kForwardSceneTransmissionMipDebug = 1u << 8u,
   kForwardSceneHasAmbientOcclusion = 1u << 9u,
 };
-
 enum ForwardSceneDepthPyramidFlags : uint32_t {
   kForwardSceneDepthPyramidPreviousFrame = 1u << 0u,
 };
-
 struct SceneDataBufferLayout {
-  size_t frameDataOffset = 0u;
   size_t postTaaFrameDataOffset = 0u;
   size_t directionalLightsOffset = 0u;
   size_t localLightsOffset = 0u;
   size_t totalBytes = 0u;
 };
-
 [[nodiscard]] SceneDataBufferLayout
-makeSceneDataBufferLayout(size_t frameDataBytes, size_t directionalLightBytes,
+makeSceneDataBufferLayout(size_t directionalLightBytes,
                           size_t localLightBytes) {
+  constexpr size_t frameDataBytes = sizeof(ForwardSceneFrameData);
   const size_t postTaaFrameDataOffset =
       alignUp(frameDataBytes, alignof(ForwardSceneFrameData));
   const size_t directionalOffset =
@@ -49,7 +40,6 @@ makeSceneDataBufferLayout(size_t frameDataBytes, size_t directionalLightBytes,
   const size_t localOffset = alignUp(directionalOffset + directionalLightBytes,
                                      alignof(LocalLightGpuData));
   return SceneDataBufferLayout{
-      .frameDataOffset = 0u,
       .postTaaFrameDataOffset = postTaaFrameDataOffset,
       .directionalLightsOffset = directionalOffset,
       .localLightsOffset = localOffset,
@@ -57,12 +47,6 @@ makeSceneDataBufferLayout(size_t frameDataBytes, size_t directionalLightBytes,
                              postTaaFrameDataOffset + frameDataBytes),
   };
 }
-
-[[nodiscard]] const RenderSettings::TextureFilteringSettings &
-textureFilteringSettingsOrDefault(const RenderFrameContext &frame) {
-  return renderSettingsOrDefault(frame).textureFiltering;
-}
-
 [[nodiscard]] uint32_t resolveDefaultMaterialSamplerId(
     GPUDevice &gpu, const RenderSettings::TextureFilteringSettings &settings) {
   switch (sanitizeTextureFilterMode(settings.mode)) {
@@ -76,37 +60,24 @@ textureFilteringSettingsOrDefault(const RenderFrameContext &frame) {
     return gpu.getLinearRepeatSamplerBindlessIndex(true, 1u);
   }
 }
-
 [[nodiscard]] float sanitizeTaaMaterialMipBias(float value) noexcept {
   return std::isfinite(value) ? std::clamp(value, -1.0f, 0.0f) : 0.0f;
 }
-
-[[nodiscard]] bool sameSamplerDesc(const SamplerDesc &lhs,
-                                   const SamplerDesc &rhs) noexcept {
-  return lhs.minFilter == rhs.minFilter && lhs.magFilter == rhs.magFilter &&
-         lhs.mipMode == rhs.mipMode && lhs.wrapU == rhs.wrapU &&
-         lhs.wrapV == rhs.wrapV && lhs.wrapW == rhs.wrapW &&
-         lhs.mipLodMin == rhs.mipLodMin && lhs.mipLodMax == rhs.mipLodMax &&
-         lhs.mipLodBias == rhs.mipLodBias &&
-         lhs.maxAnisotropy == rhs.maxAnisotropy &&
-         lhs.depthCompareEnabled == rhs.depthCompareEnabled &&
-         lhs.depthCompareOp == rhs.depthCompareOp;
-}
-
 } // namespace
 
 SceneLightingProvider::SceneLightingProvider(GPUDevice &gpu) : gpu_(gpu) {}
 
 SceneLightingProvider::~SceneLightingProvider() {
-  destroyBuffers();
-  destroyCachedSamplers();
+  if (nuri::isValid(taaMaterialMipBiasSampler_)) {
+    gpu_.destroySampler(taaMaterialMipBiasSampler_);
+  }
 }
 
 Result<uint32_t, std::string>
 SceneLightingProvider::resolveMaterialSamplerId(RenderFrameContext &frame) {
   const RenderSettings &settings = renderSettingsOrDefault(frame);
   const RenderSettings::TextureFilteringSettings &filtering =
-      textureFilteringSettingsOrDefault(frame);
+      settings.textureFiltering;
   const TextureFilterMode filterMode =
       sanitizeTextureFilterMode(filtering.mode);
   const bool mipFilteringActive = filterMode != TextureFilterMode::Bilinear;
@@ -115,18 +86,15 @@ SceneLightingProvider::resolveMaterialSamplerId(RenderFrameContext &frame) {
   const RenderSettings::AntiAliasingDebugSettings aaDebug =
       effectiveTemporalAADebugSettings(settings.antiAliasing);
   const float mipBias = sanitizeTaaMaterialMipBias(aaDebug.taaMaterialMipBias);
-
   AntiAliasingFrameMetrics &aaMetrics = frame.metrics.antiAliasing;
   aaMetrics.taaMaterialMipBiasEnabled = aaDebug.taaMaterialMipBiasEnabled;
   aaMetrics.taaMaterialMipBias = mipBias;
   aaMetrics.taaMaterialMipBiasApplied = false;
-
   if (!taaMode || !aaDebug.taaMaterialMipBiasEnabled || !mipFilteringActive ||
       mipBias >= 0.0f) {
     return Result<uint32_t, std::string>::makeResult(
         resolveDefaultMaterialSamplerId(gpu_, filtering));
   }
-
   SamplerDesc samplerDesc{
       .minFilter = SamplerFilter::Linear,
       .magFilter = SamplerFilter::Linear,
@@ -141,49 +109,22 @@ SceneLightingProvider::resolveMaterialSamplerId(RenderFrameContext &frame) {
     samplerDesc.maxAnisotropy =
         sanitizeTextureFilterAnisotropy(filtering.anisotropy);
   }
-
-  auto samplerResult = ensureTaaMaterialMipBiasSampler(samplerDesc);
-  if (samplerResult.hasError()) {
-    return Result<uint32_t, std::string>::makeError(samplerResult.error());
+  if (!nuri::isValid(taaMaterialMipBiasSampler_) ||
+      taaMaterialMipBiasSamplerDesc_ != samplerDesc) {
+    if (nuri::isValid(taaMaterialMipBiasSampler_)) {
+      gpu_.destroySampler(taaMaterialMipBiasSampler_);
+      taaMaterialMipBiasSampler_ = {};
+    }
+    auto result = gpu_.createSampler(samplerDesc, "taa_material_mip_bias");
+    if (result.hasError()) {
+      return Result<uint32_t, std::string>::makeError(result.error());
+    }
+    taaMaterialMipBiasSampler_ = result.value();
+    taaMaterialMipBiasSamplerDesc_ = samplerDesc;
   }
-  const uint32_t samplerId =
-      gpu_.getSamplerBindlessIndex(samplerResult.value());
-  if (samplerId == kInvalidTextureBindlessIndex) {
-    return Result<uint32_t, std::string>::makeError(
-        "SceneLightingProvider::resolveMaterialSamplerId: invalid TAA "
-        "material sampler bindless index");
-  }
-
   aaMetrics.taaMaterialMipBiasApplied = true;
-  return Result<uint32_t, std::string>::makeResult(samplerId);
-}
-
-Result<SamplerHandle, std::string>
-SceneLightingProvider::ensureTaaMaterialMipBiasSampler(
-    const SamplerDesc &desc) {
-  if (nuri::isValid(taaMaterialMipBiasSampler_) &&
-      taaMaterialMipBiasSamplerDesc_.has_value() &&
-      sameSamplerDesc(*taaMaterialMipBiasSamplerDesc_, desc)) {
-    return Result<SamplerHandle, std::string>::makeResult(
-        taaMaterialMipBiasSampler_);
-  }
-
-  if (nuri::isValid(taaMaterialMipBiasSampler_)) {
-    gpu_.destroySampler(taaMaterialMipBiasSampler_);
-    taaMaterialMipBiasSampler_ = {};
-  }
-
-  auto samplerResult =
-      gpu_.createSampler(desc, "taa_material_mip_bias_sampler");
-  if (samplerResult.hasError()) {
-    taaMaterialMipBiasSamplerDesc_.reset();
-    return samplerResult;
-  }
-
-  taaMaterialMipBiasSampler_ = samplerResult.value();
-  taaMaterialMipBiasSamplerDesc_ = desc;
-  return Result<SamplerHandle, std::string>::makeResult(
-      taaMaterialMipBiasSampler_);
+  return Result<uint32_t, std::string>::makeResult(
+      gpu_.getSamplerBindlessIndex(taaMaterialMipBiasSampler_));
 }
 
 Result<bool, std::string>
@@ -194,36 +135,21 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
     return Result<bool, std::string>::makeError(
         "SceneLightingProvider::prepare: frame scene is null");
   }
-  if (frame.resources == nullptr) {
-    return Result<bool, std::string>::makeError(
-        "SceneLightingProvider::prepare: frame resources are null");
-  }
-  if (!ctx.shared.materialTableGpuData.has_value()) {
-    return Result<bool, std::string>::makeError(
-        "SceneLightingProvider::prepare: material table GPU data is "
-        "unavailable");
-  }
-
+  const MaterialTableGpuData &materialTable = *ctx.shared.materialTableGpuData;
   const std::span<const DirectionalLightGpuData> directionalLights =
       frame.scene->packedDirectionalLights();
   const std::span<const LocalLightGpuData> localLights =
       frame.scene->packedLocalLights();
   const SceneDataBufferLayout layout = makeSceneDataBufferLayout(
-      sizeof(ForwardSceneFrameData),
       directionalLights.size() * sizeof(DirectionalLightGpuData),
       localLights.size() * sizeof(LocalLightGpuData));
-
   auto bufferResult = ensureBufferRingCapacity(
       layout.totalBytes, std::max(1u, gpu_.getSwapchainImageCount()));
   if (bufferResult.hasError()) {
     return bufferResult;
   }
-  Buffer *const sceneDataBuffer = currentBuffer(frame.frameIndex);
-  if (sceneDataBuffer == nullptr || !sceneDataBuffer->valid()) {
-    return Result<bool, std::string>::makeError(
-        "SceneLightingProvider::prepare: scene data buffer is unavailable");
-  }
-
+  Slot &slot = slots_[static_cast<size_t>(frame.frameIndex % slots_.size())];
+  Buffer &sceneDataBuffer = *slot.buffer.buffer;
   uint32_t cubemapTexId = kInvalidTextureBindlessIndex;
   uint32_t hasCubemap = 0u;
   uint32_t irradianceTexId = kInvalidTextureBindlessIndex;
@@ -233,8 +159,8 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
   uint32_t flags = 0u;
   const uint32_t cubemapSamplerId = gpu_.getCubemapSamplerBindlessIndex();
   const RenderSettings &renderSettings = renderSettingsOrDefault(frame);
-  const uint32_t materialCoverageSamplerId = resolveDefaultMaterialSamplerId(
-      gpu_, textureFilteringSettingsOrDefault(frame));
+  const uint32_t materialCoverageSamplerId =
+      resolveDefaultMaterialSamplerId(gpu_, renderSettings.textureFiltering);
   const uint32_t materialDataSamplerId = materialCoverageSamplerId;
   auto materialSamplerIdResult = resolveMaterialSamplerId(frame);
   if (materialSamplerIdResult.hasError()) {
@@ -247,50 +173,29 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
       AntiAliasingDebugView::TAATransmissionMipSource) {
     flags |= kForwardSceneTransmissionMipDebug;
   }
-
-  if (const TextureRecord *cubemap =
-          frame.resources->tryGet(environment.cubemap);
-      cubemap != nullptr && nuri::isValid(cubemap->texture) &&
-      cubemap->bindlessIndex != kInvalidTextureBindlessIndex) {
-    cubemapTexId = cubemap->bindlessIndex;
-    hasCubemap = 1u;
+  const std::array environmentRefs{
+      environment.cubemap, environment.irradiance, environment.prefilteredGgx,
+      environment.prefilteredCharlie, environment.brdfLut};
+  const std::array environmentIds{&cubemapTexId, &irradianceTexId,
+                                  &prefilteredGgxTexId,
+                                  &prefilteredCharlieTexId, &brdfLutTexId};
+  constexpr std::array<uint32_t, 5u> environmentFlags{
+      0u, kForwardSceneHasIblDiffuse, kForwardSceneHasIblSpecular,
+      kForwardSceneHasIblSheen, kForwardSceneHasBrdfLut};
+  for (size_t i = 0; i < environmentRefs.size(); ++i) {
+    const TextureRecord *record = ctx.resources.tryGet(environmentRefs[i]);
+    if (record != nullptr &&
+        record->bindlessIndex != kInvalidTextureBindlessIndex) {
+      *environmentIds[i] = record->bindlessIndex;
+      flags |= environmentFlags[i];
+    }
   }
-  if (const TextureRecord *irradiance =
-          frame.resources->tryGet(environment.irradiance);
-      irradiance != nullptr && nuri::isValid(irradiance->texture) &&
-      irradiance->bindlessIndex != kInvalidTextureBindlessIndex) {
-    irradianceTexId = irradiance->bindlessIndex;
-    flags |= kForwardSceneHasIblDiffuse;
-  }
-  if (const TextureRecord *prefilteredGgx =
-          frame.resources->tryGet(environment.prefilteredGgx);
-      prefilteredGgx != nullptr && nuri::isValid(prefilteredGgx->texture) &&
-      prefilteredGgx->bindlessIndex != kInvalidTextureBindlessIndex) {
-    prefilteredGgxTexId = prefilteredGgx->bindlessIndex;
-    flags |= kForwardSceneHasIblSpecular;
-  }
-  if (const TextureRecord *prefilteredCharlie =
-          frame.resources->tryGet(environment.prefilteredCharlie);
-      prefilteredCharlie != nullptr &&
-      nuri::isValid(prefilteredCharlie->texture) &&
-      prefilteredCharlie->bindlessIndex != kInvalidTextureBindlessIndex) {
-    prefilteredCharlieTexId = prefilteredCharlie->bindlessIndex;
-    flags |= kForwardSceneHasIblSheen;
-  } else if ((flags & kForwardSceneHasIblSpecular) != 0u) {
-    // Reuse the GGX prefilter as a sheen approximation when Charlie is
-    // missing; keep kForwardSceneHasIblSheen set so downstream shading knows
-    // a fallback sheen source is available.
+  hasCubemap = cubemapTexId != kInvalidTextureBindlessIndex;
+  if (prefilteredCharlieTexId == kInvalidTextureBindlessIndex &&
+      prefilteredGgxTexId != kInvalidTextureBindlessIndex) {
     prefilteredCharlieTexId = prefilteredGgxTexId;
     flags |= kForwardSceneHasIblSheen;
   }
-  if (const TextureRecord *brdfLut =
-          frame.resources->tryGet(environment.brdfLut);
-      brdfLut != nullptr && nuri::isValid(brdfLut->texture) &&
-      brdfLut->bindlessIndex != kInvalidTextureBindlessIndex) {
-    brdfLutTexId = brdfLut->bindlessIndex;
-    flags |= kForwardSceneHasBrdfLut;
-  }
-
   uint32_t sceneColorTexId = kInvalidTextureBindlessIndex;
   uint32_t sceneColorHalfResTexId = kInvalidTextureBindlessIndex;
   uint32_t sceneColorQuarterResTexId = kInvalidTextureBindlessIndex;
@@ -303,33 +208,23 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
   uint32_t ambientOcclusionTexId = kInvalidTextureBindlessIndex;
   uint32_t ambientOcclusionSamplerId = 0u;
   uint32_t ambientOcclusionFlags = 0u;
-  if (nuri::isValid(ctx.shared.sceneColorTexture)) {
-    sceneColorTexId =
-        gpu_.getTextureBindlessIndex(ctx.shared.sceneColorTexture);
+  const auto textureIndex = [this](TextureHandle texture) {
+    return nuri::isValid(texture) ? gpu_.getTextureBindlessIndex(texture)
+                                  : kInvalidTextureBindlessIndex;
+  };
+  sceneColorTexId = textureIndex(ctx.shared.sceneColorTexture);
+  sceneColorHalfResTexId = textureIndex(ctx.shared.sceneColorHalfResTexture);
+  sceneColorQuarterResTexId =
+      textureIndex(ctx.shared.sceneColorQuarterResTexture);
+  sceneDepthTexId = textureIndex(ctx.shared.sceneDepthTexture);
+  if (sceneColorTexId != kInvalidTextureBindlessIndex) {
     sceneColorSamplerId = gpu_.getLinearRepeatSamplerBindlessIndex(true, 1u);
-    if (sceneColorTexId != kInvalidTextureBindlessIndex) {
-      flags |= kForwardSceneHasSceneColor;
-    }
+    flags |= kForwardSceneHasSceneColor;
   }
-  if ((flags & kForwardSceneHasSceneColor) != 0u &&
-      nuri::isValid(ctx.shared.sceneColorHalfResTexture)) {
-    sceneColorHalfResTexId =
-        gpu_.getTextureBindlessIndex(ctx.shared.sceneColorHalfResTexture);
+  if (sceneDepthTexId != kInvalidTextureBindlessIndex) {
+    flags |= kForwardSceneHasSceneDepth;
   }
-  if ((flags & kForwardSceneHasSceneColor) != 0u &&
-      nuri::isValid(ctx.shared.sceneColorQuarterResTexture)) {
-    sceneColorQuarterResTexId =
-        gpu_.getTextureBindlessIndex(ctx.shared.sceneColorQuarterResTexture);
-  }
-  if (nuri::isValid(ctx.shared.sceneDepthTexture)) {
-    sceneDepthTexId =
-        gpu_.getTextureBindlessIndex(ctx.shared.sceneDepthTexture);
-    if (sceneDepthTexId != kInvalidTextureBindlessIndex) {
-      flags |= kForwardSceneHasSceneDepth;
-    }
-  }
-  if ((flags & kForwardSceneHasSceneDepth) != 0u &&
-      ctx.shared.sceneDepthPyramidLevelCount > 0u) {
+  if ((flags & kForwardSceneHasSceneDepth) != 0u) {
     const uint32_t candidateLevelCount = std::min<uint32_t>(
         ctx.shared.sceneDepthPyramidLevelCount, kMaxSceneDepthPyramidLevels);
     for (uint32_t level = 0u; level < candidateLevelCount; ++level) {
@@ -352,7 +247,6 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
           gpu_.getTextureDimensions(ctx.shared.sceneDepthPyramidTextures[0]);
       uint32_t depthPyramidFlags = 0u;
       if (ctx.shared.sceneDepthPyramidSourceFrameIndex.has_value() &&
-          ctx.shared.sceneDepthPyramidSourceViewProj.has_value() &&
           *ctx.shared.sceneDepthPyramidSourceFrameIndex + 1u ==
               frame.frameIndex) {
         depthPyramidFlags |= kForwardSceneDepthPyramidPreviousFrame;
@@ -367,12 +261,10 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
   sanitizeAmbientOcclusionSettings(ambientOcclusionSettings,
                                    renderSettings.opaque,
                                    renderSettings.antiAliasing);
-  if (ambientOcclusionSettings.active &&
-      nuri::isValid(ctx.shared.ambientOcclusionTexture)) {
-    ambientOcclusionTexId =
-        gpu_.getTextureBindlessIndex(ctx.shared.ambientOcclusionTexture);
-    ambientOcclusionSamplerId = gpu_.getDefaultSamplerBindlessIndex();
+  if (ambientOcclusionSettings.active) {
+    ambientOcclusionTexId = textureIndex(ctx.shared.ambientOcclusionTexture);
     if (ambientOcclusionTexId != kInvalidTextureBindlessIndex) {
+      ambientOcclusionSamplerId = gpu_.getDefaultSamplerBindlessIndex();
       flags |= kForwardSceneHasAmbientOcclusion;
       ambientOcclusionFlags =
           kAmbientOcclusionFlagScalarAo |
@@ -382,11 +274,7 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
     }
   }
   const uint64_t sceneDataBaseAddress =
-      gpu_.getBufferDeviceAddress(sceneDataBuffer->handle());
-  if (sceneDataBaseAddress == 0u) {
-    return Result<bool, std::string>::makeError(
-        "SceneLightingProvider::prepare: invalid scene data buffer address");
-  }
+      gpu_.getBufferDeviceAddress(sceneDataBuffer.handle());
   const uint64_t directionalLightBufferAddress =
       directionalLights.empty()
           ? 0u
@@ -394,13 +282,9 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
   const uint64_t localLightBufferAddress =
       localLights.empty() ? 0u
                           : sceneDataBaseAddress + layout.localLightsOffset;
-  const uint32_t directionalLightCount = static_cast<uint32_t>(std::min<size_t>(
-      directionalLights.size(), std::numeric_limits<uint32_t>::max()));
-  const uint32_t localLightCount = static_cast<uint32_t>(std::min<size_t>(
-      localLights.size(), std::numeric_limits<uint32_t>::max()));
-  const size_t slotIndex =
-      static_cast<size_t>(frame.frameIndex % sceneDataBuffers_.size());
-  SlotUploadState &slotState = slotUploadStates_[slotIndex];
+  const uint32_t directionalLightCount =
+      static_cast<uint32_t>(directionalLights.size());
+  const uint32_t localLightCount = static_cast<uint32_t>(localLights.size());
   const uint64_t sceneId = frame.scene->id();
   uint64_t shadowFrameBufferAddress =
       ctx.shared.shadowFrameGpuData.has_value()
@@ -417,12 +301,10 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
   RenderSettings::ShadowSettings shadowSettings =
       renderSettingsOrDefault(frame).shadow;
   sanitizeShadowSettings(shadowSettings);
-  if (shadowSettings.enabled && shadowFrameBufferAddress != 0u &&
-      directionalLightCount > 0u) {
+  if (shadowSettings.enabled && directionalLightCount > 0u) {
     shadowFlags =
         kShadowFrameFlagEnabled | shadowDebugFrameFlags(shadowSettings.debug);
   }
-
   const ForwardSceneFrameData frameData{
       .view = frame.camera.view,
       .proj = frame.camera.proj,
@@ -450,16 +332,12 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
       .ambientOcclusionReserved0 = 0u,
       .directionalLightBufferAddress = directionalLightBufferAddress,
       .localLightBufferAddress = localLightBufferAddress,
-      .materialHeaderBufferAddress =
-          ctx.shared.materialTableGpuData->headerBufferAddress,
-      .materialClearcoatBufferAddress =
-          ctx.shared.materialTableGpuData->clearcoatBufferAddress,
-      .materialSheenBufferAddress =
-          ctx.shared.materialTableGpuData->sheenBufferAddress,
+      .materialHeaderBufferAddress = materialTable.headerBufferAddress,
+      .materialClearcoatBufferAddress = materialTable.clearcoatBufferAddress,
+      .materialSheenBufferAddress = materialTable.sheenBufferAddress,
       .materialTransmissionBufferAddress =
-          ctx.shared.materialTableGpuData->transmissionBufferAddress,
-      .materialSpecularBufferAddress =
-          ctx.shared.materialTableGpuData->specularBufferAddress,
+          materialTable.transmissionBufferAddress,
+      .materialSpecularBufferAddress = materialTable.specularBufferAddress,
       .directionalLightCount = directionalLightCount,
       .localLightCount = localLightCount,
       .shadowFrameBufferAddress = shadowFrameBufferAddress,
@@ -472,106 +350,57 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
   };
   ForwardSceneFrameData postTaaFrameData = frameData;
   postTaaFrameData.proj = cameraCurrentUnjitteredProjection(frame.camera);
-
-  if (loggedAddressProbeTopologyVersion_ != frame.scene->topologyVersion() ||
-      loggedLightStateSignature_ != frame.scene->lightTransformVersion()) {
-    loggedAddressProbeTopologyVersion_ = frame.scene->topologyVersion();
-    loggedLightStateSignature_ = frame.scene->lightTransformVersion();
-    NURI_LOG_TRACE(
-        "SceneLightingProvider::prepare probe: sceneData=0x%llx "
-        "frameData=0x%llx postTaaFrameData=0x%llx "
-        "dirLights=0x%llx localLights=0x%llx materialHeader=0x%llx "
-        "materialClearcoat=0x%llx materialSheen=0x%llx "
-        "materialTransmission=0x%llx materialSpecular=0x%llx shadow=0x%llx "
-        "flags=0x%08x shadowFlags=0x%08x dirCount=%u localCount=%u",
-        static_cast<unsigned long long>(sceneDataBaseAddress),
-        static_cast<unsigned long long>(sceneDataBaseAddress +
-                                        layout.frameDataOffset),
-        static_cast<unsigned long long>(sceneDataBaseAddress +
-                                        layout.postTaaFrameDataOffset),
-        static_cast<unsigned long long>(directionalLightBufferAddress),
-        static_cast<unsigned long long>(localLightBufferAddress),
-        static_cast<unsigned long long>(frameData.materialHeaderBufferAddress),
-        static_cast<unsigned long long>(
-            frameData.materialClearcoatBufferAddress),
-        static_cast<unsigned long long>(frameData.materialSheenBufferAddress),
-        static_cast<unsigned long long>(
-            frameData.materialTransmissionBufferAddress),
-        static_cast<unsigned long long>(
-            frameData.materialSpecularBufferAddress),
-        static_cast<unsigned long long>(frameData.shadowFrameBufferAddress),
-        frameData.flags, frameData.shadowFlags, frameData.directionalLightCount,
-        frameData.localLightCount);
-  }
-
-  if (!slotState.hasFrameData || slotState.frameData != frameData) {
-    const std::span<const std::byte> frameDataBytes{
-        reinterpret_cast<const std::byte *>(&frameData), sizeof(frameData)};
-    auto updateResult = gpu_.updateBuffer(
-        sceneDataBuffer->handle(), frameDataBytes, layout.frameDataOffset);
-    if (updateResult.hasError()) {
-      return updateResult;
+  const std::array<const ForwardSceneFrameData *, 2u> frameValues{
+      &frameData, &postTaaFrameData};
+  const std::array frameCache{&slot.frameData, &slot.postTaaFrameData};
+  const std::array<size_t, 2u> frameOffsets{0u, layout.postTaaFrameDataOffset};
+  for (size_t i = 0; i < frameValues.size(); ++i) {
+    if (!slot.hasFrameData || *frameCache[i] != *frameValues[i]) {
+      auto result = gpu_.updateBuffer(
+          sceneDataBuffer.handle(),
+          std::as_bytes(std::span{frameValues[i], 1u}), frameOffsets[i]);
+      if (result.hasError()) {
+        return result;
+      }
     }
   }
-  if (!slotState.hasFrameData ||
-      slotState.postTaaFrameData != postTaaFrameData) {
-    const std::span<const std::byte> frameDataBytes{
-        reinterpret_cast<const std::byte *>(&postTaaFrameData),
-        sizeof(postTaaFrameData)};
-    auto updateResult =
-        gpu_.updateBuffer(sceneDataBuffer->handle(), frameDataBytes,
-                          layout.postTaaFrameDataOffset);
-    if (updateResult.hasError()) {
-      return updateResult;
-    }
-  }
-
   const bool lightDataDirty =
-      slotState.scene != frame.scene || slotState.sceneId != sceneId ||
-      slotState.lightTopologyVersion != frame.scene->lightTopologyVersion() ||
-      slotState.lightTransformVersion != frame.scene->lightTransformVersion() ||
-      slotState.directionalLightCount != directionalLightCount ||
-      slotState.localLightCount != localLightCount;
-
-  if (lightDataDirty && !directionalLights.empty()) {
-    const std::span<const std::byte> directionalLightBytes{
-        reinterpret_cast<const std::byte *>(directionalLights.data()),
-        directionalLights.size() * sizeof(DirectionalLightGpuData)};
-    auto lightUpdateResult =
-        gpu_.updateBuffer(sceneDataBuffer->handle(), directionalLightBytes,
-                          layout.directionalLightsOffset);
-    if (lightUpdateResult.hasError()) {
-      return lightUpdateResult;
+      !slot.hasFrameData || slot.scene != frame.scene ||
+      slot.sceneId != sceneId ||
+      slot.lightTopologyVersion != frame.scene->lightTopologyVersion() ||
+      slot.lightTransformVersion != frame.scene->lightTransformVersion() ||
+      slot.directionalLightCount != directionalLightCount ||
+      slot.localLightCount != localLightCount;
+  if (lightDataDirty) {
+    const std::array lightBytes{std::as_bytes(directionalLights),
+                                std::as_bytes(localLights)};
+    const std::array lightOffsets{layout.directionalLightsOffset,
+                                  layout.localLightsOffset};
+    for (size_t i = 0; i < lightBytes.size(); ++i) {
+      if (lightBytes[i].empty()) {
+        continue;
+      }
+      auto result = gpu_.updateBuffer(sceneDataBuffer.handle(), lightBytes[i],
+                                      lightOffsets[i]);
+      if (result.hasError()) {
+        return result;
+      }
     }
   }
-  if (lightDataDirty && !localLights.empty()) {
-    const std::span<const std::byte> localLightBytes{
-        reinterpret_cast<const std::byte *>(localLights.data()),
-        localLights.size() * sizeof(LocalLightGpuData)};
-    auto lightUpdateResult = gpu_.updateBuffer(
-        sceneDataBuffer->handle(), localLightBytes, layout.localLightsOffset);
-    if (lightUpdateResult.hasError()) {
-      return lightUpdateResult;
-    }
-  }
-
-  slotState.scene = frame.scene;
-  slotState.sceneId = sceneId;
-  slotState.lightTopologyVersion = frame.scene->lightTopologyVersion();
-  slotState.lightTransformVersion = frame.scene->lightTransformVersion();
-  slotState.directionalLightCount = directionalLightCount;
-  slotState.localLightCount = localLightCount;
-  slotState.hasFrameData = true;
-  slotState.frameData = frameData;
-  slotState.postTaaFrameData = postTaaFrameData;
-
-  // Transmission feedback builds a small CPU-side variant of this frame data,
-  // so keep mirrors alongside the GPU buffer addresses.
+  slot.scene = frame.scene;
+  slot.sceneId = sceneId;
+  slot.lightTopologyVersion = frame.scene->lightTopologyVersion();
+  slot.lightTransformVersion = frame.scene->lightTransformVersion();
+  slot.directionalLightCount = directionalLightCount;
+  slot.localLightCount = localLightCount;
+  slot.hasFrameData = true;
+  slot.frameData = frameData;
+  slot.postTaaFrameData = postTaaFrameData;
   ctx.shared.forwardSceneGpuData = ForwardSceneGpuData{
-      .buffer = sceneDataBuffer->handle(),
+      .buffer = sceneDataBuffer.handle(),
       .frameData = frameData,
       .postTaaFrameData = postTaaFrameData,
-      .frameDataAddress = sceneDataBaseAddress + layout.frameDataOffset,
+      .frameDataAddress = sceneDataBaseAddress,
       .postTaaFrameDataAddress =
           sceneDataBaseAddress + layout.postTaaFrameDataOffset,
       .directionalLightBufferAddress = directionalLightBufferAddress,
@@ -581,41 +410,25 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
       .localLightCount = localLightCount,
       .shadowFlags = shadowFlags,
   };
-
   return Result<bool, std::string>::makeResult(true);
 }
 
 Result<bool, std::string>
 SceneLightingProvider::ensureBufferRingCapacity(size_t requiredBytes,
                                                 uint32_t requiredCount) {
-  const size_t requested =
-      std::max(requiredBytes, sizeof(ForwardSceneFrameData));
-  const uint32_t safeCount = std::max(requiredCount, 1u);
-  const bool ringCountChanged = sceneDataBuffers_.size() != safeCount;
-  if (sceneDataBuffers_.size() > safeCount) {
-    retireDynamicBufferRing(gpu_, std::span<DynamicBufferSlot>(
-                                      sceneDataBuffers_.data() + safeCount,
-                                      sceneDataBuffers_.size() - safeCount));
-  }
-  sceneDataBuffers_.resize(safeCount);
-  if (ringCountChanged) {
-    slotUploadStates_.assign(safeCount, SlotUploadState{});
-  } else if (slotUploadStates_.size() != safeCount) {
-    slotUploadStates_.resize(safeCount);
-  }
-
-  for (uint32_t i = 0u; i < safeCount; ++i) {
-    auto bufferResult =
-        ensureDynamicBufferCapacity(gpu_, sceneDataBuffers_[i],
+  slots_.resize(requiredCount);
+  for (Slot &slot : slots_) {
+    auto result =
+        ensureDynamicBufferCapacity(gpu_, slot.buffer,
                                     BufferDesc{.usage = BufferUsage::Storage,
                                                .storage = Storage::HostVisible,
-                                               .size = requested},
+                                               .size = requiredBytes},
                                     "forward_scene_data");
-    if (bufferResult.hasError()) {
-      return Result<bool, std::string>::makeError(bufferResult.error());
+    if (result.hasError()) {
+      return Result<bool, std::string>::makeError(result.error());
     }
-    if (bufferResult.value()) {
-      slotUploadStates_[i] = {};
+    if (result.value()) {
+      slot.hasFrameData = false;
     }
   }
   return Result<bool, std::string>::makeResult(true);
@@ -623,64 +436,26 @@ SceneLightingProvider::ensureBufferRingCapacity(size_t requiredBytes,
 
 Result<uint64_t, std::string>
 SceneLightingProvider::ensureDisabledShadowFrameBuffer() {
-  if (disabledShadowFrameBuffer_ == nullptr ||
-      !disabledShadowFrameBuffer_->valid()) {
-    auto bufferResult =
-        Buffer::create(gpu_,
-                       BufferDesc{.usage = BufferUsage::Storage,
-                                  .storage = Storage::HostVisible,
-                                  .size = sizeof(ShadowFrameGpuData)},
-                       "forward_scene_disabled_shadow_frame");
-    if (bufferResult.hasError()) {
-      return Result<uint64_t, std::string>::makeError(bufferResult.error());
+  if (!disabledShadowFrameBuffer_) {
+    auto result = Buffer::create(gpu_,
+                                 BufferDesc{.usage = BufferUsage::Storage,
+                                            .storage = Storage::HostVisible,
+                                            .size = sizeof(ShadowFrameGpuData)},
+                                 "forward_scene_disabled_shadow_frame");
+    if (result.hasError()) {
+      return Result<uint64_t, std::string>::makeError(result.error());
     }
-    disabledShadowFrameBuffer_ = std::move(bufferResult.value());
-
+    std::unique_ptr<Buffer> buffer = std::move(result.value());
     const ShadowFrameGpuData disabledShadow{};
-    const std::span<const std::byte> bytes{
-        reinterpret_cast<const std::byte *>(&disabledShadow),
-        sizeof(disabledShadow)};
-    auto updateResult =
-        gpu_.updateBuffer(disabledShadowFrameBuffer_->handle(), bytes, 0u);
-    if (updateResult.hasError()) {
-      disabledShadowFrameBuffer_.reset();
-      return Result<uint64_t, std::string>::makeError(updateResult.error());
+    auto update = gpu_.updateBuffer(
+        buffer->handle(), std::as_bytes(std::span{&disabledShadow, 1u}), 0u);
+    if (update.hasError()) {
+      return Result<uint64_t, std::string>::makeError(update.error());
     }
+    disabledShadowFrameBuffer_ = std::move(buffer);
   }
-
-  const uint64_t address =
-      gpu_.getBufferDeviceAddress(disabledShadowFrameBuffer_->handle());
-  if (address == 0u) {
-    return Result<uint64_t, std::string>::makeError(
-        "SceneLightingProvider::prepare: invalid disabled shadow frame buffer "
-        "address");
-  }
-  return Result<uint64_t, std::string>::makeResult(address);
-}
-
-void SceneLightingProvider::destroyBuffers() {
-  retireDynamicBufferRing(gpu_, sceneDataBuffers_);
-  sceneDataBuffers_.clear();
-  slotUploadStates_.clear();
-  disabledShadowFrameBuffer_.reset();
-}
-
-void SceneLightingProvider::destroyCachedSamplers() {
-  if (nuri::isValid(taaMaterialMipBiasSampler_)) {
-    gpu_.destroySampler(taaMaterialMipBiasSampler_);
-  }
-  taaMaterialMipBiasSampler_ = {};
-  taaMaterialMipBiasSamplerDesc_.reset();
-}
-
-Buffer *
-SceneLightingProvider::currentBuffer(uint64_t frameIndex) const noexcept {
-  if (sceneDataBuffers_.empty()) {
-    return nullptr;
-  }
-  const size_t slot =
-      static_cast<size_t>(frameIndex % sceneDataBuffers_.size());
-  return sceneDataBuffers_[slot].buffer.get();
+  return Result<uint64_t, std::string>::makeResult(
+      gpu_.getBufferDeviceAddress(disabledShadowFrameBuffer_->handle()));
 }
 
 } // namespace nuri

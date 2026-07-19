@@ -1,32 +1,25 @@
-#include "nuri/pch.h"
-
 #include "nuri/gfx/render_graph/render_graph_runtime.h"
-
+#include "nuri/pch.h"
 #include "nuri/utils/env_utils.h"
-
 namespace nuri {
 namespace {
-
 [[nodiscard]] bool parseEnvBool(std::string_view name, bool defaultValue) {
   const std::optional<std::string> value = readEnvVar(name);
   if (!value.has_value()) {
     return defaultValue;
   }
-
   std::string normalized = *value;
   std::transform(
       normalized.begin(), normalized.end(), normalized.begin(),
       [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
   return normalized == "1" || normalized == "true";
 }
-
 [[nodiscard]] uint32_t parseWorkerCountEnv() {
   const std::optional<std::string> value =
       readEnvVar("NURI_RENDER_GRAPH_WORKER_COUNT");
   if (!value.has_value() || value->empty()) {
     return 0u;
   }
-
   char *end = nullptr;
   const unsigned long parsed = std::strtoul(value->c_str(), &end, 10);
   if (end == value->c_str() || parsed == 0ul) {
@@ -34,7 +27,6 @@ namespace {
   }
   return static_cast<uint32_t>(std::min<unsigned long>(parsed, 64ul));
 }
-
 [[nodiscard]] RenderGraphRuntimeConfig resolveDefaultConfig() {
   const uint32_t envWorkerCount = parseWorkerCountEnv();
   const uint32_t hardwareCount =
@@ -49,7 +41,6 @@ namespace {
       !parseEnvBool("NURI_RENDER_GRAPH_DISABLE_PARALLEL_RECORDING", false);
   return config;
 }
-
 } // namespace
 
 RenderGraphRuntime::RenderGraphRuntime(std::pmr::memory_resource *memory)
@@ -102,10 +93,8 @@ RenderGraphRuntime::makeRanges(uint32_t itemCount, uint32_t maxRangeCount) {
   if (itemCount == 0u || maxRangeCount == 0u) {
     return ranges;
   }
-
   const uint32_t rangeCount = std::min(itemCount, maxRangeCount);
   ranges.resize(rangeCount);
-
   const uint32_t baseCount = itemCount / rangeCount;
   const uint32_t remainder = itemCount % rangeCount;
   uint32_t offset = 0u;
@@ -114,7 +103,6 @@ RenderGraphRuntime::makeRanges(uint32_t itemCount, uint32_t maxRangeCount) {
     ranges[i] = RenderGraphContiguousRange{.offset = offset, .count = count};
     offset += count;
   }
-
   return ranges;
 }
 
@@ -131,7 +119,6 @@ void RenderGraphRuntime::runRangesImpl(
     }
     return;
   }
-
   std::lock_guard runLock(runMutex_);
   const uint32_t totalRangeCount = static_cast<uint32_t>(ranges.size());
   const uint32_t scheduledRangeCount =
@@ -154,13 +141,11 @@ void RenderGraphRuntime::runRangesImpl(
     NURI_PROFILER_ZONE_END();
   }
   cvWork_.notify_all();
-
   task(0u, ranges[0u]);
   for (uint32_t rangeIndex = activeRangeCount_; rangeIndex < totalRangeCount;
        ++rangeIndex) {
     task(rangeIndex, ranges[rangeIndex]);
   }
-
   {
     NURI_PROFILER_ZONE("RenderGraphRuntime.run_ranges.wait",
                        NURI_PROFILER_COLOR_CMD_COPY);
@@ -175,7 +160,6 @@ void RenderGraphRuntime::workerLoop(uint32_t workerIndex,
                                     std::stop_token stopToken) {
   NURI_PROFILER_THREAD("RenderGraphWorker");
   uint64_t observedGeneration = 0u;
-
   while (!stopToken.stop_requested()) {
     std::function<void(uint32_t, RenderGraphContiguousRange)> task{};
     RenderGraphContiguousRange range{};
@@ -188,7 +172,6 @@ void RenderGraphRuntime::workerLoop(uint32_t workerIndex,
       if (stopToken.stop_requested()) {
         return;
       }
-
       observedGeneration = generation_;
       const uint32_t scheduledRangeCount = std::min(
           activeRangeCount_, static_cast<uint32_t>(currentRanges_.size()));
@@ -199,14 +182,12 @@ void RenderGraphRuntime::workerLoop(uint32_t workerIndex,
         shouldRun = static_cast<bool>(task);
       }
     }
-
     if (shouldRun) {
       NURI_PROFILER_ZONE("RenderGraphRuntime.worker_task",
                          NURI_PROFILER_COLOR_CMD_COPY);
       task(workerIndex, range);
       NURI_PROFILER_ZONE_END();
     }
-
     {
       std::lock_guard lock(mutex_);
       if (workerIndex < activeRangeCount_ && pendingWorkers_ > 0u) {

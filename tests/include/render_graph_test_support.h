@@ -100,6 +100,7 @@ public:
   GpuMultisampleCapabilities getMultisampleCapabilities() const override;
   bool supportsFeature(GPUFeature feature) const override;
   MeshletLimits getMeshletLimits() const override;
+  bool supportsSampledImageLinearFiltering(Format format) const override;
   uint32_t getTextureBindlessIndex(TextureHandle h) const override;
   Result<SamplerHandle, std::string>
   createSampler(const SamplerDesc &desc, std::string_view debugName) override;
@@ -145,10 +146,12 @@ public:
   discardGraphicsRecordingContext(RecordingContextHandle ctx) override;
   Result<bool, std::string> discardRecordedGraphicsCommandBuffer(
       RecordedCommandBufferHandle commandBuffer) override;
-  Result<SubmissionHandle, std::string> submitRecordedGraphicsFrame(
+  Result<SubmittedGraphicsFrame, std::string> submitRecordedGraphicsFrame(
       std::span<const RecordedCommandBufferHandle> commandBuffers,
       std::span<const SubmitBatchMeta> batches) override;
   bool isSubmissionComplete(SubmissionHandle handle) const override;
+  Result<bool, std::string>
+  makeSubmissionVisibleToGraphics(SubmissionHandle handle) override;
   Result<bool, std::string> submitComputeDispatches(
       std::span<const ComputeDispatchItem> dispatches) override;
   Result<GeometryAllocationHandle, std::string>
@@ -160,6 +163,7 @@ public:
   submitBackgroundBufferCopies(std::span<const BufferCopyRegion> regions,
                                std::string_view debugName) override;
   Result<SubmissionHandle, std::string> submitPendingUploads() override;
+  bool assetUploadsUseDedicatedCopyQueue() const noexcept override;
   Result<SubmissionHandle, std::string> captureWorkCompletion() override;
 
   Result<bool, std::string> updateBuffer(BufferHandle buffer,
@@ -321,7 +325,7 @@ public:
   createBuffer(const BufferDesc &desc, std::string_view debugName) override;
   Result<TextureHandle, std::string>
   createTexture(const TextureDesc &desc, std::string_view debugName) override;
-  Result<SubmissionHandle, std::string> submitRecordedGraphicsFrame(
+  Result<SubmittedGraphicsFrame, std::string> submitRecordedGraphicsFrame(
       std::span<const RecordedCommandBufferHandle> commandBuffers,
       std::span<const SubmitBatchMeta> batches) override;
 
@@ -334,6 +338,7 @@ public:
   uint32_t failCreateBufferAtCall = 0u;
   uint32_t failCreateTextureAtCall = 0u;
   bool failSubmitFrame = false;
+  bool failPresentFrame = false;
 
 private:
   uint32_t createBufferCallCount = 0u;
@@ -346,7 +351,7 @@ public:
     return format == Format::D16_UNORM;
   }
 
-  Result<SubmissionHandle, std::string> submitRecordedGraphicsFrame(
+  Result<SubmittedGraphicsFrame, std::string> submitRecordedGraphicsFrame(
       std::span<const RecordedCommandBufferHandle> commandBuffers,
       std::span<const SubmitBatchMeta> batches) override;
   size_t submittedPassCount = 0u;

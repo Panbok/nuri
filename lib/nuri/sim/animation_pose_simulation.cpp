@@ -1,19 +1,13 @@
-#include "nuri/pch.h"
-
 #include "nuri/sim/animation_pose_simulation.h"
-
+#include "nuri/pch.h"
 #include <type_traits>
-
 namespace nuri {
 namespace {
-
 constexpr float kAnimationPoseBlendWeightEpsilon = 1.0e-5f;
-
 [[nodiscard]] bool clipStateValid(const ScenePrefab &prefab,
                                   const AnimationPoseClipState &clip) {
   return clip.clipIndex < prefab.animations.size();
 }
-
 } // namespace
 
 Result<AnimationPoseSimulationParams, std::string>
@@ -22,7 +16,6 @@ decodeAnimationPoseSimulationParams(std::span<const std::byte> bytes) {
     return Result<AnimationPoseSimulationParams, std::string>::makeError(
         "decodeAnimationPoseSimulationParams: invalid params payload");
   }
-
   AnimationPoseSimulationParams params{};
   static_assert(std::is_trivially_copyable_v<AnimationPoseSimulationParams>,
                 "AnimationPoseSimulationParams must be trivially copyable for "
@@ -43,9 +36,6 @@ void sanitizeAnimationPoseSimulationParams(
 Result<void, std::string> validateAnimationPoseSimulationParams(
     const ScenePrefab &prefab, const AnimationPoseSimulationParams &params) {
   AnimationPoseSimulationParams sanitized = params;
-  // validateAnimationPoseSimulationParams sanitizes params.blendWeight via
-  // sanitizeAnimationPoseSimulationParams so AnimationPoseBlendMode::Lerp
-  // checks do not depend on caller order.
   sanitizeAnimationPoseSimulationParams(sanitized);
   if (!clipStateValid(prefab, params.primary)) {
     return Result<void, std::string>::makeError(
@@ -77,15 +67,12 @@ Result<SimulationDesc, std::string> makeAnimationPoseSimulationDesc(
     return Result<SimulationDesc, std::string>::makeError(
         "makeAnimationPoseSimulationDesc: rootNode is invalid");
   }
-
   SimulationDesc desc(memory);
   desc.kind = SimulationKind::AnimationPose;
   desc.debugName.assign(createInfo.debugName.data(),
                         createInfo.debugName.size());
   desc.binding.primaryTarget =
       SimulationBindingTarget::makePrefabRoot(createInfo.rootNode);
-  desc.backendPreference = SimulationBackendPreference::GPUOnly;
-  desc.allowGpuExecution = true;
   desc.startPaused = !createInfo.params.primary.playing;
   desc.enabled = true;
   desc.initialParams = asBytes(createInfo.params);

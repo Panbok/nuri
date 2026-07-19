@@ -1,16 +1,4 @@
 #pragma once
-
-#include <array>
-#include <cstdint>
-#include <filesystem>
-#include <limits>
-#include <memory>
-#include <memory_resource>
-#include <utility>
-#include <vector>
-
-#include <glm/glm.hpp>
-
 #include "nuri/core/runtime_config.h"
 #include "nuri/defines.h"
 #include "nuri/gfx/dynamic_buffer.h"
@@ -18,19 +6,27 @@
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/gfx/render_graph/render_graph.h"
 #include "nuri/gfx/renderers/detail/instance_data.h"
+#include "nuri/gfx/renderers/scene_draw_database.h"
 #include "nuri/resources/cpu/mesh_data.h"
 #include "nuri/resources/gpu/buffer.h"
 #include "nuri/resources/gpu/material.h"
 #include "nuri/resources/gpu/model.h"
 #include "nuri/resources/gpu/texture.h"
 #include "nuri/scene/render_scene.h"
-
+#include <array>
+#include <cstdint>
+#include <filesystem>
+#include <glm/glm.hpp>
+#include <limits>
+#include <memory_resource>
+#include <utility>
+#include <vector>
 namespace nuri {
 
 using TransmissionRendererConfig = RuntimeOpaqueShaderConfig;
 
 class ResourceManager;
-class Shader;
+class RenderPipeline;
 
 class NURI_API TransmissionRenderer {
 public:
@@ -38,12 +34,10 @@ public:
       GPUDevice &gpu, const TransmissionRendererConfig &config,
       std::pmr::memory_resource *memory = std::pmr::get_default_resource());
   ~TransmissionRenderer();
-
   TransmissionRenderer(const TransmissionRenderer &) = delete;
   TransmissionRenderer &operator=(const TransmissionRenderer &) = delete;
   TransmissionRenderer(TransmissionRenderer &&) = delete;
   TransmissionRenderer &operator=(TransmissionRenderer &&) = delete;
-
   void onAttach();
   void onDetach();
   void publishFrameData(RenderFrameContext &frame);
@@ -61,96 +55,22 @@ private:
   using FrameData = ForwardSceneFrameData;
   static_assert(sizeof(FrameData) == 464,
                 "TransmissionRenderer::FrameData must match shader layout");
-
-  struct MeshPushConstants {
-    uint64_t frameDataAddress = 0;
-    uint64_t vertexBufferAddress = 0;
-    uint64_t vertexDecodeBufferAddress = 0;
-    uint64_t instanceMatricesAddress = 0;
-    uint64_t previousInstanceMatricesAddress = 0;
-    uint64_t instanceRemapAddress = 0;
-    uint64_t instanceCentersPhaseAddress = 0;
-    uint64_t instanceBaseMatricesAddress = 0;
-    uint64_t velocityInstanceFlagsAddress = 0;
-    uint64_t velocityFrameDataAddress = 0;
-    uint32_t instanceCount = 0;
-    uint32_t materialIndex = 0;
-    uint32_t vertexDecodeIndex = 0;
-    uint32_t packedVertexFormat = 0;
-    float timeSeconds = 0.0f;
-    // Transmission fragment shading aliases these tessellation slots as
-    // per-draw model scale to keep the push-constant layout shader-compatible.
-    float tessNearDistance = 1.0f;
-    float tessFarDistance = 8.0f;
-    float tessMinFactor = 1.0f;
-    // Transmission fragment shading aliases this tessellation slot as the
-    // minimum scene-color pyramid LOD used to stabilize post-TAA refraction.
-    float tessMaxFactor = 0.0f;
-    uint32_t debugVisualizationMode = 0;
-    uint32_t shadowCascadeIndex = 0;
-
-    void setTransmissionScale(const glm::vec3 &scale) noexcept {
-      tessNearDistance = scale.x;
-      tessFarDistance = scale.y;
-      tessMinFactor = scale.z;
-    }
-  };
-  static_assert(
-      sizeof(MeshPushConstants) == 128,
-      "TransmissionRenderer::MeshPushConstants must match shader layout");
-  static_assert(offsetof(MeshPushConstants, previousInstanceMatricesAddress) ==
-                    32u,
-                "TransmissionRenderer::MeshPushConstants "
-                "previousInstanceMatricesAddress offset changed");
-  static_assert(offsetof(MeshPushConstants, instanceRemapAddress) == 40u);
-  static_assert(offsetof(MeshPushConstants, instanceCentersPhaseAddress) ==
-                48u);
-  static_assert(offsetof(MeshPushConstants, instanceBaseMatricesAddress) ==
-                56u);
-  static_assert(offsetof(MeshPushConstants, velocityInstanceFlagsAddress) ==
-                    64u,
-                "TransmissionRenderer::MeshPushConstants "
-                "velocityInstanceFlagsAddress offset changed");
-  static_assert(offsetof(MeshPushConstants, velocityFrameDataAddress) == 72u,
-                "TransmissionRenderer::MeshPushConstants "
-                "velocityFrameDataAddress offset changed");
-  static_assert(offsetof(MeshPushConstants, instanceCount) == 80u);
-  static_assert(offsetof(MeshPushConstants, shadowCascadeIndex) == 120u);
-
-  struct MeshDrawTemplate {
-    const Renderable *renderable = nullptr;
-    const Submesh *submesh = nullptr;
-    uint32_t submeshIndex = 0;
-    BufferHandle indexBuffer{};
-    uint64_t indexBufferOffset = 0;
-    // base* handles are unresolved source buffers captured from geometry;
-    // vertexBuffer/vertexBufferByteOffset describe the intended binding/view.
-    // GPU virtual addresses are resolved later during pass preparation after
-    // resource binding/animation overrides are known.
-    BufferHandle baseVertexBuffer{};
-    uint64_t vertexBufferByteOffset = 0;
-    BufferHandle vertexBuffer{};
-    BufferHandle baseVertexDecodeBuffer{};
-    uint64_t vertexBufferAddress = 0;
-    uint64_t vertexDecodeBufferAddress = 0;
+  using MeshPushConstants = ForwardMeshPushConstants;
+  struct MeshDrawTemplate : SceneDrawRecord {
     glm::vec3 transmissionScale{1.0f};
     std::array<glm::vec3, 8> worldBoundsCorners{};
     DrawItem cachedDrawItem{};
     uint64_t cachedDrawLayoutSignature = std::numeric_limits<uint64_t>::max();
-    uint32_t vertexDecodeIndex = 0;
-    uint32_t packedVertexFormat = 0;
-    uint32_t materialIndex = kInvalidMaterialIndex;
-    uint32_t instanceIndex = 0;
-    bool doubleSided = false;
     bool sortedFeedback = false;
+    explicit MeshDrawTemplate(const SceneDrawRecord &draw)
+        : SceneDrawRecord(draw),
+          sortedFeedback(draw.sortedTransmissionFeedback) {}
   };
-
   Result<bool, std::string> ensureInitialized();
   Result<bool, std::string> createShaders();
   Result<bool, std::string> ensurePipelines(Format colorFormat,
                                             Format depthFormat,
                                             RasterPipelineState rasterState);
-  Result<bool, std::string> ensureRingBufferCount(uint32_t requiredCount);
   Result<bool, std::string>
   ensureInstanceMatricesRingCapacity(size_t requiredBytes);
   Result<bool, std::string>
@@ -159,48 +79,29 @@ private:
   ensureBlendedFrameDataRingCapacity(size_t requiredBytes);
   Result<bool, std::string>
   ensureTransparentFeedbackTextures(RenderFrameContext &frame);
-  Result<bool, std::string> rebuildSceneCache(const RenderScene &scene,
-                                              const ResourceManager &resources,
-                                              uint32_t materialCount);
-  Result<bool, std::string>
-  rebuildMaterialTextureAccessCache(const ResourceManager &resources);
-  void collectEnvironmentTextureReads(const RenderScene &scene,
-                                      const ResourceManager &resources);
-  void refreshDrawTemplateTransforms(std::span<const Renderable> renderables);
+  void rebuildSceneCache(const SceneDrawDatabase &database,
+                         const RenderScene &scene);
+  void refreshDrawTemplateTransforms();
   void resetCachedState();
   void resetFrameBuildState();
   void destroyPipelineState();
   void destroyShaders();
   void destroyBuffers();
-  [[nodiscard]] bool hasTransmissionContent(const RenderFrameContext &frame);
   [[nodiscard]] RenderPipelineHandle
   selectMeshPipeline(bool doubleSided, bool useBlendPipeline) const;
   void destroyFeedbackTextures();
-
   GPUDevice &gpu_;
   TransmissionRendererConfig config_{};
   std::pmr::memory_resource *memory_ = std::pmr::get_default_resource();
-  std::unique_ptr<Shader> meshShader_;
   std::pmr::vector<DynamicBufferSlot> instanceMatricesRing_;
   std::pmr::vector<DynamicBufferSlot> instanceRemapRing_;
   std::pmr::vector<DynamicBufferSlot> blendedFrameDataRing_;
-
-  ShaderHandle meshVertexShader_{};
-  ShaderHandle meshFragmentShader_{};
-  RenderPipelineHandle meshPipelineHandle_{};
-  RenderPipelineHandle meshDoubleSidedPipelineHandle_{};
-  RenderPipelineHandle meshBlendPipelineHandle_{};
-  RenderPipelineHandle meshBlendDoubleSidedPipelineHandle_{};
-
+  std::array<ShaderHandle, 2> shaders_{};
+  std::array<RenderPipelineHandle, 4> meshPipelines_{};
   Format meshPipelineColorFormat_ = Format::Count;
   Format meshPipelineDepthFormat_ = Format::Count;
   RasterPipelineState meshPipelineRasterState_{};
-
   bool initialized_ = false;
-  bool loggedMaterialFallbackWarning_ = false;
-  uint64_t loggedAddressProbeTopologyVersion_ =
-      std::numeric_limits<uint64_t>::max();
-
   const RenderScene *cachedScene_ = nullptr;
   uint64_t cachedTopologyVersion_ = std::numeric_limits<uint64_t>::max();
   uint64_t cachedMaterialVersion_ = std::numeric_limits<uint64_t>::max();
@@ -209,20 +110,10 @@ private:
   uint64_t cachedTransformVersion_ = std::numeric_limits<uint64_t>::max();
   uint64_t cachedGeometryMutationVersion_ =
       std::numeric_limits<uint64_t>::max();
-  const RenderScene *cachedTransmissionContentScene_ = nullptr;
-  uint64_t cachedTransmissionContentTopologyVersion_ =
-      std::numeric_limits<uint64_t>::max();
-  uint64_t cachedTransmissionContentMaterialVersion_ =
-      std::numeric_limits<uint64_t>::max();
-  uint64_t cachedTransmissionContentBindingVersion_ =
-      std::numeric_limits<uint64_t>::max();
-  bool cachedTransmissionContentValid_ = false;
-  bool cachedTransmissionContent_ = false;
   EnvironmentHandles cachedEnvironmentHandles_{};
   bool environmentTextureAccessCacheValid_ = false;
   bool materialTextureAccessCacheValid_ = false;
   bool staticPassTextureReadsValid_ = false;
-
   std::pmr::vector<MeshDrawTemplate> meshDrawTemplates_;
   std::pmr::vector<InstanceData> instanceMatrices_;
   std::pmr::vector<uint32_t> instanceRemap_;
@@ -251,7 +142,6 @@ private:
   std::filesystem::path transmissionVertexPath_{};
   std::filesystem::path transmissionFragmentPath_{};
   TextureHandle preparedSceneColorTexture_{};
-  // Downsampled scene color prepared for transmission mip/debug paths.
   TextureHandle preparedSceneColorHalfResTexture_{};
   TextureHandle preparedSceneColorQuarterResTexture_{};
   TextureHandle preparedFrameColorTexture_{};
@@ -264,5 +154,11 @@ private:
   uint32_t transparentFeedbackHeight_ = 0u;
   uint32_t transparentFeedbackRingCount_ = 0u;
 };
+
+NURI_API void registerTransmissionStage(
+    RenderPipeline &pipeline, GPUDevice &gpu,
+    const RuntimeOpaqueShaderConfig &config,
+    std::pmr::memory_resource *memory = std::pmr::get_default_resource(),
+    SceneDrawDatabase *database = nullptr);
 
 } // namespace nuri

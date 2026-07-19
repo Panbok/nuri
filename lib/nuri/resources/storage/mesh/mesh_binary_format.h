@@ -1,9 +1,7 @@
 #pragma once
-
+#include "nuri/resources/storage/binary_format.h"
 #include <array>
 #include <cstdint>
-#include <type_traits>
-
 namespace nuri {
 
 constexpr uint16_t kMeshBinaryFormatMajorVersion = 2;
@@ -12,44 +10,35 @@ constexpr uint16_t kMeshBinaryFormatMinorVersion = 2;
 constexpr std::array<char, 8> kMeshBinaryMagic = {'N', 'U', 'R', 'I',
                                                   'M', 'S', 'H', '\0'};
 
-constexpr uint32_t kMeshBinaryHeaderFlagLittleEndian = 1u << 0u;
 constexpr uint32_t kMeshBinaryHeaderFlagCompressed = 1u << 1u;
-
 constexpr uint32_t kMeshBinarySectionFlagCompressed = 1u << 0u;
 
-constexpr uint32_t makeMeshBinaryFourCC(char a, char b, char c, char d) {
-  return static_cast<uint32_t>(static_cast<uint8_t>(a)) |
-         (static_cast<uint32_t>(static_cast<uint8_t>(b)) << 8u) |
-         (static_cast<uint32_t>(static_cast<uint8_t>(c)) << 16u) |
-         (static_cast<uint32_t>(static_cast<uint8_t>(d)) << 24u);
-}
-
 constexpr uint32_t kMeshBinarySectionVlay =
-    makeMeshBinaryFourCC('V', 'L', 'A', 'Y');
+    makeBinaryFourCC('V', 'L', 'A', 'Y');
 constexpr uint32_t kMeshBinarySectionSmes =
-    makeMeshBinaryFourCC('S', 'M', 'E', 'S');
+    makeBinaryFourCC('S', 'M', 'E', 'S');
 constexpr uint32_t kMeshBinarySectionLods =
-    makeMeshBinaryFourCC('L', 'O', 'D', 'S');
+    makeBinaryFourCC('L', 'O', 'D', 'S');
 constexpr uint32_t kMeshBinarySectionVbuf =
-    makeMeshBinaryFourCC('V', 'B', 'U', 'F');
+    makeBinaryFourCC('V', 'B', 'U', 'F');
 constexpr uint32_t kMeshBinarySectionIbuf =
-    makeMeshBinaryFourCC('I', 'B', 'U', 'F');
+    makeBinaryFourCC('I', 'B', 'U', 'F');
 constexpr uint32_t kMeshBinarySectionVinf =
-    makeMeshBinaryFourCC('V', 'I', 'N', 'F'); // Vertex Info
+    makeBinaryFourCC('V', 'I', 'N', 'F');
 constexpr uint32_t kMeshBinarySectionVdec =
-    makeMeshBinaryFourCC('V', 'D', 'E', 'C'); // Static Vertex Decode
+    makeBinaryFourCC('V', 'D', 'E', 'C');
 constexpr uint32_t kMeshBinarySectionMmta =
-    makeMeshBinaryFourCC('M', 'M', 'T', 'A'); // Morph Metadata
+    makeBinaryFourCC('M', 'M', 'T', 'A');
 constexpr uint32_t kMeshBinarySectionMdel =
-    makeMeshBinaryFourCC('M', 'D', 'E', 'L'); // Morph Deltas
+    makeBinaryFourCC('M', 'D', 'E', 'L');
 constexpr uint32_t kMeshBinarySectionMlds =
-    makeMeshBinaryFourCC('M', 'L', 'D', 'S'); // Meshlet descriptors
+    makeBinaryFourCC('M', 'L', 'D', 'S');
 constexpr uint32_t kMeshBinarySectionMlvi =
-    makeMeshBinaryFourCC('M', 'L', 'V', 'I'); // Meshlet vertex indices
+    makeBinaryFourCC('M', 'L', 'V', 'I');
 constexpr uint32_t kMeshBinarySectionMlpi =
-    makeMeshBinaryFourCC('M', 'L', 'P', 'I'); // Meshlet primitive indices
+    makeBinaryFourCC('M', 'L', 'P', 'I');
 constexpr uint32_t kMeshBinarySectionMlrg =
-    makeMeshBinaryFourCC('M', 'L', 'R', 'G'); // LOD meshlet ranges
+    makeBinaryFourCC('M', 'L', 'R', 'G');
 
 constexpr uint32_t kMeshBinaryLayoutIdStaticQuantized20 = 0u;
 constexpr uint32_t kMeshBinaryLayoutIdAnimatedFloat24 = 1u;
@@ -58,7 +47,6 @@ constexpr uint32_t kMeshBinaryStaticVertexStrideBytes = 20u;
 constexpr uint32_t kMeshBinaryAnimatedVertexStrideBytes = 24u;
 constexpr uint32_t kMeshBinaryAnimatedFloat32VertexStrideBytes = 32u;
 
-// Attribute bitmask for the packed v1 shader layout.
 constexpr uint32_t kMeshBinaryPackedAttributePosition = 1u << 0u;
 constexpr uint32_t kMeshBinaryPackedAttributeUv = 1u << 1u;
 constexpr uint32_t kMeshBinaryPackedAttributeUv1 = 1u << 2u;
@@ -188,27 +176,4 @@ static_assert(sizeof(MeshBinaryLodMeshletRangeRecord) == 8);
 static_assert(sizeof(MeshBinaryMeshletRecord) == 64);
 static_assert(sizeof(MeshBinaryBufferSectionHeader) == 16);
 static_assert(sizeof(MeshBinaryMorphMetaRecord) == 16);
-static_assert(std::is_standard_layout_v<MeshBinaryHeader>);
-static_assert(std::is_standard_layout_v<MeshBinarySectionTocEntry>);
-static_assert(std::is_standard_layout_v<MeshBinaryVertexLayoutRecord>);
-static_assert(std::is_standard_layout_v<MeshBinarySubmeshRecord>);
-static_assert(std::is_standard_layout_v<MeshBinarySubmeshRecordV0>);
-static_assert(std::is_standard_layout_v<MeshBinarySubmeshRecordV1>);
-static_assert(std::is_standard_layout_v<MeshBinaryLodRecord>);
-static_assert(std::is_standard_layout_v<MeshBinaryLodMeshletRangeRecord>);
-static_assert(std::is_standard_layout_v<MeshBinaryMeshletRecord>);
-static_assert(std::is_standard_layout_v<MeshBinaryBufferSectionHeader>);
-static_assert(std::is_standard_layout_v<MeshBinaryMorphMetaRecord>);
-static_assert(std::is_trivially_copyable_v<MeshBinaryHeader>);
-static_assert(std::is_trivially_copyable_v<MeshBinarySectionTocEntry>);
-static_assert(std::is_trivially_copyable_v<MeshBinaryVertexLayoutRecord>);
-static_assert(std::is_trivially_copyable_v<MeshBinarySubmeshRecord>);
-static_assert(std::is_trivially_copyable_v<MeshBinarySubmeshRecordV0>);
-static_assert(std::is_trivially_copyable_v<MeshBinarySubmeshRecordV1>);
-static_assert(std::is_trivially_copyable_v<MeshBinaryLodRecord>);
-static_assert(std::is_trivially_copyable_v<MeshBinaryLodMeshletRangeRecord>);
-static_assert(std::is_trivially_copyable_v<MeshBinaryMeshletRecord>);
-static_assert(std::is_trivially_copyable_v<MeshBinaryBufferSectionHeader>);
-static_assert(std::is_trivially_copyable_v<MeshBinaryMorphMetaRecord>);
-
 } // namespace nuri

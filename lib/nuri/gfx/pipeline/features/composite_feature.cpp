@@ -1,13 +1,13 @@
-#include "nuri/pch.h"
-
 #include "nuri/gfx/pipeline/features/composite_feature.h"
-
 #include "nuri/core/log.h"
 #include "nuri/core/profiling.h"
-
+#include "nuri/gfx/frame/render_capture.h"
+#include "nuri/gfx/fullscreen.h"
+#include "nuri/gfx/pipeline/render_pipeline.h"
+#include "nuri/gfx/shader.h"
+#include "nuri/pch.h"
 namespace nuri {
 namespace {
-
 constexpr uint32_t kSceneCopyFlagDownsample = 1u << 0u;
 constexpr uint32_t kPresentFlagManualSrgbEncode = 1u << 0u;
 constexpr uint32_t kPresentFlagPrimaryUseAgx = 1u << 1u;
@@ -17,13 +17,11 @@ constexpr uint32_t kPresentFlagAcesLutAvailable = 1u << 4u;
 constexpr uint32_t kPresentFlagAgxLutAvailable = 1u << 5u;
 constexpr uint32_t kPresentFlagPrimaryLegacyFallback = 1u << 6u;
 constexpr uint32_t kPresentFlagCompareLegacyFallback = 1u << 7u;
-constexpr uint32_t kInvalidTextureBindlessIndex = 0xFFFFFFFFu;
 constexpr uint32_t kDownsamplePassDebugColor = 0xff33aa88u;
 constexpr uint32_t kResolvePassDebugColor = 0xff33cc88u;
 constexpr uint32_t kPresentPassDebugColor = 0xff55cc88u;
 constexpr uint32_t kHDRPassDebugColor = 0xff66dd99u;
 constexpr uint32_t kDrawDebugColor = 0xff2299ddu;
-constexpr uint64_t kInitialDebugFrames = 4u;
 constexpr uint32_t kHDRPostFlagBloomEnabled = 1u << 0u;
 constexpr uint32_t kHDRPostFlagAdaptationEnabled = 1u << 1u;
 constexpr uint32_t kHDRPostFlagExposureHistoryValid = 1u << 2u;
@@ -33,7 +31,10 @@ constexpr uint32_t kHDRBloomModeDownsample = 1u;
 constexpr uint32_t kHDRBloomModeUpsample = 2u;
 constexpr uint32_t kHDRBloomModeCopy = 3u;
 constexpr float kHDRBloomUpsampleScatter = 0.65f;
-
+constexpr std::array<std::string_view, 2> kToneMapLutNames{"tonemap_aces2_sdr",
+                                                           "tonemap_agx_sdr"};
+constexpr std::array<std::string_view, 2> kToneMapLutImportNames{
+    "present_aces_lut", "present_agx_lut"};
 struct PresentToneMapState {
   RenderSettings::ToneMapSettings settings{};
   bool primaryUseAgx = false;
@@ -44,7 +45,6 @@ struct PresentToneMapState {
   bool primaryHasLut = false;
   bool compareHasLut = false;
 };
-
 struct HDRExposurePushConstants {
   uint32_t sourceTexId = 0u;
   uint32_t previousExposureTexId = 0u;
@@ -55,24 +55,16 @@ struct HDRExposurePushConstants {
   float minEv = kDefaultHDRAdaptationMinEv;
   float maxEv = kDefaultHDRAdaptationMaxEv;
   float deltaSeconds = 1.0f / 60.0f;
-  float reserved0 = 0.0f;
-  float reserved1 = 0.0f;
-  float reserved2 = 0.0f;
 };
 static_assert(sizeof(HDRExposurePushConstants) <= 128u);
-
 struct HDRLuminanceReducePushConstants {
   uint32_t sourceTexId = 0u;
   uint32_t sourceSamplerId = 0u;
   uint32_t mode = 0u;
-  uint32_t reserved0 = 0u;
   float texelSizeX = 1.0f;
   float texelSizeY = 1.0f;
-  float reserved1 = 0.0f;
-  float reserved2 = 0.0f;
 };
 static_assert(sizeof(HDRLuminanceReducePushConstants) <= 128u);
-
 struct HDRBloomCompositePushConstants {
   uint32_t sourceTexId = 0u;
   uint32_t bloomTexId = kInvalidTextureBindlessIndex;
@@ -80,8 +72,6 @@ struct HDRBloomCompositePushConstants {
   uint32_t sourceSamplerId = 0u;
   uint32_t flags = 0u;
   uint32_t debugView = 0u;
-  uint32_t reserved0 = 0u;
-  uint32_t reserved1 = 0u;
   float bloomStrength = kDefaultHDRBloomStrength;
   float fallbackExposureEv = 0.0f;
   float adaptationTargetGray = kDefaultHDRAdaptationTargetGray;
@@ -89,7 +79,6 @@ struct HDRBloomCompositePushConstants {
   float adaptationMaxEv = kDefaultHDRAdaptationMaxEv;
 };
 static_assert(sizeof(HDRBloomCompositePushConstants) <= 128u);
-
 struct HDRBloomPushConstants {
   uint32_t sourceTexId = 0u;
   uint32_t secondaryTexId = kInvalidTextureBindlessIndex;
@@ -106,23 +95,6 @@ struct HDRBloomPushConstants {
   float adaptationMaxEv = kDefaultHDRAdaptationMaxEv;
 };
 static_assert(sizeof(HDRBloomPushConstants) <= 128u);
-
-RenderPipelineDesc fullscreenPipelineDesc(Format colorFormat,
-                                          ShaderHandle vertexShader,
-                                          ShaderHandle fragmentShader) {
-  return RenderPipelineDesc{
-      .vertexInput = {},
-      .vertexShader = vertexShader,
-      .fragmentShader = fragmentShader,
-      .colorFormats = {colorFormat},
-      .depthFormat = Format::Count,
-      .cullMode = CullMode::None,
-      .polygonMode = PolygonMode::Fill,
-      .topology = Topology::Triangle,
-      .blendEnabled = false,
-  };
-}
-
 std::filesystem::path
 resolveShaderBasePath(const FrameCompositionFeatureConfig &config) {
   if (!config.shaderBasePath.empty()) {
@@ -136,49 +108,6 @@ resolveShaderBasePath(const FrameCompositionFeatureConfig &config) {
   }
   return config.presentFragment.parent_path();
 }
-
-DrawItem makeFullscreenDraw(RenderPipelineHandle pipeline,
-                            std::span<const std::byte> pushConstants,
-                            std::string_view label) {
-  DrawItem draw{};
-  draw.pipeline = pipeline;
-  draw.vertexCount = 3u;
-  draw.instanceCount = 1u;
-  draw.pushConstants = pushConstants;
-  draw.debugLabel = label;
-  draw.debugColor = kDrawDebugColor;
-  return draw;
-}
-
-void publishRequestedCapture(RenderFrameContext &frame, GPUDevice &gpu,
-                             std::string_view name, TextureHandle texture,
-                             RenderCaptureValueKind kind,
-                             RenderCaptureLifetimeClass lifetime,
-                             std::string_view colorSpace,
-                             std::string_view compareProfile,
-                             std::string_view producerPassLabel,
-                             std::string_view debugLabel) {
-  if (!isRenderCaptureRequested(frame, name) || !nuri::isValid(texture)) {
-    return;
-  }
-  frame.captureRegistry.publish(RenderCapturePoint{
-      .name = name,
-      .version = 1u,
-      .texture = texture,
-      .format = gpu.getTextureFormat(texture),
-      .dimensions = gpu.getTextureDimensions(texture),
-      .frameIndex = frame.frameIndex,
-      .mip = 0u,
-      .layer = 0u,
-      .kind = kind,
-      .lifetime = lifetime,
-      .colorSpace = colorSpace,
-      .defaultCompareProfile = compareProfile,
-      .producerPassLabel = producerPassLabel,
-      .debugLabel = debugLabel,
-  });
-}
-
 void destroyFullscreenPassResources(GPUDevice &gpu,
                                     FullscreenPassResources &resources) {
   if (nuri::isValid(resources.pipelineHandle)) {
@@ -190,45 +119,31 @@ void destroyFullscreenPassResources(GPUDevice &gpu,
   if (nuri::isValid(resources.fragmentShader)) {
     gpu.destroyShaderModule(resources.fragmentShader);
   }
-  resources.pipelineHandle = {};
-  resources.pipelineColorFormat = Format::Count;
-  resources.vertexShader = {};
-  resources.fragmentShader = {};
-  resources.shader.reset();
-  resources.initialized = false;
 }
-
-void destroyFullscreenPipeline(GPUDevice &gpu,
-                               FullscreenPassResources &resources) {
-  if (nuri::isValid(resources.pipelineHandle)) {
-    gpu.destroyRenderPipeline(resources.pipelineHandle);
+template <typename Range>
+void destroyTextureHandles(GPUDevice &gpu, Range &values) {
+  if constexpr (std::is_same_v<std::remove_cvref_t<Range>, TextureHandle>) {
+    if (nuri::isValid(values))
+      gpu.destroyTexture(values);
+  } else {
+    for (auto &value : values)
+      destroyTextureHandles(gpu, value);
+    values.clear();
   }
-  resources.pipelineHandle = {};
-  resources.pipelineColorFormat = Format::Count;
 }
-
-void destroyFullscreenShaders(GPUDevice &gpu,
-                              FullscreenPassResources &resources) {
-  if (nuri::isValid(resources.vertexShader)) {
-    gpu.destroyShaderModule(resources.vertexShader);
+template <typename Step, typename... Rest>
+Result<bool, std::string> runSteps(Step &&step, Rest &&...rest) {
+  auto result = step();
+  if constexpr (sizeof...(Rest) == 0u) {
+    return result;
+  } else {
+    return result.hasError() ? result : runSteps(std::forward<Rest>(rest)...);
   }
-  if (nuri::isValid(resources.fragmentShader)) {
-    gpu.destroyShaderModule(resources.fragmentShader);
-  }
-  resources.vertexShader = {};
-  resources.fragmentShader = {};
-  resources.shader.reset();
 }
-
 Result<bool, std::string>
 createFullscreenPassShaders(GPUDevice &gpu, FullscreenPassResources &resources,
-                            std::string_view shaderName,
-                            std::string_view errorContext) {
+                            std::string_view shaderName) {
   std::unique_ptr<Shader> shader = Shader::create(shaderName, gpu);
-  if (!shader) {
-    return Result<bool, std::string>::makeError(std::string(errorContext) +
-                                                ": failed to create shader");
-  }
   auto vertexResult = shader->compileFromFile(resources.vertexPath.string(),
                                               ShaderStage::Vertex);
   if (vertexResult.hasError()) {
@@ -243,40 +158,30 @@ createFullscreenPassShaders(GPUDevice &gpu, FullscreenPassResources &resources,
     }
     return Result<bool, std::string>::makeError(fragmentResult.error());
   }
-  destroyFullscreenShaders(gpu, resources);
-  resources.shader = std::move(shader);
   resources.vertexShader = vertexShader;
   resources.fragmentShader = fragmentResult.value();
   return Result<bool, std::string>::makeResult(true);
 }
-
-Result<bool, std::string> ensureFullscreenPassInitialized(
-    GPUDevice &gpu, FullscreenPassResources &resources,
-    std::string_view shaderName, std::string_view errorContext) {
-  if (resources.initialized) {
+Result<bool, std::string>
+ensureFullscreenPassInitialized(GPUDevice &gpu,
+                                FullscreenPassResources &resources,
+                                std::string_view shaderName) {
+  if (nuri::isValid(resources.vertexShader) &&
+      nuri::isValid(resources.fragmentShader)) {
     return Result<bool, std::string>::makeResult(true);
   }
-  auto shaderResult =
-      createFullscreenPassShaders(gpu, resources, shaderName, errorContext);
+  auto shaderResult = createFullscreenPassShaders(gpu, resources, shaderName);
   if (shaderResult.hasError()) {
     return shaderResult;
   }
-  resources.initialized = true;
   return Result<bool, std::string>::makeResult(true);
 }
-
 Result<bool, std::string>
 ensureFullscreenPassPipeline(GPUDevice &gpu, FullscreenPassResources &resources,
-                             Format colorFormat, std::string_view debugName,
-                             std::string_view errorContext) {
+                             Format colorFormat, std::string_view debugName) {
   if (nuri::isValid(resources.pipelineHandle) &&
       resources.pipelineColorFormat == colorFormat) {
     return Result<bool, std::string>::makeResult(true);
-  }
-  if (!nuri::isValid(resources.vertexShader) ||
-      !nuri::isValid(resources.fragmentShader)) {
-    return Result<bool, std::string>::makeError(std::string(errorContext) +
-                                                ": invalid shader handle");
   }
   if (nuri::isValid(resources.pipelineHandle)) {
     gpu.destroyRenderPipeline(resources.pipelineHandle);
@@ -293,13 +198,13 @@ ensureFullscreenPassPipeline(GPUDevice &gpu, FullscreenPassResources &resources,
   resources.pipelineColorFormat = colorFormat;
   return Result<bool, std::string>::makeResult(true);
 }
-
-Result<bool, std::string> addFullscreenTexturePass(
+void addFullscreenTexturePass(
     RenderGraphBuilder &graph, RenderGraphTextureId colorTexture,
     std::span<const DrawItem> draws,
     std::span<const TextureHandle> textureReads, std::string_view debugLabel,
     uint32_t debugColor, bool markColorAsFrameOutput = false,
-    GpuTimingScope gpuTimingScope = GpuTimingScope::None) {
+    GpuTimingScope gpuTimingScope = GpuTimingScope::None,
+    std::span<const RenderGraphTextureId> graphReads = {}) {
   RenderGraphGraphicsPassDesc passDesc{};
   passDesc.color = {.loadOp = LoadOp::Clear,
                     .storeOp = StoreOp::Store,
@@ -311,13 +216,11 @@ Result<bool, std::string> addFullscreenTexturePass(
   passDesc.debugColor = debugColor;
   passDesc.markColorAsFrameOutput = markColorAsFrameOutput;
   passDesc.gpuTimingScope = gpuTimingScope;
-  auto addResult = graph.addGraphicsPass(passDesc);
-  if (addResult.hasError()) {
-    return Result<bool, std::string>::makeError(addResult.error());
+  const RenderGraphPassId pass = graph.addGraphicsPass(passDesc).value();
+  for (RenderGraphTextureId read : graphReads) {
+    (void)graph.addTextureRead(pass, read).value();
   }
-  return Result<bool, std::string>::makeResult(true);
 }
-
 TextureDesc makePostProcessTextureDesc(uint32_t width, uint32_t height) {
   return TextureDesc{
       .type = TextureType::Texture2D,
@@ -333,43 +236,26 @@ TextureDesc makePostProcessTextureDesc(uint32_t width, uint32_t height) {
       .generateMipmaps = false,
   };
 }
-
 TextureDesc makeLuminanceTextureDesc(uint32_t width, uint32_t height) {
   TextureDesc desc = makePostProcessTextureDesc(width, height);
   desc.format = kFrameCompositionExposureFormat;
   return desc;
 }
-
-TextureDimensions bloomMipDimensions(uint32_t width, uint32_t height,
-                                     uint32_t mipIndex) {
+TextureDimensions mipDimensions(uint32_t width, uint32_t height,
+                                uint32_t mipIndex, bool ceil) {
   uint32_t mipWidth = std::max(width, 1u);
   uint32_t mipHeight = std::max(height, 1u);
-  const uint32_t downsampleCount = mipIndex + 1u;
-  for (uint32_t i = 0u; i < downsampleCount; ++i) {
-    mipWidth = std::max(mipWidth / 2u, 1u);
-    mipHeight = std::max(mipHeight / 2u, 1u);
+  for (uint32_t i = 0u; i <= mipIndex; ++i) {
+    mipWidth = std::max((mipWidth + static_cast<uint32_t>(ceil)) / 2u, 1u);
+    mipHeight = std::max((mipHeight + static_cast<uint32_t>(ceil)) / 2u, 1u);
   }
   return TextureDimensions{.width = mipWidth, .height = mipHeight, .depth = 1u};
 }
-
-TextureDimensions luminanceMipDimensions(uint32_t width, uint32_t height,
-                                         uint32_t mipIndex) {
-  uint32_t mipWidth = std::max(width, 1u);
-  uint32_t mipHeight = std::max(height, 1u);
-  const uint32_t downsampleCount = mipIndex + 1u;
-  for (uint32_t i = 0u; i < downsampleCount; ++i) {
-    mipWidth = std::max((mipWidth + 1u) / 2u, 1u);
-    mipHeight = std::max((mipHeight + 1u) / 2u, 1u);
-  }
-  return TextureDimensions{.width = mipWidth, .height = mipHeight, .depth = 1u};
-}
-
 uint32_t effectiveBloomMipCount(uint32_t width, uint32_t height,
                                 uint32_t requestedMipCount) {
   if (requestedMipCount == 0u) {
     return 0u;
   }
-
   uint32_t mipCount = 0u;
   uint32_t mipWidth = std::max(width / 2u, 1u);
   uint32_t mipHeight = std::max(height / 2u, 1u);
@@ -383,7 +269,6 @@ uint32_t effectiveBloomMipCount(uint32_t width, uint32_t height,
   }
   return mipCount;
 }
-
 uint32_t effectiveLuminanceMipCount(uint32_t width, uint32_t height) {
   uint32_t mipCount = 0u;
   uint32_t mipWidth = std::max(width, 1u);
@@ -395,32 +280,6 @@ uint32_t effectiveLuminanceMipCount(uint32_t width, uint32_t height) {
   }
   return std::max(mipCount, 1u);
 }
-
-uint32_t bytesPerPixel(Format format) {
-  switch (format) {
-  case Format::R8_UNORM:
-    return 1u;
-  case Format::R16_UNORM:
-    return 2u;
-  case Format::R32_FLOAT:
-  case Format::R32_UINT:
-  case Format::RGBA8_UNORM:
-  case Format::RGBA8_SRGB:
-  case Format::RGBA8_UINT:
-    return 4u;
-  case Format::RGBA16_FLOAT:
-    return 8u;
-  case Format::RGBA32_FLOAT:
-    return 16u;
-  default:
-    break;
-  }
-  NURI_ASSERT(
-      false, "HDR postprocess texture storage estimate missing Format value %u",
-      static_cast<uint32_t>(format));
-  return 0u;
-}
-
 [[nodiscard]] float
 exposureEvFromLuminance(float luminance,
                         const RenderSettings::HDRPostProcessSettings &hdr) {
@@ -429,7 +288,6 @@ exposureEvFromLuminance(float luminance,
   return std::clamp(std::log2(safeTargetGray / safeLuminance),
                     hdr.adaptationMinEv, hdr.adaptationMaxEv);
 }
-
 [[nodiscard]] std::optional<float>
 readExposureLuminance(GPUDevice &gpu, TextureHandle texture) {
   if (!nuri::isValid(texture)) {
@@ -440,17 +298,13 @@ readExposureLuminance(GPUDevice &gpu, TextureHandle texture) {
       .x = 0u, .y = 0u, .width = 1u, .height = 1u, .mipLevel = 0u, .layer = 0u};
   auto readResult = gpu.readTexture(texture, region, bytes);
   if (readResult.hasError()) {
-    NURI_LOG_DEBUG("HDR postprocess exposure readback unavailable: %s",
-                   readResult.error().c_str());
     return std::nullopt;
   }
-
   float luminance = 0.0f;
   std::memcpy(&luminance, bytes.data(), sizeof(luminance));
   return std::isfinite(luminance) ? std::optional<float>(luminance)
                                   : std::nullopt;
 }
-
 uint64_t textureStorageBytes(GPUDevice &gpu, TextureHandle texture) {
   if (!nuri::isValid(texture)) {
     return 0u;
@@ -458,9 +312,8 @@ uint64_t textureStorageBytes(GPUDevice &gpu, TextureHandle texture) {
   const TextureDimensions dimensions = gpu.getTextureDimensions(texture);
   return static_cast<uint64_t>(std::max(dimensions.width, 1u)) *
          static_cast<uint64_t>(std::max(dimensions.height, 1u)) *
-         static_cast<uint64_t>(bytesPerPixel(gpu.getTextureFormat(texture)));
+         static_cast<uint64_t>(formatTexelBytes(gpu.getTextureFormat(texture)));
 }
-
 bool shouldRunHDRPostProcess(const RenderFrameContext &frame) {
   RenderSettings::HDRPostProcessSettings hdr =
       renderSettingsOrDefault(frame).hdrPostProcess;
@@ -468,13 +321,11 @@ bool shouldRunHDRPostProcess(const RenderFrameContext &frame) {
   return hdr.bloomEnabled || hdr.adaptationEnabled ||
          hdr.debugView != HDRPostProcessDebugView::None;
 }
-
 bool shouldBuildBloomChain(const RenderSettings::HDRPostProcessSettings &hdr) {
   return hdr.bloomEnabled ||
          hdr.debugView == HDRPostProcessDebugView::BloomPrefilter ||
          hdr.debugView == HDRPostProcessDebugView::BloomFinal;
 }
-
 PresentToneMapState
 buildPresentToneMapState(const RenderSettings::ToneMapSettings &settings,
                          bool acesLutAvailable, bool agxLutAvailable) {
@@ -492,39 +343,23 @@ buildPresentToneMapState(const RenderSettings::ToneMapSettings &settings,
       state.primaryUseAgx ? state.acesLutAvailable : state.agxLutAvailable;
   return state;
 }
-
 uint32_t buildPresentFlags(const PresentToneMapState &state,
                            bool manualSrgbEncode) {
-  uint32_t flags = manualSrgbEncode ? kPresentFlagManualSrgbEncode : 0u;
-  if (state.primaryUseAgx) {
-    flags |= kPresentFlagPrimaryUseAgx;
-  }
-  if (state.compareEnabled) {
-    flags |= kPresentFlagCompareEnabled;
-  }
-  if (state.grayCardDebug) {
-    flags |= kPresentFlagGrayCardDebug;
-  }
-  if (state.acesLutAvailable) {
-    flags |= kPresentFlagAcesLutAvailable;
-  }
-  if (state.agxLutAvailable) {
-    flags |= kPresentFlagAgxLutAvailable;
-  }
-  if (!state.primaryHasLut) {
-    flags |= kPresentFlagPrimaryLegacyFallback;
-  }
-  if (state.compareEnabled && !state.compareHasLut) {
-    flags |= kPresentFlagCompareLegacyFallback;
-  }
-  return flags;
+  return (manualSrgbEncode ? kPresentFlagManualSrgbEncode : 0u) |
+         (state.primaryUseAgx ? kPresentFlagPrimaryUseAgx : 0u) |
+         (state.compareEnabled ? kPresentFlagCompareEnabled : 0u) |
+         (state.grayCardDebug ? kPresentFlagGrayCardDebug : 0u) |
+         (state.acesLutAvailable ? kPresentFlagAcesLutAvailable : 0u) |
+         (state.agxLutAvailable ? kPresentFlagAgxLutAvailable : 0u) |
+         (!state.primaryHasLut ? kPresentFlagPrimaryLegacyFallback : 0u) |
+         (state.compareEnabled && !state.compareHasLut
+              ? kPresentFlagCompareLegacyFallback
+              : 0u);
 }
-
 struct SceneResolveSource {
   TextureHandle texture{};
   AntiAliasingDebugView debugView = AntiAliasingDebugView::None;
 };
-
 [[nodiscard]] SceneResolveSource
 resolveSceneResolveSource(const FrameBuildContext &ctx) {
   const RenderSettings &settings = renderSettingsOrDefault(ctx.frame);
@@ -544,25 +379,11 @@ resolveSceneResolveSource(const FrameBuildContext &ctx) {
   }
   return {.texture = ctx.shared.sceneColorTexture, .debugView = debugView};
 }
-
 [[nodiscard]] bool
 isPostTaaSceneColorMipFrame(const RenderFrameContext &frame) noexcept {
   const RenderSettings &settings = renderSettingsOrDefault(frame);
   return isTemporalAAResolvedSceneColorOutput(settings.antiAliasing);
 }
-
-Result<uint32_t, std::string> resolveLutBindlessIndex(GPUDevice &gpu,
-                                                      TextureHandle texture,
-                                                      std::string_view name) {
-  const uint32_t texId = gpu.getTextureBindlessIndex(texture);
-  if (texId == kInvalidTextureBindlessIndex) {
-    return Result<uint32_t, std::string>::makeError(
-        std::string("PresentToneMapPass::build: invalid ") + std::string(name) +
-        " tone-map LUT bindless index");
-  }
-  return Result<uint32_t, std::string>::makeResult(texId);
-}
-
 } // namespace
 
 FullscreenRenderPass::FullscreenRenderPass(GPUDevice &gpu) : gpu_(gpu) {}
@@ -572,33 +393,14 @@ FullscreenRenderPass::~FullscreenRenderPass() {
 }
 
 Result<bool, std::string>
-FullscreenRenderPass::ensureInitialized(std::string_view shaderName,
-                                        std::string_view errorContext) {
-  return ensureFullscreenPassInitialized(gpu_, resources_, shaderName,
-                                         errorContext);
+FullscreenRenderPass::ensureInitialized(std::string_view shaderName) {
+  return ensureFullscreenPassInitialized(gpu_, resources_, shaderName);
 }
 
 Result<bool, std::string>
 FullscreenRenderPass::ensurePipeline(Format colorFormat,
-                                     std::string_view debugName,
-                                     std::string_view errorContext) {
-  return ensureFullscreenPassPipeline(gpu_, resources_, colorFormat, debugName,
-                                      errorContext);
-}
-
-Result<bool, std::string>
-FullscreenRenderPass::createShaders(std::string_view shaderName,
-                                    std::string_view errorContext) {
-  return createFullscreenPassShaders(gpu_, resources_, shaderName,
-                                     errorContext);
-}
-
-void FullscreenRenderPass::destroyPipeline() {
-  destroyFullscreenPipeline(gpu_, resources_);
-}
-
-void FullscreenRenderPass::destroyShaders() {
-  destroyFullscreenShaders(gpu_, resources_);
+                                     std::string_view debugName) {
+  return ensureFullscreenPassPipeline(gpu_, resources_, colorFormat, debugName);
 }
 
 SceneColorDownsamplePass::SceneColorDownsamplePass(
@@ -620,26 +422,16 @@ bool SceneColorDownsamplePass::isEnabled(const FrameBuildContext &ctx) const {
 }
 
 Result<bool, std::string>
-SceneColorDownsamplePass::prepare(FrameBuildContext &ctx) {
-  if (!isEnabled(ctx)) {
-    return Result<bool, std::string>::makeResult(true);
-  }
-  auto initResult = ensureInitialized(
-      "scene_color_downsample", "SceneColorDownsamplePass::createShaders");
-  if (initResult.hasError()) {
-    return initResult;
-  }
-  return ensurePipeline(kFrameCompositionSceneColorFormat,
-                        "scene_color_downsample",
-                        "SceneColorDownsamplePass::ensurePipeline");
+SceneColorDownsamplePass::prepare(FrameBuildContext &) {
+  return runSteps([&] { return ensureInitialized("scene_color_downsample"); },
+                  [&] {
+                    return ensurePipeline(kFrameCompositionSceneColorFormat,
+                                          "scene_color_downsample");
+                  });
 }
 
 Result<bool, std::string>
 SceneColorDownsamplePass::build(FrameBuildContext &ctx) {
-  if (!isEnabled(ctx)) {
-    return Result<bool, std::string>::makeResult(true);
-  }
-
   AntiAliasingFrameMetrics &aaMetrics = ctx.frame.metrics.antiAliasing;
   const GpuTimingReport &timingReport = ctx.frame.gpuTiming;
   if (hasGpuTimingScope(timingReport, GpuTimingScope::SceneColorDownsample)) {
@@ -649,7 +441,6 @@ SceneColorDownsamplePass::build(FrameBuildContext &ctx) {
         timingReport.sceneColorDownsampleSourceFrameIndex;
     aaMetrics.taaSceneColorDownsampleGpuTimingAvailable = 1u;
   }
-
   const bool isPostTaaSceneColorMip = isPostTaaSceneColorMipFrame(ctx.frame);
   for (uint32_t mipLevel = 1u; mipLevel < kFrameCompositionSceneColorMipCount;
        ++mipLevel) {
@@ -657,43 +448,28 @@ SceneColorDownsamplePass::build(FrameBuildContext &ctx) {
         resolveSceneColorMipTexture(ctx.frame, mipLevel - 1u);
     const TextureHandle destination =
         resolveSceneColorMipTexture(ctx.frame, mipLevel);
-    NURI_ASSERT(nuri::isValid(source) && nuri::isValid(destination),
-                "SceneColorDownsamplePass::build: scene color mip chain is "
-                "incomplete");
     const std::string_view debugLabel = mipLevel == 1u
                                             ? "Scene Color Downsample Half"
                                             : "Scene Color Downsample Quarter";
     const uint32_t sourceTexId = gpu_.getTextureBindlessIndex(source);
-    if (sourceTexId == kInvalidTextureBindlessIndex) {
-      return Result<bool, std::string>::makeError(
-          "SceneColorDownsamplePass::build: invalid source texture bindless "
-          "index");
-    }
     const CopyPushConstants pushConstants{
         .sourceTexId = sourceTexId,
         .sourceSamplerId = gpu_.getLinearRepeatSamplerBindlessIndex(true, 1u),
         .flags = kSceneCopyFlagDownsample,
-        .reserved0 = 0u,
     };
     const DrawItem draw = makeFullscreenDraw(
         resources_.pipelineHandle,
         std::span<const std::byte>(
             reinterpret_cast<const std::byte *>(&pushConstants),
             sizeof(pushConstants)),
-        debugLabel);
-    auto colorImportResult =
-        ctx.graph.importTexture(destination, "scene_color_mip");
-    if (colorImportResult.hasError()) {
-      return Result<bool, std::string>::makeError(colorImportResult.error());
-    }
+        debugLabel, kDrawDebugColor);
+    const RenderGraphTextureId color =
+        ctx.graph.importTexture(destination, "scene_color_mip").value();
     const std::span<const TextureHandle> textureReads(&source, 1u);
-    auto addResult = addFullscreenTexturePass(
-        ctx.graph, colorImportResult.value(),
-        std::span<const DrawItem>(&draw, 1u), textureReads, debugLabel,
-        kDownsamplePassDebugColor, false, GpuTimingScope::SceneColorDownsample);
-    if (addResult.hasError()) {
-      return addResult;
-    }
+    addFullscreenTexturePass(ctx.graph, color,
+                             std::span<const DrawItem>(&draw, 1u), textureReads,
+                             debugLabel, kDownsamplePassDebugColor, false,
+                             GpuTimingScope::SceneColorDownsample);
     if (aaMetrics.taaResolvedSceneColorPublished || isPostTaaSceneColorMip) {
       ++aaMetrics.taaPostResolveSceneColorMipPassCount;
       aaMetrics.taaPostResolveSceneColorMipChainGenerated =
@@ -701,7 +477,6 @@ SceneColorDownsamplePass::build(FrameBuildContext &ctx) {
           kFrameCompositionSceneColorMipCount - 1u;
     }
   }
-
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -722,73 +497,42 @@ bool SceneResolvePass::isEnabled(const FrameBuildContext &ctx) const {
          nuri::isValid(ctx.shared.frameColorTexture);
 }
 
-Result<bool, std::string> SceneResolvePass::prepare(FrameBuildContext &ctx) {
-  if (!isEnabled(ctx)) {
-    return Result<bool, std::string>::makeResult(true);
-  }
-  auto initResult =
-      ensureInitialized("scene_resolve", "SceneResolvePass::createShaders");
-  if (initResult.hasError()) {
-    return initResult;
-  }
-  return ensurePipeline(kFrameCompositionFrameColorFormat, "scene_resolve",
-                        "SceneResolvePass::ensurePipeline");
+Result<bool, std::string> SceneResolvePass::prepare(FrameBuildContext &) {
+  return runSteps([&] { return ensureInitialized("scene_resolve"); },
+                  [&] {
+                    return ensurePipeline(kFrameCompositionFrameColorFormat,
+                                          "scene_resolve");
+                  });
 }
 
 Result<bool, std::string> SceneResolvePass::build(FrameBuildContext &ctx) {
-  if (!isEnabled(ctx)) {
-    return Result<bool, std::string>::makeResult(true);
-  }
-
   const SceneResolveSource source = resolveSceneResolveSource(ctx);
   const uint32_t sourceTexId = gpu_.getTextureBindlessIndex(source.texture);
-  if (sourceTexId == kInvalidTextureBindlessIndex) {
-    return Result<bool, std::string>::makeError(
-        "SceneResolvePass::build: invalid scene color bindless index");
-  }
   const bool mipDebugView =
       source.debugView == AntiAliasingDebugView::TAASceneColorHalfRes ||
       source.debugView == AntiAliasingDebugView::TAASceneColorQuarterRes;
   if (mipDebugView) {
     ctx.frame.metrics.antiAliasing.taaSceneColorMipDebugViewRendered = true;
   }
-
   const CopyPushConstants pushConstants{
       .sourceTexId = sourceTexId,
       .sourceSamplerId = gpu_.getLinearRepeatSamplerBindlessIndex(true, 1u),
       .flags = 0u,
-      .reserved0 = 0u,
   };
   const DrawItem draw = makeFullscreenDraw(
       resources_.pipelineHandle,
       std::span<const std::byte>(
           reinterpret_cast<const std::byte *>(&pushConstants),
           sizeof(pushConstants)),
-      "Scene Resolve");
-  if (ctx.frame.frameIndex < kInitialDebugFrames) {
-    NURI_LOG_DEBUG("SceneResolvePass::build: frame=%" PRIu64
-                   " sourceHandle=%u:%u sourceTexId=%u targetHandle=%u:%u",
-                   ctx.frame.frameIndex, source.texture.index,
-                   source.texture.generation, sourceTexId,
-                   ctx.shared.frameColorTexture.index,
-                   ctx.shared.frameColorTexture.generation);
-  }
-
-  auto colorImportResult =
-      ctx.graph.importTexture(ctx.shared.frameColorTexture, "frame_color");
-  if (colorImportResult.hasError()) {
-    return Result<bool, std::string>::makeError(colorImportResult.error());
-  }
+      "Scene Resolve", kDrawDebugColor);
+  const RenderGraphTextureId color =
+      ctx.graph.importTexture(ctx.shared.frameColorTexture, "frame_color")
+          .value();
   const std::span<const TextureHandle> textureReads(&source.texture, 1u);
-  auto addResult = addFullscreenTexturePass(
-      ctx.graph, colorImportResult.value(),
-      std::span<const DrawItem>(&draw, 1u), textureReads, "Scene Resolve Pass",
-      kResolvePassDebugColor);
-  if (addResult.hasError()) {
-    return addResult;
-  }
-
-  ctx.shared.frameColorGraphTexture = colorImportResult.value();
+  addFullscreenTexturePass(ctx.graph, color,
+                           std::span<const DrawItem>(&draw, 1u), textureReads,
+                           "Scene Resolve Pass", kResolvePassDebugColor);
+  ctx.shared.frameColorGraphTexture = color;
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -815,14 +559,7 @@ HDRExposureAdaptPass::~HDRExposureAdaptPass() {
 }
 
 void HDRExposureAdaptPass::destroyLuminanceTextures() {
-  for (std::vector<TextureHandle> &mipTextures : luminanceTextures_) {
-    for (TextureHandle texture : mipTextures) {
-      if (nuri::isValid(texture)) {
-        gpu_.destroyTexture(texture);
-      }
-    }
-  }
-  luminanceTextures_.clear();
+  destroyTextureHandles(gpu_, luminanceTextures_);
   luminanceWidth_ = 0u;
   luminanceHeight_ = 0u;
   luminanceRingCount_ = 0u;
@@ -837,18 +574,16 @@ Result<bool, std::string> HDRExposureAdaptPass::ensureLuminanceTextures() {
   const uint32_t height = static_cast<uint32_t>(std::max(framebufferHeight, 1));
   const uint32_t ringCount = std::max(1u, gpu_.getSwapchainImageCount());
   const uint32_t mipCount = effectiveLuminanceMipCount(width, height);
-
   if (luminanceWidth_ == width && luminanceHeight_ == height &&
       luminanceRingCount_ == ringCount && luminanceMipCount_ == mipCount &&
       luminanceTextures_.size() == mipCount) {
     return Result<bool, std::string>::makeResult(true);
   }
-
   destroyLuminanceTextures();
   luminanceTextures_.resize(mipCount);
   for (uint32_t mip = 0u; mip < mipCount; ++mip) {
     const TextureDimensions dimensions =
-        luminanceMipDimensions(width, height, mip);
+        mipDimensions(width, height, mip, true);
     const TextureDesc desc =
         makeLuminanceTextureDesc(dimensions.width, dimensions.height);
     luminanceTextures_[mip].resize(ringCount);
@@ -864,7 +599,6 @@ Result<bool, std::string> HDRExposureAdaptPass::ensureLuminanceTextures() {
       luminanceTextures_[mip][ring] = createResult.value();
     }
   }
-
   luminanceWidth_ = width;
   luminanceHeight_ = height;
   luminanceRingCount_ = ringCount;
@@ -886,40 +620,25 @@ HDRExposureAdaptPass::prepare(FrameBuildContext &ctx) {
       renderSettingsOrDefault(ctx.frame).hdrPostProcess;
   sanitizeHDRPostProcessSettings(hdr);
   ctx.frame.metrics.hdrPostProcess.adaptationEnabled = hdr.adaptationEnabled;
-  if (!isEnabled(ctx)) {
-    return Result<bool, std::string>::makeResult(true);
-  }
-  auto initResult = ensureInitialized("hdr_exposure_adapt",
-                                      "HDRExposureAdaptPass::createShaders");
-  if (initResult.hasError()) {
-    return initResult;
-  }
-  auto luminanceInitResult = ensureFullscreenPassInitialized(
-      gpu_, luminanceResources_, "hdr_luminance_reduce",
-      "HDRExposureAdaptPass::createLuminanceShaders");
-  if (luminanceInitResult.hasError()) {
-    return luminanceInitResult;
-  }
-  auto exposurePipelineResult =
-      ensurePipeline(kFrameCompositionExposureFormat, "hdr_exposure_adapt",
-                     "HDRExposureAdaptPass::ensurePipeline");
-  if (exposurePipelineResult.hasError()) {
-    return exposurePipelineResult;
-  }
-  auto luminancePipelineResult = ensureFullscreenPassPipeline(
-      gpu_, luminanceResources_, kFrameCompositionExposureFormat,
-      "hdr_luminance_reduce", "HDRExposureAdaptPass::ensureLuminancePipeline");
-  if (luminancePipelineResult.hasError()) {
-    return luminancePipelineResult;
-  }
-  return ensureLuminanceTextures();
+  return runSteps(
+      [&] { return ensureInitialized("hdr_exposure_adapt"); },
+      [&] {
+        return ensureFullscreenPassInitialized(gpu_, luminanceResources_,
+                                               "hdr_luminance_reduce");
+      },
+      [&] {
+        return ensurePipeline(kFrameCompositionExposureFormat,
+                              "hdr_exposure_adapt");
+      },
+      [&] {
+        return ensureFullscreenPassPipeline(gpu_, luminanceResources_,
+                                            kFrameCompositionExposureFormat,
+                                            "hdr_luminance_reduce");
+      },
+      [&] { return ensureLuminanceTextures(); });
 }
 
 Result<bool, std::string> HDRExposureAdaptPass::build(FrameBuildContext &ctx) {
-  if (!isEnabled(ctx)) {
-    return Result<bool, std::string>::makeResult(true);
-  }
-
   RenderSettings::HDRPostProcessSettings hdr =
       renderSettingsOrDefault(ctx.frame).hdrPostProcess;
   sanitizeHDRPostProcessSettings(hdr);
@@ -931,19 +650,10 @@ Result<bool, std::string> HDRExposureAdaptPass::build(FrameBuildContext &ctx) {
       ctx.shared.exposureHistoryValid && nuri::isValid(exposureRead)
           ? gpu_.getTextureBindlessIndex(exposureRead)
           : kInvalidTextureBindlessIndex;
-  if (frameColorTexId == kInvalidTextureBindlessIndex) {
-    return Result<bool, std::string>::makeError(
-        "HDRExposureAdaptPass::build: invalid frame color bindless index");
-  }
-
-  auto sourceImport =
+  const RenderGraphTextureId sourceImport =
       nuri::isValid(ctx.shared.frameColorGraphTexture)
-          ? Result<RenderGraphTextureId, std::string>::makeResult(
-                ctx.shared.frameColorGraphTexture)
-          : ctx.graph.importTexture(source, "hdr_source_color");
-  if (sourceImport.hasError()) {
-    return Result<bool, std::string>::makeError(sourceImport.error());
-  }
+          ? ctx.shared.frameColorGraphTexture
+          : ctx.graph.importTexture(source, "hdr_source_color").value();
   const uint32_t ringIndex =
       luminanceTextures_.empty()
           ? 0u
@@ -951,34 +661,24 @@ Result<bool, std::string> HDRExposureAdaptPass::build(FrameBuildContext &ctx) {
                                   luminanceTextures_[0u].size());
   const uint32_t samplerId = gpu_.getLinearRepeatSamplerBindlessIndex(true, 1u);
   TextureHandle meteringSource = source;
-  RenderGraphTextureId meteringSourceImport = sourceImport.value();
+  RenderGraphTextureId meteringSourceImport = sourceImport;
   uint32_t sourceTexId = frameColorTexId;
   bool reducedLuminanceSource = false;
   if (!luminanceTextures_.empty()) {
-    RenderGraphTextureId previousImport = sourceImport.value();
+    RenderGraphTextureId previousImport = sourceImport;
     TextureHandle previousTexture = source;
     for (uint32_t mip = 0u; mip < luminanceMipCount_; ++mip) {
       const TextureHandle target = luminanceTextures_[mip][ringIndex];
       const uint32_t reduceSourceTexId =
           gpu_.getTextureBindlessIndex(previousTexture);
-      if (reduceSourceTexId == kInvalidTextureBindlessIndex) {
-        return Result<bool, std::string>::makeError(
-            "HDRExposureAdaptPass::build: invalid luminance source bindless "
-            "index");
-      }
-      auto targetImport =
-          ctx.graph.importTexture(target, "hdr_luminance_reduce");
-      if (targetImport.hasError()) {
-        return Result<bool, std::string>::makeError(targetImport.error());
-      }
-
+      const RenderGraphTextureId targetImport =
+          ctx.graph.importTexture(target, "hdr_luminance_reduce").value();
       const TextureDimensions sourceDimensions =
           gpu_.getTextureDimensions(previousTexture);
       const HDRLuminanceReducePushConstants reduceConstants{
           .sourceTexId = reduceSourceTexId,
           .sourceSamplerId = samplerId,
           .mode = mip == 0u ? 0u : 1u,
-          .reserved0 = 0u,
           .texelSizeX =
               1.0f / static_cast<float>(std::max(sourceDimensions.width, 1u)),
           .texelSizeY =
@@ -989,42 +689,21 @@ Result<bool, std::string> HDRExposureAdaptPass::build(FrameBuildContext &ctx) {
           std::span<const std::byte>(
               reinterpret_cast<const std::byte *>(&reduceConstants),
               sizeof(reduceConstants)),
-          "HDRLuminanceReduce");
-      RenderGraphGraphicsPassDesc reducePass{};
-      reducePass.color = {.loadOp = LoadOp::Clear,
-                          .storeOp = StoreOp::Store,
-                          .clearColor = {0.0f, 0.0f, 0.0f, 1.0f}};
-      reducePass.colorTexture = targetImport.value();
-      reducePass.dependencyTextures =
-          std::span<const TextureHandle>(&previousTexture, 1u);
-      reducePass.draws = std::span<const DrawItem>(&reduceDraw, 1u);
-      reducePass.gpuTimingScope = GpuTimingScope::HDRPostProcess;
-      reducePass.debugLabel = "HDR Luminance Reduce Pass";
-      reducePass.debugColor = kHDRPassDebugColor;
-      auto addReduce = ctx.graph.addGraphicsPass(reducePass);
-      if (addReduce.hasError()) {
-        return Result<bool, std::string>::makeError(addReduce.error());
-      }
-      auto sourceRead =
-          ctx.graph.addTextureRead(addReduce.value(), previousImport);
-      if (sourceRead.hasError()) {
-        return Result<bool, std::string>::makeError(sourceRead.error());
-      }
-
+          "HDRLuminanceReduce", kDrawDebugColor);
+      addFullscreenTexturePass(
+          ctx.graph, targetImport, std::span<const DrawItem>(&reduceDraw, 1u),
+          std::span<const TextureHandle>(&previousTexture, 1u),
+          "HDR Luminance Reduce Pass", kHDRPassDebugColor, false,
+          GpuTimingScope::HDRPostProcess,
+          std::span<const RenderGraphTextureId>(&previousImport, 1u));
       previousTexture = target;
-      previousImport = targetImport.value();
+      previousImport = targetImport;
     }
     meteringSource = previousTexture;
     meteringSourceImport = previousImport;
     sourceTexId = gpu_.getTextureBindlessIndex(meteringSource);
-    if (sourceTexId == kInvalidTextureBindlessIndex) {
-      return Result<bool, std::string>::makeError(
-          "HDRExposureAdaptPass::build: invalid reduced luminance bindless "
-          "index");
-    }
     reducedLuminanceSource = true;
   }
-
   const uint32_t flags =
       kHDRPostFlagAdaptationEnabled |
       (previousExposureTexId != kInvalidTextureBindlessIndex
@@ -1042,60 +721,32 @@ Result<bool, std::string> HDRExposureAdaptPass::build(FrameBuildContext &ctx) {
       .maxEv = hdr.adaptationMaxEv,
       .deltaSeconds = static_cast<float>(std::max(ctx.frame.deltaSeconds, 0.0)),
   };
-
-  auto exposureImport =
-      ctx.graph.importTexture(exposureWrite, "hdr_exposure_write");
-  if (exposureImport.hasError()) {
-    return Result<bool, std::string>::makeError(exposureImport.error());
-  }
+  const RenderGraphTextureId exposureImport =
+      ctx.graph.importTexture(exposureWrite, "hdr_exposure_write").value();
   std::array<TextureHandle, 2> reads{meteringSource, {}};
   size_t readCount = 1u;
   RenderGraphTextureId previousExposureImport{};
   if (previousExposureTexId != kInvalidTextureBindlessIndex) {
-    auto importPrevious =
-        ctx.graph.importTexture(exposureRead, "hdr_exposure_read");
-    if (importPrevious.hasError()) {
-      return Result<bool, std::string>::makeError(importPrevious.error());
-    }
-    previousExposureImport = importPrevious.value();
+    previousExposureImport =
+        ctx.graph.importTexture(exposureRead, "hdr_exposure_read").value();
     reads[readCount++] = exposureRead;
   }
-
   const DrawItem draw = makeFullscreenDraw(
       resources_.pipelineHandle,
       std::span<const std::byte>(
           reinterpret_cast<const std::byte *>(&pushConstants),
           sizeof(pushConstants)),
-      "HDRExposureAdapt");
-  RenderGraphGraphicsPassDesc passDesc{};
-  passDesc.color = {.loadOp = LoadOp::Clear,
-                    .storeOp = StoreOp::Store,
-                    .clearColor = {0.0f, 0.0f, 0.0f, 1.0f}};
-  passDesc.colorTexture = exposureImport.value();
-  passDesc.dependencyTextures =
-      std::span<const TextureHandle>(reads.data(), readCount);
-  passDesc.draws = std::span<const DrawItem>(&draw, 1u);
-  passDesc.gpuTimingScope = GpuTimingScope::HDRPostProcess;
-  passDesc.debugLabel = "HDR Exposure Adapt Pass";
-  passDesc.debugColor = kHDRPassDebugColor;
-  auto addResult = ctx.graph.addGraphicsPass(passDesc);
-  if (addResult.hasError()) {
-    return Result<bool, std::string>::makeError(addResult.error());
-  }
-  auto sourceRead =
-      ctx.graph.addTextureRead(addResult.value(), meteringSourceImport);
-  if (sourceRead.hasError()) {
-    return Result<bool, std::string>::makeError(sourceRead.error());
-  }
-  if (nuri::isValid(previousExposureImport)) {
-    auto previousRead =
-        ctx.graph.addTextureRead(addResult.value(), previousExposureImport);
-    if (previousRead.hasError()) {
-      return Result<bool, std::string>::makeError(previousRead.error());
-    }
-  }
+      "HDRExposureAdapt", kDrawDebugColor);
+  std::array<RenderGraphTextureId, 2> graphReads{meteringSourceImport,
+                                                 previousExposureImport};
+  size_t graphReadCount = nuri::isValid(previousExposureImport) ? 2u : 1u;
+  addFullscreenTexturePass(
+      ctx.graph, exposureImport, std::span<const DrawItem>(&draw, 1u),
+      std::span<const TextureHandle>(reads.data(), readCount),
+      "HDR Exposure Adapt Pass", kHDRPassDebugColor, false,
+      GpuTimingScope::HDRPostProcess,
+      std::span<const RenderGraphTextureId>(graphReads.data(), graphReadCount));
   ctx.shared.historyWriteRequirements |= FrameTextureRequirementFlags::Exposure;
-
   HDRPostProcessFrameMetrics &metrics = ctx.frame.metrics.hdrPostProcess;
   metrics.adaptationActive = true;
   metrics.adaptationPassCount += 1u;
@@ -1139,34 +790,15 @@ HDRBloomCompositePass::~HDRBloomCompositePass() {
 }
 
 void HDRBloomCompositePass::destroyOutputTextures() {
-  for (TextureHandle texture : outputTextures_) {
-    if (nuri::isValid(texture)) {
-      gpu_.destroyTexture(texture);
-    }
-  }
-  outputTextures_.clear();
+  destroyTextureHandles(gpu_, outputTextures_);
   outputWidth_ = 0u;
   outputHeight_ = 0u;
   outputRingCount_ = 0u;
 }
 
 void HDRBloomCompositePass::destroyBloomTextures() {
-  for (std::vector<TextureHandle> &mipTextures : bloomDownsampleTextures_) {
-    for (TextureHandle texture : mipTextures) {
-      if (nuri::isValid(texture)) {
-        gpu_.destroyTexture(texture);
-      }
-    }
-  }
-  for (std::vector<TextureHandle> &mipTextures : bloomUpsampleTextures_) {
-    for (TextureHandle texture : mipTextures) {
-      if (nuri::isValid(texture)) {
-        gpu_.destroyTexture(texture);
-      }
-    }
-  }
-  bloomDownsampleTextures_.clear();
-  bloomUpsampleTextures_.clear();
+  destroyTextureHandles(gpu_, bloomDownsampleTextures_);
+  destroyTextureHandles(gpu_, bloomUpsampleTextures_);
   bloomWidth_ = 0u;
   bloomHeight_ = 0u;
   bloomRingCount_ = 0u;
@@ -1212,24 +844,22 @@ HDRBloomCompositePass::ensureBloomTextures(uint32_t requestedMipCount) {
   const uint32_t ringCount = std::max(1u, gpu_.getSwapchainImageCount());
   const uint32_t mipCount =
       effectiveBloomMipCount(width, height, requestedMipCount);
-
   if (mipCount == 0u) {
     destroyBloomTextures();
     return Result<bool, std::string>::makeResult(true);
   }
-
   if (bloomWidth_ == width && bloomHeight_ == height &&
       bloomRingCount_ == ringCount && bloomMipCount_ == mipCount &&
       bloomDownsampleTextures_.size() == mipCount &&
       bloomUpsampleTextures_.size() == mipCount) {
     return Result<bool, std::string>::makeResult(true);
   }
-
   destroyBloomTextures();
   bloomDownsampleTextures_.resize(mipCount);
   bloomUpsampleTextures_.resize(mipCount);
   for (uint32_t mip = 0u; mip < mipCount; ++mip) {
-    const TextureDimensions dimensions = bloomMipDimensions(width, height, mip);
+    const TextureDimensions dimensions =
+        mipDimensions(width, height, mip, false);
     const TextureDesc desc =
         makePostProcessTextureDesc(dimensions.width, dimensions.height);
     bloomDownsampleTextures_[mip].resize(ringCount);
@@ -1244,7 +874,6 @@ HDRBloomCompositePass::ensureBloomTextures(uint32_t requestedMipCount) {
         return Result<bool, std::string>::makeError(downsampleResult.error());
       }
       bloomDownsampleTextures_[mip][ring] = downsampleResult.value();
-
       const std::string upsampleName = "hdr_bloom_upsample_mip_" +
                                        std::to_string(mip) + "_slot_" +
                                        std::to_string(ring);
@@ -1276,67 +905,39 @@ HDRBloomCompositePass::prepare(FrameBuildContext &ctx) {
   HDRPostProcessFrameMetrics &metrics = ctx.frame.metrics.hdrPostProcess;
   metrics.bloomEnabled = hdr.bloomEnabled;
   metrics.adaptationEnabled = hdr.adaptationEnabled;
-  if (!isEnabled(ctx)) {
-    return Result<bool, std::string>::makeResult(true);
-  }
   const bool needsBloomChain = shouldBuildBloomChain(hdr);
-  auto initResult = ensureInitialized("hdr_bloom_composite",
-                                      "HDRBloomCompositePass::createShaders");
-  if (initResult.hasError()) {
-    return initResult;
-  }
-  if (needsBloomChain) {
-    auto bloomInitResult = ensureFullscreenPassInitialized(
-        gpu_, bloomResources_, "hdr_bloom",
-        "HDRBloomCompositePass::createBloomShaders");
-    if (bloomInitResult.hasError()) {
-      return bloomInitResult;
-    }
-  }
-  auto pipelineResult =
-      ensurePipeline(kFrameCompositionFrameColorFormat, "hdr_bloom_composite",
-                     "HDRBloomCompositePass::ensurePipeline");
-  if (pipelineResult.hasError()) {
-    return pipelineResult;
-  }
-  if (needsBloomChain) {
-    auto bloomPipelineResult = ensureFullscreenPassPipeline(
-        gpu_, bloomResources_, kFrameCompositionFrameColorFormat, "hdr_bloom",
-        "HDRBloomCompositePass::ensureBloomPipeline");
-    if (bloomPipelineResult.hasError()) {
-      return bloomPipelineResult;
-    }
-  }
-  auto outputResult = ensureOutputTextures();
-  if (outputResult.hasError()) {
-    return outputResult;
-  }
-  return ensureBloomTextures(needsBloomChain ? hdr.bloomMaxMipCount : 0u);
+  const auto success = [] {
+    return Result<bool, std::string>::makeResult(true);
+  };
+  return runSteps(
+      [&] { return ensureInitialized("hdr_bloom_composite"); },
+      [&] {
+        return needsBloomChain ? ensureFullscreenPassInitialized(
+                                     gpu_, bloomResources_, "hdr_bloom")
+                               : success();
+      },
+      [&] {
+        return ensurePipeline(kFrameCompositionFrameColorFormat,
+                              "hdr_bloom_composite");
+      },
+      [&] {
+        return needsBloomChain
+                   ? ensureFullscreenPassPipeline(
+                         gpu_, bloomResources_,
+                         kFrameCompositionFrameColorFormat, "hdr_bloom")
+                   : success();
+      },
+      [&] { return ensureOutputTextures(); },
+      [&] {
+        return ensureBloomTextures(needsBloomChain ? hdr.bloomMaxMipCount : 0u);
+      });
 }
 
 Result<bool, std::string> HDRBloomCompositePass::build(FrameBuildContext &ctx) {
-  if (!isEnabled(ctx)) {
-    return Result<bool, std::string>::makeResult(true);
-  }
   RenderSettings::HDRPostProcessSettings hdr =
       renderSettingsOrDefault(ctx.frame).hdrPostProcess;
   sanitizeHDRPostProcessSettings(hdr);
   const bool needsBloomChain = shouldBuildBloomChain(hdr);
-
-  auto outputResult = ensureOutputTextures();
-  if (outputResult.hasError()) {
-    return outputResult;
-  }
-  auto bloomTextureResult =
-      ensureBloomTextures(needsBloomChain ? hdr.bloomMaxMipCount : 0u);
-  if (bloomTextureResult.hasError()) {
-    return bloomTextureResult;
-  }
-  if (outputTextures_.empty()) {
-    return Result<bool, std::string>::makeError(
-        "HDRBloomCompositePass::build: output texture ring is empty");
-  }
-
   const uint32_t ringIndex =
       static_cast<uint32_t>(ctx.frame.frameIndex % outputTextures_.size());
   const TextureHandle source = ctx.shared.frameColorTexture;
@@ -1348,41 +949,24 @@ Result<bool, std::string> HDRBloomCompositePass::build(FrameBuildContext &ctx) {
   const uint32_t exposureTexId = nuri::isValid(exposure)
                                      ? gpu_.getTextureBindlessIndex(exposure)
                                      : kInvalidTextureBindlessIndex;
-  if (sourceTexId == kInvalidTextureBindlessIndex ||
-      outputTexId == kInvalidTextureBindlessIndex) {
-    return Result<bool, std::string>::makeError(
-        "HDRBloomCompositePass::build: invalid bindless texture index");
-  }
-
-  auto sourceImport =
+  const RenderGraphTextureId sourceImport =
       nuri::isValid(ctx.shared.frameColorGraphTexture)
-          ? Result<RenderGraphTextureId, std::string>::makeResult(
-                ctx.shared.frameColorGraphTexture)
-          : ctx.graph.importTexture(source, "hdr_frame_color");
-  if (sourceImport.hasError()) {
-    return Result<bool, std::string>::makeError(sourceImport.error());
-  }
-  auto outputImport = ctx.graph.importTexture(output, "hdr_postprocess_output");
-  if (outputImport.hasError()) {
-    return Result<bool, std::string>::makeError(outputImport.error());
-  }
+          ? ctx.shared.frameColorGraphTexture
+          : ctx.graph.importTexture(source, "hdr_frame_color").value();
+  const RenderGraphTextureId outputImport =
+      ctx.graph.importTexture(output, "hdr_postprocess_output").value();
   RenderGraphTextureId exposureImport{};
   if (hdr.adaptationEnabled && exposureTexId != kInvalidTextureBindlessIndex) {
-    auto importExposure = ctx.graph.importTexture(exposure, "hdr_exposure");
-    if (importExposure.hasError()) {
-      return Result<bool, std::string>::makeError(importExposure.error());
-    }
-    exposureImport = importExposure.value();
+    exposureImport = ctx.graph.importTexture(exposure, "hdr_exposure").value();
   }
-
   const uint32_t samplerId = gpu_.getLinearRepeatSamplerBindlessIndex(true, 1u);
   const float manualExposureEv =
       renderSettingsOrDefault(ctx.frame).toneMap.exposureEv;
-  const bool bloomAvailable = needsBloomChain && bloomMipCount_ != 0u &&
-                              !bloomDownsampleTextures_.empty() &&
-                              !bloomUpsampleTextures_.empty();
-  std::vector<RenderGraphTextureId> bloomDownsampleImports(bloomMipCount_);
-  std::vector<RenderGraphTextureId> bloomUpsampleImports(bloomMipCount_);
+  const bool bloomAvailable = needsBloomChain && bloomMipCount_ != 0u;
+  std::array<RenderGraphTextureId, kMaxSceneDepthPyramidLevels>
+      bloomDownsampleImports{};
+  std::array<RenderGraphTextureId, kMaxSceneDepthPyramidLevels>
+      bloomUpsampleImports{};
   if (bloomAvailable) {
     for (uint32_t mip = 0u; mip < bloomMipCount_; ++mip) {
       const TextureHandle downsampleTarget =
@@ -1391,18 +975,9 @@ Result<bool, std::string> HDRBloomCompositePass::build(FrameBuildContext &ctx) {
           mip == 0u ? source : bloomDownsampleTextures_[mip - 1u][ringIndex];
       const uint32_t downsampleSourceTexId =
           gpu_.getTextureBindlessIndex(downsampleSource);
-      if (downsampleSourceTexId == kInvalidTextureBindlessIndex) {
-        return Result<bool, std::string>::makeError(
-            "HDRBloomCompositePass::build: invalid bloom downsample source "
-            "bindless index");
-      }
-
-      auto targetImport =
-          ctx.graph.importTexture(downsampleTarget, "hdr_bloom_downsample");
-      if (targetImport.hasError()) {
-        return Result<bool, std::string>::makeError(targetImport.error());
-      }
-      bloomDownsampleImports[mip] = targetImport.value();
+      bloomDownsampleImports[mip] =
+          ctx.graph.importTexture(downsampleTarget, "hdr_bloom_downsample")
+              .value();
       const HDRBloomPushConstants downsampleConstants{
           .sourceTexId = downsampleSourceTexId,
           .secondaryTexId = kInvalidTextureBindlessIndex,
@@ -1426,41 +1001,24 @@ Result<bool, std::string> HDRBloomCompositePass::build(FrameBuildContext &ctx) {
           std::span<const std::byte>(
               reinterpret_cast<const std::byte *>(&downsampleConstants),
               sizeof(downsampleConstants)),
-          "HDRBloomDownsample");
-      RenderGraphGraphicsPassDesc downsamplePass{};
-      downsamplePass.color = {.loadOp = LoadOp::Clear,
-                              .storeOp = StoreOp::Store,
-                              .clearColor = {0.0f, 0.0f, 0.0f, 1.0f}};
-      downsamplePass.colorTexture = targetImport.value();
+          "HDRBloomDownsample", kDrawDebugColor);
       std::array<TextureHandle, 2> downsampleReads{downsampleSource, exposure};
       const size_t downsampleReadCount =
           mip == 0u && exposureTexId != kInvalidTextureBindlessIndex ? 2u : 1u;
-      downsamplePass.dependencyTextures = std::span<const TextureHandle>(
-          downsampleReads.data(), downsampleReadCount);
-      downsamplePass.draws = std::span<const DrawItem>(&downsampleDraw, 1u);
-      downsamplePass.gpuTimingScope = GpuTimingScope::HDRPostProcess;
-      downsamplePass.debugLabel = "HDR Bloom Downsample Pass";
-      downsamplePass.debugColor = kHDRPassDebugColor;
-      auto addDownsample = ctx.graph.addGraphicsPass(downsamplePass);
-      if (addDownsample.hasError()) {
-        return Result<bool, std::string>::makeError(addDownsample.error());
-      }
       const RenderGraphTextureId downsampleSourceImport =
-          mip == 0u ? sourceImport.value() : bloomDownsampleImports[mip - 1u];
-      auto sourceRead = ctx.graph.addTextureRead(addDownsample.value(),
-                                                 downsampleSourceImport);
-      if (sourceRead.hasError()) {
-        return Result<bool, std::string>::makeError(sourceRead.error());
-      }
-      if (mip == 0u && nuri::isValid(exposureImport)) {
-        auto exposureRead =
-            ctx.graph.addTextureRead(addDownsample.value(), exposureImport);
-        if (exposureRead.hasError()) {
-          return Result<bool, std::string>::makeError(exposureRead.error());
-        }
-      }
+          mip == 0u ? sourceImport : bloomDownsampleImports[mip - 1u];
+      std::array<RenderGraphTextureId, 2> downsampleGraphReads{
+          downsampleSourceImport, exposureImport};
+      addFullscreenTexturePass(
+          ctx.graph, bloomDownsampleImports[mip],
+          std::span<const DrawItem>(&downsampleDraw, 1u),
+          std::span<const TextureHandle>(downsampleReads.data(),
+                                         downsampleReadCount),
+          "HDR Bloom Downsample Pass", kHDRPassDebugColor, false,
+          GpuTimingScope::HDRPostProcess,
+          std::span<const RenderGraphTextureId>(downsampleGraphReads.data(),
+                                                downsampleReadCount));
     }
-
     for (uint32_t offset = 0u; offset < bloomMipCount_; ++offset) {
       const uint32_t mip = bloomMipCount_ - 1u - offset;
       const bool smallestMip = mip + 1u == bloomMipCount_;
@@ -1476,19 +1034,8 @@ Result<bool, std::string> HDRBloomCompositePass::build(FrameBuildContext &ctx) {
       const uint32_t highSourceTexId =
           nuri::isValid(highSource) ? gpu_.getTextureBindlessIndex(highSource)
                                     : kInvalidTextureBindlessIndex;
-      if (lowSourceTexId == kInvalidTextureBindlessIndex ||
-          (!smallestMip && highSourceTexId == kInvalidTextureBindlessIndex)) {
-        return Result<bool, std::string>::makeError(
-            "HDRBloomCompositePass::build: invalid bloom upsample bindless "
-            "index");
-      }
-
-      auto targetImport =
-          ctx.graph.importTexture(upsampleTarget, "hdr_bloom_upsample");
-      if (targetImport.hasError()) {
-        return Result<bool, std::string>::makeError(targetImport.error());
-      }
-      bloomUpsampleImports[mip] = targetImport.value();
+      bloomUpsampleImports[mip] =
+          ctx.graph.importTexture(upsampleTarget, "hdr_bloom_upsample").value();
       const HDRBloomPushConstants upsampleConstants{
           .sourceTexId = lowSourceTexId,
           .secondaryTexId = highSourceTexId,
@@ -1509,48 +1056,32 @@ Result<bool, std::string> HDRBloomCompositePass::build(FrameBuildContext &ctx) {
           std::span<const std::byte>(
               reinterpret_cast<const std::byte *>(&upsampleConstants),
               sizeof(upsampleConstants)),
-          "HDRBloomUpsample");
+          "HDRBloomUpsample", kDrawDebugColor);
       std::array<TextureHandle, 2> upsampleReads{lowSource, highSource};
       const size_t upsampleReadCount = smallestMip ? 1u : 2u;
-      RenderGraphGraphicsPassDesc upsamplePass{};
-      upsamplePass.color = {.loadOp = LoadOp::Clear,
-                            .storeOp = StoreOp::Store,
-                            .clearColor = {0.0f, 0.0f, 0.0f, 1.0f}};
-      upsamplePass.colorTexture = targetImport.value();
-      upsamplePass.dependencyTextures = std::span<const TextureHandle>(
-          upsampleReads.data(), upsampleReadCount);
-      upsamplePass.draws = std::span<const DrawItem>(&upsampleDraw, 1u);
-      upsamplePass.gpuTimingScope = GpuTimingScope::HDRPostProcess;
-      upsamplePass.debugLabel = "HDR Bloom Upsample Pass";
-      upsamplePass.debugColor = kHDRPassDebugColor;
-      auto addUpsample = ctx.graph.addGraphicsPass(upsamplePass);
-      if (addUpsample.hasError()) {
-        return Result<bool, std::string>::makeError(addUpsample.error());
-      }
       const RenderGraphTextureId lowSourceImport =
           smallestMip ? bloomDownsampleImports[mip]
                       : bloomUpsampleImports[mip + 1u];
-      auto lowRead =
-          ctx.graph.addTextureRead(addUpsample.value(), lowSourceImport);
-      if (lowRead.hasError()) {
-        return Result<bool, std::string>::makeError(lowRead.error());
-      }
-      if (!smallestMip) {
-        auto highRead = ctx.graph.addTextureRead(addUpsample.value(),
-                                                 bloomDownsampleImports[mip]);
-        if (highRead.hasError()) {
-          return Result<bool, std::string>::makeError(highRead.error());
-        }
-      }
+      std::array<RenderGraphTextureId, 2> upsampleGraphReads{
+          lowSourceImport, bloomDownsampleImports[mip]};
+      addFullscreenTexturePass(
+          ctx.graph, bloomUpsampleImports[mip],
+          std::span<const DrawItem>(&upsampleDraw, 1u),
+          std::span<const TextureHandle>(upsampleReads.data(),
+                                         upsampleReadCount),
+          "HDR Bloom Upsample Pass", kHDRPassDebugColor, false,
+          GpuTimingScope::HDRPostProcess,
+          std::span<const RenderGraphTextureId>(upsampleGraphReads.data(),
+                                                upsampleReadCount));
     }
   }
-
   std::array<TextureHandle, 3> compositeReads{source, {}, {}};
+  std::array<RenderGraphTextureId, 3> compositeGraphReads{sourceImport, {}, {}};
   size_t compositeReadCount = 1u;
   if (nuri::isValid(exposureImport)) {
     compositeReads[compositeReadCount++] = exposure;
+    compositeGraphReads[1] = exposureImport;
   }
-
   TextureHandle bloomCompositeTexture{};
   RenderGraphTextureId bloomCompositeImport{};
   uint32_t bloomTexId = kInvalidTextureBindlessIndex;
@@ -1563,13 +1094,9 @@ Result<bool, std::string> HDRBloomCompositePass::build(FrameBuildContext &ctx) {
       bloomCompositeImport = bloomUpsampleImports[0u];
     }
     bloomTexId = gpu_.getTextureBindlessIndex(bloomCompositeTexture);
-    if (bloomTexId == kInvalidTextureBindlessIndex) {
-      return Result<bool, std::string>::makeError(
-          "HDRBloomCompositePass::build: invalid final bloom bindless index");
-    }
-    compositeReads[compositeReadCount++] = bloomCompositeTexture;
+    compositeReads[compositeReadCount] = bloomCompositeTexture;
+    compositeGraphReads[compositeReadCount++] = bloomCompositeImport;
   }
-
   const float fallbackEv = 0.0f;
   const uint32_t flags =
       (hdr.bloomEnabled && bloomTexId != kInvalidTextureBindlessIndex
@@ -1585,56 +1112,25 @@ Result<bool, std::string> HDRBloomCompositePass::build(FrameBuildContext &ctx) {
       .sourceSamplerId = samplerId,
       .flags = flags,
       .debugView = static_cast<uint32_t>(hdr.debugView),
-      .reserved0 = 0u,
-      .reserved1 = 0u,
       .bloomStrength = hdr.bloomStrength,
       .fallbackExposureEv = fallbackEv,
       .adaptationTargetGray = hdr.adaptationTargetGray,
       .adaptationMinEv = hdr.adaptationMinEv,
       .adaptationMaxEv = hdr.adaptationMaxEv,
   };
-
   const DrawItem compositeDraw = makeFullscreenDraw(
       resources_.pipelineHandle,
       std::span<const std::byte>(
           reinterpret_cast<const std::byte *>(&compositeConstants),
           sizeof(compositeConstants)),
-      "HDRBloomComposite");
-  RenderGraphGraphicsPassDesc compositePass{};
-  compositePass.color = {.loadOp = LoadOp::Clear,
-                         .storeOp = StoreOp::Store,
-                         .clearColor = {0.0f, 0.0f, 0.0f, 1.0f}};
-  compositePass.colorTexture = outputImport.value();
-  compositePass.dependencyTextures =
-      std::span<const TextureHandle>(compositeReads.data(), compositeReadCount);
-  compositePass.draws = std::span<const DrawItem>(&compositeDraw, 1u);
-  compositePass.gpuTimingScope = GpuTimingScope::HDRPostProcess;
-  compositePass.debugLabel = "HDR Bloom Composite Pass";
-  compositePass.debugColor = kHDRPassDebugColor;
-  auto addComposite = ctx.graph.addGraphicsPass(compositePass);
-  if (addComposite.hasError()) {
-    return Result<bool, std::string>::makeError(addComposite.error());
-  }
-  auto sourceRead =
-      ctx.graph.addTextureRead(addComposite.value(), sourceImport.value());
-  if (sourceRead.hasError()) {
-    return Result<bool, std::string>::makeError(sourceRead.error());
-  }
-  if (nuri::isValid(exposureImport)) {
-    auto exposureRead =
-        ctx.graph.addTextureRead(addComposite.value(), exposureImport);
-    if (exposureRead.hasError()) {
-      return Result<bool, std::string>::makeError(exposureRead.error());
-    }
-  }
-  if (nuri::isValid(bloomCompositeImport)) {
-    auto bloomRead =
-        ctx.graph.addTextureRead(addComposite.value(), bloomCompositeImport);
-    if (bloomRead.hasError()) {
-      return Result<bool, std::string>::makeError(bloomRead.error());
-    }
-  }
-
+      "HDRBloomComposite", kDrawDebugColor);
+  addFullscreenTexturePass(
+      ctx.graph, outputImport, std::span<const DrawItem>(&compositeDraw, 1u),
+      std::span<const TextureHandle>(compositeReads.data(), compositeReadCount),
+      "HDR Bloom Composite Pass", kHDRPassDebugColor, false,
+      GpuTimingScope::HDRPostProcess,
+      std::span<const RenderGraphTextureId>(compositeGraphReads.data(),
+                                            compositeReadCount));
   HDRBloomCompositePushConstants copyConstants = compositeConstants;
   copyConstants.sourceTexId = outputTexId;
   copyConstants.bloomTexId = kInvalidTextureBindlessIndex;
@@ -1648,27 +1144,13 @@ Result<bool, std::string> HDRBloomCompositePass::build(FrameBuildContext &ctx) {
       std::span<const std::byte>(
           reinterpret_cast<const std::byte *>(&copyConstants),
           sizeof(copyConstants)),
-      "HDRPostProcessCopyBack");
-  RenderGraphGraphicsPassDesc copyPass{};
-  copyPass.color = {.loadOp = LoadOp::Clear,
-                    .storeOp = StoreOp::Store,
-                    .clearColor = {0.0f, 0.0f, 0.0f, 1.0f}};
-  copyPass.colorTexture = sourceImport.value();
-  copyPass.dependencyTextures = std::span<const TextureHandle>(&output, 1u);
-  copyPass.draws = std::span<const DrawItem>(&copyDraw, 1u);
-  copyPass.gpuTimingScope = GpuTimingScope::HDRPostProcess;
-  copyPass.debugLabel = "HDR Postprocess Copy Back Pass";
-  copyPass.debugColor = kHDRPassDebugColor;
-  auto addCopy = ctx.graph.addGraphicsPass(copyPass);
-  if (addCopy.hasError()) {
-    return Result<bool, std::string>::makeError(addCopy.error());
-  }
-  auto outputRead =
-      ctx.graph.addTextureRead(addCopy.value(), outputImport.value());
-  if (outputRead.hasError()) {
-    return Result<bool, std::string>::makeError(outputRead.error());
-  }
-
+      "HDRPostProcessCopyBack", kDrawDebugColor);
+  addFullscreenTexturePass(
+      ctx.graph, sourceImport, std::span<const DrawItem>(&copyDraw, 1u),
+      std::span<const TextureHandle>(&output, 1u),
+      "HDR Postprocess Copy Back Pass", kHDRPassDebugColor, false,
+      GpuTimingScope::HDRPostProcess,
+      std::span<const RenderGraphTextureId>(&outputImport, 1u));
   HDRPostProcessFrameMetrics &metrics = ctx.frame.metrics.hdrPostProcess;
   const TextureDimensions dimensions = gpu_.getTextureDimensions(source);
   metrics.width = dimensions.width;
@@ -1702,8 +1184,6 @@ Result<bool, std::string> HDRBloomCompositePass::build(FrameBuildContext &ctx) {
       metrics.effectiveExposureEv =
           metrics.adaptedExposureEv +
           renderSettingsOrDefault(ctx.frame).toneMap.exposureEv;
-      metrics.measuredLogAverageLuminance =
-          std::log2(std::max(*adaptedLuminance, 1.0e-4f));
     }
   }
   const GpuTimingReport &timingReport = ctx.frame.gpuTiming;
@@ -1713,8 +1193,8 @@ Result<bool, std::string> HDRBloomCompositePass::build(FrameBuildContext &ctx) {
         timingReport.hdrPostProcessSourceFrameIndex;
     metrics.gpuTimingAvailable = 1u;
   }
-  ctx.shared.frameColorGraphTexture = sourceImport.value();
-  ctx.frame.sharedResources.frameColorGraphTexture = sourceImport.value();
+  ctx.shared.frameColorGraphTexture = sourceImport;
+  ctx.frame.sharedResources.frameColorGraphTexture = sourceImport;
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -1730,13 +1210,14 @@ PresentToneMapPass::PresentToneMapPass(GPUDevice &gpu,
                                 : config.presentFragment;
   captureResources_.vertexPath = resources_.vertexPath;
   captureResources_.fragmentPath = resources_.fragmentPath;
-  aces2SdrLut_.path = config.aces2SdrLut;
-  agxLut_.path = config.agxLut;
+  toneMapLuts_[0].path = config.aces2SdrLut;
+  toneMapLuts_[1].path = config.agxLut;
 }
 
 PresentToneMapPass::~PresentToneMapPass() {
   destroyFullscreenPassResources(gpu_, captureResources_);
-  destroyToneMapAssets();
+  if (nuri::isValid(lutSampler_))
+    gpu_.destroySampler(lutSampler_);
 }
 
 bool PresentToneMapPass::isEnabled(const FrameBuildContext &ctx) const {
@@ -1744,93 +1225,59 @@ bool PresentToneMapPass::isEnabled(const FrameBuildContext &ctx) const {
 }
 
 Result<bool, std::string> PresentToneMapPass::prepare(FrameBuildContext &ctx) {
-  if (!isEnabled(ctx)) {
-    return Result<bool, std::string>::makeResult(true);
-  }
-  auto initResult =
-      ensureInitialized("present_tonemap", "PresentToneMapPass::createShaders");
+  auto initResult = ensureInitialized("present_tonemap");
   if (initResult.hasError()) {
     return initResult;
   }
-  auto assetsResult = ensureToneMapAssetsLoaded();
-  if (assetsResult.hasError()) {
-    return assetsResult;
-  }
+  auto samplerResult = ensureToneMapSampler();
+  if (samplerResult.hasError())
+    return samplerResult;
+  for (size_t i = 0; i < toneMapLuts_.size(); ++i)
+    ensureToneMapLutLoaded(toneMapLuts_[i], kToneMapLutNames[i]);
   auto pipelineResult =
-      ensurePipeline(gpu_.getSwapchainFormat(), "present_tonemap",
-                     "PresentToneMapPass::ensurePipeline");
+      ensurePipeline(gpu_.getSwapchainFormat(), "present_tonemap");
   if (pipelineResult.hasError()) {
     return pipelineResult;
   }
   if (isRenderCaptureRequested(ctx.frame, "final_color") &&
       nuri::isValid(ctx.shared.presentCaptureTexture)) {
     auto captureInit = ensureFullscreenPassInitialized(
-        gpu_, captureResources_, "present_tonemap_capture",
-        "PresentToneMapPass::createCaptureShaders");
+        gpu_, captureResources_, "present_tonemap_capture");
     if (captureInit.hasError()) {
       return captureInit;
     }
-    return ensureFullscreenPassPipeline(
-        gpu_, captureResources_, Format::RGBA8_UNORM, "present_tonemap_capture",
-        "PresentToneMapPass::ensureCapturePipeline");
+    return ensureFullscreenPassPipeline(gpu_, captureResources_,
+                                        Format::RGBA8_UNORM,
+                                        "present_tonemap_capture");
   }
   return Result<bool, std::string>::makeResult(true);
 }
 
 Result<bool, std::string> PresentToneMapPass::build(FrameBuildContext &ctx) {
-  if (!isEnabled(ctx)) {
-    return Result<bool, std::string>::makeResult(true);
-  }
-
   const TextureHandle source = ctx.shared.frameColorTexture;
   const uint32_t sourceTexId = gpu_.getTextureBindlessIndex(source);
-  if (sourceTexId == kInvalidTextureBindlessIndex) {
-    return Result<bool, std::string>::makeError(
-        "PresentToneMapPass::build: invalid frame color bindless index");
-  }
-
-  const bool acesLutAvailable =
-      aces2SdrLut_.texture != nullptr && aces2SdrLut_.texture->valid();
-  const bool agxLutAvailable =
-      agxLut_.texture != nullptr && agxLut_.texture->valid();
+  const auto available = [](const ToneMapLutResource &lut) {
+    return lut.texture && lut.texture->valid();
+  };
+  const bool acesLutAvailable = available(toneMapLuts_[0]);
+  const bool agxLutAvailable = available(toneMapLuts_[1]);
   const PresentToneMapState toneMapState =
       buildPresentToneMapState(renderSettingsOrDefault(ctx.frame).toneMap,
                                acesLutAvailable, agxLutAvailable);
   const Format swapchainFormat = gpu_.getSwapchainFormat();
   const bool manualSrgbEncode = swapchainFormat != Format::RGBA8_SRGB;
   const uint32_t flags = buildPresentFlags(toneMapState, manualSrgbEncode);
-
-  uint32_t acesLutTexId = 0u;
-  uint32_t agxLutTexId = 0u;
-  if (acesLutAvailable) {
-    auto texIdResult =
-        resolveLutBindlessIndex(gpu_, aces2SdrLut_.texture->handle(), "ACES");
-    if (texIdResult.hasError()) {
-      return Result<bool, std::string>::makeError(texIdResult.error());
-    }
-    acesLutTexId = texIdResult.value();
-  }
-  if (agxLutAvailable) {
-    auto texIdResult =
-        resolveLutBindlessIndex(gpu_, agxLut_.texture->handle(), "AgX");
-    if (texIdResult.hasError()) {
-      return Result<bool, std::string>::makeError(texIdResult.error());
-    }
-    agxLutTexId = texIdResult.value();
-  }
+  std::array<uint32_t, 2> lutTexIds{};
+  for (size_t i = 0; i < toneMapLuts_.size(); ++i)
+    if (available(toneMapLuts_[i]))
+      lutTexIds[i] =
+          gpu_.getTextureBindlessIndex(toneMapLuts_[i].texture->handle());
   const uint32_t lutSamplerId = gpu_.getSamplerBindlessIndex(lutSampler_);
-  if ((acesLutAvailable || agxLutAvailable) &&
-      lutSamplerId == kInvalidTextureBindlessIndex) {
-    return Result<bool, std::string>::makeError(
-        "PresentToneMapPass::build: invalid tone-map LUT sampler bindless "
-        "index");
-  }
-
   const PushConstants pushConstants{
       .sourceTexId = sourceTexId,
       .sourceSamplerId = gpu_.getLinearRepeatSamplerBindlessIndex(true, 1u),
-      .acesLutTexId = acesLutTexId,
-      .agxLutTexId = agxLutTexId,
+      .acesLutTexId = lutTexIds[0],
+      .agxLutTexId = lutTexIds[1],
       .lutSamplerId = lutSamplerId,
       .flags = flags,
       .acesExposureScale =
@@ -1847,115 +1294,63 @@ Result<bool, std::string> PresentToneMapPass::build(FrameBuildContext &ctx) {
       std::span<const std::byte>(
           reinterpret_cast<const std::byte *>(&pushConstants),
           sizeof(pushConstants)),
-      "Present ToneMap");
+      "Present ToneMap", kDrawDebugColor);
   const DrawItem captureDraw = makeFullscreenDraw(
       captureResources_.pipelineHandle,
       std::span<const std::byte>(
           reinterpret_cast<const std::byte *>(&pushConstants),
           sizeof(pushConstants)),
-      "Present ToneMap Capture");
-  if (ctx.frame.frameIndex < kInitialDebugFrames) {
-    NURI_LOG_DEBUG(
-        "PresentToneMapPass::build: frame=%" PRIu64
-        " sourceHandle=%u:%u sourceTexId=%u acesLutTexId=%u agxLutTexId=%u",
-        ctx.frame.frameIndex, source.index, source.generation, sourceTexId,
-        acesLutTexId, agxLutTexId);
-  }
-
-  auto sourceImportResult =
-      ctx.graph.importTexture(source, "present_frame_color");
-  if (sourceImportResult.hasError()) {
-    return Result<bool, std::string>::makeError(sourceImportResult.error());
-  }
+      "Present ToneMap Capture", kDrawDebugColor);
+  const RenderGraphTextureId sourceImport =
+      ctx.graph.importTexture(source, "present_frame_color").value();
   std::array<RenderGraphTextureId, 2> lutImports{};
   std::array<TextureHandle, 3> dependencies{source, {}, {}};
   size_t dependencyCount = 1u;
-  if (acesLutAvailable) {
-    auto lutImportResult = ctx.graph.importTexture(
-        aces2SdrLut_.texture->handle(), "present_aces_lut");
-    if (lutImportResult.hasError()) {
-      return Result<bool, std::string>::makeError(lutImportResult.error());
-    }
-    lutImports[0] = lutImportResult.value();
-    dependencies[dependencyCount++] = aces2SdrLut_.texture->handle();
+  for (size_t i = 0; i < toneMapLuts_.size(); ++i) {
+    if (!available(toneMapLuts_[i]))
+      continue;
+    const TextureHandle texture = toneMapLuts_[i].texture->handle();
+    lutImports[i] =
+        ctx.graph.importTexture(texture, kToneMapLutImportNames[i]).value();
+    dependencies[dependencyCount++] = texture;
   }
-  if (agxLutAvailable) {
-    auto lutImportResult =
-        ctx.graph.importTexture(agxLut_.texture->handle(), "present_agx_lut");
-    if (lutImportResult.hasError()) {
-      return Result<bool, std::string>::makeError(lutImportResult.error());
-    }
-    lutImports[1] = lutImportResult.value();
-    dependencies[dependencyCount++] = agxLut_.texture->handle();
-  }
-
-  const auto addToneMapReads =
-      [&](RenderGraphPassId passId) -> Result<bool, std::string> {
-    auto readResult =
-        ctx.graph.addTextureRead(passId, sourceImportResult.value());
-    if (readResult.hasError()) {
-      return Result<bool, std::string>::makeError(readResult.error());
-    }
-    if (acesLutAvailable) {
-      auto lutReadResult = ctx.graph.addTextureRead(passId, lutImports[0]);
-      if (lutReadResult.hasError()) {
-        return Result<bool, std::string>::makeError(lutReadResult.error());
-      }
-    }
-    if (agxLutAvailable) {
-      auto lutReadResult = ctx.graph.addTextureRead(passId, lutImports[1]);
-      if (lutReadResult.hasError()) {
-        return Result<bool, std::string>::makeError(lutReadResult.error());
-      }
-    }
-    return Result<bool, std::string>::makeResult(true);
+  const auto addToneMapReads = [&](RenderGraphPassId passId) {
+    (void)ctx.graph.addTextureRead(passId, sourceImport).value();
+    for (RenderGraphTextureId lut : lutImports)
+      if (nuri::isValid(lut))
+        (void)ctx.graph.addTextureRead(passId, lut).value();
   };
-
   publishRequestedCapture(ctx.frame, gpu_, "frame_color_hdr", source,
                           RenderCaptureValueKind::LinearHdrColor,
                           RenderCaptureLifetimeClass::FrameSharedRingTexture,
                           "linear_hdr", "hdr_color", "PresentToneMapPass",
                           "frame_color_hdr");
-
   if (isRenderCaptureRequested(ctx.frame, "final_color") &&
       nuri::isValid(ctx.shared.presentCaptureTexture)) {
-    if (!nuri::isValid(captureResources_.pipelineHandle)) {
-      return Result<bool, std::string>::makeError(
-          "PresentToneMapPass::build: invalid capture pipeline");
-    }
-    auto captureImport = ctx.graph.importTexture(
-        ctx.shared.presentCaptureTexture, "present_capture_color");
-    if (captureImport.hasError()) {
-      return Result<bool, std::string>::makeError(captureImport.error());
-    }
+    const RenderGraphTextureId capture =
+        ctx.graph
+            .importTexture(ctx.shared.presentCaptureTexture,
+                           "present_capture_color")
+            .value();
     RenderGraphGraphicsPassDesc captureDesc{};
     captureDesc.color = {.loadOp = LoadOp::Clear,
                          .storeOp = StoreOp::Store,
                          .clearColor = {0.0f, 0.0f, 0.0f, 1.0f}};
-    captureDesc.colorTexture = captureImport.value();
+    captureDesc.colorTexture = capture;
     captureDesc.draws = std::span<const DrawItem>(&captureDraw, 1u);
     captureDesc.debugLabel = "Present ToneMap Capture Pass";
     captureDesc.debugColor = kPresentPassDebugColor;
     captureDesc.dependencyTextures =
         std::span<const TextureHandle>(dependencies.data(), dependencyCount);
-    auto captureAdd = ctx.graph.addGraphicsPass(captureDesc);
-    if (captureAdd.hasError()) {
-      return Result<bool, std::string>::makeError(captureAdd.error());
-    }
-    auto captureReads = addToneMapReads(captureAdd.value());
-    if (captureReads.hasError()) {
-      return captureReads;
-    }
-    ctx.shared.presentCaptureGraphTexture = captureImport.value();
-    ctx.frame.sharedResources.presentCaptureGraphTexture =
-        captureImport.value();
+    addToneMapReads(ctx.graph.addGraphicsPass(captureDesc).value());
+    ctx.shared.presentCaptureGraphTexture = capture;
+    ctx.frame.sharedResources.presentCaptureGraphTexture = capture;
     publishRequestedCapture(
         ctx.frame, gpu_, "final_color", ctx.shared.presentCaptureTexture,
         RenderCaptureValueKind::Color,
         RenderCaptureLifetimeClass::ToolCaptureTexture, "display_sdr",
         "ldr_color", "Present ToneMap Capture Pass", "final_color");
   }
-
   RenderGraphGraphicsPassDesc passDesc{};
   passDesc.color = {.loadOp = LoadOp::Clear,
                     .storeOp = StoreOp::Store,
@@ -1966,31 +1361,7 @@ Result<bool, std::string> PresentToneMapPass::build(FrameBuildContext &ctx) {
   passDesc.markColorAsFrameOutput = true;
   passDesc.dependencyTextures =
       std::span<const TextureHandle>(dependencies.data(), dependencyCount);
-  auto addResult = ctx.graph.addGraphicsPass(passDesc);
-  if (addResult.hasError()) {
-    return Result<bool, std::string>::makeError(addResult.error());
-  }
-  auto presentReads = addToneMapReads(addResult.value());
-  if (presentReads.hasError()) {
-    return presentReads;
-  }
-
-  return Result<bool, std::string>::makeResult(true);
-}
-
-Result<bool, std::string> PresentToneMapPass::ensureToneMapAssetsLoaded() {
-  auto samplerResult = ensureToneMapSampler();
-  if (samplerResult.hasError()) {
-    return samplerResult;
-  }
-  auto acesResult = ensureToneMapLutLoaded(aces2SdrLut_, "tonemap_aces2_sdr");
-  if (acesResult.hasError()) {
-    return acesResult;
-  }
-  auto agxResult = ensureToneMapLutLoaded(agxLut_, "tonemap_agx_sdr");
-  if (agxResult.hasError()) {
-    return agxResult;
-  }
+  addToneMapReads(ctx.graph.addGraphicsPass(passDesc).value());
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -2018,65 +1389,34 @@ Result<bool, std::string> PresentToneMapPass::ensureToneMapSampler() {
   return Result<bool, std::string>::makeResult(true);
 }
 
-Result<bool, std::string>
-PresentToneMapPass::ensureToneMapLutLoaded(ToneMapLutResource &resource,
-                                           std::string_view debugName) {
+void PresentToneMapPass::ensureToneMapLutLoaded(ToneMapLutResource &resource,
+                                                std::string_view debugName) {
   if (resource.loadAttempted) {
-    return Result<bool, std::string>::makeResult(true);
+    return;
   }
   resource.loadAttempted = true;
   if (resource.path.empty()) {
-    if (!resource.warned) {
-      NURI_LOG_WARNING(
-          "PresentToneMapPass: tone-map LUT '%s' has no configured path; "
-          "falling back to legacy fit",
-          std::string(debugName).c_str());
-      resource.warned = true;
-    }
-    return Result<bool, std::string>::makeResult(true);
+    NURI_LOG_WARNING(
+        "PresentToneMapPass: tone-map LUT '%s' has no configured path; "
+        "falling back to legacy fit",
+        std::string(debugName).c_str());
+    return;
   }
-
   auto textureResult =
       Texture::loadTextureKtx2(gpu_, resource.path.string(), debugName);
   if (textureResult.hasError()) {
-    if (!resource.warned) {
-      NURI_LOG_WARNING("PresentToneMapPass: failed to load LUT '%s' from '%s': "
-                       "%s. Falling back to legacy fit.",
-                       std::string(debugName).c_str(),
-                       resource.path.string().c_str(),
-                       textureResult.error().c_str());
-      resource.warned = true;
-    }
-    return Result<bool, std::string>::makeResult(true);
+    NURI_LOG_WARNING("PresentToneMapPass: failed to load LUT '%s' from '%s': "
+                     "%s. Falling back to legacy fit.",
+                     std::string(debugName).c_str(),
+                     resource.path.string().c_str(),
+                     textureResult.error().c_str());
+    return;
   }
-
   resource.texture = std::move(textureResult.value());
-  return Result<bool, std::string>::makeResult(true);
 }
-
-void PresentToneMapPass::destroyToneMapAssets() {
-  aces2SdrLut_.texture.reset();
-  agxLut_.texture.reset();
-  if (nuri::isValid(lutSampler_)) {
-    gpu_.destroySampler(lutSampler_);
-    lutSampler_ = {};
-  }
-}
-
-FrameCompositionFeature::FrameCompositionFeature(
-    GPUDevice &gpu, FrameCompositionFeatureConfig config)
-    : downsamplePass_(gpu, config), resolvePass_(gpu, std::move(config)) {}
-
-std::span<RenderFeaturePass *const> FrameCompositionFeature::passes() noexcept {
-  return passes_;
-}
-
-HDRPostProcessFeature::HDRPostProcessFeature(
-    GPUDevice &gpu, FrameCompositionFeatureConfig config)
-    : exposurePass_(gpu, config), compositePass_(gpu, std::move(config)) {}
 
 Result<bool, std::string>
-HDRPostProcessFeature::publishFrameData(FrameBuildContext &ctx) {
+HDRExposureAdaptPass::publishFrameData(FrameBuildContext &ctx) {
   RenderSettings::HDRPostProcessSettings hdr =
       renderSettingsOrDefault(ctx.frame).hdrPostProcess;
   sanitizeHDRPostProcessSettings(hdr);
@@ -2086,16 +1426,33 @@ HDRPostProcessFeature::publishFrameData(FrameBuildContext &ctx) {
   return Result<bool, std::string>::makeResult(true);
 }
 
-std::span<RenderFeaturePass *const> HDRPostProcessFeature::passes() noexcept {
-  return passes_;
+void registerFrameCompositionStages(RenderPipeline &pipeline, GPUDevice &gpu,
+                                    FrameCompositionFeatureConfig config) {
+  pipeline.addStage(std::make_unique<SceneColorDownsamplePass>(gpu, config),
+                    "FrameCompositionFeature", "SceneColorDownsamplePass");
+  pipeline.addStage(std::make_unique<SceneResolvePass>(gpu, std::move(config)),
+                    "FrameCompositionFeature", "SceneResolvePass");
 }
 
-FramePresentFeature::FramePresentFeature(GPUDevice &gpu,
-                                         FrameCompositionFeatureConfig config)
-    : presentPass_(gpu, std::move(config)) {}
+void registerHDRPostProcessStages(RenderPipeline &pipeline, GPUDevice &gpu,
+                                  FrameCompositionFeatureConfig config) {
+  pipeline.addStage(
+      std::make_unique<HDRExposureAdaptPass>(gpu, config),
+      "HDRPostProcessFeature", "HDRExposureAdaptPass", false,
+      PipelineComponentDesc{.publish = [](void *state, FrameBuildContext &ctx) {
+        return static_cast<HDRExposureAdaptPass *>(state)->publishFrameData(
+            ctx);
+      }});
+  pipeline.addStage(
+      std::make_unique<HDRBloomCompositePass>(gpu, std::move(config)),
+      "HDRPostProcessFeature", "HDRBloomCompositePass");
+}
 
-std::span<RenderFeaturePass *const> FramePresentFeature::passes() noexcept {
-  return passes_;
+void registerFramePresentStage(RenderPipeline &pipeline, GPUDevice &gpu,
+                               FrameCompositionFeatureConfig config) {
+  pipeline.addStage(
+      std::make_unique<PresentToneMapPass>(gpu, std::move(config)),
+      "FramePresentFeature", "PresentToneMapPass", true);
 }
 
 } // namespace nuri

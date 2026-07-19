@@ -1,14 +1,9 @@
-#include "nuri/pch.h"
-
 #include "nuri/utils/env_utils.h"
-
 #include "nuri/core/log.h"
-
+#include "nuri/pch.h"
 #include <cctype>
-
 namespace nuri {
 namespace {
-
 [[nodiscard]] bool envValueEqualsIgnoreCase(std::string_view value,
                                             std::string_view expected) {
   if (value.size() != expected.size()) {
@@ -25,7 +20,6 @@ namespace {
   }
   return true;
 }
-
 } // namespace
 
 std::optional<std::string> readEnvVar(std::string_view variableName) {
@@ -33,7 +27,6 @@ std::optional<std::string> readEnvVar(std::string_view variableName) {
   struct CFreeDeleter {
     void operator()(char *value) const noexcept { std::free(value); }
   };
-
   std::string key(variableName);
   char *rawValue = nullptr;
   size_t valueLength = 0;
@@ -41,7 +34,6 @@ std::optional<std::string> readEnvVar(std::string_view variableName) {
       rawValue == nullptr) {
     return std::nullopt;
   }
-
   std::unique_ptr<char, CFreeDeleter> value(rawValue);
   if (value.get()[0] == '\0') {
     return std::nullopt;
@@ -62,7 +54,6 @@ bool readEnvFlag(std::string_view variableName) {
   if (!value.has_value()) {
     return false;
   }
-
   const std::string_view view = *value;
   if (envValueEqualsIgnoreCase(view, "1") ||
       envValueEqualsIgnoreCase(view, "true") ||
@@ -83,7 +74,6 @@ readEnvBoolOverride(std::string_view variableName) {
   if (!value.has_value()) {
     return std::nullopt;
   }
-
   const std::string_view view = *value;
   if (envValueEqualsIgnoreCase(view, "1") ||
       envValueEqualsIgnoreCase(view, "true") ||
@@ -97,7 +87,6 @@ readEnvBoolOverride(std::string_view variableName) {
       envValueEqualsIgnoreCase(view, "no")) {
     return false;
   }
-
   NURI_LOG_WARNING(
       "Environment override: ignoring unrecognized boolean value '%.*s=%s'",
       static_cast<int>(variableName.size()), variableName.data(),

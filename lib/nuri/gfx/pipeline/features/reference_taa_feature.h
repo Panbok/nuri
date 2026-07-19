@@ -1,34 +1,24 @@
 #pragma once
-
 #include "nuri/core/runtime_config.h"
 #include "nuri/defines.h"
 #include "nuri/gfx/gpu_device.h"
-#include "nuri/gfx/pipeline/render_feature.h"
-#include "nuri/gfx/pipeline/render_feature_pass.h"
+#include "nuri/gfx/pipeline/render_pipeline.h"
 #include "nuri/gfx/shader.h"
-
 #include <array>
 #include <filesystem>
 #include <memory>
-
 namespace nuri {
 
-class NURI_API ReferenceTAAResolvePass final : public RenderFeaturePass {
+class RenderPipeline;
+
+class NURI_API ReferenceTAAResolvePass final {
 public:
   ReferenceTAAResolvePass(GPUDevice &gpu, RuntimeCompositeConfig config);
-  ~ReferenceTAAResolvePass() override;
-
-  ReferenceTAAResolvePass(const ReferenceTAAResolvePass &) = delete;
-  ReferenceTAAResolvePass &operator=(const ReferenceTAAResolvePass &) = delete;
-  ReferenceTAAResolvePass(ReferenceTAAResolvePass &&) = delete;
-  ReferenceTAAResolvePass &operator=(ReferenceTAAResolvePass &&) = delete;
-
-  [[nodiscard]] std::string_view name() const noexcept override {
-    return "ReferenceTAAResolvePass";
-  }
-  [[nodiscard]] bool isEnabled(const FrameBuildContext &ctx) const override;
-  Result<bool, std::string> prepare(FrameBuildContext &ctx) override;
-  Result<bool, std::string> build(FrameBuildContext &ctx) override;
+  ~ReferenceTAAResolvePass();
+  [[nodiscard]] bool isEnabled(const FrameBuildContext &ctx) const;
+  Result<bool, std::string> publishFrameData(FrameBuildContext &ctx);
+  Result<bool, std::string> prepare(FrameBuildContext &ctx);
+  Result<bool, std::string> build(FrameBuildContext &ctx);
 
 private:
   GPUDevice &gpu_;
@@ -42,29 +32,8 @@ private:
   bool initialized_ = false;
 };
 
-class NURI_API ReferenceTAAFeature final : public RenderFeature {
-public:
-  ReferenceTAAFeature(GPUDevice &gpu, RuntimeCompositeConfig config)
-      : resolvePass_(gpu, std::move(config)) {}
-  ~ReferenceTAAFeature() override = default;
-
-  ReferenceTAAFeature(const ReferenceTAAFeature &) = delete;
-  ReferenceTAAFeature &operator=(const ReferenceTAAFeature &) = delete;
-  ReferenceTAAFeature(ReferenceTAAFeature &&) = delete;
-  ReferenceTAAFeature &operator=(ReferenceTAAFeature &&) = delete;
-
-  [[nodiscard]] std::string_view name() const noexcept override {
-    return "ReferenceTAAFeature";
-  }
-  [[nodiscard]] Result<bool, std::string>
-  publishFrameData(FrameBuildContext &ctx) override;
-  [[nodiscard]] std::span<RenderFeaturePass *const> passes() noexcept override {
-    return passes_;
-  }
-
-private:
-  ReferenceTAAResolvePass resolvePass_;
-  std::array<RenderFeaturePass *, 1> passes_{&resolvePass_};
-};
+NURI_API void registerReferenceTAAStage(RenderPipeline &pipeline,
+                                        GPUDevice &gpu,
+                                        RuntimeCompositeConfig config);
 
 } // namespace nuri

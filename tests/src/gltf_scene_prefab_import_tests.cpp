@@ -1,7 +1,6 @@
 #include "tests_pch.h"
 
 #include "nuri/core/log.h"
-#include "nuri/resources/gltf_scene_importer.h"
 #include "nuri/resources/mesh_importer.h"
 #include "nuri/resources/scene_importer.h"
 #include "nuri/scene/scene_prefab.h"
@@ -473,8 +472,7 @@ TEST(GltfScenePrefabImport, LoadsPrefabHierarchyRenderablesAndLightsFromFile) {
   const std::filesystem::path gltfPath = dir.path / "prefab_scene.gltf";
   writeTextFile(gltfPath, json);
 
-  auto result =
-      nuri::GltfSceneImporter::loadScenePrefabFromFile(gltfPath.string());
+  auto result = nuri::SceneImporter::loadScenePrefabFromFile(gltfPath.string());
   ASSERT_FALSE(result.hasError()) << result.error();
 
   const nuri::ScenePrefab &prefab = result.value();
@@ -503,8 +501,9 @@ TEST(GltfScenePrefabImport, LoadsPrefabHierarchyRenderablesAndLightsFromFile) {
                  glm::vec3(0.0f, 1.5f, 0.0f));
 
   EXPECT_EQ(prefab.renderables[0].nodeIndex, static_cast<uint32_t>(meshIndex));
-  EXPECT_EQ(prefab.renderables[0].meshIndex, 0u);
-  EXPECT_LT(prefab.renderables[0].materialIndex, prefab.materialAssets.size());
+  EXPECT_EQ(prefab.renderables[0].meshAssetIndex, 0u);
+  EXPECT_LT(prefab.renderables[0].materialAssetIndex,
+            prefab.materialAssets.size());
 
   EXPECT_EQ(prefab.lights[0].nodeIndex, static_cast<uint32_t>(lightIndex));
   EXPECT_EQ(prefab.lights[0].light.name, "LightNode");
@@ -777,12 +776,12 @@ TEST(GltfScenePrefabImport, PreservesSingleMeshPrimitiveMaterialBindings) {
   ASSERT_EQ(scene.meshAssets.size(), 2u);
   ASSERT_GE(scene.materialAssets.size(), 2u);
 
-  EXPECT_EQ(scene.materialAssets[scene.renderables[0].materialAssetIndex]
-                .sourceMaterialIndex,
-            0u);
-  EXPECT_EQ(scene.materialAssets[scene.renderables[1].materialAssetIndex]
-                .sourceMaterialIndex,
-            1u);
+  EXPECT_EQ(
+      scene.materialAssets[scene.renderables[0].materialAssetIndex].sourceIndex,
+      0u);
+  EXPECT_EQ(
+      scene.materialAssets[scene.renderables[1].materialAssetIndex].sourceIndex,
+      1u);
 
   constexpr std::array<uint32_t, 2> kSceneMeshIndices = {0u, 1u};
   auto meshResult = nuri::MeshImporter::loadSceneMeshesFromFile(

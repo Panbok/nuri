@@ -1,13 +1,15 @@
 #pragma once
-
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <span>
 #include <type_traits>
-
 namespace nuri {
+
+inline constexpr uint32_t kInvalidTextureBindlessIndex =
+    std::numeric_limits<uint32_t>::max();
 
 enum class SwapchainPresentMode : uint8_t {
   Unknown = 0,
@@ -16,7 +18,6 @@ enum class SwapchainPresentMode : uint8_t {
   Fifo,
 };
 
-// Cheap typed generational handles for GPU packets and resource tables.
 template <typename Tag> struct Handle {
   uint32_t index = 0;
   uint32_t generation = 0;
@@ -51,6 +52,23 @@ template <typename Tag> constexpr bool isValid(Handle<Tag> handle) noexcept {
   return handle.generation != 0;
 }
 
+template <typename Tag>
+[[nodiscard]] constexpr uint64_t handleKey(Handle<Tag> handle) noexcept {
+  return (static_cast<uint64_t>(handle.generation) << 32u) | handle.index;
+}
+
+struct HandleHash {
+  template <typename Tag>
+  [[nodiscard]] size_t operator()(Handle<Tag> handle) const noexcept {
+    return std::hash<uint64_t>{}(handleKey(handle));
+  }
+};
+
+[[nodiscard]] constexpr uint32_t saturateToU32(size_t value) noexcept {
+  return static_cast<uint32_t>(
+      std::min(value, size_t(std::numeric_limits<uint32_t>::max())));
+}
+
 static_assert(std::is_aggregate_v<BufferHandle>);
 static_assert(std::is_standard_layout_v<BufferHandle>);
 static_assert(std::is_trivially_copyable_v<BufferHandle>);
@@ -65,7 +83,6 @@ static_assert(BufferHandle{.index = 7u, .generation = 3u} !=
 static_assert(isValid(BufferHandle{.index = 7u, .generation = 3u}));
 static_assert(!isValid(BufferHandle{}));
 
-// Backend-neutral GPU enums.
 enum class Format : uint8_t {
   R32_UINT,
   RGBA8_UNORM,
@@ -86,6 +103,31 @@ enum class Format : uint8_t {
   R16_UNORM,
   Count
 };
+
+[[nodiscard]] constexpr uint32_t formatTexelBytes(Format format) noexcept {
+  switch (format) {
+  case Format::R8_UNORM:
+    return 1u;
+  case Format::R16_UNORM:
+  case Format::D16_UNORM:
+    return 2u;
+  case Format::R32_UINT:
+  case Format::R32_FLOAT:
+  case Format::D32_FLOAT:
+  case Format::RG16_FLOAT:
+  case Format::RGBA8_UNORM:
+  case Format::RGBA8_SRGB:
+  case Format::RGBA8_UINT:
+    return 4u;
+  case Format::RG32_FLOAT:
+  case Format::RGBA16_FLOAT:
+    return 8u;
+  case Format::RGBA32_FLOAT:
+    return 16u;
+  default:
+    return 0u;
+  }
+}
 
 static_assert(static_cast<uint8_t>(Format::D32_FLOAT) == 6u);
 static_assert(static_cast<uint8_t>(Format::BC7_RGBA_UNORM) == 7u);
@@ -344,8 +386,6 @@ struct BufferCopyRegion {
   uint64_t size = 0;
 };
 
-// Non-owning source data for an immediate upload batch. Implementations must
-// consume the bytes before returning; no caller span may escape the call.
 struct BufferUpdate {
   BufferHandle buffer{};
   std::span<const std::byte> data{};
@@ -373,10 +413,6 @@ struct DepthState {
   bool isDepthWriteEnabled = true;
 };
 
-// Canonical immutable raster facts for backends that bake depth state into a
-// pipeline. Depth-bias constant is integral because that is the state exposed
-// by NVRHI; callers use makeRasterPipelineState() to lower float draw settings
-// once, outside command encoding.
 struct RasterPipelineState {
   CompareOp compareOp = CompareOp::Less;
   bool depthWrite = true;
@@ -384,7 +420,6 @@ struct RasterPipelineState {
   int32_t depthBiasConstant = 0;
   float depthBiasSlope = 0.0f;
   float depthBiasClamp = 0.0f;
-
   constexpr bool
   operator==(const RasterPipelineState &) const noexcept = default;
 };

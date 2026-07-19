@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "name": "AMD FidelityFX SDK",
+  "repository": "https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK.git",
+  "path": "external/fidelityfx-sdk",
+  "tag": "v1.1.4",
+  "revision": "c6efa6bf7f2027b3ec94f28578bb5965eabb9e55",
+  "sdkVersion": "1.1.4",
+  "fsrUpscalerVersion": "3.1.4",
+  "license": {
+    "spdx": "MIT",
+    "file": "sdk/LICENSE.txt"
+  },
+  "runtime": {
+    "api": "Vulkan",
+    "library": "PrebuiltSignedDLL/amd_fidelityfx_vk.dll",
+    "importLibrary": "PrebuiltSignedDLL/amd_fidelityfx_vk.lib",
+    "minimumVulkanSdk": "1.3.250"
+  },
+  "requiredFiles": [
+    "ffx-api/include/ffx_api/ffx_api.h",
+    "ffx-api/include/ffx_api/ffx_upscale.h",
+    "ffx-api/include/ffx_api/vk/ffx_api_vk.h",
+    "PrebuiltSignedDLL/amd_fidelityfx_vk.dll",
+    "PrebuiltSignedDLL/amd_fidelityfx_vk.lib",
+    "sdk/LICENSE.txt"
+  ]
+}

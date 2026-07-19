@@ -1,10 +1,7 @@
-#include "nuri/pch.h"
-
 #include "nuri/gfx/sim/simulation_gpu_context.h"
-
+#include "nuri/pch.h"
 namespace nuri {
 namespace {
-
 [[nodiscard]] bool bufferSliceEqual(const SimulationBufferSlice &lhs,
                                     const SimulationBufferSlice &rhs) noexcept {
   return lhs.buffer.index == rhs.buffer.index &&
@@ -12,7 +9,6 @@ namespace {
          lhs.offsetBytes == rhs.offsetBytes && lhs.sizeBytes == rhs.sizeBytes &&
          lhs.version == rhs.version;
 }
-
 [[nodiscard]] bool
 frameResourcesEqual(const SimulationFrameGpuResources &lhs,
                     const SimulationFrameGpuResources &rhs) noexcept {
@@ -21,7 +17,6 @@ frameResourcesEqual(const SimulationFrameGpuResources &lhs,
          bufferSliceEqual(lhs.writeback, rhs.writeback) &&
          bufferSliceEqual(lhs.dispatchMetadata, rhs.dispatchMetadata);
 }
-
 } // namespace
 
 void SimulationGpuContext::reset() noexcept {

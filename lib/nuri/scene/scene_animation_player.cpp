@@ -1,30 +1,27 @@
-#include "nuri/pch.h"
-
 #include "nuri/scene/scene_animation_player.h"
-
 #include "nuri/core/pmr_scratch.h"
 #include "nuri/math/utils.h"
-
+#include "nuri/pch.h"
 #define GLM_ENABLE_EXPERIMENTAL
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtx/matrix_decompose.hpp>
-
 namespace nuri {
 namespace {
-
 struct SampleWindow {
   uint32_t leftIndex = 0;
   uint32_t rightIndex = 0;
   float t = 0.0f;
 };
-
+[[nodiscard]] std::pmr::memory_resource *
+memoryOrDefault(std::pmr::memory_resource *memory) noexcept {
+  return memory != nullptr ? memory : std::pmr::get_default_resource();
+}
 [[nodiscard]] glm::mat4 composeTransform(const glm::vec3 &translation,
                                          const glm::quat &rotation,
                                          const glm::vec3 &scale) {
   return glm::translate(glm::mat4(1.0f), translation) *
          glm::mat4_cast(rotation) * glm::scale(glm::mat4(1.0f), scale);
 }
-
 void decomposeTransform(const glm::mat4 &matrix, glm::vec3 &translation,
                         glm::quat &rotation, glm::vec3 &scale) {
   glm::vec3 skew(0.0f);
@@ -38,12 +35,8 @@ void decomposeTransform(const glm::mat4 &matrix, glm::vec3 &translation,
   }
   rotation = glm::normalize(rotation);
 }
-
 [[nodiscard]] SampleWindow findSampleWindow(std::span<const float> keyTimes,
                                             float timeSeconds) {
-  if (keyTimes.empty()) {
-    return {};
-  }
   if (keyTimes.size() == 1u || timeSeconds <= keyTimes.front()) {
     return {};
   }
@@ -65,69 +58,31 @@ void decomposeTransform(const glm::mat4 &matrix, glm::vec3 &translation,
   const float t = duration > 0.0f ? (timeSeconds - leftTime) / duration : 0.0f;
   return SampleWindow{.leftIndex = leftIndex, .rightIndex = rightIndex, .t = t};
 }
-
-[[nodiscard]] bool readLinearValue(std::span<const float> values,
-                                   uint32_t keyIndex, uint32_t valueArity,
-                                   std::span<float> out) {
-  const size_t base = static_cast<size_t>(keyIndex) * valueArity;
-  if (base + valueArity > values.size() || valueArity > out.size()) {
-    std::fill(out.begin(), out.end(), 0.0f);
-    return false;
-  }
-  for (uint32_t i = 0; i < valueArity; ++i) {
-    out[i] = values[base + i];
-  }
-  return true;
+[[nodiscard]] size_t sampleValueOffset(const AnimationSamplerData &sampler,
+                                       uint32_t keyIndex) noexcept {
+  const size_t keyStride =
+      sampler.interpolation == AnimationInterpolation::CubicSpline ? 3u : 1u;
+  const size_t valueIndex =
+      static_cast<size_t>(keyIndex) * keyStride + (keyStride == 3u ? 1u : 0u);
+  return valueIndex * sampler.valueArity;
 }
-
-[[nodiscard]] bool readQuaternionValue(const AnimationSamplerData &sampler,
-                                       uint32_t keyIndex,
-                                       glm::quat &outRotation) {
-  if (sampler.valueArity < 4u) {
-    outRotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
-    return false;
-  }
-  const std::span<const float> values(sampler.values.data(),
-                                      sampler.values.size());
-  size_t base = static_cast<size_t>(keyIndex) * sampler.valueArity;
-  if (sampler.interpolation == AnimationInterpolation::CubicSpline) {
-    base = static_cast<size_t>(keyIndex) * sampler.valueArity * 3u +
-           sampler.valueArity;
-  }
-  if (base + 4u > values.size()) {
-    outRotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
-    return false;
-  }
-  outRotation = glm::normalize(glm::quat(values[base + 3u], values[base + 0u],
-                                         values[base + 1u], values[base + 2u]));
-  return true;
+[[nodiscard]] glm::quat readQuaternionValue(const AnimationSamplerData &sampler,
+                                            uint32_t keyIndex) {
+  const size_t base = sampleValueOffset(sampler, keyIndex);
+  return glm::normalize(
+      glm::quat(sampler.values[base + 3u], sampler.values[base],
+                sampler.values[base + 1u], sampler.values[base + 2u]));
 }
-
-[[nodiscard]] bool sampleRotationSampler(const AnimationSamplerData &sampler,
-                                         float timeSeconds,
-                                         glm::quat &outRotation) {
-  if (sampler.keyTimes.empty() || sampler.valueArity < 4u) {
-    outRotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
-    return false;
-  }
-
-  const std::span<const float> keyTimes(sampler.keyTimes.data(),
-                                        sampler.keyTimes.size());
-  const SampleWindow window = findSampleWindow(keyTimes, timeSeconds);
+[[nodiscard]] glm::quat
+sampleRotationSampler(const AnimationSamplerData &sampler, float timeSeconds) {
+  const SampleWindow window = findSampleWindow(sampler.keyTimes, timeSeconds);
   if (window.leftIndex == window.rightIndex ||
       sampler.interpolation == AnimationInterpolation::Step ||
       sampler.interpolation == AnimationInterpolation::CubicSpline) {
-    return readQuaternionValue(sampler, window.leftIndex, outRotation);
+    return readQuaternionValue(sampler, window.leftIndex);
   }
-
-  glm::quat left(1.0f, 0.0f, 0.0f, 0.0f);
-  glm::quat right(1.0f, 0.0f, 0.0f, 0.0f);
-  if (!readQuaternionValue(sampler, window.leftIndex, left) ||
-      !readQuaternionValue(sampler, window.rightIndex, right)) {
-    outRotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
-    return false;
-  }
-
+  const glm::quat left = readQuaternionValue(sampler, window.leftIndex);
+  glm::quat right = readQuaternionValue(sampler, window.rightIndex);
   float cosTheta = glm::dot(left, right);
   if (cosTheta < 0.0f) {
     right = -right;
@@ -135,23 +90,17 @@ void decomposeTransform(const glm::mat4 &matrix, glm::vec3 &translation,
   }
   cosTheta = std::clamp(cosTheta, -1.0f, 1.0f);
   if (cosTheta > 0.9995f) {
-    outRotation = glm::normalize(left + window.t * (right - left));
-    return true;
+    return glm::normalize(left + window.t * (right - left));
   }
-
   const float angle = std::acos(cosTheta);
   const float sinAngle = std::sin(angle);
   if (sinAngle <= 1.0e-5f) {
-    outRotation = left;
-    return true;
+    return left;
   }
-
   const float leftWeight = std::sin((1.0f - window.t) * angle) / sinAngle;
   const float rightWeight = std::sin(window.t * angle) / sinAngle;
-  outRotation = glm::normalize(left * leftWeight + right * rightWeight);
-  return true;
+  return glm::normalize(left * leftWeight + right * rightWeight);
 }
-
 [[nodiscard]] float clampPlaybackTime(const AnimationClipData *clip,
                                       float timeSeconds) noexcept {
   const float maxTime = clip != nullptr && clip->durationSeconds > 0.0f
@@ -159,7 +108,6 @@ void decomposeTransform(const glm::mat4 &matrix, glm::vec3 &translation,
                             : 0.0f;
   return std::clamp(timeSeconds, 0.0f, maxTime);
 }
-
 void advancePlaybackTime(float &timeSeconds, bool &playing,
                          AnimationPlaybackMode mode, float deltaSeconds,
                          const AnimationClipData &clip) noexcept {
@@ -178,67 +126,29 @@ void advancePlaybackTime(float &timeSeconds, bool &playing,
     playing = false;
   }
 }
-
-[[nodiscard]] bool sampleSampler(const AnimationSamplerData &sampler,
-                                 float timeSeconds, std::span<float> out) {
-  if (sampler.keyTimes.empty() || sampler.valueArity == 0u) {
-    std::fill(out.begin(), out.end(), 0.0f);
-    return true;
-  }
-  const std::span<const float> keyTimes(sampler.keyTimes.data(),
-                                        sampler.keyTimes.size());
-  const std::span<const float> values(sampler.values.data(),
-                                      sampler.values.size());
-  const SampleWindow window = findSampleWindow(keyTimes, timeSeconds);
-  if (window.leftIndex == window.rightIndex) {
-    if (sampler.interpolation == AnimationInterpolation::CubicSpline) {
-      const size_t base =
-          static_cast<size_t>(window.leftIndex) * sampler.valueArity * 3u +
-          sampler.valueArity;
-      if (base + sampler.valueArity > values.size() ||
-          sampler.valueArity > out.size()) {
-        std::fill(out.begin(), out.end(), 0.0f);
-        return false;
-      }
-      for (uint32_t i = 0; i < sampler.valueArity; ++i) {
-        out[i] = values[base + i];
-      }
-    } else {
-      return readLinearValue(values, window.leftIndex, sampler.valueArity, out);
-    }
-    return true;
-  }
-
-  if (sampler.interpolation == AnimationInterpolation::Step) {
-    return readLinearValue(values, window.leftIndex, sampler.valueArity, out);
+void sampleSampler(const AnimationSamplerData &sampler, float timeSeconds,
+                   std::span<float> out) {
+  const SampleWindow window = findSampleWindow(sampler.keyTimes, timeSeconds);
+  if (window.leftIndex == window.rightIndex ||
+      sampler.interpolation == AnimationInterpolation::Step) {
+    std::copy_n(sampler.values.begin() +
+                    sampleValueOffset(sampler, window.leftIndex),
+                sampler.valueArity, out.begin());
+    return;
   }
   if (sampler.interpolation == AnimationInterpolation::Linear) {
-    const size_t leftBase =
-        static_cast<size_t>(window.leftIndex) * sampler.valueArity;
-    const size_t rightBase =
-        static_cast<size_t>(window.rightIndex) * sampler.valueArity;
-    if (leftBase + sampler.valueArity > values.size() ||
-        rightBase + sampler.valueArity > values.size() ||
-        sampler.valueArity > out.size()) {
-      std::fill(out.begin(), out.end(), 0.0f);
-      return false;
-    }
+    const size_t leftBase = sampleValueOffset(sampler, window.leftIndex);
+    const size_t rightBase = sampleValueOffset(sampler, window.rightIndex);
     for (uint32_t i = 0; i < sampler.valueArity; ++i) {
-      out[i] = glm::mix(values[leftBase + i], values[rightBase + i], window.t);
+      out[i] = glm::mix(sampler.values[leftBase + i],
+                        sampler.values[rightBase + i], window.t);
     }
-    return true;
+    return;
   }
-
   const size_t leftBase =
       static_cast<size_t>(window.leftIndex) * sampler.valueArity * 3u;
   const size_t rightBase =
       static_cast<size_t>(window.rightIndex) * sampler.valueArity * 3u;
-  if (leftBase + sampler.valueArity * 3u > values.size() ||
-      rightBase + sampler.valueArity * 3u > values.size() ||
-      sampler.valueArity > out.size()) {
-    std::fill(out.begin(), out.end(), 0.0f);
-    return false;
-  }
   const float deltaTime =
       sampler.keyTimes[window.rightIndex] - sampler.keyTimes[window.leftIndex];
   const float t = glm::clamp(window.t, 0.0f, 1.0f);
@@ -249,47 +159,48 @@ void advancePlaybackTime(float &timeSeconds, bool &playing,
   const float h01 = -2.0f * t3 + 3.0f * t2;
   const float h11 = t3 - t2;
   for (uint32_t i = 0; i < sampler.valueArity; ++i) {
-    const float value0 = values[leftBase + sampler.valueArity + i];
-    const float outTangent0 = values[leftBase + sampler.valueArity * 2u + i];
-    const float value1 = values[rightBase + sampler.valueArity + i];
-    const float inTangent1 = values[rightBase + i];
+    const float value0 = sampler.values[leftBase + sampler.valueArity + i];
+    const float outTangent0 =
+        sampler.values[leftBase + sampler.valueArity * 2u + i];
+    const float value1 = sampler.values[rightBase + sampler.valueArity + i];
+    const float inTangent1 = sampler.values[rightBase + i];
     out[i] = h00 * value0 + h10 * deltaTime * outTangent0 + h01 * value1 +
              h11 * deltaTime * inTangent1;
   }
-  return true;
 }
-
 } // namespace
 
 SceneAnimationPlayer::SceneAnimationPlayer(
     const ScenePrefab &prefab, const SceneInstantiationMap &instantiationMap,
     std::pmr::memory_resource *memory)
-    : prefab_(&prefab), instantiationMap_(&instantiationMap),
-      memory_(memory != nullptr ? memory : std::pmr::get_default_resource()),
-      baseNodeStates_(memory_), sampledNodeStates_(memory_) {
+    : prefab_(prefab), instantiationMap_(instantiationMap),
+      baseNodeStates_(memoryOrDefault(memory)),
+      sampledNodeStates_(memoryOrDefault(memory)) {
+  memory = memoryOrDefault(memory);
   baseNodeStates_.reserve(prefab.nodes.size());
   sampledNodeStates_.reserve(prefab.nodes.size());
   for (const ScenePrefabNode &node : prefab.nodes) {
-    baseNodeStates_.emplace_back(memory_);
-    sampledNodeStates_.emplace_back(memory_);
+    baseNodeStates_.emplace_back(memory);
+    sampledNodeStates_.emplace_back(memory);
     NodeState &base = baseNodeStates_.back();
     decomposeTransform(node.localFromParent, base.translation, base.rotation,
                        base.scale);
     base.morphWeights.assign(node.morphWeights.begin(),
                              node.morphWeights.end());
+    sampledNodeStates_.back() = base;
   }
 }
 
 const AnimationClipData *SceneAnimationPlayer::activeClip() const noexcept {
-  if (prefab_ == nullptr || clipIndex_ >= prefab_->animations.size()) {
+  if (clipIndex_ >= prefab_.animations.size()) {
     return nullptr;
   }
-  return &prefab_->animations[clipIndex_];
+  return &prefab_.animations[clipIndex_];
 }
 
 Result<bool, std::string>
 SceneAnimationPlayer::play(uint32_t clipIndex, AnimationPlaybackMode mode) {
-  if (prefab_ == nullptr || clipIndex >= prefab_->animations.size()) {
+  if (clipIndex >= prefab_.animations.size()) {
     return Result<bool, std::string>::makeError(
         "SceneAnimationPlayer::play: clip index is out of range");
   }
@@ -297,6 +208,7 @@ SceneAnimationPlayer::play(uint32_t clipIndex, AnimationPlaybackMode mode) {
   timeSeconds_ = 0.0f;
   playing_ = true;
   mode_ = mode;
+  sampledNodeStates_ = baseNodeStates_;
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -308,23 +220,11 @@ void SceneAnimationPlayer::seek(float timeSeconds) {
 
 void SceneAnimationPlayer::applyClip(SceneGraph &graph) const {
   const AnimationClipData *clip = activeClip();
-  if (clip == nullptr || prefab_ == nullptr || instantiationMap_ == nullptr) {
+  if (clip == nullptr) {
     return;
   }
   ScratchArena scratch;
   ScopedScratch scopedScratch(scratch);
-
-  NURI_ASSERT(sampledNodeStates_.size() == baseNodeStates_.size(),
-              "SceneAnimationPlayer: node state buffers are out of sync");
-  for (size_t nodeIndex = 0; nodeIndex < baseNodeStates_.size(); ++nodeIndex) {
-    const NodeState &base = baseNodeStates_[nodeIndex];
-    NodeState &sampled = sampledNodeStates_[nodeIndex];
-    sampled.translation = base.translation;
-    sampled.rotation = base.rotation;
-    sampled.scale = base.scale;
-    sampled.morphWeights.assign(base.morphWeights.begin(),
-                                base.morphWeights.end());
-  }
   uint32_t maxValueArity = 0u;
   for (const AnimationSamplerData &sampler : clip->samplers) {
     maxValueArity = std::max(maxValueArity, sampler.valueArity);
@@ -332,10 +232,6 @@ void SceneAnimationPlayer::applyClip(SceneGraph &graph) const {
   std::pmr::vector<float> sampleBuffer(scopedScratch.resource());
   sampleBuffer.resize(maxValueArity);
   for (const AnimationChannelData &channel : clip->channels) {
-    if (channel.targetNodeIndex >= sampledNodeStates_.size() ||
-        channel.samplerIndex >= clip->samplers.size()) {
-      continue;
-    }
     const AnimationSamplerData &sampler = clip->samplers[channel.samplerIndex];
     NodeState &nodeState = sampledNodeStates_[channel.targetNodeIndex];
     switch (channel.path) {
@@ -343,82 +239,61 @@ void SceneAnimationPlayer::applyClip(SceneGraph &graph) const {
     case AnimationTargetPath::Scale:
     case AnimationTargetPath::Weights: {
       std::span<float> sample(sampleBuffer.data(), sampler.valueArity);
-      if (!sampleSampler(sampler, timeSeconds_, sample)) {
-        continue;
-      }
-      // Translation and scale need xyz samples; weights accepts any arity.
-      if (sampler.valueArity >= 3u) {
-        if (channel.path == AnimationTargetPath::Translation) {
-          nodeState.translation = glm::vec3(sample[0], sample[1], sample[2]);
-          break;
-        }
-        if (channel.path == AnimationTargetPath::Scale) {
-          nodeState.scale = glm::vec3(sample[0], sample[1], sample[2]);
-          break;
-        }
-      }
+      sampleSampler(sampler, timeSeconds_, sample);
       if (channel.path == AnimationTargetPath::Weights) {
         nodeState.morphWeights.assign(sample.begin(), sample.end());
+      } else {
+        nodeState.*(channel.path == AnimationTargetPath::Translation
+                        ? &NodeState::translation
+                        : &NodeState::scale) =
+            glm::vec3(sample[0], sample[1], sample[2]);
       }
       break;
     }
     case AnimationTargetPath::Rotation:
-      if (sampler.valueArity >= 4u) {
-        glm::quat sampledRotation(1.0f, 0.0f, 0.0f, 0.0f);
-        if (sampleRotationSampler(sampler, timeSeconds_, sampledRotation)) {
-          nodeState.rotation = sampledRotation;
-        }
-      }
+      nodeState.rotation = sampleRotationSampler(sampler, timeSeconds_);
       break;
     }
   }
-
   for (uint32_t nodeIndex = 0; nodeIndex < sampledNodeStates_.size();
        ++nodeIndex) {
-    if (nodeIndex >= instantiationMap_->nodes.size() ||
-        !isValid(instantiationMap_->nodes[nodeIndex])) {
+    if (!isValid(instantiationMap_.nodes[nodeIndex])) {
       continue;
     }
     const NodeState &state = sampledNodeStates_[nodeIndex];
     (void)graph.setNodeLocalTransform(
-        instantiationMap_->nodes[nodeIndex],
+        instantiationMap_.nodes[nodeIndex],
         composeTransform(state.translation, state.rotation, state.scale));
     graph.forEachRenderableOnNode(
-        instantiationMap_->nodes[nodeIndex], [&](RenderableId renderableId) {
+        instantiationMap_.nodes[nodeIndex], [&](RenderableId renderableId) {
           (void)graph.setRenderableMorphWeights(
               renderableId, std::span<const float>(state.morphWeights.data(),
                                                    state.morphWeights.size()));
         });
   }
-
   (void)graph.syncWorldTransforms();
   uint32_t maxJointCount = 0u;
-  for (const SkinData &skin : prefab_->skins) {
+  for (const SkinData &skin : prefab_.skins) {
     maxJointCount = std::max(
         maxJointCount, static_cast<uint32_t>(skin.jointNodeIndices.size()));
   }
   std::pmr::vector<glm::mat4> palette(scopedScratch.resource());
   palette.resize(maxJointCount, glm::mat4(1.0f));
   for (uint32_t renderableIndex = 0;
-       renderableIndex < prefab_->renderables.size(); ++renderableIndex) {
+       renderableIndex < prefab_.renderables.size(); ++renderableIndex) {
     const ScenePrefabRenderable &prefabRenderable =
-        prefab_->renderables[renderableIndex];
-    if (renderableIndex >= instantiationMap_->renderables.size() ||
-        !isValid(instantiationMap_->renderables[renderableIndex]) ||
-        prefabRenderable.skinIndex >= prefab_->skins.size()) {
+        prefab_.renderables[renderableIndex];
+    if (!isValid(instantiationMap_.renderables[renderableIndex]) ||
+        prefabRenderable.skinIndex >= prefab_.skins.size()) {
       continue;
     }
-    const SkinData &skin = prefab_->skins[prefabRenderable.skinIndex];
+    const SkinData &skin = prefab_.skins[prefabRenderable.skinIndex];
     std::fill_n(palette.begin(), skin.jointNodeIndices.size(), glm::mat4(1.0f));
     for (uint32_t jointIndex = 0; jointIndex < skin.jointNodeIndices.size();
          ++jointIndex) {
-      if (skin.jointNodeIndices[jointIndex] >=
-          instantiationMap_->nodes.size()) {
-        continue;
-      }
       glm::mat4 jointWorld(1.0f);
       if (!graph.getCachedNodeWorldTransform(
-              instantiationMap_->nodes[skin.jointNodeIndices[jointIndex]],
+              instantiationMap_.nodes[skin.jointNodeIndices[jointIndex]],
               jointWorld)) {
         continue;
       }
@@ -428,7 +303,7 @@ void SceneAnimationPlayer::applyClip(SceneGraph &graph) const {
       palette[jointIndex] = jointWorld * inverseBind;
     }
     (void)graph.setRenderableSkinPalette(
-        instantiationMap_->renderables[renderableIndex],
+        instantiationMap_.renderables[renderableIndex],
         std::span<const glm::mat4>(palette.data(),
                                    skin.jointNodeIndices.size()));
   }

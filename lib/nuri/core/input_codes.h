@@ -1,12 +1,9 @@
 #pragma once
-
 #include <cstdint>
-
 namespace nuri {
 
 enum class Key : uint16_t {
   Unknown = 0,
-
   Space = 32,
   Apostrophe = 39,
   Comma = 44,
@@ -57,7 +54,6 @@ enum class Key : uint16_t {
   GraveAccent = 96,
   World1 = 161,
   World2 = 162,
-
   Escape = 256,
   Enter = 257,
   Tab = 258,
@@ -128,13 +124,9 @@ enum class Key : uint16_t {
   RightAlt = 346,
   RightSuper = 347,
   Menu = 348,
-
   Count = 512,
 };
 
-// Unknown is 0xff so that platform button indices (e.g. GLFW 0–7) map directly
-// to Left..Button7 without shifting. Default/zero-initialized MouseButton is
-// therefore Left; use explicit Unknown when “no button” is required.
 enum class MouseButton : uint8_t {
   Unknown = 0xff,
   Left = 0,

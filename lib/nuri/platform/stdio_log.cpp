@@ -1,21 +1,35 @@
-#include "nuri/platform/stdio_log.h"
-
+#include "nuri/core/log.h"
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <ctime>
 #include <limits>
-
+#include <mutex>
 #if defined(_WIN32)
 #include <io.h>
 #include <windows.h>
 #else
 #include <unistd.h>
 #endif
-
 namespace nuri {
 
-namespace {
+class StdioLog final : public Log {
+public:
+  static std::unique_ptr<StdioLog> create(const LogConfig &config);
+  explicit StdioLog(const LogConfig &config);
+  ~StdioLog() override;
+  void write(LogLevel level, std::string_view message) override;
 
+private:
+  LogConfig config_{};
+  std::FILE *file_ = nullptr;
+  std::mutex mutex_{};
+  bool stdoutColor_ = false;
+  bool stderrColor_ = false;
+  bool initialized_ = false;
+};
+
+namespace {
 [[nodiscard]] constexpr const char *levelName(LogLevel level) noexcept {
   switch (level) {
   case LogLevel::Trace:
@@ -33,12 +47,10 @@ namespace {
   }
   return "unknown";
 }
-
 [[nodiscard]] constexpr bool includes(LogLevel threshold,
                                       LogLevel level) noexcept {
   return static_cast<uint8_t>(level) >= static_cast<uint8_t>(threshold);
 }
-
 [[nodiscard]] constexpr const char *colorCode(LogLevel level) noexcept {
   switch (level) {
   case LogLevel::Trace:
@@ -56,7 +68,6 @@ namespace {
   }
   return "";
 }
-
 [[nodiscard]] bool enableTerminalColor(std::FILE *stream) noexcept {
   if (stream == nullptr) {
     return false;
@@ -84,19 +95,16 @@ namespace {
   return ::isatty(::fileno(stream)) != 0;
 #endif
 }
-
 struct LocalTimestamp {
   std::tm calendar{};
   uint32_t milliseconds = 0u;
 };
-
 [[nodiscard]] LocalTimestamp localTimestamp() noexcept {
   const auto now = std::chrono::system_clock::now();
   const auto milliseconds =
       std::chrono::duration_cast<std::chrono::milliseconds>(
           now.time_since_epoch());
   const std::time_t time = std::chrono::system_clock::to_time_t(now);
-
   LocalTimestamp timestamp{
       .milliseconds = static_cast<uint32_t>(milliseconds.count() % 1000),
   };
@@ -107,13 +115,11 @@ struct LocalTimestamp {
 #endif
   return timestamp;
 }
-
 void writeLine(std::FILE *stream, LogLevel level, std::string_view message,
                bool forceFlush, bool colored) noexcept {
   if (stream == nullptr) {
     return;
   }
-
   const LocalTimestamp timestamp = localTimestamp();
   const int length = static_cast<int>(std::min(
       message.size(), static_cast<size_t>(std::numeric_limits<int>::max())));
@@ -132,7 +138,6 @@ void writeLine(std::FILE *stream, LogLevel level, std::string_view message,
     std::fflush(stream);
   }
 }
-
 } // namespace
 
 StdioLog::StdioLog(const LogConfig &config)
@@ -143,7 +148,6 @@ StdioLog::StdioLog(const LogConfig &config)
     initialized_ = true;
     return;
   }
-
 #if defined(_WIN32)
   initialized_ = fopen_s(&file_, config_.filePath.c_str(), "wb") == 0;
 #else

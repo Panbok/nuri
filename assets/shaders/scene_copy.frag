@@ -9,7 +9,6 @@ layout(push_constant) uniform CopyPushConstants {
   uint sourceTexId;
   uint sourceSamplerId;
   uint flags;
-  uint reserved0;
 }
 pc;
 

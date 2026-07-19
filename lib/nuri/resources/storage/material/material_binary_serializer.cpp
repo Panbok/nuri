@@ -1,97 +1,197 @@
-#include "nuri/pch.h"
-
 #include "nuri/resources/storage/material/material_binary_serializer.h"
-
-#include "nuri/resources/storage/material/material_binary_codec.h"
+#include "nuri/pch.h"
+#include "nuri/resources/storage/binary_io.h"
 #include "nuri/resources/storage/material/material_binary_format.h"
-#include "nuri/resources/storage/material/material_binary_schema_codec.h"
-
 namespace nuri {
 namespace {
-
+using FloatField = float MaterialData::*;
+constexpr std::array kEarlyFields{
+    &MaterialData::emissiveStrength,
+    &MaterialData::metallicFactor,
+    &MaterialData::roughnessFactor,
+};
+constexpr std::array kSpecularFields{
+    &MaterialData::specularFactor,
+    &MaterialData::glossinessFactor,
+};
+constexpr std::array kExtensionFields{
+    &MaterialData::sheenWeight,
+    &MaterialData::sheenRoughnessFactor,
+    &MaterialData::clearcoatFactor,
+    &MaterialData::clearcoatRoughnessFactor,
+    &MaterialData::clearcoatNormalScale,
+    &MaterialData::transmissionFactor,
+    &MaterialData::thicknessFactor,
+};
+constexpr std::array kLateFields{
+    &MaterialData::attenuationDistance, &MaterialData::ior,
+    &MaterialData::normalScale,         &MaterialData::occlusionStrength,
+    &MaterialData::alphaCutoff,
+};
+constexpr uint8_t kRecordVersion = 1u;
+constexpr size_t kMinimumRecordBytes = 830u;
 template <typename T>
 [[nodiscard]] Result<T, MaterialBinaryDeserializeError>
-makeDeserializeError(std::string message, bool stale = false) {
+deserializeError(std::string message, bool stale = false) {
   return Result<T, MaterialBinaryDeserializeError>::makeError(
-      MaterialBinaryDeserializeError{.message = std::move(message),
-                                     .stale = stale});
+      {.message = std::move(message), .stale = stale});
 }
-
-constexpr size_t kSerializedU8Bytes = sizeof(uint8_t);
-constexpr size_t kSerializedU32Bytes = sizeof(uint32_t);
-constexpr size_t kSerializedU64Bytes = sizeof(uint64_t);
-constexpr size_t kSerializedF32Bytes = sizeof(float);
-constexpr size_t kSerializedEmptyStringBytes = kSerializedU32Bytes;
-constexpr size_t kSerializedVec3Bytes = 3u * kSerializedF32Bytes;
-constexpr size_t kSerializedVec4Bytes = 4u * kSerializedF32Bytes;
-
-[[nodiscard]] constexpr size_t minSerializedTextureSlotBytes() noexcept {
-  constexpr size_t kSerializedTextureTransformBytes =
-      (2u * kSerializedF32Bytes) + (2u * kSerializedF32Bytes) +
-      kSerializedF32Bytes;
-  return kSerializedEmptyStringBytes + // `slot.path`
-         kSerializedU8Bytes +          // `slot.sourceKind`
-         (3u *
-          kSerializedU32Bytes) + // `embeddedIndex`, `uvSet`, `samplerIndex`
-         kSerializedF32Bytes +   // `slot.scale`
-         kSerializedTextureTransformBytes; // `offset.xy`, `scale.xy`,
-                                           // `rotation`
+void writeVec3(BinaryWriter &writer, const glm::vec3 &value) {
+  writer.write(value.x);
+  writer.write(value.y);
+  writer.write(value.z);
 }
-
-[[nodiscard]] constexpr size_t minSerializedTextureCacheEntryBytes() noexcept {
-  return kSerializedU64Bytes; // `artifactIdentityHash`
+void writeVec4(BinaryWriter &writer, const glm::vec4 &value) {
+  writer.write(value.x);
+  writer.write(value.y);
+  writer.write(value.z);
+  writer.write(value.w);
 }
-
-[[nodiscard]] constexpr size_t
-minSerializedSceneMaterialRecordBytes() noexcept {
-  constexpr size_t kMaterialVec3FieldCount = 4u;
-  constexpr size_t kMaterialScalarFloatFieldCount = 17u;
-  return kSerializedU8Bytes +          // format version
-         kSerializedU32Bytes +         // source material index
-         kSerializedEmptyStringBytes + // material name
-         kSerializedU8Bytes +          // workflow
-         kSerializedVec4Bytes +        // baseColorFactor
-         (kMaterialVec3FieldCount * kSerializedVec3Bytes) + // vec3 factors
-         (kMaterialScalarFloatFieldCount *
-          kSerializedF32Bytes) + // scalar factors
-         kSerializedU8Bytes +    // doubleSided
-         kSerializedU8Bytes +    // alphaMode
-         (kMaterialTextureSlotCount * (minSerializedTextureSlotBytes() +
-                                       minSerializedTextureCacheEntryBytes()));
+[[nodiscard]] glm::vec3 readVec3(BinaryReader &reader) {
+  const float x = reader.read<float>();
+  const float y = reader.read<float>();
+  const float z = reader.read<float>();
+  return {x, y, z};
 }
-
-static_assert(minSerializedSceneMaterialRecordBytes() == 830u);
-
+[[nodiscard]] glm::vec4 readVec4(BinaryReader &reader) {
+  const float x = reader.read<float>();
+  const float y = reader.read<float>();
+  const float z = reader.read<float>();
+  const float w = reader.read<float>();
+  return {x, y, z, w};
+}
+template <size_t N>
+void writeFields(BinaryWriter &writer, const MaterialData &material,
+                 const std::array<FloatField, N> &fields) {
+  for (FloatField field : fields) {
+    writer.write(material.*field);
+  }
+}
+template <size_t N>
+void readFields(BinaryReader &reader, MaterialData &material,
+                const std::array<FloatField, N> &fields) {
+  for (FloatField field : fields) {
+    material.*field = reader.read<float>();
+  }
+}
+void writeSlot(BinaryWriter &writer, const MaterialTextureSlotData &slot) {
+  writer.writeString(slot.path);
+  writer.write(static_cast<uint8_t>(slot.sourceKind));
+  writer.write(slot.embeddedIndex);
+  writer.write(slot.uvSet);
+  writer.write(slot.samplerIndex);
+  writer.write(slot.scale);
+  writer.write(slot.transform.offset.x);
+  writer.write(slot.transform.offset.y);
+  writer.write(slot.transform.scale.x);
+  writer.write(slot.transform.scale.y);
+  writer.write(slot.transform.rotationRadians);
+}
+[[nodiscard]] bool readSlot(BinaryReader &reader,
+                            MaterialTextureSlotData &slot) {
+  slot.path = reader.readString();
+  const uint8_t sourceKind = reader.read<uint8_t>();
+  slot.embeddedIndex = reader.read<uint32_t>();
+  slot.uvSet = reader.read<uint32_t>();
+  slot.samplerIndex = reader.read<uint32_t>();
+  slot.scale = reader.read<float>();
+  slot.transform.offset.x = reader.read<float>();
+  slot.transform.offset.y = reader.read<float>();
+  slot.transform.scale.x = reader.read<float>();
+  slot.transform.scale.y = reader.read<float>();
+  slot.transform.rotationRadians = reader.read<float>();
+  if (!reader.valid() ||
+      sourceKind > static_cast<uint8_t>(
+                       MaterialTextureSourceKind::EmbeddedSceneTexture)) {
+    return false;
+  }
+  slot.sourceKind = static_cast<MaterialTextureSourceKind>(sourceKind);
+  return true;
+}
+void writeRecord(BinaryWriter &writer, const SceneMaterialRecord &record) {
+  const MaterialData &material = record.sourceMaterial;
+  writer.write(kRecordVersion);
+  writer.write(record.sourceMaterialIndex);
+  writer.writeString(material.name);
+  writer.write(static_cast<uint8_t>(material.workflow));
+  writeVec4(writer, material.baseColorFactor);
+  writeVec3(writer, material.emissiveFactor);
+  writeFields(writer, material, kEarlyFields);
+  writeVec3(writer, material.specularColorFactor);
+  writeFields(writer, material, kSpecularFields);
+  writeVec3(writer, material.sheenColorFactor);
+  writeFields(writer, material, kExtensionFields);
+  writeVec3(writer, material.attenuationColor);
+  writeFields(writer, material, kLateFields);
+  writer.write(static_cast<uint8_t>(material.doubleSided));
+  writer.write(static_cast<uint8_t>(material.alphaMode));
+  for (size_t i = 0; i < material.textures.size(); ++i) {
+    writeSlot(writer, material.textures[i]);
+    writer.write(record.textureCache[i].artifactIdentityHash);
+  }
+}
+[[nodiscard]] bool readRecord(BinaryReader &reader,
+                              SceneMaterialRecord &record) {
+  const uint8_t version = reader.read<uint8_t>();
+  record.sourceMaterialIndex = reader.read<uint32_t>();
+  MaterialData &material = record.sourceMaterial;
+  material.name = reader.readString();
+  const uint8_t workflow = reader.read<uint8_t>();
+  material.baseColorFactor = readVec4(reader);
+  material.emissiveFactor = readVec3(reader);
+  readFields(reader, material, kEarlyFields);
+  material.specularColorFactor = readVec3(reader);
+  readFields(reader, material, kSpecularFields);
+  material.sheenColorFactor = readVec3(reader);
+  readFields(reader, material, kExtensionFields);
+  material.attenuationColor = readVec3(reader);
+  readFields(reader, material, kLateFields);
+  material.doubleSided = reader.read<uint8_t>() != 0u;
+  const uint8_t alphaMode = reader.read<uint8_t>();
+  if (!reader.valid() || version != kRecordVersion ||
+      workflow > static_cast<uint8_t>(MaterialWorkflow::SpecularGlossiness) ||
+      alphaMode > static_cast<uint8_t>(MaterialAlphaMode::Blend)) {
+    return false;
+  }
+  material.workflow = static_cast<MaterialWorkflow>(workflow);
+  material.alphaMode = static_cast<MaterialAlphaMode>(alphaMode);
+  for (size_t i = 0; i < material.textures.size(); ++i) {
+    if (!readSlot(reader, material.textures[i])) {
+      return false;
+    }
+    record.textureCache[i].artifactIdentityHash = reader.read<uint64_t>();
+  }
+  return reader.valid();
+}
 } // namespace
 
 Result<std::vector<std::byte>, std::string>
 materialBinarySerialize(const MaterialBinarySerializeInput &input) {
-  material_binary_codec::Writer writer{};
-  MaterialBinaryHeader header{};
-  header.magic = kMaterialBinaryMagic;
-  header.majorVersion = kMaterialBinaryFormatMajorVersion;
-  header.minorVersion = kMaterialBinaryFormatMinorVersion;
-  header.sourcePathHash = input.sourcePathHash;
-  header.sourceSizeBytes = input.sourceSizeBytes;
-  header.sourceMtimeNs = input.sourceMtimeNs;
   if (input.materials.size() > std::numeric_limits<uint32_t>::max()) {
     return Result<std::vector<std::byte>, std::string>::makeError(
-        "materialBinarySerialize: material count exceeds uint32_t range");
+        "materialBinarySerialize: too many materials");
   }
-  header.materialCount = static_cast<uint32_t>(input.materials.size());
-
-  writer.writeBytes(
-      {reinterpret_cast<const std::byte *>(&header), sizeof(header)});
+  MaterialBinaryHeader header{
+      .magic = kMaterialBinaryMagic,
+      .majorVersion = kMaterialBinaryFormatMajorVersion,
+      .minorVersion = kMaterialBinaryFormatMinorVersion,
+      .sourcePathHash = input.sourcePathHash,
+      .sourceSizeBytes = input.sourceSizeBytes,
+      .sourceMtimeNs = input.sourceMtimeNs,
+      .materialCount = static_cast<uint32_t>(input.materials.size()),
+  };
+  BinaryWriter writer;
+  writer.write(header);
   for (const SceneMaterialRecord &record : input.materials) {
-    material_binary_schema_codec::writeSceneMaterialRecord(writer, record);
+    writeRecord(writer, record);
   }
-
-  std::vector<std::byte> bytes = writer.bytes();
-  if (bytes.size() > std::numeric_limits<uint32_t>::max()) {
+  if (!writer.valid() ||
+      writer.bytes().size() > std::numeric_limits<uint32_t>::max()) {
     return Result<std::vector<std::byte>, std::string>::makeError(
-        "materialBinarySerialize: output exceeds 4GB");
+        "materialBinarySerialize: output exceeds format limits");
   }
-  header.fileSize = static_cast<uint32_t>(bytes.size());
+  header.fileSize = static_cast<uint32_t>(writer.bytes().size());
+  auto bytes = std::move(writer).take();
   std::memcpy(bytes.data(), &header, sizeof(header));
   return Result<std::vector<std::byte>, std::string>::makeResult(
       std::move(bytes));
@@ -101,69 +201,43 @@ Result<SceneMaterialCacheData, MaterialBinaryDeserializeError>
 materialBinaryDeserialize(std::span<const std::byte> fileBytes,
                           const MaterialBinaryDeserializeContext &context) {
   if (fileBytes.size() < sizeof(MaterialBinaryHeader)) {
-    return makeDeserializeError<SceneMaterialCacheData>(
+    return deserializeError<SceneMaterialCacheData>(
         "materialBinaryDeserialize: file too small");
   }
-
   MaterialBinaryHeader header{};
   std::memcpy(&header, fileBytes.data(), sizeof(header));
-  if (header.magic != kMaterialBinaryMagic) {
-    return makeDeserializeError<SceneMaterialCacheData>(
-        "materialBinaryDeserialize: magic mismatch");
+  if (header.magic != kMaterialBinaryMagic ||
+      header.majorVersion != kMaterialBinaryFormatMajorVersion ||
+      header.minorVersion > kMaterialBinaryFormatMinorVersion ||
+      header.fileSize != fileBytes.size() ||
+      header.sourcePathHash != context.expectedSourcePathHash) {
+    return deserializeError<SceneMaterialCacheData>(
+        "materialBinaryDeserialize: invalid cache header");
   }
-  if (header.majorVersion != kMaterialBinaryFormatMajorVersion) {
-    return makeDeserializeError<SceneMaterialCacheData>(
-        "materialBinaryDeserialize: unsupported format major version");
+  if (context.validateSourceFingerprint &&
+      (!context.sourceExists ||
+       header.sourceSizeBytes != context.sourceSizeBytes ||
+       header.sourceMtimeNs != context.sourceMtimeNs)) {
+    return deserializeError<SceneMaterialCacheData>(
+        "materialBinaryDeserialize: stale source fingerprint", true);
   }
-  if (header.minorVersion > kMaterialBinaryFormatMinorVersion) {
-    return makeDeserializeError<SceneMaterialCacheData>(
-        "materialBinaryDeserialize: unsupported format minor version");
+  const auto payload = fileBytes.subspan(sizeof(header));
+  if (header.materialCount > payload.size() / kMinimumRecordBytes) {
+    return deserializeError<SceneMaterialCacheData>(
+        "materialBinaryDeserialize: invalid material count");
   }
-  if (header.fileSize != fileBytes.size()) {
-    return makeDeserializeError<SceneMaterialCacheData>(
-        "materialBinaryDeserialize: file size mismatch");
-  }
-  if (header.sourcePathHash != context.expectedSourcePathHash) {
-    return makeDeserializeError<SceneMaterialCacheData>(
-        "materialBinaryDeserialize: source path hash mismatch");
-  }
-  if (context.validateSourceFingerprint) {
-    if (!context.sourceExists) {
-      return makeDeserializeError<SceneMaterialCacheData>(
-          "materialBinaryDeserialize: source file is missing", true);
+  BinaryReader reader(payload);
+  SceneMaterialCacheData data;
+  data.materials.resize(header.materialCount);
+  for (SceneMaterialRecord &record : data.materials) {
+    if (!readRecord(reader, record)) {
+      return deserializeError<SceneMaterialCacheData>(
+          "materialBinaryDeserialize: invalid material record");
     }
-    if (header.sourceSizeBytes != context.sourceSizeBytes ||
-        header.sourceMtimeNs != context.sourceMtimeNs) {
-      return makeDeserializeError<SceneMaterialCacheData>(
-          "materialBinaryDeserialize: cache is stale for current source file",
-          true);
-    }
-  }
-
-  material_binary_codec::Reader reader(fileBytes.subspan(sizeof(header)));
-  SceneMaterialCacheData data{};
-  const size_t remainingBytes = fileBytes.size() - sizeof(header);
-  const size_t safeMaxMaterialCount =
-      remainingBytes / minSerializedSceneMaterialRecordBytes();
-  if (header.materialCount > safeMaxMaterialCount) {
-    return makeDeserializeError<SceneMaterialCacheData>(
-        "materialBinaryDeserialize: material count exceeds remaining file "
-        "size");
-  }
-  data.materials.reserve(static_cast<size_t>(header.materialCount));
-  for (uint32_t i = 0; i < header.materialCount; ++i) {
-    auto material =
-        material_binary_schema_codec::readSceneMaterialRecord(reader);
-    if (material.hasError()) {
-      return Result<SceneMaterialCacheData,
-                    MaterialBinaryDeserializeError>::makeError(material
-                                                                   .error());
-    }
-    data.materials.push_back(std::move(material.value()));
   }
   if (!reader.empty()) {
-    return makeDeserializeError<SceneMaterialCacheData>(
-        "materialBinaryDeserialize: trailing bytes remain");
+    return deserializeError<SceneMaterialCacheData>(
+        "materialBinaryDeserialize: trailing bytes");
   }
   return Result<SceneMaterialCacheData,
                 MaterialBinaryDeserializeError>::makeResult(std::move(data));

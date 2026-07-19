@@ -425,7 +425,7 @@ TEST(TextureCacheUtilsTests, DdsScenePackBuildsHitsAndRebuildsWhenStale) {
   const std::vector<std::byte> firstBytes = readBinaryBytes(firstPath);
   const std::string firstCanonical =
       nuri::canonicalizeResourcePath(firstPath.string());
-  auto packedFirst = cold.value().pack->read(firstCanonical);
+  auto packedFirst = cold.value().pack->readOwned(firstCanonical);
   ASSERT_FALSE(packedFirst.hasError()) << packedFirst.error();
   EXPECT_TRUE(std::ranges::equal(packedFirst.value(), firstBytes));
   Bc7FakeGpu packedGpu;
@@ -486,7 +486,7 @@ TEST(TextureCacheUtilsTests, DdsScenePackBuildsHitsAndRebuildsWhenStale) {
       nuri::ddsTexturePackTelemetry();
   EXPECT_EQ(afterRebuild.stale, afterWarm.stale + 1u);
   EXPECT_EQ(afterRebuild.builds, afterWarm.builds + 1u);
-  auto packedSecond = rebuilt.value().pack->read(
+  auto packedSecond = rebuilt.value().pack->readOwned(
       nuri::canonicalizeResourcePath(secondPath.string()));
   ASSERT_FALSE(packedSecond.hasError()) << packedSecond.error();
   EXPECT_EQ(packedSecond.value().size(),

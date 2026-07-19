@@ -1,5 +1,4 @@
 #pragma once
-
 #include "nuri/core/containers/slot_pool.h"
 #include "nuri/core/result.h"
 #include "nuri/defines.h"
@@ -7,18 +6,16 @@
 #include "nuri/scene/light.h"
 #include "nuri/scene/scene_handles.h"
 #include "nuri/scene/scene_prefab.h"
-
 #include <algorithm>
+#include <array>
 #include <cstdint>
+#include <glm/glm.hpp>
 #include <limits>
 #include <memory_resource>
 #include <span>
 #include <string>
 #include <string_view>
 #include <vector>
-
-#include <glm/glm.hpp>
-
 namespace nuri {
 
 class RenderScene;
@@ -31,14 +28,11 @@ struct ScenePrefabStructureCursor {
   bool complete = false;
 };
 
-// Cursors a capacity reservation over many editor frames so a large authored
-// scene does not grow every scene-graph backing array in one UI tick.
 struct SceneGraphCapacityReservation {
-  static constexpr uint32_t kStageCount = 32u;
+  static constexpr uint32_t kStageCount = 3u;
   size_t nodeCapacity = 0u;
   size_t renderableCapacity = 0u;
   uint32_t stage = 0u;
-
   [[nodiscard]] bool complete() const noexcept { return stage >= kStageCount; }
   [[nodiscard]] float progress() const noexcept {
     return static_cast<float>(std::min(stage, kStageCount)) /
@@ -48,18 +42,12 @@ struct SceneGraphCapacityReservation {
 
 class NURI_API SceneGraph {
 public:
-  // SceneGraph owns authored node/component state plus an explicit node
-  // world-transform cache. Call syncWorldTransforms() before reading cached
-  // world-space queries after local hierarchy edits.
   explicit SceneGraph(
       std::pmr::memory_resource *memory = std::pmr::get_default_resource());
-  ~SceneGraph() = default;
-
   SceneGraph(const SceneGraph &) = delete;
   SceneGraph &operator=(const SceneGraph &) = delete;
   SceneGraph(SceneGraph &&) = delete;
   SceneGraph &operator=(SceneGraph &&) = delete;
-
   [[nodiscard]] NodeId rootNode() const noexcept { return rootNode_; }
   [[nodiscard]] uint64_t topologyVersion() const noexcept {
     return topologyVersion_;
@@ -77,11 +65,7 @@ public:
   [[nodiscard]] bool setNodeLocalTransform(NodeId node,
                                            const glm::mat4 &localFromParent);
   [[nodiscard]] bool syncWorldTransforms();
-  // Advances at most maxNodes world-transform updates. Returns true when all
-  // currently dirty roots are synchronized.
   [[nodiscard]] bool syncWorldTransformsStep(uint32_t maxNodes);
-  // Reserves at most maxOperations backing arrays. Existing handles and
-  // authored state remain valid. Returns true once every array is reserved.
   [[nodiscard]] Result<bool, std::string>
   reserveCapacityStep(SceneGraphCapacityReservation &reservation,
                       uint32_t maxOperations);
@@ -93,7 +77,6 @@ public:
   [[nodiscard]] bool getNodeNextSibling(NodeId node, NodeId &out) const;
   [[nodiscard]] bool setNodeName(NodeId node, std::string_view name);
   [[nodiscard]] bool getNodeName(NodeId node, std::string_view &out) const;
-
   [[nodiscard]] Result<RenderableId, std::string>
   addRenderable(NodeId node, ModelRef model, MaterialRef material);
   [[nodiscard]] Result<uint32_t, std::string>
@@ -114,18 +97,13 @@ public:
   [[nodiscard]] bool getRenderableNode(RenderableId id, NodeId &out) const;
   [[nodiscard]] bool setRenderableMorphWeights(RenderableId id,
                                                std::span<const float> weights);
-  // Returned spans reference internal storage and are invalidated by
-  // renderable topology changes; copy the data if a stable lifetime is needed.
   [[nodiscard]] std::span<const float>
   getRenderableMorphWeights(RenderableId id) const;
   [[nodiscard]] bool
   setRenderableSkinPalette(RenderableId id,
                            std::span<const glm::mat4> matrices);
-  // Returned spans reference internal storage and are invalidated by
-  // renderable topology changes; copy the data if a stable lifetime is needed.
   [[nodiscard]] std::span<const glm::mat4>
   getRenderableSkinPalette(RenderableId id) const;
-
   template <typename Fn>
   void forEachRenderableOnNode(NodeId node, Fn &&fn) const {
     if (!nodeSlotValid(node)) {
@@ -139,7 +117,6 @@ public:
                           renderableComponents_.slots.generation(index)));
     }
   }
-
   [[nodiscard]] Result<LightId, std::string> addLight(NodeId node,
                                                       const LightDesc &desc);
   [[nodiscard]] bool removeLight(LightId id);
@@ -150,32 +127,23 @@ public:
   [[nodiscard]] bool updateLight(LightId id, const LightDesc &desc);
   [[nodiscard]] bool setLightNode(LightId id, NodeId node,
                                   bool preserveWorldTransform = false);
-
   template <typename Fn> void forEachLightOnNode(NodeId node, Fn &&fn) const {
     if (!nodeSlotValid(node)) {
       return;
     }
     const uint32_t nodeIndex = indexOf(node);
-    const auto visitStore = [&](const auto &store, const auto &head,
-                                LightType type) {
-      for (uint32_t index = head[nodeIndex]; index != kInvalidIndex;
-           index = store.nextOnNode[index]) {
-        fn(makeLightId(type, index, store.slots.generation(index)));
+    for (size_t typeIndex = 0; typeIndex < kLightTypeCount; ++typeIndex) {
+      const auto &store = lights_[typeIndex];
+      for (uint32_t index = nodes_.lightHead[typeIndex][nodeIndex];
+           index != kInvalidIndex; index = store.records[index].nextOnNode) {
+        fn(makeLightId(static_cast<LightType>(typeIndex), index,
+                       store.slots.generation(index)));
       }
-    };
-
-    visitStore(directionalLights_, nodes_.directionalLightHead,
-               LightType::Directional);
-    visitStore(pointLights_, nodes_.pointLightHead, LightType::Point);
-    visitStore(spotLights_, nodes_.spotLightHead, LightType::Spot);
+    }
   }
-
   [[nodiscard]] Result<NodeId, std::string>
   instantiatePrefabStructure(const ScenePrefab &prefab, NodeId parent,
                              SceneInstantiationMap *outMap = nullptr);
-  // Incremental variant used by interactive scene publication. Each created
-  // node or light consumes one operation. Partial state belongs to `outMap`
-  // and remains authored but unpublished until its owner commits the scene.
   [[nodiscard]] Result<bool, std::string> instantiatePrefabStructureStep(
       const ScenePrefab &prefab, NodeId parent, SceneInstantiationMap &outMap,
       ScenePrefabStructureCursor &cursor, uint32_t maxOperations);
@@ -187,172 +155,104 @@ public:
   instantiatePrefab(const ScenePrefab &prefab, NodeId parent,
                     const ScenePrefabAssets &assets,
                     SceneInstantiationMap *outMap = nullptr);
-
   template <typename Fn> void forEachLightId(Fn &&fn) const {
-    const auto visitStore = [&](const auto &store, LightType type) {
+    for (size_t typeIndex = 0; typeIndex < kLightTypeCount; ++typeIndex) {
+      const auto &store = lights_[typeIndex];
       for (uint32_t index = 0; index < store.slots.slotCount(); ++index) {
         if (!store.slots.isLive(index)) {
           continue;
         }
-        fn(makeLightId(type, index, store.slots.generation(index)));
+        fn(makeLightId(static_cast<LightType>(typeIndex), index,
+                       store.slots.generation(index)));
       }
-    };
-
-    visitStore(directionalLights_, LightType::Directional);
-    visitStore(pointLights_, LightType::Point);
-    visitStore(spotLights_, LightType::Spot);
+    }
   }
-
   void clearRenderables();
   void clearLights();
 
 private:
   friend class RenderScene;
-
   static constexpr uint32_t kInvalidIndex =
       std::numeric_limits<uint32_t>::max();
-  static constexpr uint32_t kInvalidPackedLightIndex =
-      std::numeric_limits<uint32_t>::max();
-
+  static constexpr size_t kLightTypeCount = 3u;
+  using GenerationPool =
+      SlotPool<MaskedNonZeroGenerationPolicy<kResourceHandleGenerationMask>>;
+  using IndexArray = std::pmr::vector<uint32_t>;
+  using LightIndexArrays = std::array<IndexArray, kLightTypeCount>;
   struct NodeStore {
-    explicit NodeStore(
-        std::pmr::memory_resource *memory = std::pmr::get_default_resource())
+    explicit NodeStore(std::pmr::memory_resource *memory)
         : slots(memory), parent(memory), firstChild(memory),
           nextSibling(memory), prevSibling(memory), depth(memory),
           localFromParent(memory), worldFromRoot(memory), dirty(memory),
           dirtyRootQueued(memory), names(memory), renderableHead(memory),
-          renderableTail(memory), directionalLightHead(memory),
-          directionalLightTail(memory), pointLightHead(memory),
-          pointLightTail(memory), spotLightHead(memory), spotLightTail(memory) {
-    }
-
-    SlotPool<MaskedNonZeroGenerationPolicy<kResourceHandleGenerationMask>>
-        slots;
-    std::pmr::vector<uint32_t> parent;
-    std::pmr::vector<uint32_t> firstChild;
-    std::pmr::vector<uint32_t> nextSibling;
-    std::pmr::vector<uint32_t> prevSibling;
-    std::pmr::vector<uint32_t> depth;
+          renderableTail(memory), lightHead{std::pmr::vector<uint32_t>{memory},
+                                            std::pmr::vector<uint32_t>{memory},
+                                            std::pmr::vector<uint32_t>{memory}},
+          lightTail{std::pmr::vector<uint32_t>{memory},
+                    std::pmr::vector<uint32_t>{memory},
+                    std::pmr::vector<uint32_t>{memory}} {}
+    GenerationPool slots;
+    IndexArray parent;
+    IndexArray firstChild;
+    IndexArray nextSibling;
+    IndexArray prevSibling;
+    IndexArray depth;
     std::pmr::vector<glm::mat4> localFromParent;
     std::pmr::vector<glm::mat4> worldFromRoot;
     std::pmr::vector<uint8_t> dirty;
     std::pmr::vector<uint8_t> dirtyRootQueued;
     std::pmr::vector<std::pmr::string> names;
-    std::pmr::vector<uint32_t> renderableHead;
-    std::pmr::vector<uint32_t> renderableTail;
-    std::pmr::vector<uint32_t> directionalLightHead;
-    std::pmr::vector<uint32_t> directionalLightTail;
-    std::pmr::vector<uint32_t> pointLightHead;
-    std::pmr::vector<uint32_t> pointLightTail;
-    std::pmr::vector<uint32_t> spotLightHead;
-    std::pmr::vector<uint32_t> spotLightTail;
+    IndexArray renderableHead;
+    IndexArray renderableTail;
+    LightIndexArrays lightHead;
+    LightIndexArrays lightTail;
   };
-
   struct RenderableStore {
-    explicit RenderableStore(
-        std::pmr::memory_resource *memory = std::pmr::get_default_resource())
+    explicit RenderableStore(std::pmr::memory_resource *memory)
         : slots(memory), node(memory), models(memory), materials(memory),
           materialOverrides(memory), morphWeights(memory), skinPalette(memory),
           flatRenderableIndex(memory), nextOnNode(memory), prevOnNode(memory) {}
-
-    SlotPool<MaskedNonZeroGenerationPolicy<kResourceHandleGenerationMask>>
-        slots;
-    std::pmr::vector<uint32_t> node;
+    GenerationPool slots;
+    IndexArray node;
     std::pmr::vector<ModelRef> models;
     std::pmr::vector<MaterialRef> materials;
     std::pmr::vector<MaterialRef> materialOverrides;
     std::pmr::vector<std::pmr::vector<float>> morphWeights;
     std::pmr::vector<std::pmr::vector<glm::mat4>> skinPalette;
-    std::pmr::vector<uint32_t> flatRenderableIndex;
-    std::pmr::vector<uint32_t> nextOnNode;
-    std::pmr::vector<uint32_t> prevOnNode;
+    IndexArray flatRenderableIndex;
+    IndexArray nextOnNode;
+    IndexArray prevOnNode;
   };
-
-  struct DirectionalLightStore {
-    explicit DirectionalLightStore(
-        std::pmr::memory_resource *memory = std::pmr::get_default_resource())
-        : slots(memory), packedIndices(memory), node(memory), names(memory),
-          localPositions(memory), localRotations(memory), colors(memory),
-          intensities(memory), angularRadiusDegrees(memory), enabled(memory),
-          nextOnNode(memory), prevOnNode(memory) {}
-
-    SlotPool<MaskedNonZeroGenerationPolicy<kResourceHandleGenerationMask>>
-        slots;
-    std::pmr::vector<uint32_t> packedIndices;
-    std::pmr::vector<uint32_t> node;
-    std::pmr::vector<std::pmr::string> names;
-    std::pmr::vector<glm::vec3> localPositions;
-    std::pmr::vector<glm::quat> localRotations;
-    std::pmr::vector<glm::vec3> colors;
-    std::pmr::vector<float> intensities;
-    std::pmr::vector<float> angularRadiusDegrees;
-    std::pmr::vector<uint8_t> enabled;
-    std::pmr::vector<uint32_t> nextOnNode;
-    std::pmr::vector<uint32_t> prevOnNode;
+  struct LightRecord {
+    explicit LightRecord(std::pmr::memory_resource *memory) : name(memory) {}
+    uint32_t packedIndex = kInvalidIndex;
+    uint32_t node = kInvalidIndex;
+    std::pmr::string name;
+    glm::vec3 localPosition{0.0f};
+    glm::quat localRotation{1.0f, 0.0f, 0.0f, 0.0f};
+    glm::vec3 color{1.0f};
+    float intensity = 1.0f;
+    float range = 0.0f;
+    float innerConeAngle = 0.0f;
+    float outerConeAngle = glm::quarter_pi<float>();
+    float angularRadiusDegrees = 0.27f;
+    uint32_t nextOnNode = kInvalidIndex;
+    uint32_t prevOnNode = kInvalidIndex;
+    bool enabled = false;
   };
-
-  struct PointLightStore {
-    explicit PointLightStore(
-        std::pmr::memory_resource *memory = std::pmr::get_default_resource())
-        : slots(memory), packedIndices(memory), node(memory), names(memory),
-          localPositions(memory), localRotations(memory), colors(memory),
-          intensities(memory), ranges(memory), enabled(memory),
-          nextOnNode(memory), prevOnNode(memory) {}
-
-    SlotPool<MaskedNonZeroGenerationPolicy<kResourceHandleGenerationMask>>
-        slots;
-    std::pmr::vector<uint32_t> packedIndices;
-    std::pmr::vector<uint32_t> node;
-    std::pmr::vector<std::pmr::string> names;
-    std::pmr::vector<glm::vec3> localPositions;
-    std::pmr::vector<glm::quat> localRotations;
-    std::pmr::vector<glm::vec3> colors;
-    std::pmr::vector<float> intensities;
-    std::pmr::vector<float> ranges;
-    std::pmr::vector<uint8_t> enabled;
-    std::pmr::vector<uint32_t> nextOnNode;
-    std::pmr::vector<uint32_t> prevOnNode;
+  struct LightStore {
+    explicit LightStore(std::pmr::memory_resource *memory)
+        : slots(memory), records(memory) {}
+    GenerationPool slots;
+    std::pmr::vector<LightRecord> records;
   };
-
-  struct SpotLightStore {
-    explicit SpotLightStore(
-        std::pmr::memory_resource *memory = std::pmr::get_default_resource())
-        : slots(memory), packedIndices(memory), node(memory), names(memory),
-          localPositions(memory), localRotations(memory), colors(memory),
-          intensities(memory), ranges(memory), innerConeAngles(memory),
-          outerConeAngles(memory), enabled(memory), nextOnNode(memory),
-          prevOnNode(memory) {}
-
-    SlotPool<MaskedNonZeroGenerationPolicy<kResourceHandleGenerationMask>>
-        slots;
-    std::pmr::vector<uint32_t> packedIndices;
-    std::pmr::vector<uint32_t> node;
-    std::pmr::vector<std::pmr::string> names;
-    std::pmr::vector<glm::vec3> localPositions;
-    std::pmr::vector<glm::quat> localRotations;
-    std::pmr::vector<glm::vec3> colors;
-    std::pmr::vector<float> intensities;
-    std::pmr::vector<float> ranges;
-    std::pmr::vector<float> innerConeAngles;
-    std::pmr::vector<float> outerConeAngles;
-    std::pmr::vector<uint8_t> enabled;
-    std::pmr::vector<uint32_t> nextOnNode;
-    std::pmr::vector<uint32_t> prevOnNode;
-  };
-
   [[nodiscard]] bool nodeSlotValid(NodeId id) const noexcept;
   [[nodiscard]] bool renderableSlotValid(RenderableId id) const noexcept;
-  [[nodiscard]] bool directionalSlotValid(LightId id) const noexcept;
-  [[nodiscard]] bool pointSlotValid(LightId id) const noexcept;
-  [[nodiscard]] bool spotSlotValid(LightId id) const noexcept;
-
+  [[nodiscard]] bool lightSlotValid(LightId id) const noexcept;
   [[nodiscard]] Result<SlotReservation, std::string> allocateNodeSlot();
   [[nodiscard]] Result<SlotReservation, std::string> allocateRenderableSlot();
   [[nodiscard]] Result<SlotReservation, std::string>
-  allocateDirectionalLightSlot();
-  [[nodiscard]] Result<SlotReservation, std::string> allocatePointLightSlot();
-  [[nodiscard]] Result<SlotReservation, std::string> allocateSpotLightSlot();
-
+  allocateLightSlot(LightType type);
   void markSubtreeDirty(uint32_t rootIndex);
   void resetWorldTransformSync() noexcept;
   void attachNode(uint32_t childIndex, uint32_t parentIndex);
@@ -365,9 +265,6 @@ private:
   void markTransformDependentsDirty() noexcept;
   void recycleRenderableSlot(uint32_t index) noexcept;
   [[nodiscard]] uint32_t localLightCount() const noexcept;
-  [[nodiscard]] bool tryGetLightNodeIndex(LightId id,
-                                          uint32_t &outNodeIndex) const;
-
   std::pmr::memory_resource *memory_ = std::pmr::get_default_resource();
   std::pmr::vector<uint32_t> worldSyncRoots_;
   std::pmr::vector<uint32_t> worldSyncStack_;
@@ -376,9 +273,7 @@ private:
   std::pmr::vector<uint32_t> dirtyRoots_;
   NodeStore nodes_;
   RenderableStore renderableComponents_;
-  DirectionalLightStore directionalLights_;
-  PointLightStore pointLights_;
-  SpotLightStore spotLights_;
+  std::array<LightStore, kLightTypeCount> lights_;
   NodeId rootNode_ = kInvalidNodeId;
   uint64_t topologyVersion_ = 0u;
   uint64_t transformVersion_ = 0u;

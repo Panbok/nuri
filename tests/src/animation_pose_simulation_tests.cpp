@@ -404,8 +404,6 @@ TEST(AnimationPoseSimulationTests, MakeDescBuildsGpuOnlyAnimationBinding) {
   EXPECT_EQ(desc.binding.primaryTarget.type,
             nuri::SimulationBindingTargetType::PrefabRoot);
   EXPECT_EQ(desc.binding.primaryTarget.prefabRoot, scene.graph().rootNode());
-  EXPECT_EQ(desc.backendPreference, nuri::SimulationBackendPreference::GPUOnly);
-  EXPECT_TRUE(desc.allowGpuExecution);
   EXPECT_FALSE(desc.startPaused);
 }
 
@@ -565,6 +563,7 @@ TEST(AnimationPoseSimulationTests,
   EXPECT_GT(countDispatches(*frameData, "AnimationPose SkinPalette"), 0u);
   EXPECT_GT(countDispatches(*frameData, "AnimationPose Skin"), 0u);
   EXPECT_EQ(countDispatches(*frameData, "AnimationPose Blend"), 0u);
+  EXPECT_TRUE(allDependencyBuffersValid(gpu, *frameData));
 
   const bool hasGeometryOverride = std::any_of(
       frameData->geometryOverridesByRenderable.begin(),

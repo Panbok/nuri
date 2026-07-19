@@ -88,7 +88,6 @@ void pumpUntilTerminal(nuri::test_support::FakeExecutorGPUDevice &gpu,
                        uint64_t &frameIndex) {
   for (uint32_t attempt = 0u; attempt < 200u; ++attempt) {
     ASSERT_FALSE(gpu.beginFrame(frameIndex).hasError());
-    resources.beginFrame(frameIndex);
     auto prepared = assets.prepareFrame();
     ASSERT_FALSE(prepared.hasError()) << prepared.error();
     if (assets.query(handle).terminal()) {
@@ -136,7 +135,6 @@ TEST(AssetSystemTests, DeduplicatesAndPublishesOnlyAfterUploadCompletion) {
   bool sawSubmitted = false;
   for (uint32_t attempt = 0u; attempt < 200u; ++attempt) {
     ASSERT_FALSE(gpu.beginFrame(frameIndex).hasError());
-    resources.beginFrame(frameIndex);
     auto prepared = assets.prepareFrame();
     ASSERT_FALSE(prepared.hasError()) << prepared.error();
     const nuri::AssetLoadSnapshot snapshot = assets.query(first.value());
@@ -186,7 +184,6 @@ TEST(AssetSystemTests, CancellationAfterSubmissionRetiresWithoutPublishing) {
   bool cancelled = false;
   for (uint32_t attempt = 0u; attempt < 200u; ++attempt) {
     ASSERT_FALSE(gpu.beginFrame(frameIndex).hasError());
-    resources.beginFrame(frameIndex);
     auto prepared = assets.prepareFrame();
     ASSERT_FALSE(prepared.hasError()) << prepared.error();
     if (!cancelled &&
@@ -276,8 +273,6 @@ TEST(AssetSystemTests, PublishesMaterialBatchWithSingleVersionAdvance) {
 
   auto first = assets.requestMaterial(firstRequest);
   auto second = assets.requestMaterial(secondRequest);
-  ASSERT_FALSE(first.hasError()) << first.error();
-  ASSERT_FALSE(second.hasError()) << second.error();
   const uint64_t previousVersion = resources.materialVersion();
 
   auto prepared = assets.prepareFrame();
@@ -289,18 +284,17 @@ TEST(AssetSystemTests, PublishesMaterialBatchWithSingleVersionAdvance) {
   EXPECT_EQ(firstSnapshot.dirtyBaseVersion, previousVersion);
   EXPECT_EQ(firstSnapshot.dirtyHeaders.first, 0u);
   EXPECT_EQ(firstSnapshot.dirtyHeaders.count, 2u);
-  EXPECT_EQ(assets.query(first.value()).state, nuri::AssetState::Published);
-  EXPECT_EQ(assets.query(second.value()).state, nuri::AssetState::Published);
-  EXPECT_TRUE(assets.tryResolve(first.value()).has_value());
-  EXPECT_TRUE(assets.tryResolve(second.value()).has_value());
+  EXPECT_EQ(assets.query(first).state, nuri::AssetState::Published);
+  EXPECT_EQ(assets.query(second).state, nuri::AssetState::Published);
+  EXPECT_TRUE(assets.tryResolve(first).has_value());
+  EXPECT_TRUE(assets.tryResolve(second).has_value());
 
   nuri::MaterialAssetRequest thirdRequest{
       .debugName = "async_material_third",
       .sourceIdentity = "async_material_third",
   };
   thirdRequest.desc.baseColorFactor = glm::vec4(0.75f, 0.5f, 0.25f, 1.0f);
-  auto third = assets.requestMaterial(thirdRequest);
-  ASSERT_FALSE(third.hasError()) << third.error();
+  (void)assets.requestMaterial(thirdRequest);
   prepared = assets.prepareFrame();
   ASSERT_FALSE(prepared.hasError()) << prepared.error();
   const nuri::MaterialTableSnapshot secondSnapshot =
@@ -343,7 +337,6 @@ TEST(AssetSystemTests,
   uint64_t frameIndex = 1u;
   for (uint32_t attempt = 0u; attempt < 500u; ++attempt) {
     ASSERT_FALSE(gpu.beginFrame(frameIndex).hasError());
-    resources.beginFrame(frameIndex);
     auto prepared = assets.prepareFrame(nuri::AssetPublicationContext{
         .scene = &scene,
     });
@@ -404,7 +397,6 @@ TEST(AssetSystemTests, CompleteOnlyScenePublishesAsOneGraphTransaction) {
   uint64_t frameIndex = 1u;
   for (uint32_t attempt = 0u; attempt < 500u; ++attempt) {
     ASSERT_FALSE(gpu.beginFrame(frameIndex).hasError());
-    resources.beginFrame(frameIndex);
     auto prepared = assets.prepareFrame(nuri::AssetPublicationContext{
         .scene = &scene,
     });
@@ -468,7 +460,6 @@ TEST(AssetSystemTests, OrreyPublishesDiffuseTexturesForSpecGlossMaterials) {
   uint64_t frameIndex = 1u;
   for (uint32_t attempt = 0u; attempt < 1000u; ++attempt) {
     ASSERT_FALSE(gpu.beginFrame(frameIndex).hasError());
-    resources.beginFrame(frameIndex);
     auto prepared = assets.prepareFrame(nuri::AssetPublicationContext{
         .scene = &scene,
     });
@@ -494,12 +485,14 @@ TEST(AssetSystemTests, OrreyPublishesDiffuseTexturesForSpecGlossMaterials) {
     if (material->debugName == "async_scene_Gold001") {
       continue;
     }
-    EXPECT_TRUE(nuri::isValid(material->textureRefs.baseColor))
+    EXPECT_TRUE(nuri::isValid(
+        material->textureRefs[nuri::kMaterialTextureSlotBaseColor]))
         << material->debugName;
     EXPECT_NE(material->packedGpuData.header.commonTextureIndices.x,
               nuri::kInvalidTextureBindlessIndex)
         << material->debugName;
-    if (nuri::isValid(material->textureRefs.baseColor)) {
+    if (nuri::isValid(
+            material->textureRefs[nuri::kMaterialTextureSlotBaseColor])) {
       ++texturedMaterialCount;
     }
   }
@@ -515,27 +508,28 @@ TEST(AssetSystemTests, OrreyPublishesDiffuseTexturesForSpecGlossMaterials) {
        renderableIndex < prefab->renderables.size(); ++renderableIndex) {
     const nuri::ScenePrefabRenderable &prefabRenderable =
         prefab->renderables[renderableIndex];
-    ASSERT_LT(prefabRenderable.materialIndex, sceneAssets->materials.size());
-    ASSERT_LT(prefabRenderable.meshIndex, sceneAssets->models.size());
-    ASSERT_LT(prefabRenderable.materialIndex, prefab->materialAssets.size());
+    ASSERT_LT(prefabRenderable.materialAssetIndex,
+              sceneAssets->materials.size());
+    ASSERT_LT(prefabRenderable.meshAssetIndex, sceneAssets->models.size());
+    ASSERT_LT(prefabRenderable.materialAssetIndex,
+              prefab->materialAssets.size());
     const uint32_t sourceMaterialIndex =
-        prefab->materialAssets[prefabRenderable.materialIndex]
-            .sourceMaterialIndex;
+        prefab->materialAssets[prefabRenderable.materialAssetIndex].sourceIndex;
     ASSERT_LT(sourceMaterialIndex, sourceMaterialUsage.size());
     ++sourceMaterialUsage[sourceMaterialIndex];
     const nuri::ModelRecord *model =
-        resources.tryGet(sceneAssets->models[prefabRenderable.meshIndex]);
+        resources.tryGet(sceneAssets->models[prefabRenderable.meshAssetIndex]);
     ASSERT_NE(model, nullptr);
     ASSERT_NE(model->model, nullptr);
     ASSERT_EQ(model->model->submeshes().size(), 1u);
     EXPECT_EQ(model->materialForSubmesh(0u).value,
-              sceneAssets->materials[prefabRenderable.materialIndex].value)
+              sceneAssets->materials[prefabRenderable.materialAssetIndex].value)
         << renderableIndex;
     auto sceneRenderableIndex =
         scene.findRenderableIndex(instantiation->renderables[renderableIndex]);
     ASSERT_TRUE(sceneRenderableIndex.has_value()) << renderableIndex;
     EXPECT_EQ(scene.renderables()[*sceneRenderableIndex].material.value,
-              sceneAssets->materials[prefabRenderable.materialIndex].value)
+              sceneAssets->materials[prefabRenderable.materialAssetIndex].value)
         << renderableIndex;
   }
   EXPECT_EQ(sourceMaterialUsage[0], 12u);
@@ -578,7 +572,6 @@ TEST(AssetSystemTests, ExplicitPublicationTargetKeepsActiveSceneIsolated) {
   uint64_t frameIndex = 1u;
   for (uint32_t attempt = 0u; attempt < 500u; ++attempt) {
     ASSERT_FALSE(gpu.beginFrame(frameIndex).hasError());
-    resources.beginFrame(frameIndex);
     auto prepared = assets.prepareFrame(nuri::AssetPublicationContext{
         .scene = &activeScene,
     });
@@ -610,7 +603,6 @@ TEST(AssetSystemTests, ExplicitPublicationTargetKeepsActiveSceneIsolated) {
   ++frameIndex;
   for (uint32_t attempt = 0u; attempt < 500u; ++attempt) {
     ASSERT_FALSE(gpu.beginFrame(frameIndex).hasError());
-    resources.beginFrame(frameIndex);
     auto prepared = assets.prepareFrame(nuri::AssetPublicationContext{
         .scene = &activeScene,
     });
@@ -696,7 +688,6 @@ TEST(AssetSystemTests, SceneCancellationRemovesPublishedHierarchy) {
   uint64_t frameIndex = 1u;
   for (uint32_t attempt = 0u; attempt < 500u; ++attempt) {
     ASSERT_FALSE(gpu.beginFrame(frameIndex).hasError());
-    resources.beginFrame(frameIndex);
     auto prepared = assets.prepareFrame(nuri::AssetPublicationContext{
         .scene = &scene,
     });
@@ -759,15 +750,16 @@ TEST(AssetSystemTests, EnvironmentPublishesRequiredSetTransactionally) {
   nuri::RenderScene scene(&memory);
   scene.bindResources(&resources);
   auto requested = assets.requestEnvironment(nuri::EnvironmentAssetRequest{
-      .cubemap =
-          nuri::TextureRequest{
-              .path = cubemapPath.string(),
-              .debugName = "environment_cubemap",
-          },
-      .irradiance =
-          nuri::TextureRequest{
-              .path = irradiancePath.string(),
-              .debugName = "environment_irradiance",
+      .textures =
+          {
+              nuri::TextureRequest{
+                  .path = cubemapPath.string(),
+                  .debugName = "environment_cubemap",
+              },
+              nuri::TextureRequest{
+                  .path = irradiancePath.string(),
+                  .debugName = "environment_irradiance",
+              },
           },
   });
   ASSERT_FALSE(requested.hasError()) << requested.error();
@@ -775,7 +767,6 @@ TEST(AssetSystemTests, EnvironmentPublishesRequiredSetTransactionally) {
   uint64_t frameIndex = 1u;
   for (uint32_t attempt = 0u; attempt < 300u; ++attempt) {
     ASSERT_FALSE(gpu.beginFrame(frameIndex).hasError());
-    resources.beginFrame(frameIndex);
     auto prepared = assets.prepareFrame(nuri::AssetPublicationContext{
         .scene = &scene,
     });
@@ -798,7 +789,6 @@ TEST(AssetSystemTests, EnvironmentPublishesRequiredSetTransactionally) {
   EXPECT_TRUE(assets.tryResolve(requested.value()).has_value());
 
   ASSERT_FALSE(gpu.beginFrame(++frameIndex).hasError());
-  resources.beginFrame(frameIndex);
   auto idleFrame = assets.prepareFrame(nuri::AssetPublicationContext{
       .scene = &scene,
   });
@@ -807,7 +797,6 @@ TEST(AssetSystemTests, EnvironmentPublishesRequiredSetTransactionally) {
 
   assets.cancel(requested.value());
   ASSERT_FALSE(gpu.beginFrame(++frameIndex).hasError());
-  resources.beginFrame(frameIndex);
   auto prepared = assets.prepareFrame(nuri::AssetPublicationContext{
       .scene = &scene,
   });

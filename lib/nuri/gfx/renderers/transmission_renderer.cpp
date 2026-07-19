@@ -1,16 +1,14 @@
-#include "nuri/pch.h"
-
 #include "nuri/gfx/renderers/transmission_renderer.h"
-
 #include "nuri/core/log.h"
 #include "nuri/core/profiling.h"
-#include "nuri/gfx/renderers/detail/renderable_material_resolution.h"
+#include "nuri/gfx/pipeline/render_pipeline.h"
+#include "nuri/gfx/renderers/detail/animation_rendering.h"
+#include "nuri/gfx/renderers/detail/forward_rendering.h"
 #include "nuri/gfx/shader.h"
+#include "nuri/pch.h"
 #include "nuri/resources/gpu/resource_manager.h"
-
 namespace nuri {
 namespace {
-
 constexpr uint32_t kTransmissionPassDebugColor = 0x33ffaaeeu;
 constexpr uint32_t kTransmissionMeshDebugColor = 0x33ffaaeeu;
 constexpr std::string_view kTransmissionPassLabel = "Transmission Pass";
@@ -19,88 +17,32 @@ constexpr uint64_t kFnvOffsetBasis64 = 14695981039346656037ull;
 constexpr uint64_t kFnvPrime64 = 1099511628211ull;
 constexpr float kDefaultTaaCurrentFrameWeight = 0.045f;
 constexpr uint32_t kForwardSceneHasSceneColor = 1u << 5u;
-
 [[nodiscard]] std::pmr::memory_resource *
 resolveMemoryResource(std::pmr::memory_resource *memory) {
   return memory != nullptr ? memory : std::pmr::get_default_resource();
 }
-
 [[nodiscard]] const RenderSettings &
 settingsOrDefault(const RenderFrameContext &frame) {
   return renderSettingsOrDefault(frame);
 }
-
 [[nodiscard]] bool
 isAntiAliasingDebugOutputView(AntiAliasingDebugView view) noexcept {
   return view != AntiAliasingDebugView::None &&
          view != AntiAliasingDebugView::Settings;
 }
-
 [[nodiscard]] bool shouldSuppressTransmissionForAntiAliasingDebugView(
     AntiAliasingDebugView view) noexcept {
   return isAntiAliasingDebugOutputView(view) &&
          view != AntiAliasingDebugView::TAATransmissionMipSource;
 }
-
-const AnimationSceneFrameData *
-resolveAnimationSceneFrameData(const RenderFrameContext &frame) {
-  if (!frame.sharedResources.animationSceneGpuData.has_value()) {
-    return nullptr;
-  }
-  const AnimationSceneFrameData &data =
-      *frame.sharedResources.animationSceneGpuData;
-  if (!nuri::isValid(data.instanceMatricesBuffer) ||
-      data.instanceMatricesAddress == 0u) {
-    return nullptr;
-  }
-  if (frame.scene == nullptr || data.scene != frame.scene ||
-      data.sceneTopologyVersion != frame.scene->topologyVersion() ||
-      data.renderableCount != frame.scene->renderables().size() ||
-      data.geometryOverridesByRenderable.size() != data.renderableCount) {
-    return nullptr;
-  }
-  return &data;
-}
-
-bool animationOverrideCoversSubmesh(
-    const AnimatedRenderableGeometryOverride &geometryOverride,
-    const Submesh &submesh) noexcept {
-  const uint64_t requiredVertexCount =
-      static_cast<uint64_t>(submesh.vertexOffset) + submesh.vertexCount;
-  return static_cast<uint64_t>(geometryOverride.vertexCount) >=
-         requiredVertexCount;
-}
-
 [[nodiscard]] uint64_t foldHandle(uint32_t index, uint32_t generation) {
   return (static_cast<uint64_t>(generation) << 32u) | index;
 }
-
 [[nodiscard]] uint64_t hashCombine64(uint64_t hash, uint64_t value) {
   hash ^= value;
   hash *= kFnvPrime64;
   return hash;
 }
-
-[[nodiscard]] bool isSameTextureHandle(TextureHandle lhs,
-                                       TextureHandle rhs) noexcept {
-  return lhs.index == rhs.index && lhs.generation == rhs.generation;
-}
-
-[[nodiscard]] bool isSameBufferHandle(BufferHandle lhs,
-                                      BufferHandle rhs) noexcept {
-  return lhs.index == rhs.index && lhs.generation == rhs.generation;
-}
-
-[[nodiscard]] bool isTransmissionMaterial(const MaterialRecord &material) {
-  return (material.desc.featureMask & kMaterialFeatureTransmission) != 0u;
-}
-
-[[nodiscard]] bool
-usesSortedTransmissionFeedback(const MaterialRecord &material) {
-  return isTransmissionMaterial(material) &&
-         material.desc.alphaMode != MaterialAlphaMode::Mask;
-}
-
 [[nodiscard]] float
 transmissionSortDepth(const glm::mat4 &view,
                       const std::array<glm::vec3, 8> &worldCorners) {
@@ -111,7 +53,6 @@ transmissionSortDepth(const glm::mat4 &view,
   }
   return std::isfinite(depth) ? depth : 0.0f;
 }
-
 [[nodiscard]] std::array<glm::vec3, 8>
 transmissionWorldBoundsCorners(const glm::mat4 &model,
                                const BoundingBox &bounds) {
@@ -129,11 +70,9 @@ transmissionWorldBoundsCorners(const glm::mat4 &model,
   }
   return worldCorners;
 }
-
 [[nodiscard]] uint32_t levelDimension(uint32_t value, uint32_t mipLevel) {
   return std::max(1u, value >> mipLevel);
 }
-
 [[nodiscard]] TextureDesc makeTransparentFeedbackTextureDesc(uint32_t width,
                                                              uint32_t height) {
   return TextureDesc{
@@ -150,7 +89,6 @@ transmissionWorldBoundsCorners(const glm::mat4 &model,
       .generateMipmaps = false,
   };
 }
-
 [[nodiscard]] glm::vec3 transmissionScaleForDraw(const Renderable &renderable,
                                                  const Submesh &submesh) {
   const glm::mat4 &model = renderable.modelMatrix;
@@ -160,7 +98,6 @@ transmissionWorldBoundsCorners(const glm::mat4 &model,
       std::max(glm::length(glm::vec3(model[1])) * authoredScale.y, 1.0e-4f),
       std::max(glm::length(glm::vec3(model[2])) * authoredScale.z, 1.0e-4f));
 }
-
 [[nodiscard]] float smoothStep(float edge0, float edge1, float value) noexcept {
   if (edge1 <= edge0) {
     return value >= edge1 ? 1.0f : 0.0f;
@@ -168,7 +105,6 @@ transmissionWorldBoundsCorners(const glm::mat4 &model,
   const float t = std::clamp((value - edge0) / (edge1 - edge0), 0.0f, 1.0f);
   return t * t * (3.0f - 2.0f * t);
 }
-
 [[nodiscard]] float
 transmissionTaaJitterMinLod(const RenderFrameContext &frame,
                             const RenderSettings &settings) noexcept {
@@ -178,7 +114,6 @@ transmissionTaaJitterMinLod(const RenderFrameContext &frame,
       !frame.camera.jitterEnabled) {
     return 0.0f;
   }
-
   const RenderSettings::AntiAliasingDebugSettings aaDebug =
       effectiveTemporalAADebugSettings(settings.antiAliasing);
   const float jitterScale = std::isfinite(aaDebug.taaJitterScale)
@@ -198,7 +133,6 @@ transmissionTaaJitterMinLod(const RenderFrameContext &frame,
       smoothStep(0.0f, kDefaultTaaCurrentFrameWeight, currentWeight);
   return std::clamp(maxLod * jitterFactor * weightFactor, 0.0f, maxLod);
 }
-
 [[nodiscard]] float transmissionTaaJitterDepthBiasConstant(
     const RenderSettings &settings) noexcept {
   if (!std::isfinite(settings.transmission.taaJitterDepthBiasConstant)) {
@@ -207,7 +141,6 @@ transmissionTaaJitterMinLod(const RenderFrameContext &frame,
   return std::clamp(settings.transmission.taaJitterDepthBiasConstant, -64.0f,
                     0.0f);
 }
-
 [[nodiscard]] bool transmissionUsesJitteredPostTaaDepthBias(
     const RenderFrameContext &frame, const RenderSettings &settings,
     uint64_t frameDataAddress, const ForwardSceneGpuData &sceneGpu) noexcept {
@@ -218,45 +151,15 @@ transmissionTaaJitterMinLod(const RenderFrameContext &frame,
          frameDataAddress == sceneGpu.postTaaFrameDataAddress &&
          sceneGpu.postTaaFrameDataAddress != sceneGpu.frameDataAddress;
 }
-
-Result<ForwardSceneFrameData, std::string>
+ForwardSceneFrameData
 resolveForwardSceneFrameData(const ForwardSceneGpuData &sceneGpu,
                              uint64_t frameDataAddress) {
-  if (!nuri::isValid(sceneGpu.buffer) || frameDataAddress == 0u) {
-    return Result<ForwardSceneFrameData, std::string>::makeError(
-        "TransmissionRenderer::prepareTransmissionPasses: invalid forward "
-        "scene frame data source");
-  }
   if (frameDataAddress == sceneGpu.postTaaFrameDataAddress &&
       sceneGpu.postTaaFrameDataAddress != 0u) {
-    return Result<ForwardSceneFrameData, std::string>::makeResult(
-        sceneGpu.postTaaFrameData);
+    return sceneGpu.postTaaFrameData;
   }
-  if (frameDataAddress == sceneGpu.frameDataAddress &&
-      sceneGpu.frameDataAddress != 0u) {
-    return Result<ForwardSceneFrameData, std::string>::makeResult(
-        sceneGpu.frameData);
-  }
-  return Result<ForwardSceneFrameData, std::string>::makeError(
-      "TransmissionRenderer::prepareTransmissionPasses: unknown forward "
-      "scene frame data address");
+  return sceneGpu.frameData;
 }
-
-void appendUniqueTexture(std::pmr::vector<TextureHandle> &handles,
-                         TextureHandle handle) {
-  if (!nuri::isValid(handle)) {
-    return;
-  }
-  if (std::find_if(handles.begin(), handles.end(),
-                   [handle](const TextureHandle existing) {
-                     return existing.index == handle.index &&
-                            existing.generation == handle.generation;
-                   }) != handles.end()) {
-    return;
-  }
-  handles.push_back(handle);
-}
-
 [[nodiscard]] uint64_t
 textureReadSignature(std::span<const TextureHandle> staticHandles,
                      std::span<const TextureHandle> dynamicHandles) {
@@ -277,20 +180,18 @@ textureReadSignature(std::span<const TextureHandle> staticHandles,
   }
   return hash;
 }
-
 void rebuildTextureReads(std::pmr::vector<TextureHandle> &out,
                          std::span<const TextureHandle> staticHandles,
                          std::span<const TextureHandle> dynamicHandles) {
   out.clear();
   out.reserve(staticHandles.size() + dynamicHandles.size());
   for (const TextureHandle handle : staticHandles) {
-    appendUniqueTexture(out, handle);
+    appendUniqueForwardHandle(out, handle);
   }
   for (const TextureHandle handle : dynamicHandles) {
-    appendUniqueTexture(out, handle);
+    appendUniqueForwardHandle(out, handle);
   }
 }
-
 [[nodiscard]] uint64_t transmissionDrawLayoutSignature(
     RenderPipelineHandle pipeline, BufferHandle vertexBuffer,
     BufferHandle indexBuffer, uint64_t indexBufferOffset, const SubmeshLod &lod,
@@ -310,79 +211,15 @@ void rebuildTextureReads(std::pmr::vector<TextureHandle> &out,
   hash = hashCombine64(hash, depthBiasEnabled ? 1u : 0u);
   return hashCombine64(hash, depthBiasBits);
 }
-
-void appendUniqueBuffer(std::pmr::vector<BufferHandle> &handles,
-                        BufferHandle handle) {
-  if (!nuri::isValid(handle)) {
-    return;
-  }
-  if (std::find_if(handles.begin(), handles.end(),
-                   [handle](const BufferHandle existing) {
-                     return existing.index == handle.index &&
-                            existing.generation == handle.generation;
-                   }) != handles.end()) {
-    return;
-  }
-  handles.push_back(handle);
-}
-
 void appendPreResolvedDrawBuffers(std::pmr::vector<BufferHandle> &handles,
                                   std::span<const DrawItem> draws) {
   for (const DrawItem &draw : draws) {
-    appendUniqueBuffer(handles, draw.vertexBuffer);
-    appendUniqueBuffer(handles, draw.indexBuffer);
-    appendUniqueBuffer(handles, draw.indirectBuffer);
-    appendUniqueBuffer(handles, draw.indirectCountBuffer);
+    appendUniqueForwardHandle(handles, draw.vertexBuffer);
+    appendUniqueForwardHandle(handles, draw.indexBuffer);
+    appendUniqueForwardHandle(handles, draw.indirectBuffer);
+    appendUniqueForwardHandle(handles, draw.indirectCountBuffer);
   }
 }
-
-[[nodiscard]] bool isSameTextureRef(TextureRef lhs, TextureRef rhs) {
-  return lhs == rhs;
-}
-
-[[nodiscard]] bool isSameEnvironmentHandles(const EnvironmentHandles &lhs,
-                                            const EnvironmentHandles &rhs) {
-  return isSameTextureRef(lhs.cubemap, rhs.cubemap) &&
-         isSameTextureRef(lhs.irradiance, rhs.irradiance) &&
-         isSameTextureRef(lhs.prefilteredGgx, rhs.prefilteredGgx) &&
-         isSameTextureRef(lhs.prefilteredCharlie, rhs.prefilteredCharlie) &&
-         isSameTextureRef(lhs.brdfLut, rhs.brdfLut);
-}
-
-[[nodiscard]] std::optional<SubmeshLod>
-resolveTransmissionLod(const Submesh &submesh, const RenderSettings &settings) {
-  if (settings.opaque.forcedMeshLod < 0) {
-    if (submesh.indexCount > 0) {
-      return SubmeshLod{.indexOffset = submesh.indexOffset,
-                        .indexCount = submesh.indexCount,
-                        .error = 0.0f};
-    }
-    for (uint32_t lod = 0; lod < std::max(submesh.lodCount, 1u); ++lod) {
-      if (submesh.lods[lod].indexCount > 0u) {
-        return submesh.lods[lod];
-      }
-    }
-    return std::nullopt;
-  }
-
-  const uint32_t lodCount =
-      std::clamp(submesh.lodCount, 1u, Submesh::kMaxLodCount);
-  uint32_t candidate = std::min(
-      static_cast<uint32_t>(settings.opaque.forcedMeshLod), lodCount - 1u);
-  while (candidate > 0u && submesh.lods[candidate].indexCount == 0u) {
-    --candidate;
-  }
-  if (submesh.lods[candidate].indexCount > 0u) {
-    return submesh.lods[candidate];
-  }
-  if (submesh.indexCount > 0u) {
-    return SubmeshLod{.indexOffset = submesh.indexOffset,
-                      .indexCount = submesh.indexCount,
-                      .error = 0.0f};
-  }
-  return std::nullopt;
-}
-
 RenderPipelineDesc meshPipelineDesc(Format colorFormat, Format depthFormat,
                                     ShaderHandle vertexShader,
                                     ShaderHandle fragmentShader,
@@ -401,12 +238,6 @@ RenderPipelineDesc meshPipelineDesc(Format colorFormat, Format depthFormat,
       .rasterState = canonicalRasterPipelineState(rasterState),
   };
 }
-
-uint32_t saturateToU32(size_t value) {
-  return static_cast<uint32_t>(
-      std::min(value, size_t(std::numeric_limits<uint32_t>::max())));
-}
-
 } // namespace
 
 TransmissionRenderer::TransmissionRenderer(
@@ -450,7 +281,6 @@ void TransmissionRenderer::onDetach() {
   destroyFeedbackTextures();
   destroyPipelineState();
   destroyShaders();
-  meshShader_.reset();
   resetFrameBuildState();
   resetCachedState();
   initialized_ = false;
@@ -485,7 +315,6 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
   frame.sharedResources.transparentTransmissionFeedbackTexture = {};
   frame.sharedResources.transparentTransmissionFeedbackHalfResTexture = {};
   frame.sharedResources.transparentTransmissionFeedbackQuarterResTexture = {};
-
   const RenderSettings &settings = settingsOrDefault(frame);
   if (!settings.transmission.enabled) {
     passTextureReads_.clear();
@@ -494,31 +323,9 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
     cachedBlendedTextureReadSignature_ = std::numeric_limits<uint64_t>::max();
     return Result<bool, std::string>::makeResult(true);
   }
-  if (!frame.scene) {
-    return Result<bool, std::string>::makeError(
-        "TransmissionRenderer::buildRenderGraph: frame scene is null");
-  }
-  if (!frame.resources) {
-    return Result<bool, std::string>::makeError(
-        "TransmissionRenderer::buildRenderGraph: frame resources are null");
-  }
-
   auto initResult = ensureInitialized();
   if (initResult.hasError()) {
     return initResult;
-  }
-
-  if (!nuri::isValid(frame.sharedResources.sceneColorTexture)) {
-    return Result<bool, std::string>::makeError(
-        "TransmissionRenderer::prepareTransmissionPasses: scene color texture "
-        "is "
-        "unavailable");
-  }
-  if (!nuri::isValid(frame.sharedResources.frameColorTexture)) {
-    return Result<bool, std::string>::makeError(
-        "TransmissionRenderer::prepareTransmissionPasses: frame color texture "
-        "is "
-        "unavailable");
   }
   const TextureHandle sceneColorTexture =
       frame.sharedResources.sceneColorTexture;
@@ -537,10 +344,9 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
   const RenderGraphTextureId sceneDepthGraphTexture =
       stableVisibilityDepth
           ? frame.sharedResources.transmissionVisibilityDepthGraphTexture
-          : resolveSceneDepthGraphTexture(frame);
+          : frame.sharedResources.sceneDepthGraphTexture;
   frame.metrics.antiAliasing.taaTransmissionStableVisibilityDepth =
       stableVisibilityDepth;
-
   const MaterialTableSnapshot materialSnapshot =
       frame.resources->materialSnapshot();
   const bool topologyDirty =
@@ -562,50 +368,33 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
       geometryDirty && !meshDrawTemplates_.empty();
   bool drawTemplatesRebuilt = false;
   if (topologyDirty || materialDirty || needsGeometryRebuild) {
-    Result<bool, std::string> rebuildResult =
-        [&]() -> Result<bool, std::string> {
-      std::optional<Result<bool, std::string>> result;
-      NURI_PROFILER_ZONE("TransmissionRenderer.cache_rebuild",
-                         NURI_PROFILER_COLOR_CMD_DRAW);
-      result.emplace(rebuildSceneCache(
-          *frame.scene, *frame.resources,
-          static_cast<uint32_t>(materialSnapshot.headers.size())));
-      NURI_PROFILER_ZONE_END();
-      return std::move(*result);
-    }();
-    if (rebuildResult.hasError()) {
-      return rebuildResult;
-    }
+    NURI_PROFILER_ZONE("TransmissionRenderer.cache_rebuild",
+                       NURI_PROFILER_COLOR_CMD_DRAW);
+    rebuildSceneCache(*frame.sharedResources.sceneDrawDatabase, *frame.scene);
+    NURI_PROFILER_ZONE_END();
     drawTemplatesRebuilt = true;
     cachedMaterialVersion_ = materialSnapshot.version;
     cachedModelMaterialBindingVersion_ = modelMaterialBindingVersion;
   } else if (geometryDirty) {
     cachedGeometryMutationVersion_ = geometryMutationVersion;
   }
-
   const EnvironmentHandles &environment = frame.scene->environment();
-  const bool environmentDirty =
-      !isSameEnvironmentHandles(cachedEnvironmentHandles_, environment);
+  const bool environmentDirty = cachedEnvironmentHandles_ != environment;
   if (environmentDirty || !environmentTextureAccessCacheValid_) {
     NURI_PROFILER_ZONE("TransmissionRenderer.env_texture_collect",
                        NURI_PROFILER_COLOR_CMD_DRAW);
-    collectEnvironmentTextureReads(*frame.scene, *frame.resources);
+    collectForwardEnvironmentTextures(*frame.scene, *frame.resources,
+                                      environmentTextureAccessHandles_);
     cachedEnvironmentHandles_ = environment;
     environmentTextureAccessCacheValid_ = true;
     NURI_PROFILER_ZONE_END();
   }
   if (materialDirty || !materialTextureAccessCacheValid_) {
-    Result<bool, std::string> cacheResult = [&]() -> Result<bool, std::string> {
-      std::optional<Result<bool, std::string>> result;
-      NURI_PROFILER_ZONE("TransmissionRenderer.material_texture_cache",
-                         NURI_PROFILER_COLOR_CMD_DRAW);
-      result.emplace(rebuildMaterialTextureAccessCache(*frame.resources));
-      NURI_PROFILER_ZONE_END();
-      return std::move(*result);
-    }();
-    if (cacheResult.hasError()) {
-      return cacheResult;
-    }
+    NURI_PROFILER_ZONE("TransmissionRenderer.material_texture_cache",
+                       NURI_PROFILER_COLOR_CMD_DRAW);
+    collectForwardMaterialTextures(*frame.resources, meshDrawTemplates_,
+                                   materialTextureAccessHandles_);
+    NURI_PROFILER_ZONE_END();
     materialTextureAccessCacheValid_ = true;
   }
   if (environmentDirty || materialDirty || !staticPassTextureReadsValid_) {
@@ -613,26 +402,12 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
     staticPassTextureReads_.reserve(environmentTextureAccessHandles_.size() +
                                     materialTextureAccessHandles_.size());
     for (const TextureHandle handle : environmentTextureAccessHandles_) {
-      appendUniqueTexture(staticPassTextureReads_, handle);
+      appendUniqueForwardHandle(staticPassTextureReads_, handle);
     }
     for (const TextureHandle handle : materialTextureAccessHandles_) {
-      appendUniqueTexture(staticPassTextureReads_, handle);
+      appendUniqueForwardHandle(staticPassTextureReads_, handle);
     }
     staticPassTextureReadsValid_ = true;
-  }
-
-  if (!frame.sharedResources.forwardSceneGpuData.has_value() ||
-      !nuri::isValid(frame.sharedResources.forwardSceneGpuData->buffer) ||
-      frame.sharedResources.forwardSceneGpuData->frameDataAddress == 0u) {
-    return Result<bool, std::string>::makeError(
-        "TransmissionRenderer::prepareTransmissionPasses: forward scene GPU "
-        "data is "
-        "unavailable");
-  }
-  if (!frame.sharedResources.materialTableGpuData.has_value()) {
-    return Result<bool, std::string>::makeError(
-        "TransmissionRenderer::prepareTransmissionPasses: material table GPU "
-        "data is unavailable");
   }
   const ForwardSceneGpuData *sceneGpu =
       &*frame.sharedResources.forwardSceneGpuData;
@@ -652,16 +427,7 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
       return feedbackResult;
     }
     frame.metrics.antiAliasing.transparentTransmissionFeedbackSourceAvailable =
-        nuri::isValid(
-            frame.sharedResources.transparentTransmissionFeedbackTexture) &&
-                nuri::isValid(
-                    frame.sharedResources
-                        .transparentTransmissionFeedbackHalfResTexture) &&
-                nuri::isValid(
-                    frame.sharedResources
-                        .transparentTransmissionFeedbackQuarterResTexture)
-            ? 1u
-            : 0u;
+        1u;
   }
   const bool jitteredPostTaaDepthBias =
       !stableVisibilityDepth && nuri::isValid(depthTexture) &&
@@ -673,16 +439,14 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
           : 0.0f;
   frame.metrics.antiAliasing.taaTransmissionDepthBiasConstant =
       jitterDepthBiasConstant;
-
   const std::span<const Renderable> renderables = frame.scene->renderables();
   if (!meshDrawTemplates_.empty()) {
-    auto ringResult =
-        ensureRingBufferCount(std::max(1u, gpu_.getSwapchainImageCount()));
-    if (ringResult.hasError()) {
-      return ringResult;
-    }
+    const std::array rings{&instanceMatricesRing_, &instanceRemapRing_};
+    const uint32_t ringCount =
+        growDynamicBufferRings(gpu_.getSwapchainImageCount(), rings);
+    instanceDataRingUploadVersions_.resize(
+        ringCount, std::numeric_limits<uint64_t>::max());
   }
-
   const uint32_t frameSlot =
       instanceMatricesRing_.empty()
           ? 0u
@@ -702,18 +466,8 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
             : static_cast<uint32_t>(frame.frameIndex %
                                     blendedFrameDataRing_.size());
     DynamicBufferSlot &blendSlot = blendedFrameDataRing_[blendFrameSlot];
-    if (!blendSlot.buffer || !blendSlot.buffer->valid()) {
-      return Result<bool, std::string>::makeError(
-          "TransmissionRenderer::prepareTransmissionPasses: blended frame "
-          "data buffer is unavailable");
-    }
-    auto blendedFrameDataResult =
+    FrameData blendedFrameData =
         resolveForwardSceneFrameData(*sceneGpu, frameDataAddress);
-    if (blendedFrameDataResult.hasError()) {
-      return Result<bool, std::string>::makeError(
-          blendedFrameDataResult.error());
-    }
-    FrameData blendedFrameData = blendedFrameDataResult.value();
     const TextureHandle feedbackFull =
         frame.sharedResources.transparentTransmissionFeedbackTexture;
     const TextureHandle feedbackHalf =
@@ -728,15 +482,6 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
         gpu_.getTextureBindlessIndex(feedbackQuarter);
     blendedFrameData.sceneColorSamplerId =
         gpu_.getLinearRepeatSamplerBindlessIndex(true, 1u);
-    if (blendedFrameData.sceneColorTexId == kInvalidTextureBindlessIndex ||
-        blendedFrameData.sceneColorHalfResTexId ==
-            kInvalidTextureBindlessIndex ||
-        blendedFrameData.sceneColorQuarterResTexId ==
-            kInvalidTextureBindlessIndex) {
-      return Result<bool, std::string>::makeError(
-          "TransmissionRenderer::prepareTransmissionPasses: invalid "
-          "transparent transmission feedback texture bindless index");
-    }
     blendedFrameData.flags |= kForwardSceneHasSceneColor;
     const std::span<const std::byte> frameDataBytes{
         reinterpret_cast<const std::byte *>(&blendedFrameData),
@@ -750,34 +495,19 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
     blendedFrameDataAddress =
         gpu_.getBufferDeviceAddress(blendedFrameDataBufferHandle);
   }
-
   if (!meshDrawTemplates_.empty() && (transformDirty || drawTemplatesRebuilt)) {
     {
       NURI_PROFILER_ZONE("TransmissionRenderer.draw_template_refresh",
                          NURI_PROFILER_COLOR_CMD_DRAW);
-      refreshDrawTemplateTransforms(renderables);
+      refreshDrawTemplateTransforms();
       NURI_PROFILER_ZONE_END();
     }
   }
   if (!meshDrawTemplates_.empty() && transformDirty) {
-    instanceMatrices_.clear();
-    instanceRemap_.clear();
-    instanceMatrices_.reserve(renderables.size());
-    instanceRemap_.reserve(renderables.size());
-    for (uint32_t i = 0; i < static_cast<uint32_t>(renderables.size()); ++i) {
-      instanceMatrices_.push_back(makeInstanceData(renderables[i].modelMatrix));
-      instanceRemap_.push_back(i);
-    }
+    rebuildForwardInstances(renderables, instanceMatrices_, instanceRemap_,
+                            instanceDataRingUploadVersions_);
     cachedTransformVersion_ = frame.scene->transformVersion();
-    std::fill(instanceDataRingUploadVersions_.begin(),
-              instanceDataRingUploadVersions_.end(),
-              std::numeric_limits<uint64_t>::max());
   }
-  // cachedTransformVersion_ describes the contents of instanceMatrices_ and
-  // instanceRemap_. Do not advance it while there are no transmission draws:
-  // progressive material publication can activate this pass later without a
-  // scene transform or topology mutation.
-
   if (!meshDrawTemplates_.empty()) {
     if (animationSceneData == nullptr) {
       auto matricesBufferResult = ensureInstanceMatricesRingCapacity(
@@ -793,7 +523,6 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
       return remapBufferResult;
     }
   }
-
   const Format depthFormat = nuri::isValid(depthTexture)
                                  ? gpu_.getTextureFormat(depthTexture)
                                  : Format::Count;
@@ -810,7 +539,6 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
   if (pipelineResult.hasError()) {
     return pipelineResult;
   }
-
   passDrawItems_.clear();
   blendedSortableDraws_.clear();
   passTextureReads_.clear();
@@ -819,52 +547,21 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
   blendedDependencyBuffers_.clear();
   meshPushConstants_.clear();
   blendedPushConstants_.clear();
-
   if (!meshDrawTemplates_.empty()) {
     NURI_PROFILER_ZONE("TransmissionRenderer.material_instance_uploads",
                        NURI_PROFILER_COLOR_CMD_COPY);
-    const bool needsInstanceDataUpload =
-        animationSceneData == nullptr &&
-        instanceDataRingUploadVersions_[frameSlot] != cachedTransformVersion_;
-    std::array<BufferUpdate, 2u> instanceUpdates{};
-    size_t instanceUpdateCount = 0u;
-    if (needsInstanceDataUpload && !instanceMatrices_.empty()) {
-      const std::span<const std::byte> matrixBytes{
-          reinterpret_cast<const std::byte *>(instanceMatrices_.data()),
-          instanceMatrices_.size() * sizeof(InstanceData)};
-      instanceUpdates[instanceUpdateCount++] = BufferUpdate{
-          .buffer = instanceMatricesRing_[frameSlot].buffer->handle(),
-          .data = matrixBytes,
-      };
-    }
-    if (needsInstanceDataUpload && !instanceRemap_.empty()) {
-      const std::span<const std::byte> remapBytes{
-          reinterpret_cast<const std::byte *>(instanceRemap_.data()),
-          instanceRemap_.size() * sizeof(uint32_t)};
-      instanceUpdates[instanceUpdateCount++] = BufferUpdate{
-          .buffer = instanceRemapRing_[frameSlot].buffer->handle(),
-          .data = remapBytes,
-      };
-    }
-    if (instanceUpdateCount != 0u) {
-      auto updateResult = gpu_.updateBuffers(std::span<const BufferUpdate>(
-          instanceUpdates.data(), instanceUpdateCount));
-      if (updateResult.hasError()) {
-        return updateResult;
-      }
-    }
-    if (needsInstanceDataUpload) {
-      instanceDataRingUploadVersions_[frameSlot] = cachedTransformVersion_;
+    auto instanceUpload = uploadForwardInstances(
+        gpu_, instanceMatricesRing_, instanceRemapRing_, instanceMatrices_,
+        instanceRemap_, instanceDataRingUploadVersions_, frameSlot,
+        cachedTransformVersion_, animationSceneData != nullptr);
+    if (instanceUpload.hasError()) {
+      return instanceUpload;
     }
     NURI_PROFILER_ZONE_END();
-
     NURI_PROFILER_ZONE("TransmissionRenderer.mesh_draw_build",
                        NURI_PROFILER_COLOR_CMD_DRAW);
     const float taaJitterMinLod = transmissionTaaJitterMinLod(frame, settings);
     frame.metrics.antiAliasing.taaTransmissionJitterMinLod = taaJitterMinLod;
-    const uint64_t directionalLightBufferAddress =
-        sceneGpu->directionalLightBufferAddress;
-    const uint64_t localLightBufferAddress = sceneGpu->localLightBufferAddress;
     const BufferHandle instanceMatricesBufferHandle =
         animationSceneData != nullptr
             ? animationSceneData->instanceMatricesBuffer
@@ -875,32 +572,10 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
             : gpu_.getBufferDeviceAddress(instanceMatricesBufferHandle);
     const uint64_t instanceRemapAddress = gpu_.getBufferDeviceAddress(
         instanceRemapRing_[frameSlot].buffer->handle());
-    if (frameDataAddress == 0u || materialGpu->headerBufferAddress == 0u ||
-        materialGpu->clearcoatBufferAddress == 0u ||
-        materialGpu->sheenBufferAddress == 0u ||
-        materialGpu->transmissionBufferAddress == 0u ||
-        materialGpu->specularBufferAddress == 0u ||
-        instanceMatricesAddress == 0u || instanceRemapAddress == 0u ||
-        (hasSortedFeedbackDraws &&
-         (blendedFrameDataAddress == 0u ||
-          !nuri::isValid(blendedFrameDataBufferHandle))) ||
-        (sceneGpu->directionalLightCount > 0u &&
-         directionalLightBufferAddress == 0u) ||
-        (sceneGpu->localLightCount > 0u && localLightBufferAddress == 0u)) {
-      return Result<bool, std::string>::makeError(
-          "TransmissionRenderer::prepareTransmissionPasses: invalid GPU buffer "
-          "address");
-    }
-
     meshPushConstants_.reserve(meshDrawTemplates_.size());
     blendedPushConstants_.reserve(meshDrawTemplates_.size());
     blendedSortableDraws_.reserve(meshDrawTemplates_.size());
     const uint32_t renderableCount = saturateToU32(renderables.size());
-    if (instanceRemap_.size() < renderables.size()) {
-      return Result<bool, std::string>::makeError(
-          "TransmissionRenderer::prepareTransmissionPasses: instance remap "
-          "buffer is smaller than the renderable set");
-    }
     const bool hasDepthAttachment =
         (nuri::isValid(depthTexture) || nuri::isValid(sceneDepthGraphTexture));
     constexpr uint32_t debugFlags = 0u;
@@ -914,37 +589,16 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
     NURI_PROFILER_ZONE("TransmissionRenderer.push_constant_patch",
                        NURI_PROFILER_COLOR_CMD_DRAW);
     for (MeshDrawTemplate &entry : meshDrawTemplates_) {
-      if (entry.renderable == nullptr || entry.submesh == nullptr) {
-        continue;
-      }
-
       const std::optional<SubmeshLod> lod =
-          resolveTransmissionLod(*entry.submesh, settings);
+          resolveForwardLod(*entry.submesh, settings.opaque.forcedMeshLod);
       if (!lod.has_value()) {
         continue;
       }
-      if (entry.instanceIndex >= renderableCount ||
-          entry.instanceIndex >= instanceRemap_.size()) {
-        return Result<bool, std::string>::makeError(
-            "TransmissionRenderer::prepareTransmissionPasses: draw instance "
-            "index is out of range");
-      }
-      if (entry.materialIndex >= materialSnapshot.headers.size()) {
-        return Result<bool, std::string>::makeError(
-            "TransmissionRenderer::prepareTransmissionPasses: draw material "
-            "index is out of range");
-      }
-      if (!nuri::isValid(entry.indexBuffer)) {
-        return Result<bool, std::string>::makeError(
-            "TransmissionRenderer::prepareTransmissionPasses: draw index "
-            "buffer is invalid");
-      }
-
       BufferHandle vertexBuffer = nuri::isValid(entry.vertexBuffer)
                                       ? entry.vertexBuffer
                                       : entry.baseVertexBuffer;
       uint64_t vertexBufferAddress =
-          isSameBufferHandle(vertexBuffer, entry.vertexBuffer)
+          vertexBuffer == entry.vertexBuffer
               ? entry.vertexBufferAddress
               : gpu_.getBufferDeviceAddress(vertexBuffer,
                                             entry.vertexBufferByteOffset);
@@ -952,21 +606,7 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
       uint32_t vertexDecodeIndex = entry.vertexDecodeIndex;
       uint32_t packedVertexFormat = entry.packedVertexFormat;
       bool animatedOverrideApplied = false;
-      if (vertexBufferAddress == 0u) {
-        return Result<bool, std::string>::makeError(
-            "TransmissionRenderer::prepareTransmissionPasses: invalid live "
-            "vertex buffer address");
-      }
-      if (packedVertexFormat ==
-              static_cast<uint32_t>(PackedVertexFormat::StaticQuantized20) &&
-          vertexDecodeBufferAddress == 0u) {
-        return Result<bool, std::string>::makeError(
-            "TransmissionRenderer::prepareTransmissionPasses: invalid live "
-            "vertex decode buffer address");
-      }
-      if (animationSceneData != nullptr &&
-          entry.instanceIndex <
-              animationSceneData->geometryOverridesByRenderable.size()) {
+      if (animationSceneData != nullptr) {
         const AnimatedRenderableGeometryOverride &geometryOverride =
             animationSceneData
                 ->geometryOverridesByRenderable[entry.instanceIndex];
@@ -975,18 +615,15 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
             animationOverrideCoversSubmesh(geometryOverride, *entry.submesh)) {
           const uint64_t overrideVertexAddress = gpu_.getBufferDeviceAddress(
               geometryOverride.vertexBuffer, geometryOverride.vertexByteOffset);
-          if (overrideVertexAddress != 0u) {
-            vertexBuffer = geometryOverride.vertexBuffer;
-            vertexBufferAddress = overrideVertexAddress;
-            vertexDecodeBufferAddress = 0u;
-            vertexDecodeIndex = 0u;
-            packedVertexFormat =
-                static_cast<uint32_t>(PackedVertexFormat::AnimatedFloat32);
-            animatedOverrideApplied = true;
-          }
+          vertexBuffer = geometryOverride.vertexBuffer;
+          vertexBufferAddress = overrideVertexAddress;
+          vertexDecodeBufferAddress = 0u;
+          vertexDecodeIndex = 0u;
+          packedVertexFormat =
+              static_cast<uint32_t>(PackedVertexFormat::AnimatedFloat32);
+          animatedOverrideApplied = true;
         }
       }
-
       const bool sortedFeedbackDraw = entry.sortedFeedback;
       MeshPushConstants constants{
           .frameDataAddress =
@@ -1002,18 +639,16 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
           .vertexDecodeIndex = vertexDecodeIndex,
           .packedVertexFormat = packedVertexFormat,
           .timeSeconds = static_cast<float>(frame.timeSeconds),
-          // Alias tessMaxFactor as taaJitterMinLod: a scene-color pyramid LOD
-          // in mip levels. Transmission shaders do not tessellate, so this
-          // push-constant slot is otherwise unused in this pipeline.
           .tessMaxFactor = sortedFeedbackDraw ? 0.0f : taaJitterMinLod,
           .debugVisualizationMode = debugFlags,
       };
-      constants.setTransmissionScale(entry.transmissionScale);
+      constants.tessNearDistance = entry.transmissionScale.x;
+      constants.tessFarDistance = entry.transmissionScale.y;
+      constants.tessMinFactor = entry.transmissionScale.z;
       std::pmr::vector<MeshPushConstants> &pushConstants =
           sortedFeedbackDraw ? blendedPushConstants_ : meshPushConstants_;
       pushConstants.push_back(constants);
       const MeshPushConstants &pc = pushConstants.back();
-
       const RenderPipelineHandle pipeline =
           selectMeshPipeline(entry.doubleSided, sortedFeedbackDraw);
       const bool depthBiasEnabled =
@@ -1022,7 +657,6 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
           pipeline, vertexBuffer, entry.indexBuffer, entry.indexBufferOffset,
           *lod, entry.instanceIndex, hasDepthAttachment, depthBiasEnabled,
           jitterDepthBiasBits);
-
       DrawItem draw{};
       if (!animatedOverrideApplied &&
           entry.cachedDrawLayoutSignature == drawLayoutSignature) {
@@ -1077,22 +711,26 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
       }
       NURI_PROFILER_ZONE_END();
     }
-
     NURI_PROFILER_ZONE("TransmissionRenderer.dependency_refresh",
                        NURI_PROFILER_COLOR_CMD_DRAW);
-    appendUniqueBuffer(passDependencyBuffers_, sceneGpu->buffer);
-    appendUniqueBuffer(passDependencyBuffers_, materialGpu->headerBuffer);
-    appendUniqueBuffer(passDependencyBuffers_, materialGpu->clearcoatBuffer);
-    appendUniqueBuffer(passDependencyBuffers_, materialGpu->sheenBuffer);
-    appendUniqueBuffer(passDependencyBuffers_, materialGpu->transmissionBuffer);
-    appendUniqueBuffer(passDependencyBuffers_, materialGpu->specularBuffer);
-    appendUniqueBuffer(passDependencyBuffers_, instanceMatricesBufferHandle);
-    appendUniqueBuffer(passDependencyBuffers_,
-                       instanceRemapRing_[frameSlot].buffer->handle());
+    appendUniqueForwardHandle(passDependencyBuffers_, sceneGpu->buffer);
+    appendUniqueForwardHandle(passDependencyBuffers_,
+                              materialGpu->headerBuffer);
+    appendUniqueForwardHandle(passDependencyBuffers_,
+                              materialGpu->clearcoatBuffer);
+    appendUniqueForwardHandle(passDependencyBuffers_, materialGpu->sheenBuffer);
+    appendUniqueForwardHandle(passDependencyBuffers_,
+                              materialGpu->transmissionBuffer);
+    appendUniqueForwardHandle(passDependencyBuffers_,
+                              materialGpu->specularBuffer);
+    appendUniqueForwardHandle(passDependencyBuffers_,
+                              instanceMatricesBufferHandle);
+    appendUniqueForwardHandle(passDependencyBuffers_,
+                              instanceRemapRing_[frameSlot].buffer->handle());
     blendedDependencyBuffers_ = passDependencyBuffers_;
     if (nuri::isValid(blendedFrameDataBufferHandle)) {
-      appendUniqueBuffer(blendedDependencyBuffers_,
-                         blendedFrameDataBufferHandle);
+      appendUniqueForwardHandle(blendedDependencyBuffers_,
+                                blendedFrameDataBufferHandle);
     }
     const std::array<TextureHandle, 3> passFrameTextures = {
         sceneColorTexture, sceneColorHalfResTexture,
@@ -1126,32 +764,6 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
     NURI_PROFILER_ZONE_END();
     frame.metrics.antiAliasing.transparentTransmissionBlendDrawCount =
         saturateToU32(blendedSortableDraws_.size());
-    if (loggedAddressProbeTopologyVersion_ != frame.scene->topologyVersion() &&
-        !meshPushConstants_.empty()) {
-      loggedAddressProbeTopologyVersion_ = frame.scene->topologyVersion();
-      const MeshPushConstants &probe = meshPushConstants_.front();
-      NURI_LOG_TRACE(
-          "TransmissionRenderer::prepareTransmissionPasses probe: "
-          "frameData=0x%llx vertex=0x%llx vertexDecode=0x%llx "
-          "instanceMatrices=0x%llx instanceRemap=0x%llx "
-          "dirLights=0x%llx localLights=0x%llx materialHeader=0x%llx "
-          "materialTransmission=0x%llx materialIndex=%u decodeIndex=%u "
-          "debugFlags=0x%08x packedFormat=%u draws=%zu deps=%zu",
-          static_cast<unsigned long long>(probe.frameDataAddress),
-          static_cast<unsigned long long>(probe.vertexBufferAddress),
-          static_cast<unsigned long long>(probe.vertexDecodeBufferAddress),
-          static_cast<unsigned long long>(probe.instanceMatricesAddress),
-          static_cast<unsigned long long>(probe.instanceRemapAddress),
-          static_cast<unsigned long long>(
-              sceneGpu->directionalLightBufferAddress),
-          static_cast<unsigned long long>(sceneGpu->localLightBufferAddress),
-          static_cast<unsigned long long>(materialGpu->headerBufferAddress),
-          static_cast<unsigned long long>(
-              materialGpu->transmissionBufferAddress),
-          probe.materialIndex, probe.vertexDecodeIndex, debugFlags,
-          probe.packedVertexFormat, passDrawItems_.size(),
-          passDependencyBuffers_.size());
-    }
     NURI_PROFILER_ZONE_END();
   } else {
     passTextureReads_.clear();
@@ -1159,21 +771,12 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
     cachedPassTextureReadSignature_ = std::numeric_limits<uint64_t>::max();
     cachedBlendedTextureReadSignature_ = std::numeric_limits<uint64_t>::max();
   }
-
   preparedSceneColorTexture_ = sceneColorTexture;
   preparedSceneColorHalfResTexture_ = sceneColorHalfResTexture;
   preparedSceneColorQuarterResTexture_ = sceneColorQuarterResTexture;
   preparedFrameColorTexture_ = frameColorTexture;
   preparedDepthTexture_ = depthTexture;
   preparedSceneDepthGraphTexture_ = sceneDepthGraphTexture;
-
-  if (!meshDrawTemplates_.empty() && passDrawItems_.empty() &&
-      blendedSortableDraws_.empty()) {
-    NURI_LOG_WARNING("TransmissionRenderer::prepareTransmissionPasses: "
-                     "transmission cache has "
-                     "%zu template draw(s) but produced no pass draw(s)",
-                     meshDrawTemplates_.size());
-  }
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -1201,7 +804,6 @@ TransmissionRenderer::appendTransmissionMainPass(RenderFrameContext &frame,
   if (!hasPreparedTransmissionMainPass()) {
     return Result<bool, std::string>::makeResult(true);
   }
-
   if (!nuri::isValid(preparedFrameColorTexture_)) {
     return Result<bool, std::string>::makeError(
         "TransmissionRenderer::appendTransmissionMainPass: frame color target "
@@ -1242,7 +844,6 @@ TransmissionRenderer::appendTransmissionMainPass(RenderFrameContext &frame,
   }
   aaMetrics.taaTransmissionFlickerEstimate =
       normalTaaResolve && !consumedPostTaaSceneColor ? 1.0f : 0.0f;
-
   NURI_PROFILER_ZONE("TransmissionRenderer.main_pass_build",
                      NURI_PROFILER_COLOR_CMD_DRAW);
   uint64_t preResolvedDrawBufferSignature =
@@ -1301,69 +902,7 @@ TransmissionRenderer::appendTransmissionMainPass(RenderFrameContext &frame,
   }
   passDependencyBufferAccessModes_.resize(passDependencyBuffers_.size(),
                                           RenderGraphAccessMode::Read);
-
-  ScratchArena passBuildScratchArena;
-  ScopedScratch passBuildScratch(passBuildScratchArena);
-  std::pmr::vector<RenderGraphPreparedDependencyBufferBinding>
-      dependencyBufferBindings(passBuildScratch.resource());
-  dependencyBufferBindings.reserve(passDependencyBuffers_.size());
-  for (size_t i = 0; i < passDependencyBuffers_.size(); ++i) {
-    const BufferHandle dependency = passDependencyBuffers_[i];
-    if (!nuri::isValid(dependency)) {
-      continue;
-    }
-    auto importResult =
-        graph.importBuffer(dependency, "transmission_pass_dependency_buffer");
-    if (importResult.hasError()) {
-      return Result<bool, std::string>::makeError(importResult.error());
-    }
-    const RenderGraphAccessMode accessMode =
-        i < passDependencyBufferAccessModes_.size()
-            ? passDependencyBufferAccessModes_[i]
-            : RenderGraphAccessMode::Read;
-    dependencyBufferBindings.push_back(
-        RenderGraphPreparedDependencyBufferBinding{
-            .dependencyIndex = static_cast<uint32_t>(i),
-            .buffer = importResult.value(),
-            .mode = accessMode,
-        });
-  }
-
-  std::pmr::vector<RenderGraphPreparedDependencyTextureBinding>
-      dependencyTextureBindings(passBuildScratch.resource());
-  dependencyTextureBindings.reserve(passTextureReads_.size());
-  for (const TextureHandle dependency : passTextureReads_) {
-    if (!nuri::isValid(dependency)) {
-      continue;
-    }
-    auto importResult =
-        graph.importTexture(dependency, "transmission_pass_dependency_texture");
-    if (importResult.hasError()) {
-      return Result<bool, std::string>::makeError(importResult.error());
-    }
-    dependencyTextureBindings.push_back(
-        RenderGraphPreparedDependencyTextureBinding{
-            .texture = importResult.value(),
-            .mode = RenderGraphAccessMode::Read,
-        });
-  }
-
-  std::pmr::vector<RenderGraphBufferId> preResolvedDrawBufferIds(
-      passBuildScratch.resource());
-  preResolvedDrawBufferIds.reserve(cachedPreResolvedDrawBuffers_.size());
-  for (const BufferHandle buffer : cachedPreResolvedDrawBuffers_) {
-    if (!nuri::isValid(buffer)) {
-      continue;
-    }
-    auto importResult =
-        graph.importBuffer(buffer, "transmission_pre_resolved_draw_buffer");
-    if (importResult.hasError()) {
-      return Result<bool, std::string>::makeError(importResult.error());
-    }
-    preResolvedDrawBufferIds.push_back(importResult.value());
-  }
-
-  RenderGraphPreparedGraphicsPassDesc passDesc{};
+  RenderGraphGraphicsPassDesc passDesc{};
   passDesc.color = {.loadOp = LoadOp::Load,
                     .storeOp = StoreOp::Store,
                     .clearColor = {1.0f, 1.0f, 1.0f, 1.0f}};
@@ -1384,9 +923,8 @@ TransmissionRenderer::appendTransmissionMainPass(RenderFrameContext &frame,
             frame.sharedResources.transmissionVisibilityDepthGraphTexture) &&
         nuri::isValid(
             frame.sharedResources.transmissionVisibilityDepthTexture) &&
-        isSameTextureHandle(
-            preparedDepthTexture_,
-            frame.sharedResources.transmissionVisibilityDepthTexture)) {
+        preparedDepthTexture_ ==
+            frame.sharedResources.transmissionVisibilityDepthTexture) {
       depthGraphTexture =
           frame.sharedResources.transmissionVisibilityDepthGraphTexture;
     }
@@ -1404,27 +942,20 @@ TransmissionRenderer::appendTransmissionMainPass(RenderFrameContext &frame,
   passDesc.draws =
       std::span<const DrawItem>(passDrawItems_.data(), passDrawItems_.size());
   passDesc.drawBuffersPreResolved = true;
-  passDesc.preResolvedDrawBufferIds = std::span<const RenderGraphBufferId>(
-      preResolvedDrawBufferIds.data(), preResolvedDrawBufferIds.size());
+  passDesc.preResolvedDrawBuffers = cachedPreResolvedDrawBuffers_;
   passDesc.dependencyBuffers = std::span<const BufferHandle>(
       passDependencyBuffers_.data(), passDependencyBuffers_.size());
-  passDesc.dependencyBufferBindings =
-      std::span<const RenderGraphPreparedDependencyBufferBinding>(
-          dependencyBufferBindings.data(), dependencyBufferBindings.size());
-  passDesc.dependencyTextureBindings =
-      std::span<const RenderGraphPreparedDependencyTextureBinding>(
-          dependencyTextureBindings.data(), dependencyTextureBindings.size());
+  passDesc.dependencyBufferAccessModes = passDependencyBufferAccessModes_;
+  passDesc.dependencyTextures = passTextureReads_;
   passDesc.debugLabel = kTransmissionPassLabel;
   passDesc.debugColor = kTransmissionPassDebugColor;
   passDesc.borrowPayload = true;
   passDesc.gpuTimingScope = GpuTimingScope::Transmission;
-
-  auto addResult = graph.addPreparedGraphicsPass(passDesc);
+  auto addResult = graph.addGraphicsPass(passDesc);
   if (addResult.hasError()) {
     return Result<bool, std::string>::makeError(addResult.error());
   }
   NURI_PROFILER_ZONE_END();
-
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -1442,25 +973,18 @@ Result<bool, std::string> TransmissionRenderer::ensureInitialized() {
 
 Result<bool, std::string> TransmissionRenderer::createShaders() {
   destroyShaders();
-  meshShader_ = Shader::create("transmission_main", gpu_);
-  if (!meshShader_) {
-    return Result<bool, std::string>::makeError(
-        "TransmissionRenderer::createShaders: failed to create shader "
-        "wrappers");
+  auto compiler = Shader::create("transmission_main", gpu_);
+  const std::array paths{&transmissionVertexPath_, &transmissionFragmentPath_};
+  constexpr std::array stages{ShaderStage::Vertex, ShaderStage::Fragment};
+  for (size_t index = 0; index < shaders_.size(); ++index) {
+    auto result =
+        compiler->compileFromFile(paths[index]->string(), stages[index]);
+    if (result.hasError()) {
+      destroyShaders();
+      return Result<bool, std::string>::makeError(result.error());
+    }
+    shaders_[index] = result.value();
   }
-
-  auto meshVertexResult = meshShader_->compileFromFile(
-      transmissionVertexPath_.string(), ShaderStage::Vertex);
-  if (meshVertexResult.hasError()) {
-    return Result<bool, std::string>::makeError(meshVertexResult.error());
-  }
-  auto meshFragmentResult = meshShader_->compileFromFile(
-      transmissionFragmentPath_.string(), ShaderStage::Fragment);
-  if (meshFragmentResult.hasError()) {
-    return Result<bool, std::string>::makeError(meshFragmentResult.error());
-  }
-  meshVertexShader_ = meshVertexResult.value();
-  meshFragmentShader_ = meshFragmentResult.value();
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -1470,164 +994,92 @@ TransmissionRenderer::ensurePipelines(Format colorFormat, Format depthFormat,
   const RasterPipelineState targetRasterState =
       canonicalRasterPipelineState(rasterState);
   const bool meshPipelinesValid =
-      nuri::isValid(meshPipelineHandle_) &&
-      nuri::isValid(meshDoubleSidedPipelineHandle_) &&
-      nuri::isValid(meshBlendPipelineHandle_) &&
-      nuri::isValid(meshBlendDoubleSidedPipelineHandle_) &&
+      std::ranges::all_of(meshPipelines_,
+                          [](RenderPipelineHandle pipeline) {
+                            return nuri::isValid(pipeline);
+                          }) &&
       meshPipelineColorFormat_ == colorFormat &&
       meshPipelineDepthFormat_ == depthFormat &&
       meshPipelineRasterState_ == targetRasterState;
   if (meshPipelinesValid) {
     return Result<bool, std::string>::makeResult(true);
   }
-
-  const auto destroyPipelineIfValid = [this](RenderPipelineHandle pipeline) {
-    if (nuri::isValid(pipeline)) {
-      gpu_.destroyRenderPipeline(pipeline);
-    }
+  struct Variant {
+    CullMode cull;
+    bool blend;
+    std::string_view name;
   };
-
-  auto meshResult = gpu_.createRenderPipeline(
-      meshPipelineDesc(colorFormat, depthFormat, meshVertexShader_,
-                       meshFragmentShader_, CullMode::Back, false,
-                       targetRasterState),
-      "transmission_mesh");
-  if (meshResult.hasError()) {
-    return Result<bool, std::string>::makeError(meshResult.error());
+  constexpr std::array variants{
+      Variant{CullMode::Back, false, "transmission_mesh"},
+      Variant{CullMode::None, false, "transmission_mesh_double_sided"},
+      Variant{CullMode::Back, true, "transmission_mesh_blend"},
+      Variant{CullMode::None, true, "transmission_mesh_blend_double_sided"},
+  };
+  std::array<RenderPipelineHandle, 4> pipelines{};
+  for (size_t index = 0; index < pipelines.size(); ++index) {
+    const Variant &variant = variants[index];
+    auto result = gpu_.createRenderPipeline(
+        meshPipelineDesc(colorFormat, depthFormat, shaders_[0], shaders_[1],
+                         variant.cull, variant.blend, targetRasterState),
+        variant.name);
+    if (result.hasError()) {
+      for (RenderPipelineHandle pipeline : pipelines) {
+        if (nuri::isValid(pipeline)) {
+          gpu_.destroyRenderPipeline(pipeline);
+        }
+      }
+      return Result<bool, std::string>::makeError(result.error());
+    }
+    pipelines[index] = result.value();
   }
-  RenderPipelineHandle newMeshPipeline = meshResult.value();
-
-  auto meshDoubleResult = gpu_.createRenderPipeline(
-      meshPipelineDesc(colorFormat, depthFormat, meshVertexShader_,
-                       meshFragmentShader_, CullMode::None, false,
-                       targetRasterState),
-      "transmission_mesh_double_sided");
-  if (meshDoubleResult.hasError()) {
-    destroyPipelineIfValid(newMeshPipeline);
-    return Result<bool, std::string>::makeError(meshDoubleResult.error());
-  }
-  RenderPipelineHandle newMeshDoubleSidedPipeline = meshDoubleResult.value();
-
-  auto blendResult = gpu_.createRenderPipeline(
-      meshPipelineDesc(colorFormat, depthFormat, meshVertexShader_,
-                       meshFragmentShader_, CullMode::Back, true,
-                       targetRasterState),
-      "transmission_mesh_blend");
-  if (blendResult.hasError()) {
-    destroyPipelineIfValid(newMeshDoubleSidedPipeline);
-    destroyPipelineIfValid(newMeshPipeline);
-    return Result<bool, std::string>::makeError(blendResult.error());
-  }
-  RenderPipelineHandle newMeshBlendPipeline = blendResult.value();
-
-  auto blendDoubleResult = gpu_.createRenderPipeline(
-      meshPipelineDesc(colorFormat, depthFormat, meshVertexShader_,
-                       meshFragmentShader_, CullMode::None, true,
-                       targetRasterState),
-      "transmission_mesh_blend_double_sided");
-  if (blendDoubleResult.hasError()) {
-    destroyPipelineIfValid(newMeshBlendPipeline);
-    destroyPipelineIfValid(newMeshDoubleSidedPipeline);
-    destroyPipelineIfValid(newMeshPipeline);
-    return Result<bool, std::string>::makeError(blendDoubleResult.error());
-  }
-  RenderPipelineHandle newMeshBlendDoubleSidedPipeline =
-      blendDoubleResult.value();
-
-  const RenderPipelineHandle oldMeshPipeline = meshPipelineHandle_;
-  const RenderPipelineHandle oldMeshDoubleSidedPipeline =
-      meshDoubleSidedPipelineHandle_;
-  const RenderPipelineHandle oldMeshBlendPipeline = meshBlendPipelineHandle_;
-  const RenderPipelineHandle oldMeshBlendDoubleSidedPipeline =
-      meshBlendDoubleSidedPipelineHandle_;
-  meshPipelineHandle_ = newMeshPipeline;
-  meshDoubleSidedPipelineHandle_ = newMeshDoubleSidedPipeline;
-  meshBlendPipelineHandle_ = newMeshBlendPipeline;
-  meshBlendDoubleSidedPipelineHandle_ = newMeshBlendDoubleSidedPipeline;
-
+  const auto oldPipelines = std::exchange(meshPipelines_, pipelines);
   meshPipelineColorFormat_ = colorFormat;
   meshPipelineDepthFormat_ = depthFormat;
   meshPipelineRasterState_ = targetRasterState;
-
-  destroyPipelineIfValid(oldMeshBlendDoubleSidedPipeline);
-  destroyPipelineIfValid(oldMeshBlendPipeline);
-  destroyPipelineIfValid(oldMeshDoubleSidedPipeline);
-  destroyPipelineIfValid(oldMeshPipeline);
-  return Result<bool, std::string>::makeResult(true);
-}
-
-Result<bool, std::string>
-TransmissionRenderer::ensureRingBufferCount(uint32_t requiredCount) {
-  const uint32_t count = std::max(requiredCount, 1u);
-  while (instanceMatricesRing_.size() < count) {
-    instanceMatricesRing_.push_back(DynamicBufferSlot{});
+  for (RenderPipelineHandle pipeline : oldPipelines) {
+    if (nuri::isValid(pipeline)) {
+      gpu_.destroyRenderPipeline(pipeline);
+    }
   }
-  while (instanceRemapRing_.size() < count) {
-    instanceRemapRing_.push_back(DynamicBufferSlot{});
-  }
-  instanceDataRingUploadVersions_.resize(count,
-                                         std::numeric_limits<uint64_t>::max());
   return Result<bool, std::string>::makeResult(true);
 }
 
 Result<bool, std::string>
 TransmissionRenderer::ensureInstanceMatricesRingCapacity(size_t requiredBytes) {
-  for (size_t i = 0; i < instanceMatricesRing_.size(); ++i) {
-    DynamicBufferSlot &slot = instanceMatricesRing_[i];
-    auto bufferResult =
-        ensureDynamicBufferCapacity(gpu_, slot,
-                                    BufferDesc{.usage = BufferUsage::Storage,
-                                               .storage = Storage::Device,
-                                               .size = requiredBytes},
-                                    "transmission_instance_matrices");
-    if (bufferResult.hasError()) {
-      return Result<bool, std::string>::makeError(bufferResult.error());
-    }
-    if (bufferResult.value()) {
-      instanceDataRingUploadVersions_[i] = std::numeric_limits<uint64_t>::max();
-    }
-  }
-  return Result<bool, std::string>::makeResult(true);
+  return ensureDynamicBufferRingCapacity(
+      gpu_, instanceMatricesRing_,
+      BufferDesc{.usage = BufferUsage::Storage,
+                 .storage = Storage::Device,
+                 .size = requiredBytes},
+      "transmission_instance_matrices", [this](size_t i) {
+        instanceDataRingUploadVersions_[i] =
+            std::numeric_limits<uint64_t>::max();
+      });
 }
 
 Result<bool, std::string>
 TransmissionRenderer::ensureInstanceRemapRingCapacity(size_t requiredBytes) {
-  for (size_t i = 0; i < instanceRemapRing_.size(); ++i) {
-    DynamicBufferSlot &slot = instanceRemapRing_[i];
-    auto bufferResult =
-        ensureDynamicBufferCapacity(gpu_, slot,
-                                    BufferDesc{.usage = BufferUsage::Storage,
-                                               .storage = Storage::Device,
-                                               .size = requiredBytes},
-                                    "transmission_instance_remap");
-    if (bufferResult.hasError()) {
-      return Result<bool, std::string>::makeError(bufferResult.error());
-    }
-    if (bufferResult.value()) {
-      instanceDataRingUploadVersions_[i] = std::numeric_limits<uint64_t>::max();
-    }
-  }
-  return Result<bool, std::string>::makeResult(true);
+  return ensureDynamicBufferRingCapacity(
+      gpu_, instanceRemapRing_,
+      BufferDesc{.usage = BufferUsage::Storage,
+                 .storage = Storage::Device,
+                 .size = requiredBytes},
+      "transmission_instance_remap", [this](size_t i) {
+        instanceDataRingUploadVersions_[i] =
+            std::numeric_limits<uint64_t>::max();
+      });
 }
 
 Result<bool, std::string>
 TransmissionRenderer::ensureBlendedFrameDataRingCapacity(size_t requiredBytes) {
-  const uint32_t count = std::max(1u, gpu_.getSwapchainImageCount());
-  while (blendedFrameDataRing_.size() < count) {
-    blendedFrameDataRing_.push_back(DynamicBufferSlot{});
-  }
-  for (DynamicBufferSlot &slot : blendedFrameDataRing_) {
-    auto bufferResult =
-        ensureDynamicBufferCapacity(gpu_, slot,
-                                    BufferDesc{.usage = BufferUsage::Storage,
-                                               .storage = Storage::HostVisible,
-                                               .size = requiredBytes},
-                                    "transparent_transmission_frame_data");
-    if (bufferResult.hasError()) {
-      return Result<bool, std::string>::makeError(bufferResult.error());
-    }
-  }
-  return Result<bool, std::string>::makeResult(true);
+  const std::array rings{&blendedFrameDataRing_};
+  growDynamicBufferRings(gpu_.getSwapchainImageCount(), rings);
+  return ensureDynamicBufferRingCapacity(
+      gpu_, blendedFrameDataRing_,
+      BufferDesc{.usage = BufferUsage::Storage,
+                 .storage = Storage::HostVisible,
+                 .size = requiredBytes},
+      "transparent_transmission_frame_data");
 }
 
 Result<bool, std::string>
@@ -1685,191 +1137,35 @@ TransmissionRenderer::ensureTransparentFeedbackTextures(
   return Result<bool, std::string>::makeResult(true);
 }
 
-Result<bool, std::string>
-TransmissionRenderer::rebuildSceneCache(const RenderScene &scene,
-                                        const ResourceManager &resources,
-                                        uint32_t materialCount) {
+void TransmissionRenderer::rebuildSceneCache(const SceneDrawDatabase &database,
+                                             const RenderScene &scene) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CMD_DRAW);
   meshDrawTemplates_.clear();
-
-  const std::span<const Renderable> renderables = scene.renderables();
-  if (renderables.size() >
-      static_cast<size_t>(std::numeric_limits<uint32_t>::max())) {
-    return Result<bool, std::string>::makeError(
-        "TransmissionRenderer::rebuildSceneCache: renderables count exceeds "
-        "UINT32_MAX");
-  }
-
-  size_t invalidMaterialFallbackCount = 0u;
-  bool hasTransmissionContent = false;
-  for (uint32_t renderableIndex = 0;
-       renderableIndex < static_cast<uint32_t>(renderables.size());
-       ++renderableIndex) {
-    const Renderable &renderable = renderables[renderableIndex];
-    const ModelRecord *modelRecord = resources.tryGet(renderable.model);
-    if (!modelRecord || !modelRecord->model) {
-      return Result<bool, std::string>::makeError(
-          "TransmissionRenderer::rebuildSceneCache: failed to resolve model");
-    }
-
-    GeometryAllocationView geometry{};
-    if (!gpu_.resolveGeometry(modelRecord->model->geometryHandle(), geometry)) {
-      return Result<bool, std::string>::makeError(
-          "TransmissionRenderer::rebuildSceneCache: failed to resolve "
-          "geometry");
-    }
-    const uint64_t vertexBufferAddress = gpu_.getBufferDeviceAddress(
-        geometry.vertexBuffer, geometry.vertexByteOffset);
-    if (vertexBufferAddress == 0u) {
-      return Result<bool, std::string>::makeError(
-          "TransmissionRenderer::rebuildSceneCache: invalid vertex buffer "
-          "address");
-    }
-
-    const std::span<const Submesh> submeshes = modelRecord->model->submeshes();
-    for (size_t submeshIndex = 0; submeshIndex < submeshes.size();
-         ++submeshIndex) {
-      const MaterialRef resolvedMaterial = resolveRenderableMaterial(
-          renderable, *modelRecord, static_cast<uint32_t>(submeshIndex));
-      const MaterialRecord *materialRecord = resources.tryGet(resolvedMaterial);
-      if (materialRecord == nullptr ||
-          !isTransmissionMaterial(*materialRecord)) {
-        continue;
-      }
-      hasTransmissionContent = true;
-      const bool sortedFeedback =
-          usesSortedTransmissionFeedback(*materialRecord);
-
-      uint32_t materialIndex = resources.materialTableIndex(resolvedMaterial);
-      if (materialCount == 0u || materialIndex >= materialCount) {
-        materialIndex = 0u;
-        ++invalidMaterialFallbackCount;
-      }
-
-      meshDrawTemplates_.push_back(MeshDrawTemplate{
-          .renderable = &renderable,
-          .submesh = &submeshes[submeshIndex],
-          .submeshIndex = static_cast<uint32_t>(submeshIndex),
-          .indexBuffer = geometry.indexBuffer,
-          .indexBufferOffset = geometry.indexByteOffset,
-          .baseVertexBuffer = geometry.vertexBuffer,
-          .vertexBufferByteOffset = geometry.vertexByteOffset,
-          .vertexBuffer = geometry.vertexBuffer,
-          .baseVertexDecodeBuffer = modelRecord->model->vertexDecodeBuffer(),
-          .vertexBufferAddress = vertexBufferAddress,
-          .vertexDecodeBufferAddress =
-              modelRecord->model->vertexDecodeBufferAddress(),
-          .vertexDecodeIndex = static_cast<uint32_t>(submeshIndex),
-          .packedVertexFormat =
-              static_cast<uint32_t>(modelRecord->model->drawVertexFormat()),
-          .materialIndex = materialIndex,
-          .instanceIndex = renderableIndex,
-          .doubleSided = materialRecord->desc.doubleSided,
-          .sortedFeedback = sortedFeedback,
-      });
+  for (const SceneDrawRecord &draw : database.draws()) {
+    if (draw.transmission) {
+      meshDrawTemplates_.emplace_back(draw);
     }
   }
-
-  if (invalidMaterialFallbackCount > 0u) {
-    if (!loggedMaterialFallbackWarning_) {
-      NURI_LOG_WARNING(
-          "TransmissionRenderer::rebuildSceneCache: %zu submesh draw(s) used "
-          "fallback material index 0 due to missing/out-of-range material "
-          "mapping",
-          invalidMaterialFallbackCount);
-      loggedMaterialFallbackWarning_ = true;
-    }
-  } else {
-    loggedMaterialFallbackWarning_ = false;
-  }
-
   preResolvedTemplateBuffers_.clear();
   preResolvedTemplateBuffers_.reserve(meshDrawTemplates_.size() * 3u);
   for (const MeshDrawTemplate &entry : meshDrawTemplates_) {
-    appendUniqueBuffer(preResolvedTemplateBuffers_, entry.baseVertexBuffer);
-    appendUniqueBuffer(preResolvedTemplateBuffers_,
-                       entry.baseVertexDecodeBuffer);
-    appendUniqueBuffer(preResolvedTemplateBuffers_, entry.indexBuffer);
+    appendUniqueForwardHandle(preResolvedTemplateBuffers_,
+                              entry.baseVertexBuffer);
+    appendUniqueForwardHandle(preResolvedTemplateBuffers_,
+                              entry.baseVertexDecodeBuffer);
+    appendUniqueForwardHandle(preResolvedTemplateBuffers_, entry.indexBuffer);
   }
   cachedPreResolvedDrawBuffers_.clear();
   cachedPreResolvedDrawBufferSignature_ = std::numeric_limits<uint64_t>::max();
-
   cachedScene_ = &scene;
   cachedTopologyVersion_ = scene.topologyVersion();
-  cachedMaterialVersion_ = resources.materialSnapshot().version;
-  cachedModelMaterialBindingVersion_ = resources.modelMaterialBindingVersion();
-  cachedTransmissionContentScene_ = &scene;
-  cachedTransmissionContentTopologyVersion_ = scene.topologyVersion();
-  cachedTransmissionContentMaterialVersion_ =
-      resources.materialSnapshot().version;
-  cachedTransmissionContentBindingVersion_ =
-      resources.modelMaterialBindingVersion();
-  cachedTransmissionContentValid_ = true;
-  cachedTransmissionContent_ = hasTransmissionContent;
   cachedGeometryMutationVersion_ = gpu_.geometryMutationVersion();
-  return Result<bool, std::string>::makeResult(true);
 }
 
-Result<bool, std::string>
-TransmissionRenderer::rebuildMaterialTextureAccessCache(
-    const ResourceManager &resources) {
-  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CMD_DRAW);
-  materialTextureAccessHandles_.clear();
-  for (const MeshDrawTemplate &entry : meshDrawTemplates_) {
-    if (entry.renderable == nullptr || entry.submesh == nullptr) {
-      continue;
-    }
-    const ModelRecord *modelRecord = resources.tryGet(entry.renderable->model);
-    if (!modelRecord || !modelRecord->model) {
-      continue;
-    }
-    const std::span<const Submesh> submeshes = modelRecord->model->submeshes();
-    if (entry.submeshIndex >= submeshes.size()) {
-      continue;
-    }
-    const MaterialRef resolvedMaterial = resolveRenderableMaterial(
-        *entry.renderable, *modelRecord, entry.submeshIndex);
-    const MaterialRecord *materialRecord = resources.tryGet(resolvedMaterial);
-    if (materialRecord == nullptr) {
-      continue;
-    }
-
-    forEachMaterialTextureRef(materialRecord->textureRefs, [&](TextureRef ref) {
-      const TextureRecord *record = resources.tryGet(ref);
-      if (record == nullptr || !nuri::isValid(record->texture)) {
-        return;
-      }
-      appendUniqueTexture(materialTextureAccessHandles_, record->texture);
-    });
-  }
-  return Result<bool, std::string>::makeResult(true);
-}
-
-void TransmissionRenderer::collectEnvironmentTextureReads(
-    const RenderScene &scene, const ResourceManager &resources) {
-  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CMD_DRAW);
-  environmentTextureAccessHandles_.clear();
-  const EnvironmentHandles environment = scene.environment();
-  const std::array<TextureRef, 5> refs = {
-      environment.cubemap, environment.irradiance, environment.prefilteredGgx,
-      environment.prefilteredCharlie, environment.brdfLut};
-  for (const TextureRef ref : refs) {
-    const TextureRecord *record = resources.tryGet(ref);
-    if (record == nullptr || !nuri::isValid(record->texture)) {
-      continue;
-    }
-    appendUniqueTexture(environmentTextureAccessHandles_, record->texture);
-  }
-}
-
-void TransmissionRenderer::refreshDrawTemplateTransforms(
-    std::span<const Renderable> renderables) {
+void TransmissionRenderer::refreshDrawTemplateTransforms() {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CMD_DRAW);
   for (MeshDrawTemplate &entry : meshDrawTemplates_) {
-    if (entry.submesh == nullptr || entry.instanceIndex >= renderables.size()) {
-      continue;
-    }
-    const Renderable &renderable = renderables[entry.instanceIndex];
+    const Renderable &renderable = *entry.renderable;
     entry.transmissionScale =
         transmissionScaleForDraw(renderable, *entry.submesh);
     entry.worldBoundsCorners = transmissionWorldBoundsCorners(
@@ -1885,21 +1181,9 @@ void TransmissionRenderer::resetCachedState() {
   cachedTransformVersion_ = std::numeric_limits<uint64_t>::max();
   cachedGeometryMutationVersion_ = std::numeric_limits<uint64_t>::max();
   cachedEnvironmentHandles_ = {};
-  cachedTransmissionContentScene_ = nullptr;
-  cachedTransmissionContentTopologyVersion_ =
-      std::numeric_limits<uint64_t>::max();
-  cachedTransmissionContentMaterialVersion_ =
-      std::numeric_limits<uint64_t>::max();
-  cachedTransmissionContentBindingVersion_ =
-      std::numeric_limits<uint64_t>::max();
-  cachedTransmissionContentValid_ = false;
-  cachedTransmissionContent_ = false;
-  loggedMaterialFallbackWarning_ = false;
-  loggedAddressProbeTopologyVersion_ = std::numeric_limits<uint64_t>::max();
   environmentTextureAccessCacheValid_ = false;
   materialTextureAccessCacheValid_ = false;
   staticPassTextureReadsValid_ = false;
-
   meshDrawTemplates_.clear();
   instanceMatrices_.clear();
   instanceRemap_.clear();
@@ -1937,42 +1221,30 @@ void TransmissionRenderer::resetFrameBuildState() {
 }
 
 void TransmissionRenderer::destroyPipelineState() {
-  if (nuri::isValid(meshBlendDoubleSidedPipelineHandle_)) {
-    gpu_.destroyRenderPipeline(meshBlendDoubleSidedPipelineHandle_);
+  for (RenderPipelineHandle &pipeline : meshPipelines_) {
+    if (nuri::isValid(pipeline)) {
+      gpu_.destroyRenderPipeline(pipeline);
+    }
+    pipeline = {};
   }
-  if (nuri::isValid(meshBlendPipelineHandle_)) {
-    gpu_.destroyRenderPipeline(meshBlendPipelineHandle_);
-  }
-  if (nuri::isValid(meshDoubleSidedPipelineHandle_)) {
-    gpu_.destroyRenderPipeline(meshDoubleSidedPipelineHandle_);
-  }
-  if (nuri::isValid(meshPipelineHandle_)) {
-    gpu_.destroyRenderPipeline(meshPipelineHandle_);
-  }
-  meshPipelineHandle_ = {};
-  meshDoubleSidedPipelineHandle_ = {};
-  meshBlendPipelineHandle_ = {};
-  meshBlendDoubleSidedPipelineHandle_ = {};
   meshPipelineColorFormat_ = Format::Count;
   meshPipelineDepthFormat_ = Format::Count;
   meshPipelineRasterState_ = {};
 }
 
 void TransmissionRenderer::destroyShaders() {
-  if (nuri::isValid(meshVertexShader_)) {
-    gpu_.destroyShaderModule(meshVertexShader_);
+  for (ShaderHandle &shader : shaders_) {
+    if (nuri::isValid(shader)) {
+      gpu_.destroyShaderModule(shader);
+    }
+    shader = {};
   }
-  if (nuri::isValid(meshFragmentShader_)) {
-    gpu_.destroyShaderModule(meshFragmentShader_);
-  }
-  meshVertexShader_ = {};
-  meshFragmentShader_ = {};
 }
 
 void TransmissionRenderer::destroyBuffers() {
-  retireDynamicBufferRing(gpu_, instanceMatricesRing_);
-  retireDynamicBufferRing(gpu_, instanceRemapRing_);
-  retireDynamicBufferRing(gpu_, blendedFrameDataRing_);
+  retireDynamicBufferRing(instanceMatricesRing_);
+  retireDynamicBufferRing(instanceRemapRing_);
+  retireDynamicBufferRing(blendedFrameDataRing_);
   instanceMatricesRing_.clear();
   instanceRemapRing_.clear();
   blendedFrameDataRing_.clear();
@@ -1994,56 +1266,53 @@ void TransmissionRenderer::destroyFeedbackTextures() {
   transparentFeedbackRingCount_ = 0u;
 }
 
-bool TransmissionRenderer::hasTransmissionContent(
-    const RenderFrameContext &frame) {
-  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CMD_DRAW);
-  if (frame.scene == nullptr || frame.resources == nullptr) {
-    return false;
-  }
-
-  const MaterialTableSnapshot materialSnapshot =
-      frame.resources->materialSnapshot();
-  const uint64_t topologyVersion = frame.scene->topologyVersion();
-  const uint64_t modelMaterialBindingVersion =
-      frame.resources->modelMaterialBindingVersion();
-  if (cachedTransmissionContentValid_ &&
-      cachedTransmissionContentScene_ == frame.scene &&
-      cachedTransmissionContentTopologyVersion_ == topologyVersion &&
-      cachedTransmissionContentMaterialVersion_ == materialSnapshot.version &&
-      cachedTransmissionContentBindingVersion_ == modelMaterialBindingVersion) {
-    return cachedTransmissionContent_;
-  }
-  auto rebuildResult =
-      rebuildSceneCache(*frame.scene, *frame.resources,
-                        static_cast<uint32_t>(materialSnapshot.headers.size()));
-  if (rebuildResult.hasError()) {
-    NURI_LOG_WARNING("TransmissionRenderer::hasTransmissionContent: %s",
-                     rebuildResult.error().c_str());
-    return false;
-  }
-  return cachedTransmissionContentValid_ &&
-         cachedTransmissionContentScene_ == frame.scene &&
-         cachedTransmissionContentTopologyVersion_ == topologyVersion &&
-         cachedTransmissionContentMaterialVersion_ ==
-             materialSnapshot.version &&
-         cachedTransmissionContentBindingVersion_ ==
-             modelMaterialBindingVersion &&
-         cachedTransmissionContent_;
-}
-
 RenderPipelineHandle
 TransmissionRenderer::selectMeshPipeline(bool doubleSided,
                                          bool useBlendPipeline) const {
-  if (useBlendPipeline) {
-    if (doubleSided && nuri::isValid(meshBlendDoubleSidedPipelineHandle_)) {
-      return meshBlendDoubleSidedPipelineHandle_;
-    }
-    return meshBlendPipelineHandle_;
+  return meshPipelines_[(useBlendPipeline ? 2u : 0u) + (doubleSided ? 1u : 0u)];
+}
+
+void registerTransmissionStage(RenderPipeline &pipeline, GPUDevice &gpu,
+                               const RuntimeOpaqueShaderConfig &config,
+                               std::pmr::memory_resource *memory,
+                               SceneDrawDatabase *database) {
+  if (!database) {
+    pipeline.addProvider(std::make_unique<SceneDrawDatabase>(gpu, memory));
   }
-  if (doubleSided && nuri::isValid(meshDoubleSidedPipelineHandle_)) {
-    return meshDoubleSidedPipelineHandle_;
-  }
-  return meshPipelineHandle_;
+  auto owner = std::make_unique<TransmissionRenderer>(gpu, config, memory);
+  owner->onAttach();
+  auto *renderer = pipeline.addComponent(
+      std::move(owner),
+      PipelineComponentDesc{
+          .publish =
+              [](void *state, FrameBuildContext &ctx) {
+                static_cast<TransmissionRenderer *>(state)->publishFrameData(
+                    ctx.frame);
+                return Result<bool, std::string>::makeResult(true);
+              },
+          .prepare =
+              [](void *state, FrameBuildContext &ctx) {
+                return static_cast<TransmissionRenderer *>(state)
+                    ->prepareTransmissionPasses(ctx.frame);
+              },
+      });
+  pipeline.addStage(PipelineStageDesc{
+      .componentName = "TransmissionFeature",
+      .name = "TransmissionMainPass",
+      .state = renderer,
+      .enabled =
+          [](const void *state, const FrameBuildContext &ctx) {
+            return (!ctx.frame.settings ||
+                    renderSettingsOrDefault(ctx.frame).transmission.enabled) &&
+                   static_cast<const TransmissionRenderer *>(state)
+                       ->hasPreparedTransmissionMainPass();
+          },
+      .build =
+          [](void *state, FrameBuildContext &ctx) {
+            return static_cast<TransmissionRenderer *>(state)
+                ->appendTransmissionMainPass(ctx.frame, ctx.graph);
+          },
+  });
 }
 
 } // namespace nuri

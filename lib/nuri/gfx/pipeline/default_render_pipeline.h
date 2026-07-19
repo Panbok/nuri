@@ -1,12 +1,9 @@
 #pragma once
-
 #include "nuri/core/result.h"
 #include "nuri/core/runtime_config.h"
 #include "nuri/defines.h"
-
 #include <memory_resource>
 #include <string>
-
 namespace nuri {
 
 class GPUDevice;

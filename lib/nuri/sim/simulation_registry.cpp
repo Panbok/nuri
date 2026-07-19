@@ -1,14 +1,10 @@
-#include "nuri/pch.h"
-
 #include "nuri/sim/simulation_registry.h"
-
+#include "nuri/pch.h"
 #include <algorithm>
 #include <cmath>
 #include <limits>
-
 namespace nuri {
 namespace {
-
 void assignBindingTargetRuntimeIndices(SimulationBindingDesc &binding) {
   binding.primaryTarget.runtimeBindingIndex = kInvalidSimulationBindingIndex;
   for (SimulationBindingTarget &target : binding.secondaryTargets) {
@@ -18,7 +14,6 @@ void assignBindingTargetRuntimeIndices(SimulationBindingDesc &binding) {
     attachment.target.runtimeBindingIndex = kInvalidSimulationBindingIndex;
   }
 }
-
 void copyBindingDesc(SimulationBindingDesc &dst,
                      const SimulationBindingDesc &src) {
   dst.primaryTarget = src.primaryTarget;
@@ -29,7 +24,6 @@ void copyBindingDesc(SimulationBindingDesc &dst,
   dst.attachmentSlots.assign(src.attachmentSlots.begin(),
                              src.attachmentSlots.end());
 }
-
 void initializeStats(SimulationRegistry::Record &record) {
   record.stats.creationOrder = record.creationOrder;
   record.stats.controlVersion = 1u;
@@ -41,17 +35,24 @@ void initializeStats(SimulationRegistry::Record &record) {
   record.stats.enabled = record.enabled;
   record.stats.paused = record.state == SimulationState::Paused;
   record.stats.faulted = false;
-  record.stats.gpuEligible = record.allowGpuExecution;
   record.stats.lastFaultReason.clear();
 }
-
 void noteControlMutation(SimulationRegistry::Record &record) {
   ++record.stats.controlVersion;
   record.stats.enabled = record.enabled;
   record.stats.paused = record.state == SimulationState::Paused;
-  record.stats.gpuEligible = record.allowGpuExecution;
 }
-
+template <typename T>
+bool setControlField(SimulationRegistry::Record *record,
+                     T SimulationRegistry::Record::*field, T value) {
+  if (record == nullptr)
+    return false;
+  if (record->*field == value)
+    return true;
+  record->*field = value;
+  noteControlMutation(*record);
+  return true;
+}
 } // namespace
 
 SimulationRegistry::SimulationRegistry(std::pmr::memory_resource *memory)
@@ -94,22 +95,17 @@ SimulationRegistry::create(const SimulationDesc &desc) {
     return Result<SimulationHandle, std::string>::makeError(
         "SimulationRegistry::create: slot pool exhausted");
   }
-
   const SlotReservation slot = slots_.acquire();
   if (slot.appended) {
     records_.emplace_back(memory_);
   }
-
   Record &record = records_[slot.index];
   record.kind = desc.kind;
-  record.backendPreference = desc.backendPreference;
   record.state = !desc.enabled ? SimulationState::Stopped
                                : (desc.startPaused ? SimulationState::Paused
                                                    : SimulationState::Running);
   record.enabled = desc.enabled;
-  record.allowGpuExecution = desc.allowGpuExecution;
   record.singleStepRequested = false;
-  record.faulted = false;
   record.timeScale = desc.timeScale;
   record.priority = desc.priority;
   record.substepCount = desc.substepCount;
@@ -119,9 +115,7 @@ SimulationRegistry::create(const SimulationDesc &desc) {
   copyBindingDesc(record.binding, desc.binding);
   assignBindingTargetRuntimeIndices(record.binding);
   record.params.assign(desc.initialParams.begin(), desc.initialParams.end());
-  record.faultReason.clear();
   initializeStats(record);
-
   return Result<SimulationHandle, std::string>::makeResult(
       makeSimulationHandle(slot.index, slot.generation));
 }
@@ -131,7 +125,6 @@ bool SimulationRegistry::destroy(SimulationHandle handle) {
     return false;
   }
   slots_.release(indexOf(handle));
-  records_[indexOf(handle)] = Record(memory_);
   return true;
 }
 
@@ -145,15 +138,11 @@ SimulationRegistry::tryGet(SimulationHandle handle) noexcept {
 
 const SimulationRegistry::Record *
 SimulationRegistry::tryGet(SimulationHandle handle) const noexcept {
-  if (!slotValid(handle)) {
-    return nullptr;
-  }
-  return &records_[indexOf(handle)];
+  return const_cast<SimulationRegistry *>(this)->tryGet(handle);
 }
 
 bool SimulationRegistry::slotValid(SimulationHandle handle) const noexcept {
-  return isValid(handle) &&
-         slots_.isValid(indexOf(handle), generationOf(handle));
+  return slots_.isValid(indexOf(handle), generationOf(handle));
 }
 
 bool SimulationRegistry::setEnabled(SimulationHandle handle, bool enabled) {
@@ -169,7 +158,7 @@ bool SimulationRegistry::setEnabled(SimulationHandle handle, bool enabled) {
   record->enabled = enabled;
   if (!enabled) {
     record->state = SimulationState::Stopped;
-  } else if (!record->faulted) {
+  } else if (!record->stats.faulted) {
     record->state = SimulationState::Running;
   }
   noteControlMutation(*record);
@@ -178,7 +167,7 @@ bool SimulationRegistry::setEnabled(SimulationHandle handle, bool enabled) {
 
 bool SimulationRegistry::pause(SimulationHandle handle) {
   Record *record = tryGet(handle);
-  if (record == nullptr || !record->enabled || record->faulted) {
+  if (record == nullptr || !record->enabled || record->stats.faulted) {
     return false;
   }
   if (record->state == SimulationState::Paused) {
@@ -191,7 +180,7 @@ bool SimulationRegistry::pause(SimulationHandle handle) {
 
 bool SimulationRegistry::resume(SimulationHandle handle) {
   Record *record = tryGet(handle);
-  if (record == nullptr || !record->enabled || record->faulted) {
+  if (record == nullptr || !record->enabled || record->stats.faulted) {
     return false;
   }
   if (record->state == SimulationState::Running) {
@@ -204,7 +193,7 @@ bool SimulationRegistry::resume(SimulationHandle handle) {
 
 bool SimulationRegistry::requestSingleStep(SimulationHandle handle) {
   Record *record = tryGet(handle);
-  if (record == nullptr || !record->enabled || record->faulted) {
+  if (record == nullptr || !record->enabled || record->stats.faulted) {
     return false;
   }
   if (record->singleStepRequested) {
@@ -217,44 +206,26 @@ bool SimulationRegistry::requestSingleStep(SimulationHandle handle) {
 
 bool SimulationRegistry::setTimeScale(SimulationHandle handle,
                                       float timeScale) {
-  Record *record = tryGet(handle);
-  if (record == nullptr || timeScale < 0.0f || !std::isfinite(timeScale)) {
+  if (timeScale < 0.0f || !std::isfinite(timeScale)) {
     return false;
   }
-  if (record->timeScale == timeScale) {
-    return true;
-  }
-  record->timeScale = timeScale;
-  noteControlMutation(*record);
-  return true;
+  return setControlField(tryGet(handle), &Record::timeScale, timeScale);
 }
 
 bool SimulationRegistry::setSubstepCount(SimulationHandle handle,
                                          uint32_t count) {
-  Record *record = tryGet(handle);
-  if (record == nullptr || count == 0u) {
+  if (count == 0u) {
     return false;
   }
-  if (record->substepCount == count) {
-    return true;
-  }
-  record->substepCount = count;
-  noteControlMutation(*record);
-  return true;
+  return setControlField(tryGet(handle), &Record::substepCount, count);
 }
 
 bool SimulationRegistry::setSolverIterationCount(SimulationHandle handle,
                                                  uint32_t count) {
-  Record *record = tryGet(handle);
-  if (record == nullptr || count == 0u) {
+  if (count == 0u) {
     return false;
   }
-  if (record->solverIterationCount == count) {
-    return true;
-  }
-  record->solverIterationCount = count;
-  noteControlMutation(*record);
-  return true;
+  return setControlField(tryGet(handle), &Record::solverIterationCount, count);
 }
 
 bool SimulationRegistry::setParams(SimulationHandle handle,
@@ -293,14 +264,12 @@ bool SimulationRegistry::getDesc(SimulationHandle handle,
   out.kind = record->kind;
   out.debugName.assign(record->debugName.data(), record->debugName.size());
   copyBindingDesc(out.binding, record->binding);
-  out.backendPreference = record->backendPreference;
   out.timeScale = record->timeScale;
   out.priority = record->priority;
   out.substepCount = record->substepCount;
   out.solverIterationCount = record->solverIterationCount;
   out.enabled = record->enabled;
   out.startPaused = record->state == SimulationState::Paused;
-  out.allowGpuExecution = record->allowGpuExecution;
   out.initialParams =
       std::span<const std::byte>(record->params.data(), record->params.size());
   return true;
@@ -322,13 +291,12 @@ bool SimulationRegistry::markFaulted(SimulationHandle handle,
   if (record == nullptr) {
     return false;
   }
-  const bool changed = !record->faulted ||
-                       std::string_view(record->faultReason) != reason ||
-                       record->state != SimulationState::Stopped;
-  record->faulted = true;
+  const bool changed =
+      !record->stats.faulted ||
+      std::string_view(record->stats.lastFaultReason) != reason ||
+      record->state != SimulationState::Stopped;
   record->state = SimulationState::Stopped;
   record->singleStepRequested = false;
-  record->faultReason.assign(reason.data(), reason.size());
   record->stats.faulted = true;
   record->stats.lastFaultReason.assign(reason.data(), reason.size());
   if (changed) {
@@ -358,9 +326,6 @@ bool SimulationRegistry::notePhaseExecution(SimulationHandle handle,
     return false;
   }
   const size_t phaseIndex = static_cast<size_t>(phase);
-  if (phaseIndex >= record->stats.phaseExecutionCounts.size()) {
-    return false;
-  }
   ++record->stats.phaseExecutionCounts[phaseIndex];
   record->stats.lastExecutedFrameIndex = frameIndex;
   if (phase == SimulationPhase::Finalize) {

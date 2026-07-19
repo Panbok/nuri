@@ -1,9 +1,7 @@
 #pragma once
-
 #include <exception>
 #include <type_traits>
 #include <utility>
-
 namespace nuri {
 
 namespace detail {
@@ -18,19 +16,15 @@ public:
   Result(ValueTag, const R &value) : hasValue_(true) {
     new (&storage_.value) R(value);
   }
-
   Result(ValueTag, R &&value) : hasValue_(true) {
     new (&storage_.value) R(std::move(value));
   }
-
   Result(ErrorTag, const E &error) : hasValue_(false) {
     new (&storage_.error) E(error);
   }
-
   Result(ErrorTag, E &&error) : hasValue_(false) {
     new (&storage_.error) E(std::move(error));
   }
-
   Result(const Result &other) : hasValue_(other.hasValue_) {
     if (hasValue_) {
       new (&storage_.value) R(other.storage_.value);
@@ -38,7 +32,6 @@ public:
       new (&storage_.error) E(other.storage_.error);
     }
   }
-
   Result(Result &&other) noexcept(std::is_nothrow_move_constructible_v<R> &&
                                   std::is_nothrow_move_constructible_v<E>)
       : hasValue_(other.hasValue_) {
@@ -48,7 +41,6 @@ public:
       new (&storage_.error) E(std::move(other.storage_.error));
     }
   }
-
   Result &operator=(const Result &other) {
     if (this != &other) {
       Result tmp(other);
@@ -56,7 +48,6 @@ public:
     }
     return *this;
   }
-
   Result &
   operator=(Result &&other) noexcept(std::is_nothrow_move_constructible_v<R> &&
                                      std::is_nothrow_move_constructible_v<E>) {
@@ -71,77 +62,63 @@ public:
     }
     return *this;
   }
-
   ~Result() { destroy(); }
-
   [[nodiscard]] bool hasValue() const noexcept { return hasValue_; }
   [[nodiscard]] bool hasError() const noexcept { return !hasValue_; }
   [[nodiscard]] explicit operator bool() const noexcept { return hasValue_; }
-
   [[nodiscard]] R &value() & noexcept {
     if (!hasValue_) {
       detail::resultAccessViolation();
     }
     return storage_.value;
   }
-
   [[nodiscard]] const R &value() const & noexcept {
     if (!hasValue_) {
       detail::resultAccessViolation();
     }
     return storage_.value;
   }
-
   [[nodiscard]] R &&value() && noexcept {
     if (!hasValue_) {
       detail::resultAccessViolation();
     }
     return std::move(storage_.value);
   }
-
   [[nodiscard]] E &error() & noexcept {
     if (hasValue_) {
       detail::resultAccessViolation();
     }
     return storage_.error;
   }
-
   [[nodiscard]] const E &error() const & noexcept {
     if (hasValue_) {
       detail::resultAccessViolation();
     }
     return storage_.error;
   }
-
   [[nodiscard]] E &&error() && noexcept {
     if (hasValue_) {
       detail::resultAccessViolation();
     }
     return std::move(storage_.error);
   }
-
   [[nodiscard]] R &operator*() & { return value(); }
   [[nodiscard]] const R &operator*() const & { return value(); }
   [[nodiscard]] R &&operator*() && { return std::move(value()); }
   [[nodiscard]] R *operator->() { return &value(); }
   [[nodiscard]] const R *operator->() const { return &value(); }
-
   [[nodiscard]] static inline Result<R, E> makeResult(const R &value) {
     return Result<R, E>(ValueTag{}, value);
   }
-
   [[nodiscard]] static inline Result<R, E> makeResult(R &&value) {
     return Result<R, E>(ValueTag{}, std::forward<R>(value));
   }
-
   [[nodiscard]] static inline Result<R, E> makeError(const E &error) {
     return Result<R, E>(ErrorTag{}, error);
   }
-
   [[nodiscard]] static inline Result<R, E> makeError(E &&error) {
     return Result<R, E>(ErrorTag{}, std::forward<E>(error));
   }
-
   void swap(Result &rhs) noexcept(std::is_nothrow_move_constructible_v<R> &&
                                   std::is_nothrow_move_constructible_v<E> &&
                                   std::is_nothrow_destructible_v<R> &&
@@ -186,15 +163,12 @@ private:
       storage_.error.~E();
     }
   }
-
   union Storage {
     R value;
     E error;
-
     Storage() {}
     ~Storage() {}
   };
-
   Storage storage_;
   bool hasValue_;
 };
@@ -202,28 +176,23 @@ private:
 template <typename E> class Result<void, E> {
 public:
   Result(ValueTag) : hasValue_(true) {}
-
   Result(ErrorTag, const E &error) : hasValue_(false) {
     new (&storage_.error) E(error);
   }
-
   Result(ErrorTag, E &&error) : hasValue_(false) {
     new (&storage_.error) E(std::move(error));
   }
-
   Result(const Result &other) : hasValue_(other.hasValue_) {
     if (!hasValue_) {
       new (&storage_.error) E(other.storage_.error);
     }
   }
-
   Result(Result &&other) noexcept(std::is_nothrow_move_constructible_v<E>)
       : hasValue_(other.hasValue_) {
     if (!hasValue_) {
       new (&storage_.error) E(std::move(other.storage_.error));
     }
   }
-
   Result &operator=(const Result &other) {
     if (this != &other) {
       Result tmp(other);
@@ -231,7 +200,6 @@ public:
     }
     return *this;
   }
-
   Result &
   operator=(Result &&other) noexcept(std::is_nothrow_move_constructible_v<E>) {
     if (this != &other) {
@@ -243,52 +211,42 @@ public:
     }
     return *this;
   }
-
   ~Result() { destroy(); }
-
   [[nodiscard]] bool hasValue() const noexcept { return hasValue_; }
   [[nodiscard]] bool hasError() const noexcept { return !hasValue_; }
   [[nodiscard]] explicit operator bool() const noexcept { return hasValue_; }
-
   void value() const noexcept {
     if (!hasValue_) {
       detail::resultAccessViolation();
     }
   }
-
   [[nodiscard]] E &error() & noexcept {
     if (hasValue_) {
       detail::resultAccessViolation();
     }
     return storage_.error;
   }
-
   [[nodiscard]] const E &error() const & noexcept {
     if (hasValue_) {
       detail::resultAccessViolation();
     }
     return storage_.error;
   }
-
   [[nodiscard]] E &&error() && noexcept {
     if (hasValue_) {
       detail::resultAccessViolation();
     }
     return std::move(storage_.error);
   }
-
   [[nodiscard]] static inline Result<void, E> makeResult() {
     return Result<void, E>(ValueTag{});
   }
-
   [[nodiscard]] static inline Result<void, E> makeError(const E &error) {
     return Result<void, E>(ErrorTag{}, error);
   }
-
   [[nodiscard]] static inline Result<void, E> makeError(E &&error) {
     return Result<void, E>(ErrorTag{}, std::forward<E>(error));
   }
-
   void swap(Result &rhs) noexcept(std::is_nothrow_move_constructible_v<E> &&
                                   std::is_nothrow_destructible_v<E>) {
     if (hasValue_ == rhs.hasValue_) {
@@ -301,7 +259,6 @@ public:
       }
       return;
     }
-
     if (hasValue_) {
       new (&storage_.error) E(std::move(rhs.storage_.error));
       rhs.storage_.error.~E();
@@ -319,14 +276,11 @@ private:
       storage_.error.~E();
     }
   }
-
   union Storage {
     E error;
-
     Storage() {}
     ~Storage() {}
   };
-
   Storage storage_;
   bool hasValue_;
 };

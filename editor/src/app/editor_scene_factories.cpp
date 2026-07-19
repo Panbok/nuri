@@ -14,11 +14,11 @@ firstResolvedPrefabRenderable(const ImportedPrefabSceneResources &assets) {
     return std::nullopt;
   }
   for (const ScenePrefabRenderable &renderable : assets.prefab.renderables) {
-    if (renderable.meshIndex < assets.assets.models.size() &&
-        renderable.materialIndex < assets.assets.materials.size()) {
-      const ModelRef model = assets.assets.models[renderable.meshIndex];
+    if (renderable.meshAssetIndex < assets.assets.models.size() &&
+        renderable.materialAssetIndex < assets.assets.materials.size()) {
+      const ModelRef model = assets.assets.models[renderable.meshAssetIndex];
       const MaterialRef material =
-          assets.assets.materials[renderable.materialIndex];
+          assets.assets.materials[renderable.materialAssetIndex];
       if (isValid(model) && isValid(material)) {
         return std::make_pair(model, material);
       }
@@ -158,7 +158,7 @@ EditorSceneSpec makePrefabScene(PrefabSceneFactoryDesc desc) {
       .update =
           [desc, assets, configured,
            stagingError](EditorSceneUpdateContext &ctx) {
-            if (*configured || !isValidAssetHandle(assets->sceneLoad)) {
+            if (*configured || !isValid(assets->sceneLoad)) {
               return;
             }
             applyPendingPrefabRootTransform(ctx.runtime, assets->sceneLoad,
@@ -312,7 +312,7 @@ EditorSceneSpec makeAnimatedPrefabScene(AnimatedPrefabSceneFactoryDesc desc) {
       .update =
           [desc, assets, animation, configured,
            stagingError](EditorSceneUpdateContext &ctx) {
-            if (*configured || !isValidAssetHandle(assets->sceneLoad)) {
+            if (*configured || !isValid(assets->sceneLoad)) {
               return;
             }
             applyPendingPrefabRootTransform(ctx.runtime, assets->sceneLoad,
@@ -480,7 +480,7 @@ EditorSceneSpec makeStreamingScene(StreamingSceneFactoryDesc desc) {
       },
       .deactivate =
           [state](EditorSceneDeactivateContext &ctx) {
-            if (isValidAssetHandle(state->sceneLoad)) {
+            if (isValid(state->sceneLoad)) {
               ctx.runtime.assets().cancel(state->sceneLoad);
               state->sceneLoad = {};
             }
@@ -494,7 +494,7 @@ EditorSceneSpec makeStreamingScene(StreamingSceneFactoryDesc desc) {
           },
       .update =
           [desc, state](EditorSceneUpdateContext &ctx) {
-            if (state->configured || !isValidAssetHandle(state->sceneLoad)) {
+            if (state->configured || !isValid(state->sceneLoad)) {
               return;
             }
             const SceneLoadSnapshot load =

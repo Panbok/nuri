@@ -1,17 +1,13 @@
 #pragma once
-
 #include "nuri/core/result.h"
-
 #include <cstdint>
 #include <filesystem>
+#include <glm/glm.hpp>
 #include <memory_resource>
 #include <span>
 #include <string>
 #include <vector>
-
-#include <glm/glm.hpp>
 #include <yyjson.h>
-
 namespace nuri::detail {
 
 struct GltfAccessorInfo {

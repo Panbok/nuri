@@ -1,14 +1,11 @@
 #pragma once
-
 #include "nuri/defines.h"
-
 #include <array>
 #include <cassert>
 #include <cstdint>
 #include <memory_resource>
 #include <string>
 #include <vector>
-
 namespace nuri {
 
 inline constexpr uint32_t kTextHandleIndexBits = 20;
@@ -47,10 +44,6 @@ inline constexpr ShaperFaceHandle kInvalidShaperFaceHandle{};
 
 [[nodiscard]] constexpr uint32_t
 packTextHandleValue(uint32_t index, uint32_t generation) noexcept {
-  assert((index & ~kTextHandleIndexMask) == 0u);
-  assert((generation & ~kTextHandleGenerationMask) == 0u);
-  // Generation 0 is reserved to represent invalid handles.
-  assert(generation != 0u);
   if (generation == 0) {
     return 0;
   }
@@ -167,12 +160,9 @@ struct Text3DDesc {
   TextColor fillColor;
   TextColor outlineColor;
   MtsdfParams mtsdf;
-  std::array<float, 16> worldFromText{
-      1.0f, 0.0f, 0.0f, 0.0f, //
-      0.0f, 1.0f, 0.0f, 0.0f, //
-      0.0f, 0.0f, 1.0f, 0.0f, //
-      0.0f, 0.0f, 0.0f, 1.0f  //
-  };
+  std::array<float, 16> worldFromText{1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f,
+                                      0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f,
+                                      0.0f, 0.0f, 0.0f, 1.0f};
   TextBillboardMode billboard = TextBillboardMode::None;
   float maxScreenSizePx = 0.0f;
 };

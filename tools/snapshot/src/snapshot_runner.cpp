@@ -824,7 +824,7 @@ populateScene(const SnapshotCase &snapshotCase, Renderer &renderer,
 [[nodiscard]] Result<bool, std::string>
 waitForSnapshotAssets(Renderer &renderer, RenderScene &scene,
                       SceneLoadHandle sceneLoad) {
-  if (!isValidAssetHandle(sceneLoad)) {
+  if (!isValid(sceneLoad)) {
     return Result<bool, std::string>::makeResult(true);
   }
   const auto deadline =

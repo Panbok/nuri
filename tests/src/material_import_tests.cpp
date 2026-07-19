@@ -588,28 +588,41 @@ TEST(MaterialImportTests, ClearcoatWickerOverlayImportsClearcoatData) {
   const nuri::ImportedMaterialSet &set = result.value();
   ASSERT_FALSE(set.materials.empty());
 
-  const auto it = std::find_if(set.materials.begin(), set.materials.end(),
-                               [](const nuri::ImportedMaterialInfo &material) {
-                                 return material.clearcoatFactor > 0.0f ||
-                                        !material.clearcoatNormal.path.empty();
-                               });
+  const auto it = std::find_if(
+      set.materials.begin(), set.materials.end(),
+      [](const nuri::ImportedMaterialInfo &material) {
+        return material.clearcoatFactor > 0.0f ||
+               !material.textures[nuri::kMaterialTextureSlotClearcoatNormal]
+                    .path.empty();
+      });
   ASSERT_NE(it, set.materials.end());
 
   const nuri::ImportedMaterialInfo &material = *it;
   EXPECT_FLOAT_EQ(material.clearcoatFactor, 1.0f);
   EXPECT_FLOAT_EQ(material.clearcoatRoughnessFactor, 0.1f);
   EXPECT_FLOAT_EQ(material.clearcoatNormalScale, 1.0f);
-  EXPECT_TRUE(material.clearcoat.path.empty());
-  EXPECT_TRUE(material.clearcoatRoughness.path.empty());
-  EXPECT_FALSE(material.clearcoatNormal.path.empty());
   EXPECT_TRUE(
-      std::filesystem::path(material.clearcoatNormal.path).is_absolute());
-  EXPECT_EQ(std::filesystem::path(material.clearcoatNormal.path).filename(),
-            std::filesystem::path("clearcoat_normal.png"));
+      material.textures[nuri::kMaterialTextureSlotClearcoat].path.empty());
+  EXPECT_TRUE(material.textures[nuri::kMaterialTextureSlotClearcoatRoughness]
+                  .path.empty());
+  EXPECT_FALSE(material.textures[nuri::kMaterialTextureSlotClearcoatNormal]
+                   .path.empty());
+  EXPECT_TRUE(
+      std::filesystem::path(
+          material.textures[nuri::kMaterialTextureSlotClearcoatNormal].path)
+          .is_absolute());
+  EXPECT_EQ(
+      std::filesystem::path(
+          material.textures[nuri::kMaterialTextureSlotClearcoatNormal].path)
+          .filename(),
+      std::filesystem::path("clearcoat_normal.png"));
 
-  EXPECT_FALSE(material.baseColor.path.empty());
-  EXPECT_FALSE(material.normal.path.empty());
-  EXPECT_FALSE(material.metallicRoughness.path.empty());
+  EXPECT_FALSE(
+      material.textures[nuri::kMaterialTextureSlotBaseColor].path.empty());
+  EXPECT_FALSE(
+      material.textures[nuri::kMaterialTextureSlotNormal].path.empty());
+  EXPECT_FALSE(material.textures[nuri::kMaterialTextureSlotMetallicRoughness]
+                   .path.empty());
 }
 
 TEST(MaterialImportTests, SheenChairImportsTextureTransforms) {
@@ -622,38 +635,79 @@ TEST(MaterialImportTests, SheenChairImportsTextureTransforms) {
       findMaterialByName(set, "fabric Mystere Mango Velvet");
   ASSERT_NE(mangoVelvet, nullptr);
 
-  EXPECT_EQ(mangoVelvet->baseColor.uvSet, 0u);
-  EXPECT_FLOAT_EQ(mangoVelvet->baseColor.transform.offset.x, -3.0f);
-  EXPECT_FLOAT_EQ(mangoVelvet->baseColor.transform.offset.y, 3.0f);
-  EXPECT_FLOAT_EQ(mangoVelvet->baseColor.transform.scale.x, 7.0f);
-  EXPECT_FLOAT_EQ(mangoVelvet->baseColor.transform.scale.y, 7.0f);
-  EXPECT_FLOAT_EQ(mangoVelvet->baseColor.transform.rotationRadians, 0.0f);
+  EXPECT_EQ(mangoVelvet->textures[nuri::kMaterialTextureSlotBaseColor].uvSet,
+            0u);
+  EXPECT_FLOAT_EQ(mangoVelvet->textures[nuri::kMaterialTextureSlotBaseColor]
+                      .transform.offset.x,
+                  -3.0f);
+  EXPECT_FLOAT_EQ(mangoVelvet->textures[nuri::kMaterialTextureSlotBaseColor]
+                      .transform.offset.y,
+                  3.0f);
+  EXPECT_FLOAT_EQ(mangoVelvet->textures[nuri::kMaterialTextureSlotBaseColor]
+                      .transform.scale.x,
+                  7.0f);
+  EXPECT_FLOAT_EQ(mangoVelvet->textures[nuri::kMaterialTextureSlotBaseColor]
+                      .transform.scale.y,
+                  7.0f);
+  EXPECT_FLOAT_EQ(mangoVelvet->textures[nuri::kMaterialTextureSlotBaseColor]
+                      .transform.rotationRadians,
+                  0.0f);
 
-  EXPECT_EQ(mangoVelvet->normal.uvSet, 0u);
+  EXPECT_EQ(mangoVelvet->textures[nuri::kMaterialTextureSlotNormal].uvSet, 0u);
   EXPECT_FLOAT_EQ(mangoVelvet->normalScale, 0.6f);
-  EXPECT_FLOAT_EQ(mangoVelvet->normal.transform.offset.x, -0.5f);
-  EXPECT_FLOAT_EQ(mangoVelvet->normal.transform.offset.y, 0.5f);
-  EXPECT_FLOAT_EQ(mangoVelvet->normal.transform.scale.x, 2.0f);
-  EXPECT_FLOAT_EQ(mangoVelvet->normal.transform.scale.y, 2.0f);
-  EXPECT_FLOAT_EQ(mangoVelvet->normal.transform.rotationRadians, 0.0f);
+  EXPECT_FLOAT_EQ(mangoVelvet->textures[nuri::kMaterialTextureSlotNormal]
+                      .transform.offset.x,
+                  -0.5f);
+  EXPECT_FLOAT_EQ(mangoVelvet->textures[nuri::kMaterialTextureSlotNormal]
+                      .transform.offset.y,
+                  0.5f);
+  EXPECT_FLOAT_EQ(
+      mangoVelvet->textures[nuri::kMaterialTextureSlotNormal].transform.scale.x,
+      2.0f);
+  EXPECT_FLOAT_EQ(
+      mangoVelvet->textures[nuri::kMaterialTextureSlotNormal].transform.scale.y,
+      2.0f);
+  EXPECT_FLOAT_EQ(mangoVelvet->textures[nuri::kMaterialTextureSlotNormal]
+                      .transform.rotationRadians,
+                  0.0f);
 
-  EXPECT_EQ(mangoVelvet->occlusion.uvSet, 1u);
-  EXPECT_FLOAT_EQ(mangoVelvet->occlusion.transform.offset.x, 0.0f);
-  EXPECT_FLOAT_EQ(mangoVelvet->occlusion.transform.offset.y, 0.0f);
-  EXPECT_FLOAT_EQ(mangoVelvet->occlusion.transform.scale.x, 1.0f);
-  EXPECT_FLOAT_EQ(mangoVelvet->occlusion.transform.scale.y, 1.0f);
-  EXPECT_FLOAT_EQ(mangoVelvet->occlusion.transform.rotationRadians, 0.0f);
+  EXPECT_EQ(mangoVelvet->textures[nuri::kMaterialTextureSlotOcclusion].uvSet,
+            1u);
+  EXPECT_FLOAT_EQ(mangoVelvet->textures[nuri::kMaterialTextureSlotOcclusion]
+                      .transform.offset.x,
+                  0.0f);
+  EXPECT_FLOAT_EQ(mangoVelvet->textures[nuri::kMaterialTextureSlotOcclusion]
+                      .transform.offset.y,
+                  0.0f);
+  EXPECT_FLOAT_EQ(mangoVelvet->textures[nuri::kMaterialTextureSlotOcclusion]
+                      .transform.scale.x,
+                  1.0f);
+  EXPECT_FLOAT_EQ(mangoVelvet->textures[nuri::kMaterialTextureSlotOcclusion]
+                      .transform.scale.y,
+                  1.0f);
+  EXPECT_FLOAT_EQ(mangoVelvet->textures[nuri::kMaterialTextureSlotOcclusion]
+                      .transform.rotationRadians,
+                  0.0f);
 
   const nuri::ImportedMaterialInfo *woodBrown =
       findMaterialByName(set, "wood Brown");
   ASSERT_NE(woodBrown, nullptr);
-  EXPECT_EQ(woodBrown->baseColor.uvSet, 0u);
-  EXPECT_NEAR(woodBrown->baseColor.transform.offset.x, -0.8635584f, 1.0e-6f);
-  EXPECT_NEAR(woodBrown->baseColor.transform.offset.y, 1.12502563f, 1.0e-6f);
-  EXPECT_FLOAT_EQ(woodBrown->baseColor.transform.scale.x, 3.0f);
-  EXPECT_FLOAT_EQ(woodBrown->baseColor.transform.scale.y, 3.0f);
-  EXPECT_NEAR(woodBrown->baseColor.transform.rotationRadians, 0.08726647f,
-              1.0e-6f);
+  EXPECT_EQ(woodBrown->textures[nuri::kMaterialTextureSlotBaseColor].uvSet, 0u);
+  EXPECT_NEAR(woodBrown->textures[nuri::kMaterialTextureSlotBaseColor]
+                  .transform.offset.x,
+              -0.8635584f, 1.0e-6f);
+  EXPECT_NEAR(woodBrown->textures[nuri::kMaterialTextureSlotBaseColor]
+                  .transform.offset.y,
+              1.12502563f, 1.0e-6f);
+  EXPECT_FLOAT_EQ(woodBrown->textures[nuri::kMaterialTextureSlotBaseColor]
+                      .transform.scale.x,
+                  3.0f);
+  EXPECT_FLOAT_EQ(woodBrown->textures[nuri::kMaterialTextureSlotBaseColor]
+                      .transform.scale.y,
+                  3.0f);
+  EXPECT_NEAR(woodBrown->textures[nuri::kMaterialTextureSlotBaseColor]
+                  .transform.rotationRadians,
+              0.08726647f, 1.0e-6f);
 }
 
 TEST(MaterialImportTests, SyntheticGltfPreservesExplicitIorValue) {
@@ -722,31 +776,57 @@ TEST(MaterialImportTests, SyntheticGltfImportsSpecularTexturesAndTransforms) {
   const std::filesystem::path expectedSpecularColorPath =
       (dir.path / "textures" / "specular_color.png").lexically_normal();
 
-  EXPECT_EQ(std::filesystem::path(material->specular.path),
+  EXPECT_EQ(std::filesystem::path(
+                material->textures[nuri::kMaterialTextureSlotSpecular].path),
             expectedSpecularPath);
-  EXPECT_EQ(std::filesystem::path(material->specularColor.path),
-            expectedSpecularColorPath);
-  EXPECT_EQ(material->specular.sourceKind,
+  EXPECT_EQ(
+      std::filesystem::path(
+          material->textures[nuri::kMaterialTextureSlotSpecularColor].path),
+      expectedSpecularColorPath);
+  EXPECT_EQ(material->textures[nuri::kMaterialTextureSlotSpecular].sourceKind,
             nuri::MaterialTextureSourceKind::ExternalFile);
-  EXPECT_EQ(material->specularColor.sourceKind,
-            nuri::MaterialTextureSourceKind::ExternalFile);
-  EXPECT_EQ(material->specular.uvSet, 0u);
-  EXPECT_EQ(material->specular.samplerIndex, 1u);
-  EXPECT_FLOAT_EQ(material->specular.transform.offset.x, 0.25f);
-  EXPECT_FLOAT_EQ(material->specular.transform.offset.y, 0.5f);
-  EXPECT_FLOAT_EQ(material->specular.transform.scale.x, 2.0f);
-  EXPECT_FLOAT_EQ(material->specular.transform.scale.y, 3.0f);
-  EXPECT_NEAR(material->specular.transform.rotationRadians, 0.785398163f,
-              1.0e-6f);
+  EXPECT_EQ(
+      material->textures[nuri::kMaterialTextureSlotSpecularColor].sourceKind,
+      nuri::MaterialTextureSourceKind::ExternalFile);
+  EXPECT_EQ(material->textures[nuri::kMaterialTextureSlotSpecular].uvSet, 0u);
+  EXPECT_EQ(material->textures[nuri::kMaterialTextureSlotSpecular].samplerIndex,
+            1u);
+  EXPECT_FLOAT_EQ(
+      material->textures[nuri::kMaterialTextureSlotSpecular].transform.offset.x,
+      0.25f);
+  EXPECT_FLOAT_EQ(
+      material->textures[nuri::kMaterialTextureSlotSpecular].transform.offset.y,
+      0.5f);
+  EXPECT_FLOAT_EQ(
+      material->textures[nuri::kMaterialTextureSlotSpecular].transform.scale.x,
+      2.0f);
+  EXPECT_FLOAT_EQ(
+      material->textures[nuri::kMaterialTextureSlotSpecular].transform.scale.y,
+      3.0f);
+  EXPECT_NEAR(material->textures[nuri::kMaterialTextureSlotSpecular]
+                  .transform.rotationRadians,
+              0.785398163f, 1.0e-6f);
 
-  EXPECT_EQ(material->specularColor.uvSet, 1u);
-  EXPECT_EQ(material->specularColor.samplerIndex, 0u);
-  EXPECT_FLOAT_EQ(material->specularColor.transform.offset.x, -1.0f);
-  EXPECT_FLOAT_EQ(material->specularColor.transform.offset.y, 1.5f);
-  EXPECT_FLOAT_EQ(material->specularColor.transform.scale.x, 4.0f);
-  EXPECT_FLOAT_EQ(material->specularColor.transform.scale.y, 5.0f);
-  EXPECT_NEAR(material->specularColor.transform.rotationRadians, 0.25f,
-              1.0e-6f);
+  EXPECT_EQ(material->textures[nuri::kMaterialTextureSlotSpecularColor].uvSet,
+            1u);
+  EXPECT_EQ(
+      material->textures[nuri::kMaterialTextureSlotSpecularColor].samplerIndex,
+      0u);
+  EXPECT_FLOAT_EQ(material->textures[nuri::kMaterialTextureSlotSpecularColor]
+                      .transform.offset.x,
+                  -1.0f);
+  EXPECT_FLOAT_EQ(material->textures[nuri::kMaterialTextureSlotSpecularColor]
+                      .transform.offset.y,
+                  1.5f);
+  EXPECT_FLOAT_EQ(material->textures[nuri::kMaterialTextureSlotSpecularColor]
+                      .transform.scale.x,
+                  4.0f);
+  EXPECT_FLOAT_EQ(material->textures[nuri::kMaterialTextureSlotSpecularColor]
+                      .transform.scale.y,
+                  5.0f);
+  EXPECT_NEAR(material->textures[nuri::kMaterialTextureSlotSpecularColor]
+                  .transform.rotationRadians,
+              0.25f, 1.0e-6f);
 }
 
 TEST(MaterialImportTests, SyntheticGltfSpecGlossWinsOverSpecularExtension) {
@@ -758,9 +838,13 @@ TEST(MaterialImportTests, SyntheticGltfSpecGlossWinsOverSpecularExtension) {
   EXPECT_EQ(material->workflow, nuri::MaterialWorkflow::SpecularGlossiness);
   EXPECT_FLOAT_EQ(material->specularColorFactor.x, 1.5f);
   EXPECT_FLOAT_EQ(material->glossinessFactor, 0.35f);
-  EXPECT_TRUE(material->specular.path.empty());
-  EXPECT_EQ(std::filesystem::path(material->specularColor.path).filename(),
-            std::filesystem::path("specgloss_rgba.png"));
+  EXPECT_TRUE(
+      material->textures[nuri::kMaterialTextureSlotSpecular].path.empty());
+  EXPECT_EQ(
+      std::filesystem::path(
+          material->textures[nuri::kMaterialTextureSlotSpecularColor].path)
+          .filename(),
+      std::filesystem::path("specgloss_rgba.png"));
 }
 
 TEST(MaterialImportTests,

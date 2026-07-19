@@ -1,60 +1,23 @@
 #pragma once
-
 #include "nuri/defines.h"
 #include "nuri/resources/gpu/resource_handles.h"
-
 #include <cstdint>
 #include <functional>
-
 namespace nuri {
 
-struct NURI_API SimulationHandle {
-  uint32_t value = 0;
-
-  constexpr bool operator==(SimulationHandle other) const noexcept {
-    return value == other.value;
-  }
-  constexpr bool operator!=(SimulationHandle other) const noexcept {
-    return value != other.value;
-  }
-};
+using SimulationHandle = PackedHandle<struct SimulationHandleTag>;
 
 inline constexpr SimulationHandle kInvalidSimulationHandle{};
 
-[[nodiscard]] constexpr bool isValid(SimulationHandle handle) noexcept {
-  return handle.value != 0u;
-}
-
-[[nodiscard]] constexpr uint32_t indexOf(SimulationHandle handle) noexcept {
-  return unpackResourceHandle(handle.value).index;
-}
-
-[[nodiscard]] constexpr uint32_t
-generationOf(SimulationHandle handle) noexcept {
-  return unpackResourceHandle(handle.value).generation;
-}
-
-// Uses the same packed layout as packResourceHandle(): index must be
-// <= kResourceHandleIndexMask and generation must be in
-// [1, kResourceHandleGenerationMask], otherwise kInvalidSimulationHandle is
-// returned.
 [[nodiscard]] constexpr SimulationHandle
 makeSimulationHandle(uint32_t index, uint32_t generation) noexcept {
-  if (index > kResourceHandleIndexMask || generation == 0u ||
-      generation > kResourceHandleGenerationMask) {
-    return kInvalidSimulationHandle;
-  }
-  return SimulationHandle{packResourceHandle(index, generation)};
+  return makePackedHandle<SimulationHandleTag>(index, generation);
 }
 
 enum class SimulationKind : uint8_t {
   Unknown = 0,
   AnimationPose = 1,
-  SecondaryMotion = 2,
-  Cloth = 3,
-  SoftBody = 4,
-  RigidProxy = 5,
-  Custom = 6,
+  Custom = 2,
 };
 
 enum class SimulationState : uint8_t {
@@ -72,15 +35,7 @@ enum class SimulationPhase : uint8_t {
   Count = 5,
 };
 
-enum class SimulationBackendPreference : uint8_t {
-  Auto = 0,
-  CPUOnly = 1,
-  GPUOnly = 2,
-  PreferGPU = 3,
-};
-
 } // namespace nuri
-
 namespace std {
 
 template <> struct hash<nuri::SimulationHandle> {

@@ -537,12 +537,13 @@ Result<void, std::string> registerBuiltInScenes(EditorSceneCatalog &catalog,
           cardMaterialDesc.alphaCutoff = 0.5f;
           cardMaterialDesc.alphaMode = MaterialAlphaMode::Mask;
           cardMaterialDesc.doubleSided = true;
+          MaterialRequest::TextureRefs cardTextureRefs{};
+          cardTextureRefs[kMaterialTextureSlotBaseColor] =
+              alphaMaskAssets->alphaTexture;
           auto cardMaterialResult =
               ctx.runtime.resources().acquireMaterial(MaterialRequest{
                   .desc = cardMaterialDesc,
-                  .textureRefs =
-                      MaterialRequest::TextureRefs{
-                          .baseColor = alphaMaskAssets->alphaTexture},
+                  .textureRefs = cardTextureRefs,
                   .debugName = "alpha_mask_validation_card_material"});
           if (cardMaterialResult.hasError()) {
             alphaMaskAssets->release();

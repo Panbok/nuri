@@ -1,5 +1,4 @@
 #include "nuri/core/input_system.h"
-
 namespace nuri {
 
 namespace {
@@ -117,7 +116,6 @@ bool InputSystem::handleRawKey(const RawKeyEvent &event) {
       break;
     }
   }
-
   InputEvent out{};
   out.type = InputEventType::Key;
   out.deviceId = event.deviceId;
@@ -158,7 +156,6 @@ bool InputSystem::handleRawMouseButton(const RawMouseButtonEvent &event) {
       break;
     }
   }
-
   InputEvent out{};
   out.type = InputEventType::MouseButton;
   out.deviceId = event.deviceId;
@@ -178,10 +175,8 @@ bool InputSystem::handleRawMouseMove(const RawMouseMoveEvent &event) {
   } else {
     hasMousePosition_ = true;
   }
-
   mousePosition_ = glm::dvec2(event.x, event.y);
   mouseDelta_ += glm::dvec2(dx, dy);
-
   InputEvent out{};
   out.type = InputEventType::MouseMove;
   out.deviceId = event.deviceId;
@@ -195,7 +190,6 @@ bool InputSystem::handleRawMouseMove(const RawMouseMoveEvent &event) {
 
 bool InputSystem::handleRawMouseScroll(const RawMouseScrollEvent &event) {
   scrollDelta_ += glm::dvec2(event.xOffset, event.yOffset);
-
   InputEvent out{};
   out.type = InputEventType::MouseScroll;
   out.deviceId = event.deviceId;
@@ -213,7 +207,6 @@ bool InputSystem::handleRawFocus(const RawFocusEvent &event) {
     mousePosition_ = glm::dvec2(0.0, 0.0);
     mouseDelta_ = glm::dvec2(0.0, 0.0);
   }
-
   InputEvent out{};
   out.type = InputEventType::Focus;
   out.deviceId = event.deviceId;
@@ -228,7 +221,6 @@ bool InputSystem::handleRawCursorEnter(const RawCursorEnterEvent &event) {
     mousePosition_ = glm::dvec2(0.0, 0.0);
     mouseDelta_ = glm::dvec2(0.0, 0.0);
   }
-
   InputEvent out{};
   out.type = InputEventType::CursorEnter;
   out.deviceId = event.deviceId;

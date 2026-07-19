@@ -1,11 +1,9 @@
 #pragma once
-
 #include "nuri/resources/gpu/material.h"
 #include "nuri/resources/gpu/model.h"
 #include "nuri/resources/gpu/resource_handles.h"
 #include "nuri/resources/gpu/texture.h"
 #include "nuri/resources/storage/mesh/mesh_cache_utils.h"
-
 #include <algorithm>
 #include <bit>
 #include <cctype>
@@ -13,7 +11,6 @@
 #include <filesystem>
 #include <string>
 #include <string_view>
-
 namespace nuri {
 
 [[nodiscard]] inline std::string
@@ -33,7 +30,6 @@ struct TextureKey {
   std::string canonicalPath{};
   uint64_t optionsHash = 0;
   TextureRequestKind kind = TextureRequestKind::Texture2D;
-
   bool operator==(const TextureKey &rhs) const noexcept {
     return optionsHash == rhs.optionsHash && kind == rhs.kind &&
            canonicalPath == rhs.canonicalPath;
@@ -54,7 +50,6 @@ struct ModelKey {
   std::string canonicalPath{};
   uint64_t importOptionsHash = 0;
   uint32_t sceneMeshIndex = std::numeric_limits<uint32_t>::max();
-
   bool operator==(const ModelKey &rhs) const noexcept {
     return importOptionsHash == rhs.importOptionsHash &&
            sceneMeshIndex == rhs.sceneMeshIndex &&
@@ -75,7 +70,6 @@ struct ModelKeyHash {
 struct MaterialKey {
   uint64_t descHash = 0;
   std::string sourceIdentity{};
-
   bool operator==(const MaterialKey &rhs) const noexcept {
     return descHash == rhs.descHash && sourceIdentity == rhs.sourceIdentity;
   }
@@ -94,7 +88,6 @@ canonicalizeResourcePath(std::string_view inputPath) {
   if (inputPath.empty()) {
     return {};
   }
-
   const std::filesystem::path rawPath{std::string(inputPath)};
   std::error_code ec;
   std::filesystem::path canonical =
@@ -102,7 +95,6 @@ canonicalizeResourcePath(std::string_view inputPath) {
   if (ec) {
     canonical = rawPath.lexically_normal();
   }
-
   std::string path = pathToUtf8String(canonical);
 #if defined(_WIN32)
   std::transform(path.begin(), path.end(), path.begin(), [](unsigned char ch) {
@@ -141,18 +133,15 @@ hashModelImportOptions(const MeshImportOptions &options) {
   const auto mixFloat = [&mix](float value) {
     mix(static_cast<uint64_t>(std::bit_cast<uint32_t>(value)));
   };
-
   mix(static_cast<uint64_t>(desc.workflow));
   mixFloat(desc.baseColorFactor.x);
   mixFloat(desc.baseColorFactor.y);
   mixFloat(desc.baseColorFactor.z);
   mixFloat(desc.baseColorFactor.w);
-
   mixFloat(desc.emissiveFactor.x);
   mixFloat(desc.emissiveFactor.y);
   mixFloat(desc.emissiveFactor.z);
   mixFloat(desc.emissiveStrength);
-
   mixFloat(desc.metallicFactor);
   mixFloat(desc.roughnessFactor);
   mixFloat(desc.specularColorFactor.x);
@@ -178,66 +167,20 @@ hashModelImportOptions(const MeshImportOptions &options) {
   mixFloat(desc.normalScale);
   mixFloat(desc.occlusionStrength);
   mixFloat(desc.alphaCutoff);
-
   mix(desc.doubleSided ? 1ull : 0ull);
   mix(static_cast<uint64_t>(desc.alphaMode));
   mix(desc.featureMask);
-
-  mix(desc.textures.baseColor.index);
-  mix(desc.textures.baseColor.generation);
-  mix(desc.textures.metallicRoughness.index);
-  mix(desc.textures.metallicRoughness.generation);
-  mix(desc.textures.normal.index);
-  mix(desc.textures.normal.generation);
-  mix(desc.textures.occlusion.index);
-  mix(desc.textures.occlusion.generation);
-  mix(desc.textures.emissive.index);
-  mix(desc.textures.emissive.generation);
-  mix(desc.textures.clearcoat.index);
-  mix(desc.textures.clearcoat.generation);
-  mix(desc.textures.clearcoatRoughness.index);
-  mix(desc.textures.clearcoatRoughness.generation);
-  mix(desc.textures.clearcoatNormal.index);
-  mix(desc.textures.clearcoatNormal.generation);
-  mix(desc.textures.specular.index);
-  mix(desc.textures.specular.generation);
-  mix(desc.textures.specularColor.index);
-  mix(desc.textures.specularColor.generation);
-  mix(desc.textures.sheenColor.index);
-  mix(desc.textures.sheenColor.generation);
-  mix(desc.textures.sheenRoughness.index);
-  mix(desc.textures.sheenRoughness.generation);
-  mix(desc.textures.transmission.index);
-  mix(desc.textures.transmission.generation);
-  mix(desc.textures.thickness.index);
-  mix(desc.textures.thickness.generation);
-
-  mix(desc.uvSets.baseColor);
-  mix(desc.uvSets.metallicRoughness);
-  mix(desc.uvSets.normal);
-  mix(desc.uvSets.occlusion);
-  mix(desc.uvSets.emissive);
-  mix(desc.uvSets.clearcoat);
-  mix(desc.uvSets.clearcoatRoughness);
-  mix(desc.uvSets.clearcoatNormal);
-  mix(desc.uvSets.specular);
-  mix(desc.uvSets.specularColor);
-  mix(desc.uvSets.sheenColor);
-  mix(desc.uvSets.sheenRoughness);
-  mix(desc.uvSets.transmission);
-  mix(desc.uvSets.thickness);
-
-  for (uint32_t slotIndex = 0; slotIndex < kMaterialTextureSlotCount;
-       ++slotIndex) {
-    const MaterialTextureTransformData &transform =
-        desc.transforms.slots[slotIndex];
+  for (size_t slotIndex = 0; slotIndex < desc.textures.size(); ++slotIndex) {
+    mix(desc.textures[slotIndex].index);
+    mix(desc.textures[slotIndex].generation);
+    mix(desc.uvSets[slotIndex]);
+    const MaterialTextureTransformData &transform = desc.transforms[slotIndex];
     mixFloat(transform.offset.x);
     mixFloat(transform.offset.y);
     mixFloat(transform.scale.x);
     mixFloat(transform.scale.y);
     mixFloat(transform.rotationRadians);
   }
-
   return hash;
 }
 

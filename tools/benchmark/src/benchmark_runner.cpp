@@ -1411,10 +1411,10 @@ startTracyCaptureIfRequested(const BenchmarkCase &benchmarkCase,
 [[nodiscard]] std::string_view
 resolveTelemetryPassName(const RenderGraphTelemetrySnapshot &snapshot,
                          uint32_t passIndex) {
-  if (passIndex >= snapshot.passNames.size()) {
+  if (passIndex >= snapshot.compile.passDebugNames.size()) {
     return "unnamed_pass";
   }
-  const std::pmr::string &name = snapshot.passNames[passIndex];
+  const std::pmr::string &name = snapshot.compile.passDebugNames[passIndex];
   return name.empty() ? std::string_view("unnamed_pass")
                       : std::string_view(name.data(), name.size());
 }
@@ -1537,8 +1537,8 @@ void appendBytesAsMiB(BenchmarkFrameMeasurements &measurements,
 }
 
 void addTextureResourceMetrics(BenchmarkFrameMeasurements &measurements,
-                               const PoolStats &stats) {
-  const TextureCacheTelemetry &cache = stats.textureCache;
+                               GPUDevice &gpu) {
+  const TextureCacheTelemetry cache = Texture::cacheTelemetry();
   appendCounter(measurements,
                 NURI_BENCHMARK_METRIC("texture.cache.native_hits"),
                 cache.nativeHits);
@@ -1576,7 +1576,7 @@ void addTextureResourceMetrics(BenchmarkFrameMeasurements &measurements,
                                 static_cast<double>(cache.ddsReadTimeNs) /
                                     1'000'000.0);
 
-  const DdsTexturePackTelemetry &pack = stats.ddsTexturePacks;
+  const DdsTexturePackTelemetry pack = ddsTexturePackTelemetry();
   appendCounter(measurements, NURI_BENCHMARK_METRIC("texture.pack.hits"),
                 pack.hits);
   appendCounter(measurements, NURI_BENCHMARK_METRIC("texture.pack.misses"),
@@ -1613,7 +1613,7 @@ void addTextureResourceMetrics(BenchmarkFrameMeasurements &measurements,
                                 static_cast<double>(pack.readTimeNs) /
                                     1'000'000.0);
 
-  const TextureUploadTelemetry &uploads = stats.textureUploads;
+  const TextureUploadTelemetry uploads = gpu.getTextureUploadTelemetry();
   appendCounter(measurements,
                 NURI_BENCHMARK_METRIC("texture.upload.textures_recorded"),
                 uploads.texturesRecorded);
@@ -1948,8 +1948,6 @@ void addRendererFrameMetrics(BenchmarkFrameMeasurements &measurements,
                aa.motionVectorTextureCount);
   addIfNonzero(measurements, "renderer.aa.motion_class_textures",
                aa.motionClassTextureCount);
-  addIfNonzero(measurements, "renderer.aa.motion_class_coverage_available",
-               aa.motionClassCoverageAvailable);
   addIfNonzero(measurements, "renderer.aa.history_color_textures",
                aa.historyColorTextureCount);
   addIfNonzero(measurements, "renderer.aa.motion_vector_allocations",
@@ -2131,13 +2129,14 @@ void addRenderGraphTelemetryMetrics(BenchmarkFrameMeasurements &measurements,
   addCount("rendergraph.summary.owned_mesh_dispatch_item_count",
            summary.ownedMeshDispatchItemCount);
 
-  for (const RenderGraphPassExecutionTiming &timing : snapshot->passTimings) {
+  for (const RenderGraphPassExecutionTiming &timing :
+       snapshot->execution.passTimings) {
     const uint32_t orderedPassIndex = timing.orderedPassIndex;
-    if (orderedPassIndex >= snapshot->orderedPassIndices.size()) {
+    if (orderedPassIndex >= snapshot->compile.orderedPassIndices.size()) {
       continue;
     }
     const uint32_t declaredPassIndex =
-        snapshot->orderedPassIndices[orderedPassIndex];
+        snapshot->compile.orderedPassIndices[orderedPassIndex];
     const std::string_view passName =
         resolveTelemetryPassName(*snapshot, declaredPassIndex);
     measurements.appendOwned(
@@ -2467,7 +2466,7 @@ populateScene(const BenchmarkCase &benchmarkCase, Renderer &renderer,
 [[nodiscard]] Result<bool, std::string>
 waitForBenchmarkAssets(Renderer &renderer, RenderScene &scene,
                        SceneLoadHandle sceneLoad) {
-  if (!isValidAssetHandle(sceneLoad)) {
+  if (!isValid(sceneLoad)) {
     return Result<bool, std::string>::makeResult(true);
   }
   const auto deadline =
@@ -3777,8 +3776,7 @@ BenchmarkRunResult runBenchmarkCase(BenchmarkCase benchmarkCase,
             sceneResourcePrepareMs);
         addRendererFrameMetrics(frame.measurements, frame.metrics);
         addRenderGraphTelemetryMetrics(frame.measurements, *renderer);
-        addTextureResourceMetrics(frame.measurements,
-                                  renderer->resources().stats());
+        addTextureResourceMetrics(frame.measurements, *gpu);
         addProcessMemoryMetrics(frame.measurements);
         addPmrMemoryMetrics(frame.measurements, rendererMemoryTracker,
                             pipelineMemoryTracker, sceneMemoryTracker);

@@ -2,6 +2,8 @@
 
 #include "nuri/ui/editor_feature.h"
 
+#include "nuri/gfx/pipeline/render_pipeline.h"
+
 namespace nuri {
 
 bool EditorOverlayPass::isEnabled(const FrameBuildContext &ctx) const {
@@ -10,17 +12,11 @@ bool EditorOverlayPass::isEnabled(const FrameBuildContext &ctx) const {
 }
 
 Result<bool, std::string> EditorOverlayPass::prepare(FrameBuildContext &ctx) {
-  if (controller_ == nullptr) {
-    return Result<bool, std::string>::makeResult(true);
-  }
   controller_->prepareOverlayFrameContext(ctx.frame);
   return Result<bool, std::string>::makeResult(true);
 }
 
 Result<bool, std::string> EditorOverlayPass::build(FrameBuildContext &ctx) {
-  if (controller_ == nullptr) {
-    return Result<bool, std::string>::makeResult(true);
-  }
   auto buildResult = controller_->buildOverlayPass(ctx.frame, ctx.graph);
   if (buildResult.hasError()) {
     return Result<bool, std::string>::makeError(buildResult.error());
@@ -28,14 +24,9 @@ Result<bool, std::string> EditorOverlayPass::build(FrameBuildContext &ctx) {
   return Result<bool, std::string>::makeResult(true);
 }
 
-Result<bool, std::string>
-EditorOverlayFeature::prepare(FrameBuildContext &ctx) {
-  (void)ctx;
-  return Result<bool, std::string>::makeResult(true);
-}
-
-std::span<RenderFeaturePass *const> EditorOverlayFeature::passes() noexcept {
-  return passes_;
+EditorOverlayPass *registerEditorOverlayStage(RenderPipeline &pipeline) {
+  return pipeline.addStage(std::make_unique<EditorOverlayPass>(),
+                           "EditorOverlayFeature", "EditorOverlayPass", true);
 }
 
 } // namespace nuri

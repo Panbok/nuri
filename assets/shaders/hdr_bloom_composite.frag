@@ -10,8 +10,6 @@ layout(push_constant) uniform HDRBloomCompositePushConstants {
   uint sourceSamplerId;
   uint flags;
   uint debugView;
-  uint reserved0;
-  uint reserved1;
   float bloomStrength;
   float fallbackExposureEv;
   float adaptationTargetGray;

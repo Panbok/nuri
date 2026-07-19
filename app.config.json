@@ -1,8 +1,8 @@
 {
   "window": {
     "title": "Nuri",
-    "width": 1920,
-    "height": 1080,
+    "width": 640,
+    "height": 480,
     "mode": "windowed"
   },
   "roots": {

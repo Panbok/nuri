@@ -1,31 +1,26 @@
-#include "nuri/pch.h"
-
 #include "nuri/gfx/pipeline/providers/material_table_gpu_provider.h"
-
 #include "nuri/core/profiling.h"
+#include "nuri/pch.h"
 #include "nuri/resources/gpu/material.h"
 #include "nuri/resources/gpu/resource_manager.h"
-
 namespace nuri {
 namespace {
-
-// The returned span must be consumed immediately by call sites such as
-// gpu_.updateBuffer(). Non-empty values point at the caller-owned table and are
-// safe while that span outlives the call; the fallback branch creates a
-// single-element span pointing at fallback and dangles once fallback goes away.
+struct TableView {
+  std::span<const std::byte> bytes{};
+  MaterialTableDirtyRange dirty{};
+  size_t elementSize = 0u;
+  std::string_view name{};
+};
 template <typename T>
-std::span<const std::byte> tableBytes(std::span<const T> values,
-                                      const T &fallback) {
-  if (values.empty()) {
-    return std::as_bytes(std::span<const T>(&fallback, size_t{1u}));
-  }
-  return std::as_bytes(values);
+TableView tableView(std::span<const T> values, MaterialTableDirtyRange dirty,
+                    std::string_view name) {
+  static const T empty{};
+  return {.bytes = std::as_bytes(values.empty() ? std::span<const T>(&empty, 1u)
+                                                : values),
+          .dirty = dirty,
+          .elementSize = sizeof(T),
+          .name = name};
 }
-
-template <typename T> size_t requiredTableBytes(std::span<const T> values) {
-  return std::max(values.size() * sizeof(T), sizeof(T));
-}
-
 } // namespace
 
 MaterialTableGpuProvider::MaterialTableGpuProvider(GPUDevice &gpu)
@@ -34,167 +29,55 @@ MaterialTableGpuProvider::MaterialTableGpuProvider(GPUDevice &gpu)
 MaterialTableGpuProvider::~MaterialTableGpuProvider() { destroyBuffers(); }
 
 Result<bool, std::string>
-MaterialTableGpuProvider::ensureBufferCapacity(ManagedBuffer &managedBuffer,
-                                               size_t requiredBytes,
-                                               std::string_view debugName) {
-  return ensureDynamicBufferCapacity(gpu_, managedBuffer,
-                                     BufferDesc{.usage = BufferUsage::Storage,
-                                                .storage = Storage::Device,
-                                                .size = requiredBytes},
-                                     debugName);
-}
-
-Result<bool, std::string>
 MaterialTableGpuProvider::prepare(FrameBuildContext &ctx) {
   NURI_PROFILER_FUNCTION();
-  if (ctx.frame.resources == nullptr) {
-    return Result<bool, std::string>::makeError(
-        "MaterialTableGpuProvider::prepare: frame resources are null");
-  }
-
-  const MaterialTableSnapshot snapshot =
-      ctx.frame.resources->materialSnapshot();
-  for (size_t i = 0; i < snapshot.headers.size(); ++i) {
-    const MaterialHeaderGpuData &header = snapshot.headers[i];
-    if (header.clearcoatExtensionIndex != kInvalidMaterialExtensionIndex &&
-        header.clearcoatExtensionIndex >= snapshot.clearcoat.size()) {
-      return Result<bool, std::string>::makeError(
-          "MaterialTableGpuProvider::prepare: clearcoat extension index is "
-          "out of range for material " +
-          std::to_string(i) + " (clearcoatExtensionIndex=" +
-          std::to_string(header.clearcoatExtensionIndex) +
-          ", snapshot.clearcoat.size=" +
-          std::to_string(snapshot.clearcoat.size()) + ")");
+  const MaterialTableSnapshot snapshot = ctx.resources.materialSnapshot();
+  const std::array tables{
+      tableView(snapshot.headers, snapshot.dirtyHeaders,
+                "material_header_table"),
+      tableView(snapshot.clearcoat, snapshot.dirtyClearcoat,
+                "material_clearcoat_table"),
+      tableView(snapshot.sheen, snapshot.dirtySheen, "material_sheen_table"),
+      tableView(snapshot.transmission, snapshot.dirtyTransmission,
+                "material_transmission_table"),
+      tableView(snapshot.specular, snapshot.dirtySpecular,
+                "material_specular_table"),
+  };
+  for (size_t i = 0; i < tables.size(); ++i) {
+    auto ensured =
+        ensureDynamicBufferCapacity(gpu_, buffers_[i],
+                                    BufferDesc{.usage = BufferUsage::Storage,
+                                               .storage = Storage::Device,
+                                               .size = tables[i].bytes.size()},
+                                    tables[i].name);
+    if (ensured.hasError()) {
+      return ensured;
     }
-    if (header.sheenExtensionIndex != kInvalidMaterialExtensionIndex &&
-        header.sheenExtensionIndex >= snapshot.sheen.size()) {
-      return Result<bool, std::string>::makeError(
-          "MaterialTableGpuProvider::prepare: sheen extension index is out of "
-          "range for material " +
-          std::to_string(i) + " (sheenExtensionIndex=" +
-          std::to_string(header.sheenExtensionIndex) +
-          ", snapshot.sheen.size=" + std::to_string(snapshot.sheen.size()) +
-          ")");
-    }
-    if (header.transmissionExtensionIndex != kInvalidMaterialExtensionIndex &&
-        header.transmissionExtensionIndex >= snapshot.transmission.size()) {
-      return Result<bool, std::string>::makeError(
-          "MaterialTableGpuProvider::prepare: transmission extension index is "
-          "out of range for material " +
-          std::to_string(i) + " (transmissionExtensionIndex=" +
-          std::to_string(header.transmissionExtensionIndex) +
-          ", snapshot.transmission.size=" +
-          std::to_string(snapshot.transmission.size()) + ")");
-    }
-    if (header.specularExtensionIndex != kInvalidMaterialExtensionIndex &&
-        header.specularExtensionIndex >= snapshot.specular.size()) {
-      return Result<bool, std::string>::makeError(
-          "MaterialTableGpuProvider::prepare: specular extension index is out "
-          "of range for material " +
-          std::to_string(i) + " (specularExtensionIndex=" +
-          std::to_string(header.specularExtensionIndex) +
-          ", snapshot.specular.size=" +
-          std::to_string(snapshot.specular.size()) + ")");
+    if (ensured.value()) {
+      uploadedVersion_ = kNoVersionUploaded;
     }
   }
-  auto ensureHeaderResult =
-      ensureBufferCapacity(headerBuffer_, requiredTableBytes(snapshot.headers),
-                           "material_header_table");
-  if (ensureHeaderResult.hasError()) {
-    return ensureHeaderResult;
-  }
-  if (ensureHeaderResult.value()) {
-    uploadedVersion_ = kNoVersionUploaded;
-  }
-  auto ensureClearcoatResult = ensureBufferCapacity(
-      clearcoatBuffer_, requiredTableBytes(snapshot.clearcoat),
-      "material_clearcoat_table");
-  if (ensureClearcoatResult.hasError()) {
-    return ensureClearcoatResult;
-  }
-  if (ensureClearcoatResult.value()) {
-    uploadedVersion_ = kNoVersionUploaded;
-  }
-  auto ensureSheenResult = ensureBufferCapacity(
-      sheenBuffer_, requiredTableBytes(snapshot.sheen), "material_sheen_table");
-  if (ensureSheenResult.hasError()) {
-    return ensureSheenResult;
-  }
-  if (ensureSheenResult.value()) {
-    uploadedVersion_ = kNoVersionUploaded;
-  }
-  auto ensureTransmissionResult = ensureBufferCapacity(
-      transmissionBuffer_, requiredTableBytes(snapshot.transmission),
-      "material_transmission_table");
-  if (ensureTransmissionResult.hasError()) {
-    return ensureTransmissionResult;
-  }
-  if (ensureTransmissionResult.value()) {
-    uploadedVersion_ = kNoVersionUploaded;
-  }
-  auto ensureSpecularResult = ensureBufferCapacity(
-      specularBuffer_, requiredTableBytes(snapshot.specular),
-      "material_specular_table");
-  if (ensureSpecularResult.hasError()) {
-    return ensureSpecularResult;
-  }
-  if (ensureSpecularResult.value()) {
-    uploadedVersion_ = kNoVersionUploaded;
-  }
-
   if (uploadedVersion_ != snapshot.version) {
-    const MaterialHeaderGpuData defaultHeader{};
-    const MaterialClearcoatGpuData defaultClearcoat{};
-    const MaterialSheenGpuData defaultSheen{};
-    const MaterialTransmissionGpuData defaultTransmission{};
-    const MaterialSpecularGpuData defaultSpecular{};
     const bool fullUpload = uploadedVersion_ == kNoVersionUploaded ||
                             uploadedVersion_ != snapshot.dirtyBaseVersion;
     std::vector<BufferUpdate> updates;
-    updates.reserve(5u);
-    const auto appendUpdate = [&updates, fullUpload]<typename T>(
-                                  BufferHandle buffer,
-                                  std::span<const T> values, const T &fallback,
-                                  MaterialTableDirtyRange dirty) -> bool {
-      if (fullUpload) {
-        updates.push_back(BufferUpdate{
-            .buffer = buffer,
-            .data = tableBytes(values, fallback),
-        });
-        return true;
+    updates.reserve(tables.size());
+    for (size_t i = 0; i < tables.size(); ++i) {
+      const TableView &table = tables[i];
+      if (!fullUpload && table.dirty.empty()) {
+        continue;
       }
-      if (dirty.empty()) {
-        return true;
-      }
-      if (dirty.first > values.size() ||
-          dirty.count > values.size() - dirty.first) {
-        return false;
-      }
-      const std::span<const T> changed =
-          values.subspan(dirty.first, dirty.count);
+      const size_t offset =
+          fullUpload ? 0u : table.dirty.first * table.elementSize;
+      const std::span<const std::byte> bytes =
+          fullUpload ? table.bytes
+                     : table.bytes.subspan(offset, table.dirty.count *
+                                                       table.elementSize);
       updates.push_back(BufferUpdate{
-          .buffer = buffer,
-          .data = std::as_bytes(changed),
-          .offset = static_cast<size_t>(dirty.first) * sizeof(T),
+          .buffer = buffers_[i].buffer->handle(),
+          .data = bytes,
+          .offset = offset,
       });
-      return true;
-    };
-    const bool rangesValid =
-        appendUpdate(headerBuffer_.buffer->handle(), snapshot.headers,
-                     defaultHeader, snapshot.dirtyHeaders) &&
-        appendUpdate(clearcoatBuffer_.buffer->handle(), snapshot.clearcoat,
-                     defaultClearcoat, snapshot.dirtyClearcoat) &&
-        appendUpdate(sheenBuffer_.buffer->handle(), snapshot.sheen,
-                     defaultSheen, snapshot.dirtySheen) &&
-        appendUpdate(transmissionBuffer_.buffer->handle(),
-                     snapshot.transmission, defaultTransmission,
-                     snapshot.dirtyTransmission) &&
-        appendUpdate(specularBuffer_.buffer->handle(), snapshot.specular,
-                     defaultSpecular, snapshot.dirtySpecular);
-    if (!rangesValid) {
-      return Result<bool, std::string>::makeError(
-          "MaterialTableGpuProvider::prepare: material dirty range is out "
-          "of bounds");
     }
     if (!updates.empty()) {
       auto updateResult = gpu_.updateBuffers(updates);
@@ -204,44 +87,32 @@ MaterialTableGpuProvider::prepare(FrameBuildContext &ctx) {
     }
     uploadedVersion_ = snapshot.version;
   }
-
+  std::array<BufferHandle, 5> handles{};
+  std::array<uint64_t, 5> addresses{};
+  for (size_t i = 0; i < buffers_.size(); ++i) {
+    handles[i] = buffers_[i].buffer->handle();
+    addresses[i] = gpu_.getBufferDeviceAddress(handles[i]);
+  }
   ctx.shared.materialTableGpuData = MaterialTableGpuData{
-      .headerBuffer = headerBuffer_.buffer->handle(),
-      .clearcoatBuffer = clearcoatBuffer_.buffer->handle(),
-      .sheenBuffer = sheenBuffer_.buffer->handle(),
-      .transmissionBuffer = transmissionBuffer_.buffer->handle(),
-      .specularBuffer = specularBuffer_.buffer->handle(),
-      .headerBufferAddress =
-          gpu_.getBufferDeviceAddress(headerBuffer_.buffer->handle()),
-      .clearcoatBufferAddress =
-          gpu_.getBufferDeviceAddress(clearcoatBuffer_.buffer->handle()),
-      .sheenBufferAddress =
-          gpu_.getBufferDeviceAddress(sheenBuffer_.buffer->handle()),
-      .transmissionBufferAddress =
-          gpu_.getBufferDeviceAddress(transmissionBuffer_.buffer->handle()),
-      .specularBufferAddress =
-          gpu_.getBufferDeviceAddress(specularBuffer_.buffer->handle()),
+      .headerBuffer = handles[0],
+      .clearcoatBuffer = handles[1],
+      .sheenBuffer = handles[2],
+      .transmissionBuffer = handles[3],
+      .specularBuffer = handles[4],
+      .headerBufferAddress = addresses[0],
+      .clearcoatBufferAddress = addresses[1],
+      .sheenBufferAddress = addresses[2],
+      .transmissionBufferAddress = addresses[3],
+      .specularBufferAddress = addresses[4],
       .version = snapshot.version,
   };
-
-  if (ctx.shared.materialTableGpuData->headerBufferAddress == 0u ||
-      ctx.shared.materialTableGpuData->clearcoatBufferAddress == 0u ||
-      ctx.shared.materialTableGpuData->sheenBufferAddress == 0u ||
-      ctx.shared.materialTableGpuData->transmissionBufferAddress == 0u ||
-      ctx.shared.materialTableGpuData->specularBufferAddress == 0u) {
-    return Result<bool, std::string>::makeError(
-        "MaterialTableGpuProvider::prepare: invalid buffer address");
-  }
-
   return Result<bool, std::string>::makeResult(true);
 }
 
 void MaterialTableGpuProvider::destroyBuffers() {
-  retireDynamicBuffer(gpu_, headerBuffer_);
-  retireDynamicBuffer(gpu_, clearcoatBuffer_);
-  retireDynamicBuffer(gpu_, sheenBuffer_);
-  retireDynamicBuffer(gpu_, transmissionBuffer_);
-  retireDynamicBuffer(gpu_, specularBuffer_);
+  for (DynamicBufferSlot &buffer : buffers_) {
+    retireDynamicBuffer(buffer);
+  }
   uploadedVersion_ = kNoVersionUploaded;
 }
 

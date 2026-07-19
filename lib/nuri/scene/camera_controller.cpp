@@ -1,22 +1,28 @@
 #include "nuri/scene/camera_controller.h"
-
-#include "nuri/pch.h"
-
 #include "nuri/core/log.h"
-
+#include "nuri/pch.h"
 namespace nuri {
 
 namespace {
-
 constexpr float kEpsilon = 1e-6f;
 constexpr float kMinDamping = 0.001f;
 constexpr float kMinMoveToDurationSeconds = 0.0001f;
 constexpr float kTwoPi = glm::two_pi<float>();
-constexpr std::array<Key, 8> kMovementKeys = {
-    Key::W, Key::S, Key::A,         Key::D,
-    Key::E, Key::Q, Key::LeftShift, Key::RightShift,
+struct MovementBinding {
+  Key key;
+  glm::vec3 axis;
+  bool fast;
 };
-
+const std::array kMovementBindings{
+    MovementBinding{Key::W, {0.0f, 0.0f, 1.0f}, false},
+    MovementBinding{Key::S, {0.0f, 0.0f, -1.0f}, false},
+    MovementBinding{Key::A, {-1.0f, 0.0f, 0.0f}, false},
+    MovementBinding{Key::D, {1.0f, 0.0f, 0.0f}, false},
+    MovementBinding{Key::E, {0.0f, 1.0f, 0.0f}, false},
+    MovementBinding{Key::Q, {0.0f, -1.0f, 0.0f}, false},
+    MovementBinding{Key::LeftShift, {}, true},
+    MovementBinding{Key::RightShift, {}, true},
+};
 struct CameraIntent {
   glm::dvec2 lookDelta{0.0, 0.0};
   glm::vec3 moveAxis{0.0f, 0.0f, 0.0f};
@@ -24,114 +30,75 @@ struct CameraIntent {
   bool hasManualLook = false;
   bool hasManualMovement = false;
 };
-
 struct WorldBasis {
   glm::vec3 up{0.0f, 1.0f, 0.0f};
   glm::vec3 forward{0.0f, 0.0f, -1.0f};
   glm::vec3 right{1.0f, 0.0f, 0.0f};
 };
-
 WorldBasis makeWorldBasis(const glm::vec3 &configuredUp) {
-  WorldBasis basis{};
-  if (glm::dot(configuredUp, configuredUp) > kEpsilon) {
-    basis.up = glm::normalize(configuredUp);
-  }
-
+  WorldBasis basis{.up = configuredUp};
   const glm::vec3 fallbackForward = glm::vec3(0.0f, 0.0f, -1.0f);
   const glm::vec3 alternateForward = glm::vec3(1.0f, 0.0f, 0.0f);
   const glm::vec3 seed = std::abs(glm::dot(basis.up, fallbackForward)) < 0.999f
                              ? fallbackForward
                              : alternateForward;
-
-  glm::vec3 flattenedForward = seed - basis.up * glm::dot(seed, basis.up);
-  if (glm::dot(flattenedForward, flattenedForward) <= kEpsilon) {
-    flattenedForward = fallbackForward;
-  }
-  basis.forward = glm::normalize(flattenedForward);
+  basis.forward = glm::normalize(seed - basis.up * glm::dot(seed, basis.up));
   basis.right = glm::normalize(glm::cross(basis.forward, basis.up));
   return basis;
 }
-
 glm::quat orientationFromAngles(float yawRadians, float pitchRadians,
                                 const WorldBasis &basis) {
   const glm::quat yawRotation = glm::angleAxis(yawRadians, basis.up);
-  glm::vec3 rightAxis = yawRotation * basis.right;
-  if (glm::dot(rightAxis, rightAxis) <= kEpsilon) {
-    rightAxis = basis.right;
-  } else {
-    rightAxis = glm::normalize(rightAxis);
-  }
+  const glm::vec3 rightAxis = glm::normalize(yawRotation * basis.right);
   const glm::quat pitchRotation = glm::angleAxis(pitchRadians, rightAxis);
   return glm::normalize(pitchRotation * yawRotation);
 }
-
 bool anglesFromOrientation(const glm::quat &orientation,
                            const WorldBasis &basis, float &inOutYawRadians,
                            float &outPitchRadians) {
   const glm::vec3 forward = orientation * glm::vec3(0.0f, 0.0f, -1.0f);
   const float upDot = glm::clamp(glm::dot(forward, basis.up), -1.0f, 1.0f);
   outPitchRadians = std::asin(upDot);
-
   glm::vec3 flatForward = forward - basis.up * upDot;
   if (glm::dot(flatForward, flatForward) <= kEpsilon) {
     return false;
   }
   flatForward = glm::normalize(flatForward);
-
   inOutYawRadians = std::atan2(glm::dot(flatForward, basis.right),
                                glm::dot(flatForward, basis.forward));
   return true;
 }
-
 float applyEasing(float t, MoveToEasing easing) {
   const float clamped = glm::clamp(t, 0.0f, 1.0f);
-  switch (easing) {
-  case MoveToEasing::Linear:
-    return clamped;
-  case MoveToEasing::Smoothstep:
-    return clamped * clamped * (3.0f - 2.0f * clamped);
-  default:
-    NURI_LOG_WARNING("CameraController::applyEasing: Unknown easing type");
-    return clamped;
-  }
-  return clamped;
+  return easing == MoveToEasing::Smoothstep
+             ? clamped * clamped * (3.0f - 2.0f * clamped)
+             : clamped;
 }
-
 float wrapAngleRadians(float radians) {
   return std::remainder(radians, kTwoPi);
 }
-
 float lerpAngleShortest(float fromRadians, float toRadians, float t) {
   const float delta = wrapAngleRadians(toRadians - fromRadians);
   return wrapAngleRadians(fromRadians + delta * glm::clamp(t, 0.0f, 1.0f));
 }
-
 } // namespace
 
 CameraController::CameraController(const CameraControllerConfig &config)
-    : config_(config) {}
+    : config_(config) {
+  config_.fps.worldUp =
+      glm::dot(config_.fps.worldUp, config_.fps.worldUp) > kEpsilon
+          ? glm::normalize(config_.fps.worldUp)
+          : glm::vec3(0.0f, 1.0f, 0.0f);
+  config_.fps.damping = std::max(config_.fps.damping, kMinDamping);
+  config_.pitch.pitchLimitRadians =
+      std::max(config_.pitch.pitchLimitRadians, 0.0f);
+}
 
 bool *CameraController::stateForKey(Key key) {
-  switch (key) {
-  case Key::W:
-    return &movement_.forward;
-  case Key::S:
-    return &movement_.backward;
-  case Key::A:
-    return &movement_.left;
-  case Key::D:
-    return &movement_.right;
-  case Key::E:
-    return &movement_.up;
-  case Key::Q:
-    return &movement_.down;
-  case Key::LeftShift:
-    return &movement_.shiftLeft;
-  case Key::RightShift:
-    return &movement_.shiftRight;
-  default:
-    return nullptr;
-  }
+  for (size_t index = 0; index < kMovementBindings.size(); ++index)
+    if (kMovementBindings[index].key == key)
+      return &movement_[index];
+  return nullptr;
 }
 
 bool CameraController::handleKeyEvent(const InputKeyData &data) {
@@ -141,12 +108,10 @@ bool CameraController::handleKeyEvent(const InputKeyData &data) {
   if (!isDown && !isRelease) {
     return false;
   }
-
   bool *state = stateForKey(data.key);
   if (!state) {
     return false;
   }
-
   *state = isDown;
   return true;
 }
@@ -156,7 +121,6 @@ bool CameraController::handleMouseButtonEvent(const InputMouseButtonData &data,
   if (data.button != MouseButton::Right) {
     return false;
   }
-
   if (data.action == MouseAction::Press) {
     if (!looking_) {
       looking_ = true;
@@ -165,7 +129,6 @@ bool CameraController::handleMouseButtonEvent(const InputMouseButtonData &data,
     }
     return true;
   }
-
   if (data.action == MouseAction::Release) {
     if (looking_) {
       looking_ = false;
@@ -173,7 +136,6 @@ bool CameraController::handleMouseButtonEvent(const InputMouseButtonData &data,
     }
     return true;
   }
-
   return false;
 }
 
@@ -203,12 +165,9 @@ bool CameraController::onInput(const InputEvent &event, Window &window) {
 }
 
 void CameraController::syncKeyStateFromPolling(const InputSystem &input) {
-  for (Key key : kMovementKeys) {
-    bool *state = stateForKey(key);
-    if (state && *state && !input.isKeyDown(key)) {
-      *state = false;
-    }
-  }
+  for (size_t index = 0; index < movement_.size(); ++index)
+    if (movement_[index] && !input.isKeyDown(kMovementBindings[index].key))
+      movement_[index] = false;
 }
 
 void CameraController::initializeAnglesFromCamera(const Camera &camera) {
@@ -240,14 +199,11 @@ void CameraController::update(double deltaTime, const InputSystem &input,
   if (deltaTime <= 0.0) {
     return;
   }
-
   if (!anglesInitialized_) {
     initializeAnglesFromCamera(camera);
   }
-
   syncKeyStateFromPolling(input);
   beginMoveToFromCamera(camera);
-
   CameraIntent intent{};
   if (looking_) {
     glm::dvec2 mouseDelta = input.mouseDelta();
@@ -258,59 +214,44 @@ void CameraController::update(double deltaTime, const InputSystem &input,
     intent.lookDelta = mouseDelta;
     intent.hasManualLook = glm::dot(mouseDelta, mouseDelta) > 0.0;
   }
-
-  const float fb =
-      (movement_.forward ? 1.0f : 0.0f) - (movement_.backward ? 1.0f : 0.0f);
-  const float lr =
-      (movement_.right ? 1.0f : 0.0f) - (movement_.left ? 1.0f : 0.0f);
-  const float ud =
-      (movement_.up ? 1.0f : 0.0f) - (movement_.down ? 1.0f : 0.0f);
-  intent.moveAxis = glm::vec3(lr, ud, fb);
+  for (size_t index = 0; index < movement_.size(); ++index) {
+    if (!movement_[index])
+      continue;
+    intent.moveAxis += kMovementBindings[index].axis;
+    intent.fast |= kMovementBindings[index].fast;
+  }
   intent.hasManualMovement = glm::dot(intent.moveAxis, intent.moveAxis) > 0.0f;
-  intent.fast = movement_.shiftLeft || movement_.shiftRight;
-
   if (moveTo_.active && (intent.hasManualLook || intent.hasManualMovement)) {
     cancelMoveTo();
     NURI_LOG_DEBUG(
         "CameraController::update: MoveTo cancelled by manual input");
   }
-
   const float dtSeconds = static_cast<float>(deltaTime);
   const WorldBasis basis = makeWorldBasis(config_.fps.worldUp);
   glm::vec3 position = camera.position();
   glm::vec3 velocity = velocity_;
   float yawRadians = yawRadians_;
   float pitchRadians = pitchRadians_;
-
   yawRadians -=
       static_cast<float>(intent.lookDelta.x) * config_.fps.lookSensitivity;
   yawRadians = wrapAngleRadians(yawRadians);
   pitchRadians -=
       static_cast<float>(intent.lookDelta.y) * config_.fps.lookSensitivity;
-  const float pitchLimit = std::max(config_.pitch.pitchLimitRadians, 0.0f);
-  pitchRadians = std::clamp(pitchRadians, -pitchLimit, pitchLimit);
-
+  pitchRadians = std::clamp(pitchRadians, -config_.pitch.pitchLimitRadians,
+                            config_.pitch.pitchLimitRadians);
   glm::quat orientation =
       orientationFromAngles(yawRadians, pitchRadians, basis);
   const glm::vec3 forward = orientation * glm::vec3(0.0f, 0.0f, -1.0f);
   const glm::vec3 right = orientation * glm::vec3(1.0f, 0.0f, 0.0f);
-
-  glm::vec3 upAxis = glm::cross(right, forward);
-  if (glm::dot(upAxis, upAxis) <= kEpsilon) {
-    upAxis = basis.up;
-  } else {
-    upAxis = glm::normalize(upAxis);
-  }
-
+  const glm::vec3 upAxis = glm::normalize(glm::cross(right, forward));
   glm::vec3 accel = (forward * intent.moveAxis.z) +
                     (right * intent.moveAxis.x) + (upAxis * intent.moveAxis.y);
   if (intent.fast) {
     accel *= config_.fps.fastSpeedMultiplier;
   }
-
   if (glm::dot(accel, accel) <= kEpsilon) {
-    const float damping = std::max(config_.fps.damping, kMinDamping);
-    velocity -= velocity * std::min((1.0f / damping) * dtSeconds, 1.0f);
+    velocity -=
+        velocity * std::min((1.0f / config_.fps.damping) * dtSeconds, 1.0f);
   } else {
     velocity += accel * config_.fps.acceleration * dtSeconds;
     const float maxSpeed =
@@ -322,7 +263,6 @@ void CameraController::update(double deltaTime, const InputSystem &input,
     }
   }
   position += velocity * dtSeconds;
-
   if (moveTo_.active) {
     if (!moveTo_.anglesInitialized) {
       float targetYaw = moveTo_.startYawRadians;
@@ -338,14 +278,12 @@ void CameraController::update(double deltaTime, const InputSystem &input,
       moveTo_.targetPitchRadians = targetPitch;
       moveTo_.anglesInitialized = true;
     }
-
     moveTo_.elapsedSeconds += dtSeconds;
     const float duration =
         std::max(moveTo_.request.durationSeconds, kMinMoveToDurationSeconds);
     const float linearT =
         glm::clamp(moveTo_.elapsedSeconds / duration, 0.0f, 1.0f);
     const float t = applyEasing(linearT, moveTo_.request.easing);
-
     position =
         glm::mix(moveTo_.startPosition, moveTo_.request.targetPosition, t);
     yawRadians =
@@ -354,7 +292,6 @@ void CameraController::update(double deltaTime, const InputSystem &input,
         glm::mix(moveTo_.startPitchRadians, moveTo_.targetPitchRadians, t);
     orientation = orientationFromAngles(yawRadians, pitchRadians, basis);
     velocity = glm::vec3(0.0f);
-
     if (linearT >= 1.0f) {
       moveTo_.active = false;
       position = moveTo_.request.targetPosition;
@@ -363,9 +300,7 @@ void CameraController::update(double deltaTime, const InputSystem &input,
       orientation = orientationFromAngles(yawRadians, pitchRadians, basis);
     }
   }
-
   orientation = glm::normalize(orientation);
-
   camera.setPosition(position);
   camera.setOrientation(orientation);
   velocity_ = velocity;
@@ -377,7 +312,6 @@ void CameraController::setPreset(CameraPreset preset) {
   if (preset_ == preset) {
     return;
   }
-
   preset_ = preset;
   if (preset_ == CameraPreset::FpsDirect) {
     cancelMoveTo();
@@ -390,34 +324,19 @@ CameraController::startMoveTo(const MoveToRequest &request) {
     return Result<bool, std::string>::makeError(
         "MoveTo is available only in FPS + MoveTo preset");
   }
-
   if (!std::isfinite(request.durationSeconds) ||
       request.durationSeconds <= 0.0f) {
     return Result<bool, std::string>::makeError(
         "MoveTo durationSeconds must be > 0");
   }
-
+  const float orientationNorm = glm::length(request.targetOrientation);
   if (!std::isfinite(request.targetPosition.x) ||
       !std::isfinite(request.targetPosition.y) ||
-      !std::isfinite(request.targetPosition.z)) {
+      !std::isfinite(request.targetPosition.z) ||
+      !std::isfinite(orientationNorm) || orientationNorm <= kEpsilon) {
     return Result<bool, std::string>::makeError(
-        "MoveTo targetPosition must be finite");
+        "MoveTo target pose must be finite and non-degenerate");
   }
-
-  if (!std::isfinite(request.targetOrientation.x) ||
-      !std::isfinite(request.targetOrientation.y) ||
-      !std::isfinite(request.targetOrientation.z) ||
-      !std::isfinite(request.targetOrientation.w)) {
-    return Result<bool, std::string>::makeError(
-        "MoveTo targetOrientation must be finite");
-  }
-
-  const float orientationNorm = glm::length(request.targetOrientation);
-  if (!std::isfinite(orientationNorm) || orientationNorm <= kEpsilon) {
-    return Result<bool, std::string>::makeError(
-        "MoveTo targetOrientation must be non-degenerate");
-  }
-
   moveTo_.request = request;
   moveTo_.request.targetOrientation =
       glm::normalize(moveTo_.request.targetOrientation);
@@ -436,7 +355,7 @@ void CameraController::forceCursorNormal(Window &window) {
 }
 
 void CameraController::clearInputState() {
-  movement_ = {};
+  movement_.fill(false);
   velocity_ = glm::vec3(0.0f, 0.0f, 0.0f);
 }
 

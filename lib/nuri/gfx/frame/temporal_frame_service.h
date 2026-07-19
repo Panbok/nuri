@@ -1,13 +1,10 @@
 #pragma once
-
 #include "nuri/core/result.h"
 #include "nuri/defines.h"
 #include "nuri/gfx/frame/presentation_aa_plan.h"
-
 #include <cstdint>
 #include <optional>
 #include <string>
-
 namespace nuri {
 
 struct TemporalEpochs {
@@ -67,25 +64,21 @@ class NURI_API TemporalFrameService final {
 public:
   TemporalFrameService() = default;
   ~TemporalFrameService() = default;
-
   TemporalFrameService(const TemporalFrameService &) = delete;
   TemporalFrameService &operator=(const TemporalFrameService &) = delete;
   TemporalFrameService(TemporalFrameService &&) = delete;
   TemporalFrameService &operator=(TemporalFrameService &&) = delete;
-
   [[nodiscard]] Result<CameraFrameState, std::string>
   prepareFrame(const Camera &camera, float aspectRatio,
                const RenderSettings::AntiAliasingSettings &antiAliasing,
                const PresentationAAPlan &plan,
                const TemporalCameraFrameDesc &desc, uint64_t frameIndex,
                double timeSeconds, double deltaSeconds);
-
   [[nodiscard]] bool commitFrame(uint64_t frameIndex) noexcept;
   void abandonFrame(uint64_t frameIndex) noexcept;
   void invalidateResources() noexcept;
   void invalidateBackend() noexcept;
   void reset() noexcept;
-
   [[nodiscard]] const TemporalFrameFacts &facts() const noexcept;
   [[nodiscard]] const TemporalCameraHistoryState &
   cameraHistory() const noexcept;
@@ -96,7 +89,6 @@ private:
     TemporalFrameFacts facts{};
     PresentationAAPlan plan{};
   };
-
   TemporalCameraHistoryState committedCameraHistory_{};
   TemporalFrameFacts committedFacts_{};
   PresentationAAPlan committedPlan_{};

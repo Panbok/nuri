@@ -546,6 +546,10 @@ bool FakeGPUDeviceBase::supportsFeature(GPUFeature feature) const {
 
 MeshletLimits FakeGPUDeviceBase::getMeshletLimits() const { return {}; }
 
+bool FakeGPUDeviceBase::supportsSampledImageLinearFiltering(Format) const {
+  return false;
+}
+
 uint32_t FakeGPUDeviceBase::getTextureBindlessIndex(TextureHandle) const {
   return 1u;
 }
@@ -836,7 +840,7 @@ void FakeGPUDeviceBase::recordSubmitFrame(
   submittedBatches.assign(batches.begin(), batches.end());
 }
 
-Result<SubmissionHandle, std::string>
+Result<SubmittedGraphicsFrame, std::string>
 FakeGPUDeviceBase::submitRecordedGraphicsFrame(
     std::span<const RecordedCommandBufferHandle> commandBuffers,
     std::span<const SubmitBatchMeta> batches) {
@@ -846,7 +850,7 @@ FakeGPUDeviceBase::submitRecordedGraphicsFrame(
         return b.presentsFrameOutput && b.commandBufferCount > 0u;
       });
   if (wantsPresent && !hasPreparedFrameOutput_) {
-    return Result<SubmissionHandle, std::string>::makeError(
+    return Result<SubmittedGraphicsFrame, std::string>::makeError(
         "fake submitRecordedGraphicsFrame: frame output was not prepared");
   }
   std::vector<RenderPass> submittedPasses{};
@@ -862,7 +866,7 @@ FakeGPUDeviceBase::submitRecordedGraphicsFrame(
       break;
     }
     if (!found) {
-      return Result<SubmissionHandle, std::string>::makeError(
+      return Result<SubmittedGraphicsFrame, std::string>::makeError(
           "fake submitRecordedGraphicsFrame: unknown command buffer");
     }
   }
@@ -878,8 +882,8 @@ FakeGPUDeviceBase::submitRecordedGraphicsFrame(
   if (wantsPresent) {
     hasPreparedFrameOutput_ = false;
   }
-  return Result<SubmissionHandle, std::string>::makeResult(
-      lastSubmittedFrameHandle);
+  return Result<SubmittedGraphicsFrame, std::string>::makeResult(
+      SubmittedGraphicsFrame{.submission = lastSubmittedFrameHandle});
 }
 
 bool FakeGPUDeviceBase::isSubmissionComplete(SubmissionHandle handle) const {
@@ -895,10 +899,20 @@ bool FakeGPUDeviceBase::isSubmissionComplete(SubmissionHandle handle) const {
   return false;
 }
 
-Result<SubmissionHandle, std::string>
+Result<bool, std::string>
+FakeGPUDeviceBase::makeSubmissionVisibleToGraphics(SubmissionHandle) {
+  return Result<bool, std::string>::makeResult(true);
+}
+
+Result<SubmittedGraphicsFrame, std::string>
 FakeExecutorGPUDevice::submitRecordedGraphicsFrame(
     std::span<const RecordedCommandBufferHandle> commandBuffers,
     std::span<const SubmitBatchMeta> batches) {
+  if (failSubmitFrame) {
+    ++submitCount;
+    return Result<SubmittedGraphicsFrame, std::string>::makeError(
+        "fake submitFrame failure");
+  }
   auto baseResult =
       FakeGPUDeviceBase::submitRecordedGraphicsFrame(commandBuffers, batches);
   if (baseResult.hasError()) {
@@ -932,9 +946,8 @@ FakeExecutorGPUDevice::submitRecordedGraphicsFrame(
     lastDrawVertexBuffer = pass.draws[0u].vertexBuffer;
   }
 
-  if (failSubmitFrame) {
-    return Result<SubmissionHandle, std::string>::makeError(
-        "fake submitFrame failure");
+  if (failPresentFrame) {
+    baseResult.value().presentationError = "fake presentFrame failure";
   }
 
   return baseResult;
@@ -1096,6 +1109,10 @@ FakeGPUDeviceBase::submitPendingUploads() {
   return Result<SubmissionHandle, std::string>::makeResult(handle);
 }
 
+bool FakeGPUDeviceBase::assetUploadsUseDedicatedCopyQueue() const noexcept {
+  return false;
+}
+
 Result<bool, std::string> FakeGPUDeviceBase::updateBuffer(
     BufferHandle buffer, std::span<const std::byte> data, size_t offset) {
   if (!isValid(buffer)) {
@@ -1117,7 +1134,12 @@ Result<bool, std::string>
 FakeGPUDeviceBase::updateBuffers(std::span<const BufferUpdate> updates) {
   ++updateBufferBatchCallCount;
   updateBufferBatchSizes.push_back(updates.size());
-  return GPUDevice::updateBuffers(updates);
+  for (const BufferUpdate &update : updates) {
+    auto result = updateBuffer(update.buffer, update.data, update.offset);
+    if (result.hasError())
+      return result;
+  }
+  return Result<bool, std::string>::makeResult(true);
 }
 
 Result<bool, std::string>
@@ -1222,7 +1244,7 @@ void FakeGPUDeviceBase::waitIdle() {
   }
 }
 
-Result<SubmissionHandle, std::string>
+Result<SubmittedGraphicsFrame, std::string>
 FakeRendererGPUDevice::submitRecordedGraphicsFrame(
     std::span<const RecordedCommandBufferHandle> commandBuffers,
     std::span<const SubmitBatchMeta> batches) {
