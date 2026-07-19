@@ -1,5 +1,5 @@
-#include "nuri/pch.h"
 #include "nuri/resources/storage/texture/texture_processing.h"
+#include "nuri/pch.h"
 #include <stb_image_resize2.h>
 namespace nuri {
 namespace {
@@ -15,8 +15,8 @@ namespace {
              ? std::clamp(cutoff, 1.0f / 255.0f, 254.0f / 255.0f)
              : 0.5f;
 }
-[[nodiscard]] float alphaCoverage(std::span<const std::byte> rgba,
-                                  float cutoff, float scale = 1.0f) {
+[[nodiscard]] float alphaCoverage(std::span<const std::byte> rgba, float cutoff,
+                                  float scale = 1.0f) {
   uint32_t covered = 0;
   const size_t count = rgba.size() / 4u;
   for (size_t i = 3; i < rgba.size(); i += 4) {
@@ -42,11 +42,11 @@ void preserveAlphaCoverage(std::vector<std::byte> &rgba, float cutoff,
     rgba[i] = static_cast<std::byte>(toByte(toUnit(rgba[i]) * hi));
   }
 }
-}
+} // namespace
 
 uint32_t textureMipLevelCount(uint32_t width, uint32_t height) noexcept {
-  return std::max(1u, static_cast<uint32_t>(
-                          std::bit_width(std::max(width, height))));
+  return std::max(
+      1u, static_cast<uint32_t>(std::bit_width(std::max(width, height))));
 }
 
 uint32_t textureMipDimension(uint32_t base, uint32_t mip) noexcept {
@@ -100,11 +100,11 @@ generateRgba8Mip(std::span<const std::byte> source, uint32_t width,
   const auto *src = reinterpret_cast<const unsigned char *>(source.data());
   auto *dst = reinterpret_cast<unsigned char *>(output.data());
   const auto resized =
-      options.srgb ? stbir_resize_uint8_srgb(src, width, height, 0, dst,
-                                             dstWidth, dstHeight, 0, STBIR_RGBA)
-                   : stbir_resize_uint8_linear(src, width, height, 0, dst,
-                                               dstWidth, dstHeight, 0,
-                                               STBIR_RGBA);
+      options.srgb
+          ? stbir_resize_uint8_srgb(src, width, height, 0, dst, dstWidth,
+                                    dstHeight, 0, STBIR_RGBA)
+          : stbir_resize_uint8_linear(src, width, height, 0, dst, dstWidth,
+                                      dstHeight, 0, STBIR_RGBA);
   if (!resized) {
     return Result<std::vector<std::byte>, std::string>::makeError(
         "failed to resize texture mip");
@@ -138,11 +138,9 @@ generateRgba8Mip(std::span<const std::byte> source, uint32_t width,
       std::move(output));
 }
 
-Result<std::vector<std::byte>, std::string>
-generateSemanticRgba8MipChain(std::span<const std::byte> baseData,
-                              uint32_t width, uint32_t height,
-                              uint32_t mipLevels,
-                              const TextureLoadOptions &options) {
+Result<std::vector<std::byte>, std::string> generateSemanticRgba8MipChain(
+    std::span<const std::byte> baseData, uint32_t width, uint32_t height,
+    uint32_t mipLevels, const TextureLoadOptions &options) {
   const size_t baseSize = size_t{width} * height * 4u;
   if (baseData.size() < baseSize) {
     return Result<std::vector<std::byte>, std::string>::makeError(
@@ -179,4 +177,4 @@ bool shouldGenerateSemanticRgba8MipChain(const TextureLoadOptions &options,
          options.mipSemantic != TextureMipSemantic::Generic;
 }
 
-}
+} // namespace nuri

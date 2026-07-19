@@ -31,4 +31,4 @@ makeFullscreenDraw(RenderPipelineHandle pipeline,
                   .debugColor = debugColor};
 }
 
-}
+} // namespace nuri

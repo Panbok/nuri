@@ -43,10 +43,9 @@ using FilePtr = std::unique_ptr<std::FILE, FileCloser>;
   return FilePtr(file);
 }
 
-[[nodiscard]] inline Result<KtxTexturePtr, std::string>
-loadKtxTexture(const std::filesystem::path &path, std::string_view context,
-               ktxTextureCreateFlags flags =
-                   KTX_TEXTURE_CREATE_LOAD_IMAGE_DATA_BIT) {
+[[nodiscard]] inline Result<KtxTexturePtr, std::string> loadKtxTexture(
+    const std::filesystem::path &path, std::string_view context,
+    ktxTextureCreateFlags flags = KTX_TEXTURE_CREATE_LOAD_IMAGE_DATA_BIT) {
   FilePtr file = openFile(path);
   ktxTexture *texture = nullptr;
   const KTX_error_code error =
@@ -100,9 +99,9 @@ resolveKtxFormat(const ktxTexture &texture, std::string_view context) {
       return Result<Format, std::string>::makeResult(format);
     }
   }
-  return Result<Format, std::string>::makeError(
-      std::string(context) + ": unsupported KTX format " +
-      std::to_string(encoded));
+  return Result<Format, std::string>::makeError(std::string(context) +
+                                                ": unsupported KTX format " +
+                                                std::to_string(encoded));
 }
 
-}
+} // namespace nuri::detail

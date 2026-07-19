@@ -22,6 +22,7 @@ public:
     (add(values), ...);
   }
   [[nodiscard]] uint64_t value() const noexcept { return value_; }
+
 private:
   uint64_t value_;
 };
@@ -42,6 +43,7 @@ public:
   [[nodiscard]] bool readAt(uint64_t offset,
                             std::span<std::byte> destination) const;
   [[nodiscard]] uint64_t size() const noexcept { return size_; }
+
 private:
   void close() noexcept;
   intptr_t file_ = -1;
@@ -55,13 +57,13 @@ normalizeSourcePath(const std::filesystem::path &path);
 querySourceFingerprint(const std::filesystem::path &path);
 [[nodiscard]] NURI_API std::filesystem::path
 temporarySiblingPath(const std::filesystem::path &path);
-[[nodiscard]] NURI_API bool replaceFileAtomic(
-    const std::filesystem::path &temporaryPath,
-    const std::filesystem::path &destinationPath) noexcept;
+[[nodiscard]] NURI_API bool
+replaceFileAtomic(const std::filesystem::path &temporaryPath,
+                  const std::filesystem::path &destinationPath) noexcept;
 [[nodiscard]] NURI_API Result<std::vector<std::byte>, std::string>
 readBinaryFile(const std::filesystem::path &path);
 [[nodiscard]] NURI_API Result<bool, std::string>
 writeBinaryFileAtomic(const std::filesystem::path &path,
                       std::span<const std::byte> bytes);
 
-}
+} // namespace nuri

@@ -26,8 +26,7 @@ resolveForwardLod(const Submesh &submesh, int32_t forcedLod,
   if (forcedLod < 0) {
     const uint32_t lodCount =
         std::clamp(submesh.lodCount, 0u, Submesh::kMaxLodCount);
-    if (preferExplicitLod0 && lodCount > 0u &&
-        submesh.lods[0].indexCount > 0u)
+    if (preferExplicitLod0 && lodCount > 0u && submesh.lods[0].indexCount > 0u)
       return submesh.lods[0];
     if (submesh.indexCount > 0u) {
       return SubmeshLod{.indexOffset = submesh.indexOffset,
@@ -136,4 +135,4 @@ collectForwardEnvironmentTextures(const RenderScene &scene,
   }
 }
 
-}
+} // namespace nuri

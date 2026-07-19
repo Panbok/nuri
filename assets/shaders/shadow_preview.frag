@@ -15,7 +15,8 @@ layout(push_constant) uniform PreviewPushConstants {
   uvec4 sourceTexIds;
   uvec4 previewParams;
   vec4 depthParams;
-} pc;
+}
+pc;
 
 float fetchDepth(uint sourceTexId, vec2 tileUv) {
   ivec2 sourceSize = textureSize(nonuniformEXT(kTextures2D[sourceTexId]), 0);

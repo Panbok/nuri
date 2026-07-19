@@ -27,4 +27,4 @@ animationSceneAnimatesRenderable(const AnimationSceneFrameData &data,
          static_cast<uint64_t>(submesh.vertexOffset) + submesh.vertexCount;
 }
 
-}
+} // namespace nuri

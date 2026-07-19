@@ -1,5 +1,5 @@
-#include "nuri/pch.h"
 #include "nuri/resources/storage/cache_utils.h"
+#include "nuri/pch.h"
 #include "nuri/resources/storage/binary_io.h"
 #if defined(_WIN32)
 #include <Windows.h>
@@ -21,10 +21,10 @@ RandomAccessFile::~RandomAccessFile() { close(); }
 bool RandomAccessFile::open(const std::filesystem::path &path) {
   close();
 #if defined(_WIN32)
-  const HANDLE handle = CreateFileW(
-      path.c_str(), GENERIC_READ,
-      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
-      OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+  const HANDLE handle =
+      CreateFileW(path.c_str(), GENERIC_READ,
+                  FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                  nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
   if (handle == INVALID_HANDLE_VALUE) {
     return false;
   }
@@ -66,7 +66,8 @@ bool RandomAccessFile::readAt(uint64_t offset,
     DWORD bytesRead = 0;
     if (!ReadFile(reinterpret_cast<HANDLE>(file_),
                   destination.data() + completed, chunk, &bytesRead,
-                  &overlapped) || bytesRead != chunk) {
+                  &overlapped) ||
+        bytesRead != chunk) {
       return false;
     }
 #else
@@ -132,8 +133,7 @@ std::filesystem::path temporarySiblingPath(const std::filesystem::path &path) {
   static std::atomic<uint64_t> counter{0};
   auto temporary = path;
   temporary += std::format(
-      ".tmp.{:x}.{}",
-      std::hash<std::thread::id>{}(std::this_thread::get_id()),
+      ".tmp.{:x}.{}", std::hash<std::thread::id>{}(std::this_thread::get_id()),
       counter.fetch_add(1, std::memory_order_relaxed));
   return temporary;
 }
@@ -147,8 +147,8 @@ bool replaceFileAtomic(const std::filesystem::path &temporaryPath,
   }
   static std::atomic<uint64_t> counter{0};
   auto retired = destinationPath;
-  retired += std::format(
-      ".retired.{}", counter.fetch_add(1, std::memory_order_relaxed));
+  retired += std::format(".retired.{}",
+                         counter.fetch_add(1, std::memory_order_relaxed));
   if (!MoveFileExW(destinationPath.c_str(), retired.c_str(),
                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
     return false;
@@ -221,4 +221,4 @@ writeBinaryFileAtomic(const std::filesystem::path &path,
   return Result<bool, std::string>::makeResult(true);
 }
 
-}
+} // namespace nuri

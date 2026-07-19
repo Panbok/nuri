@@ -14,4 +14,4 @@ constexpr uint32_t makeBinaryFourCC(char a, char b, char c, char d) {
 
 static_assert(sizeof(float) == 4 && std::numeric_limits<float>::is_iec559);
 
-}
+} // namespace nuri

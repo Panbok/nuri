@@ -29,14 +29,15 @@ public:
       return;
     }
     write(static_cast<uint32_t>(value.size()));
-    writeBytes({reinterpret_cast<const std::byte *>(value.data()),
-                value.size()});
+    writeBytes(
+        {reinterpret_cast<const std::byte *>(value.data()), value.size()});
   }
   [[nodiscard]] bool valid() const noexcept { return valid_; }
   [[nodiscard]] const std::vector<std::byte> &bytes() const noexcept {
     return bytes_;
   }
   [[nodiscard]] std::vector<std::byte> take() && { return std::move(bytes_); }
+
 private:
   std::vector<std::byte> bytes_{};
   bool valid_ = true;
@@ -74,6 +75,7 @@ public:
   [[nodiscard]] bool empty() const noexcept {
     return valid_ && offset_ == bytes_.size();
   }
+
 private:
   std::span<const std::byte> bytes_{};
   size_t offset_ = 0u;
@@ -122,4 +124,4 @@ void readPodArrayAt(std::span<const std::byte> bytes, uint64_t offset,
   }
 }
 
-}
+} // namespace nuri

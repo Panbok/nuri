@@ -1,7 +1,7 @@
-#include "nuri/pch.h"
 #include "nuri/gfx/renderers/scene_draw_database.h"
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/gfx/pipeline/render_pipeline.h"
+#include "nuri/pch.h"
 #include "nuri/resources/gpu/resource_manager.h"
 #include "nuri/scene/render_scene.h"
 namespace nuri {
@@ -17,12 +17,11 @@ MaterialRef resolveMaterial(const Renderable &renderable,
   }
   return isValid(material) ? material : renderable.material;
 }
-}
+} // namespace
 
 SceneDrawDatabase::SceneDrawDatabase(GPUDevice &gpu,
                                      std::pmr::memory_resource *memory)
-    : gpu_(gpu), instances_(memory ? memory
-                                   : std::pmr::get_default_resource()),
+    : gpu_(gpu), instances_(memory ? memory : std::pmr::get_default_resource()),
       draws_(memory ? memory : std::pmr::get_default_resource()) {}
 
 Result<bool, std::string> SceneDrawDatabase::prepare(FrameBuildContext &ctx) {
@@ -99,19 +98,19 @@ SceneDrawDatabase::update(const RenderScene &scene,
       const MaterialRef material =
           resolveMaterial(renderable, *modelRecord, submeshIndex);
       const MaterialRecord *materialRecord = resources.tryGet(material);
-      const bool alphaMasked = materialRecord &&
-                               materialRecord->desc.alphaMode ==
-                                   MaterialAlphaMode::Mask;
-      const bool alphaBlended = materialRecord &&
-                                materialRecord->desc.alphaMode ==
-                                    MaterialAlphaMode::Blend;
-      const bool transmission =
+      const bool alphaMasked =
           materialRecord &&
-          (materialRecord->desc.featureMask & kMaterialFeatureTransmission) != 0;
+          materialRecord->desc.alphaMode == MaterialAlphaMode::Mask;
+      const bool alphaBlended =
+          materialRecord &&
+          materialRecord->desc.alphaMode == MaterialAlphaMode::Blend;
+      const bool transmission =
+          materialRecord && (materialRecord->desc.featureMask &
+                             kMaterialFeatureTransmission) != 0;
       const TextureRecord *baseColor =
           materialRecord
-              ? resources.tryGet(materialRecord->textureRefs[
-                    kMaterialTextureSlotBaseColor])
+              ? resources.tryGet(
+                    materialRecord->textureRefs[kMaterialTextureSlotBaseColor])
               : nullptr;
       uint32_t materialIndex = resources.materialTableIndex(material);
       if (materials.headers.empty() ||
@@ -122,7 +121,8 @@ SceneDrawDatabase::update(const RenderScene &scene,
           .renderable = &renderable,
           .model = &model,
           .submesh = &submeshes[submeshIndex],
-          .meshletView = model.hasMeshlets() ? &model.meshletGpuView() : nullptr,
+          .meshletView =
+              model.hasMeshlets() ? &model.meshletGpuView() : nullptr,
           .submeshIndex = submeshIndex,
           .instanceIndex = instanceIndex,
           .geometryHandle = model.geometryHandle(),
@@ -138,7 +138,8 @@ SceneDrawDatabase::update(const RenderScene &scene,
           .baseVertexDecodeBufferAddress = model.vertexDecodeBufferAddress(),
           .vertexBufferAddress = vertexAddress,
           .vertexDecodeBufferAddress = model.vertexDecodeBufferAddress(),
-          .basePackedVertexFormat = static_cast<uint32_t>(model.drawVertexFormat()),
+          .basePackedVertexFormat =
+              static_cast<uint32_t>(model.drawVertexFormat()),
           .vertexDecodeIndex = submeshIndex,
           .packedVertexFormat = static_cast<uint32_t>(model.drawVertexFormat()),
           .material = material,
@@ -152,10 +153,10 @@ SceneDrawDatabase::update(const RenderScene &scene,
           .materialNormalRequired =
               alphaMasked ||
               (materialRecord &&
-               (isValid(materialRecord->textureRefs[
-                    kMaterialTextureSlotNormal]) ||
-                isValid(materialRecord->desc.textures[
-                    kMaterialTextureSlotNormal]))),
+               (isValid(
+                    materialRecord->textureRefs[kMaterialTextureSlotNormal]) ||
+                isValid(materialRecord->desc
+                            .textures[kMaterialTextureSlotNormal]))),
           .dynamicCaster = dynamicCaster,
       });
     }
@@ -168,4 +169,4 @@ SceneDrawDatabase::update(const RenderScene &scene,
   return Result<bool, std::string>::makeResult(true);
 }
 
-}
+} // namespace nuri

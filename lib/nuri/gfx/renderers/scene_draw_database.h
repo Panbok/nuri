@@ -2,8 +2,8 @@
 #include "nuri/core/result.h"
 #include "nuri/defines.h"
 #include "nuri/gfx/gpu_types.h"
-#include "nuri/resources/gpu/resource_handles.h"
 #include "nuri/resources/gpu/model.h"
+#include "nuri/resources/gpu/resource_handles.h"
 #include <cstdint>
 #include <memory_resource>
 #include <span>
@@ -70,12 +70,14 @@ public:
   [[nodiscard]] Result<bool, std::string> prepare(FrameBuildContext &ctx);
   [[nodiscard]] Result<bool, std::string>
   prepareScene(RenderScenePreparationContext &ctx);
-  [[nodiscard]] std::span<const SceneInstanceRecord> instances() const noexcept {
+  [[nodiscard]] std::span<const SceneInstanceRecord>
+  instances() const noexcept {
     return instances_;
   }
   [[nodiscard]] std::span<const SceneDrawRecord> draws() const noexcept {
     return draws_;
   }
+
 private:
   GPUDevice &gpu_;
   std::pmr::vector<SceneInstanceRecord> instances_;
@@ -87,4 +89,4 @@ private:
   uint64_t geometryVersion_ = UINT64_MAX;
 };
 
-}
+} // namespace nuri

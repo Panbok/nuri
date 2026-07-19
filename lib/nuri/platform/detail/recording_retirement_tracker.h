@@ -21,7 +21,8 @@ public:
     if (serial < baseSerial_ || serial > latestIssuedSerial_) {
       return false;
     }
-    uint64_t &resolution = resolutions_[static_cast<size_t>(serial - baseSerial_)];
+    uint64_t &resolution =
+        resolutions_[static_cast<size_t>(serial - baseSerial_)];
     if (resolution != kUnresolved) {
       return false;
     }
@@ -55,9 +56,9 @@ public:
     }
     return std::max(lastSubmittedAtDestruction, resolvedSubmissionMax_);
   }
+
 private:
-  static constexpr uint64_t kUnresolved =
-      std::numeric_limits<uint64_t>::max();
+  static constexpr uint64_t kUnresolved = std::numeric_limits<uint64_t>::max();
   std::pmr::vector<uint64_t> resolutions_;
   uint64_t baseSerial_ = 1u;
   size_t head_ = 0u;
@@ -66,4 +67,4 @@ private:
   uint64_t resolvedSubmissionMax_ = 0u;
 };
 
-}
+} // namespace nuri

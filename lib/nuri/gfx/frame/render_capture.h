@@ -30,4 +30,4 @@ inline void publishRequestedCapture(
   });
 }
 
-}
+} // namespace nuri
