@@ -1,0 +1,4 @@
+interface:
+  display_name: "Compress Codebase"
+  short_description: "Map files and execute semantic compression passes"
+  default_prompt: "Use $compress-codebase to map this source tree and execute a staged semantic-compression pass."
