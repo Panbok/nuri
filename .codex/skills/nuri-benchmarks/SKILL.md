@@ -1,6 +1,6 @@
 ---
 name: nuri-benchmarks
-description: Primary Nuri renderer performance workflow. Use when measuring renderer performance, running perf passes, creating or comparing benchmark baselines, investigating frame-time regressions, collecting benchmark-owned Tracy diagnostic artifacts, or updating benchmark cases/reports/HTML output.
+description: Primary Nuri renderer performance workflow. Use when measuring renderer performance, running perf passes, creating or comparing benchmark baselines, investigating frame-time regressions, collecting benchmark-owned Tracy, RGP shader-diagnostic, or RenderDoc frame-forensics artifacts, or updating benchmark cases/reports/HTML output.
 ---
 
 # Nuri Benchmarks
@@ -47,6 +47,25 @@ Tracy is a benchmark diagnostic artifact, not a separate first-choice workflow.
   The `cpu` profiling mode enables both CPU and Vulkan GPU Tracy instrumentation.
   Render-graph passes appear as GPU zones on the `Nuri Graphics` context and as
   Vulkan debug-marker ranges for external GPU profilers.
+- After a profiling-off benchmark identifies an AMD shader/pass to investigate,
+  collect a separate RGP shader diagnostic:
+  `scripts/run_benchmarks.bat release cpu run --case <id> --rgp-shader-diagnostic --rgp-tool <path-to-RadeonDeveloperPanelCLI.exe> --artifact-dir artifacts/bench/<run-id>`.
+  The `cpu` build supplies pass debug markers; its Tracy instrumentation and the
+  RGP capture both make the run diagnostic-only. Do not combine
+  `--rgp-shader-diagnostic` with `--tracy-diagnostic`, repetitions, suites,
+  dry-runs, or authoritative profiles.
+  Use `--rgp-capture-frame N` for a later zero-based settled frame and
+  `--rgp-timeout-ms N` when scene setup or capture exceeds the 60-second
+  default.
+- After a benchmark identifies a frame-structure or resource-state question,
+  collect a separate RenderDoc diagnostic:
+  `scripts/run_benchmarks.bat release cpu run --case <id> --renderdoc-diagnostic --artifact-dir artifacts/bench/<run-id>`.
+  The `cpu` build supplies Vulkan pass markers. The runner discovers
+  `renderdoccmd` from PATH or `%ProgramFiles%/RenderDoc`; use
+  `--renderdoc-tool <path>` to override it. Use `--renderdoc-capture-frame N`
+  for a settled frame and `--renderdoc-timeout-ms N` for a longer launch.
+  RenderDoc diagnostics require one investigative case and cannot be combined
+  with Tracy, RGP, repetitions, suites, or dry-runs.
 - Visual correctness is still separate: run `nuri-snapshot run` after renderer
   changes. Do not approve visual baselines unless explicitly asked.
 
@@ -61,6 +80,14 @@ Tracy is a benchmark diagnostic artifact, not a separate first-choice workflow.
 - A Tracy diagnostic is intentionally non-authoritative because its timestamp
   queries and debug markers perturb the workload. Use it after a profiling-off
   regression is reproduced.
+- An RGP shader diagnostic is never GPU performance evidence. Ignore all timing
+  statistics produced while it is active; the detailed report intentionally
+  omits frames and benchmark statistics. `nuri-bench compare` rejects RGP
+  reports even with `--force`, and baseline acceptance rejects them.
+- A RenderDoc diagnostic is frame-forensics evidence, never benchmark timing or
+  shader-throughput evidence. Its report also omits frames and statistics;
+  comparison rejects it even with `--force`, and baseline acceptance rejects
+  it.
 - Start with the benchmark JSON. Under `tracy`, inspect `tracePath`,
   `gpuEventsExportSupported`, `gpuZoneEventCount`, `gpuZones`, and
   `gpuEventsCsvPath`. GPU zone rows report total, mean, P50, P95, maximum, and
@@ -83,11 +110,40 @@ Tracy is a benchmark diagnostic artifact, not a separate first-choice workflow.
   Use the Vulkan pass marker to correlate it, then inspect source/ISA hotspots,
   registers per thread, theoretical occupancy, instruction mix, and stall
   reasons.
-- On AMD, use Radeon GPU Profiler for queue timing, barriers, wave occupancy,
-  and instruction timing. Use Radeon GPU Analyzer for offline GLSL/SPIR-V ISA,
-  VGPR/SGPR, and LDS analysis.
-- RenderDoc is a correctness and frame-inspection tool here, not the authority
-  for frame-time or shader-throughput conclusions.
+- On AMD, use `--rgp-shader-diagnostic` only to inspect the shader behind a
+  benchmark-localized pass: wave occupancy, VGPR/SGPR pressure, LDS limits,
+  instruction behavior, divergence, cache evidence, and stall hypotheses. Under
+  report `rgp`, require `requested: true`, `available: true`, a non-empty
+  `tracePath`, `captureExitCode: 0`, `traceSizeBytes > 0`,
+  `counterCollectionRequested: true`, and `derivedCounterCount > 0`. Inspect the
+  referenced capture log for successful SPM query, trace processing, and clock
+  restoration before opening the `.rgp` in Radeon GPU Profiler. A requested
+  counter collection is not proof that AMD supplied usable counter data.
+- Do not use RGP queue/frame duration, clock-controlled timings, or counters to
+  rank overall renderer performance. Re-run the owning case in profiling-off
+  Release mode after every shader change.
+- Use Radeon GPU Analyzer on the matching GLSL/SPIR-V for agent-readable ISA,
+  VGPR/SGPR, LDS, live-register, and control-flow output. Treat RGA as static
+  diagnostic evidence, not runtime proof. Require the exact stage variant,
+  entry point, defines, specialization constants, includes, compiler options,
+  and compatible pipeline state; otherwise label the result approximate. Store
+  outputs beside the owning run under `rga/<shader-id>/`, for example:
+  `rga -s vulkan -a rga/<shader-id>/stats.csv --isa rga/<shader-id>/isa.txt --livereg rga/<shader-id>/vgpr.txt --<stage> <shader.spv>`.
+- The installed RGP viewer has no supported headless JSON/CSV report exporter.
+  Capture ownership is automated; shader interpretation remains GUI-assisted.
+- Use `--renderdoc-diagnostic` for event hierarchy, draw/dispatch/barrier/copy
+  counts, resource dimensions and formats, attachment usage, pipeline and
+  descriptor state, redundant work, pixel history, and overdraw hypotheses.
+  Under report `renderDoc`, require `requested`, `available`, and
+  `captureTriggered` to be true; require purpose `frame-forensics-only`, API
+  version, launcher/conversion exit code 0, non-empty capture and Chrome-trace
+  sizes, and owned `.rdc`, `.chrome.json`, log, and thumbnail paths. Start with
+  `drawCallCount`, `dispatchCallCount`, `barrierCallCount`, and `copyCallCount`,
+  then open the `.rdc` only for the localized question.
+- Ignore Chrome-trace and replay durations: capture injection, FIFO override,
+  replay, counter queries, and single-frame selection perturb execution. Re-run
+  the owning profiling-off Release benchmark after a renderer change. Use
+  `nuri-snapshot` rather than RenderDoc as the automated visual-regression gate.
 - Vendor counters, Vulkan pipeline statistics, static SPIR-V instruction counts,
   and pipeline executable properties are diagnostic and device/driver specific.
   Never use them as portable baseline gates. Normalize shader experiments by

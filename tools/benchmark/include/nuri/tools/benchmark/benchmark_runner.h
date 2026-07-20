@@ -13,6 +13,19 @@
 
 namespace nuri::tools::benchmark {
 
+enum class BenchmarkGpuDiagnosticKind : uint8_t {
+  None,
+  RgpShader,
+  RenderDocFrame,
+};
+
+struct BenchmarkGpuDiagnosticOptions {
+  BenchmarkGpuDiagnosticKind kind = BenchmarkGpuDiagnosticKind::None;
+  std::filesystem::path toolPath{};
+  uint32_t captureFrame = 30u;
+  std::chrono::milliseconds timeout = std::chrono::minutes(1);
+};
+
 struct BenchmarkRunOptions {
   std::optional<uint32_t> samplesOverride{};
   std::optional<uint32_t> isolatedRepetitions{};
@@ -26,6 +39,7 @@ struct BenchmarkRunOptions {
   bool dryRun = false;
   bool printEffectiveConfig = false;
   bool tracyDiagnostic = false;
+  BenchmarkGpuDiagnosticOptions gpuDiagnostic{};
   bool verboseFrames = false;
   bool internalIsolatedChild = false;
   std::string baselineProfileId{};
@@ -91,6 +105,10 @@ formatEffectiveConfigJson(const BenchmarkCase &benchmarkCase,
 [[nodiscard]] BenchmarkRunResult
 runBenchmarkCase(BenchmarkCase benchmarkCase,
                  const BenchmarkRunOptions &options = {});
+
+[[nodiscard]] BenchmarkRunResult
+runBenchmarkCaseRenderDoc(BenchmarkCase benchmarkCase,
+                          const BenchmarkRunOptions &options);
 [[nodiscard]] BenchmarkRunResult
 runBenchmarkCaseIsolated(BenchmarkCase benchmarkCase,
                          const BenchmarkRunOptions &options);

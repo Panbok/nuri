@@ -191,6 +191,14 @@ int main(int argc, char **argv) {
   bool dryRun = false;
   bool printEffectiveConfig = false;
   bool tracyDiagnostic = false;
+  bool rgpShaderDiagnostic = false;
+  std::filesystem::path rgpToolPath;
+  uint32_t rgpCaptureFrame = 30u;
+  uint32_t rgpTimeoutMs = 60000u;
+  bool renderDocDiagnostic = false;
+  std::filesystem::path renderDocToolPath;
+  uint32_t renderDocCaptureFrame = 30u;
+  uint32_t renderDocTimeoutMs = 60000u;
   bool verboseFrames = false;
   auto *run = app.add_subcommand("run", "Run benchmark case or suite");
   run->add_option("--case", runCase, "Case id");
@@ -216,11 +224,70 @@ int main(int argc, char **argv) {
                 "Print resolved config before running");
   run->add_flag("--tracy-diagnostic", tracyDiagnostic,
                 "Capture benchmark-owned Tracy CPU/GPU diagnostics");
+  run->add_flag("--rgp-shader-diagnostic", rgpShaderDiagnostic,
+                "Capture AMD RGP shader diagnostics; never performance data");
+  auto *rgpToolOption = run->add_option(
+      "--rgp-tool", rgpToolPath,
+      "Path to RadeonDeveloperPanelCLI; defaults to PATH lookup");
+  auto *rgpFrameOption =
+      run->add_option("--rgp-capture-frame", rgpCaptureFrame,
+                      "Zero-based RGP diagnostic capture frame");
+  auto *rgpTimeoutOption = run->add_option("--rgp-timeout-ms", rgpTimeoutMs,
+                                           "RGP diagnostic process timeout")
+                               ->check(CLI::PositiveNumber);
+  run->add_flag("--renderdoc-diagnostic", renderDocDiagnostic,
+                "Capture RenderDoc frame forensics; never performance data");
+  auto *renderDocToolOption = run->add_option(
+      "--renderdoc-tool", renderDocToolPath,
+      "Path to renderdoccmd; defaults to PATH or Program Files lookup");
+  auto *renderDocFrameOption =
+      run->add_option("--renderdoc-capture-frame", renderDocCaptureFrame,
+                      "Zero-based RenderDoc diagnostic capture frame");
+  auto *renderDocTimeoutOption =
+      run->add_option("--renderdoc-timeout-ms", renderDocTimeoutMs,
+                      "RenderDoc diagnostic process timeout")
+          ->check(CLI::PositiveNumber);
   run->add_flag("--verbose-frames", verboseFrames,
                 "Include verbose frame renderer metrics");
   run->callback([&]() {
+    const uint32_t diagnosticCount =
+        static_cast<uint32_t>(tracyDiagnostic) +
+        static_cast<uint32_t>(rgpShaderDiagnostic) +
+        static_cast<uint32_t>(renderDocDiagnostic);
+    const bool gpuDiagnostic = rgpShaderDiagnostic || renderDocDiagnostic;
+    const std::string_view gpuDiagnosticFlag = rgpShaderDiagnostic
+                                                   ? "--rgp-shader-diagnostic"
+                                                   : "--renderdoc-diagnostic";
     if (runCase.empty() == runSuite.empty()) {
       std::cerr << "run requires exactly one of --case or --suite\n";
+      std::exit(exitCode(BenchmarkExitCode::InvalidInput));
+    }
+    if (diagnosticCount > 1u) {
+      std::cerr << "Tracy, RGP, and RenderDoc diagnostics must be collected "
+                   "in separate runs\n";
+      std::exit(exitCode(BenchmarkExitCode::InvalidInput));
+    }
+    if (gpuDiagnostic && runCase.empty()) {
+      std::cerr << gpuDiagnosticFlag << " requires one --case\n";
+      std::exit(exitCode(BenchmarkExitCode::InvalidInput));
+    }
+    if (gpuDiagnostic && (repetitions.has_value() || dryRun)) {
+      std::cerr << gpuDiagnosticFlag
+                << " cannot be combined with --repetitions or --dry-run\n";
+      std::exit(exitCode(BenchmarkExitCode::InvalidInput));
+    }
+    if (!rgpShaderDiagnostic &&
+        (rgpToolOption->count() > 0u || rgpFrameOption->count() > 0u ||
+         rgpTimeoutOption->count() > 0u)) {
+      std::cerr << "--rgp-tool, --rgp-capture-frame, and --rgp-timeout-ms "
+                   "require --rgp-shader-diagnostic\n";
+      std::exit(exitCode(BenchmarkExitCode::InvalidInput));
+    }
+    if (!renderDocDiagnostic && (renderDocToolOption->count() > 0u ||
+                                 renderDocFrameOption->count() > 0u ||
+                                 renderDocTimeoutOption->count() > 0u)) {
+      std::cerr << "--renderdoc-tool, --renderdoc-capture-frame, and "
+                   "--renderdoc-timeout-ms require --renderdoc-diagnostic\n";
       std::exit(exitCode(BenchmarkExitCode::InvalidInput));
     }
     auto loadedProfile = loadBaselineProfile(
@@ -230,6 +297,11 @@ int main(int argc, char **argv) {
       std::exit(exitCode(BenchmarkExitCode::InvalidInput));
     }
     const BaselineProfile &profile = loadedProfile.value();
+    if (gpuDiagnostic && profile.authority.authoritative) {
+      std::cerr << gpuDiagnosticFlag
+                << " requires an investigative benchmark profile\n";
+      std::exit(exitCode(BenchmarkExitCode::InvalidInput));
+    }
     if (profile.authority.authoritative &&
         (!repetitions.has_value() ||
          *repetitions < profile.benchmarkPolicy.minimumRepetitions)) {
@@ -253,6 +325,16 @@ int main(int argc, char **argv) {
     if (executableError) {
       processExecutable = std::filesystem::path(argv[0]);
     }
+    const BenchmarkGpuDiagnosticOptions gpuDiagnosticOptions{
+        .kind = rgpShaderDiagnostic ? BenchmarkGpuDiagnosticKind::RgpShader
+                : renderDocDiagnostic
+                    ? BenchmarkGpuDiagnosticKind::RenderDocFrame
+                    : BenchmarkGpuDiagnosticKind::None,
+        .toolPath = rgpShaderDiagnostic ? rgpToolPath : renderDocToolPath,
+        .captureFrame =
+            rgpShaderDiagnostic ? rgpCaptureFrame : renderDocCaptureFrame,
+        .timeout = std::chrono::milliseconds(
+            rgpShaderDiagnostic ? rgpTimeoutMs : renderDocTimeoutMs)};
     std::vector<BenchmarkCase> cases = loadCasesOrExit();
     BenchmarkRunOptions options{
         .samplesOverride = samples,
@@ -264,6 +346,7 @@ int main(int argc, char **argv) {
         .dryRun = dryRun,
         .printEffectiveConfig = printEffectiveConfig,
         .tracyDiagnostic = tracyDiagnostic,
+        .gpuDiagnostic = gpuDiagnosticOptions,
         .verboseFrames = verboseFrames,
         .baselineProfileId = profile.id,
         .baselineProfileAuthoritative = profile.authority.authoritative,
@@ -289,10 +372,15 @@ int main(int argc, char **argv) {
           std::cout << effective.value();
         }
       }
-      BenchmarkRunResult result =
-          repetitions.has_value()
-              ? runBenchmarkCaseIsolated(std::move(benchmarkCase), options)
-              : runBenchmarkCase(std::move(benchmarkCase), options);
+      BenchmarkRunResult result{};
+      if (gpuDiagnosticOptions.kind ==
+          BenchmarkGpuDiagnosticKind::RenderDocFrame) {
+        result = runBenchmarkCaseRenderDoc(std::move(benchmarkCase), options);
+      } else if (repetitions.has_value()) {
+        result = runBenchmarkCaseIsolated(std::move(benchmarkCase), options);
+      } else {
+        result = runBenchmarkCase(std::move(benchmarkCase), options);
+      }
       std::cout << result.message
                 << "\nreport: " << result.reportPath.generic_string() << "\n";
       writeGraphOrExit(
@@ -400,6 +488,9 @@ int main(int argc, char **argv) {
   uint32_t childRepetitionIndex = 0u;
   bool childDryRun = false;
   bool childTracyDiagnostic = false;
+  bool childRenderDocDiagnostic = false;
+  std::filesystem::path childRenderDocToolPath;
+  uint32_t childRenderDocCaptureFrame = 30u;
   bool childVerboseFrames = false;
   auto *child = app.add_subcommand(
       "__run-child", "Internal isolated benchmark repetition worker");
@@ -419,6 +510,12 @@ int main(int argc, char **argv) {
                   "Resolve config without renderer init");
   child->add_flag("--tracy-diagnostic", childTracyDiagnostic,
                   "Capture benchmark-owned Tracy CPU/GPU diagnostics");
+  child->add_flag("--renderdoc-diagnostic", childRenderDocDiagnostic,
+                  "Internal RenderDoc frame-forensics worker");
+  child->add_option("--renderdoc-tool", childRenderDocToolPath,
+                    "RenderDoc launcher path");
+  child->add_option("--renderdoc-capture-frame", childRenderDocCaptureFrame,
+                    "Zero-based RenderDoc capture frame");
   child->add_flag("--verbose-frames", childVerboseFrames,
                   "Include verbose frame renderer metrics");
   child->callback([&]() {
@@ -434,9 +531,11 @@ int main(int argc, char **argv) {
       }
       profile = std::move(loadedProfile.value());
       if (!profile->authority.authoritative) {
-        profileWarning = "baseline profile '" + profile->id +
-                         "' is investigative; child repetition is not "
-                         "independently authoritative";
+        profileWarning =
+            "baseline profile '" + profile->id + "' is investigative; " +
+            (childRenderDocDiagnostic
+                 ? "RenderDoc diagnostic is not authoritative"
+                 : "child repetition is not independently authoritative");
       }
     }
     std::vector<BenchmarkCase> cases = loadCasesOrExit();
@@ -448,6 +547,12 @@ int main(int argc, char **argv) {
         .artifactDir = childArtifactDir,
         .dryRun = childDryRun,
         .tracyDiagnostic = childTracyDiagnostic,
+        .gpuDiagnostic = {.kind =
+                              childRenderDocDiagnostic
+                                  ? BenchmarkGpuDiagnosticKind::RenderDocFrame
+                                  : BenchmarkGpuDiagnosticKind::None,
+                          .toolPath = childRenderDocToolPath,
+                          .captureFrame = childRenderDocCaptureFrame},
         .verboseFrames = childVerboseFrames,
         .internalIsolatedChild = true,
         .baselineProfileId = profile.has_value() ? profile->id : std::string{},

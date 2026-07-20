@@ -12,6 +12,7 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace nuri::tools::benchmark {
@@ -82,6 +83,48 @@ struct BenchmarkArtifactInfo {
   std::filesystem::path artifactDir{};
   std::vector<std::filesystem::path> caseReports{};
   std::vector<std::filesystem::path> tracyArtifacts{};
+  std::vector<std::filesystem::path> rgpArtifacts{};
+  std::vector<std::filesystem::path> renderDocArtifacts{};
+};
+
+struct BenchmarkRgpReport {
+  bool requested = false;
+  bool available = false;
+  std::string purpose = "shader-diagnostic-only";
+  std::filesystem::path toolPath{};
+  std::filesystem::path tracePath{};
+  std::filesystem::path captureLogPath{};
+  std::string captureCommand{};
+  uint32_t captureFrame = 30u;
+  bool counterCollectionRequested = false;
+  uint32_t derivedCounterCount = 0u;
+  int32_t captureExitCode = -1;
+  uint64_t traceSizeBytes = 0u;
+};
+
+struct BenchmarkRenderDocReport {
+  bool requested = false;
+  bool available = false;
+  bool captureTriggered = false;
+  std::string purpose = "frame-forensics-only";
+  std::string apiVersion{};
+  std::filesystem::path toolPath{};
+  std::filesystem::path capturePath{};
+  std::filesystem::path captureLogPath{};
+  std::filesystem::path chromeTracePath{};
+  std::filesystem::path conversionLogPath{};
+  std::filesystem::path thumbnailPath{};
+  std::string captureCommand{};
+  uint32_t captureFrame = 30u;
+  int32_t launcherExitCode = -1;
+  int32_t conversionExitCode = -1;
+  uint64_t captureSizeBytes = 0u;
+  uint64_t chromeTraceSizeBytes = 0u;
+  uint32_t chromeEventCount = 0u;
+  uint32_t drawCallCount = 0u;
+  uint32_t dispatchCallCount = 0u;
+  uint32_t barrierCallCount = 0u;
+  uint32_t copyCallCount = 0u;
 };
 
 struct BenchmarkTracyZoneStats {
@@ -155,6 +198,8 @@ struct BenchmarkReport {
   BenchmarkRunInfo run{};
   BenchmarkArtifactInfo artifacts{};
   BenchmarkTracyReport tracy{};
+  BenchmarkRgpReport rgp{};
+  BenchmarkRenderDocReport renderDoc{};
   std::vector<BenchmarkFrameRecord> frames{};
   std::vector<BenchmarkSampleStats> sampleStats{};
   std::map<std::string, MetricStats> stats{};
@@ -171,6 +216,8 @@ writeBenchmarkReportFile(const BenchmarkReport &report,
                          const std::filesystem::path &path, bool verboseFrames);
 [[nodiscard]] Result<BenchmarkReport, std::string>
 readBenchmarkReportFile(const std::filesystem::path &path);
+[[nodiscard]] std::string_view
+benchmarkDiagnosticLabel(const BenchmarkReport &report) noexcept;
 void computeBenchmarkReportStats(BenchmarkReport &report);
 
 } // namespace nuri::tools::benchmark

@@ -507,8 +507,58 @@ void addBenchmarkProfile(nuri::tools::core::ResultEnvelopeV2 &envelope,
                   "text/plain; charset=utf-8");
     }
   }
+  for (const std::filesystem::path &path : report.artifacts.rgpArtifacts) {
+    const bool trace = path.extension() == ".rgp";
+    addArtifact(
+        trace ? "benchmark.rgp.shader-trace" : "benchmark.rgp.capture-log",
+        path, trace ? "application/octet-stream" : "text/plain; charset=utf-8");
+  }
+  for (const std::filesystem::path &path :
+       report.artifacts.renderDocArtifacts) {
+    const std::string extension = path.extension().string();
+    if (extension == ".rdc") {
+      addArtifact("benchmark.renderdoc.capture", path,
+                  "application/octet-stream");
+    } else if (extension == ".json") {
+      addArtifact("benchmark.renderdoc.chrome-trace", path, "application/json");
+    } else if (extension == ".png") {
+      addArtifact("benchmark.renderdoc.thumbnail", path, "image/png");
+    } else {
+      addArtifact("benchmark.renderdoc.log", path, "text/plain; charset=utf-8");
+    }
+  }
   envelope.payloadJson = std::move(payload.value());
   return nuri::tools::core::writeResultEnvelopeV2(envelopePath, envelope);
+}
+
+[[nodiscard]] BenchmarkRunResult
+finalizeBenchmarkCaseResult(BenchmarkRunResult result, BenchmarkReport report,
+                            const std::filesystem::path &artifactDir,
+                            std::string_view runId, bool verboseFrames) {
+  auto reportWrite =
+      writeBenchmarkReportFile(report, result.reportPath, verboseFrames);
+  if (reportWrite.hasError()) {
+    result.exitCode = BenchmarkExitCode::RuntimeError;
+    result.message = reportWrite.error();
+    report.run.validForComparison = false;
+    report.profile.authoritative = false;
+    report.warnings.push_back(reportWrite.error());
+  }
+  auto envelopeWrite = writeBenchmarkCaseEnvelope(
+      result, report, artifactDir, result.envelopePath, runId, verboseFrames,
+      !reportWrite.hasError());
+  if (envelopeWrite.hasError()) {
+    result.exitCode = BenchmarkExitCode::RuntimeError;
+    result.message = envelopeWrite.error();
+    report.run.validForComparison = false;
+    report.profile.authoritative = false;
+    report.warnings.push_back(envelopeWrite.error());
+    if (!reportWrite.hasError()) {
+      (void)writeBenchmarkReportFile(report, result.reportPath, verboseFrames);
+    }
+  }
+  result.report = std::move(report);
+  return result;
 }
 
 [[nodiscard]] Result<void, std::string> writeBenchmarkSuiteEnvelope(
@@ -754,6 +804,45 @@ findTracyTool(std::string_view name) {
   return findTracyToolInRoot(benchmarkRepoRoot() / "build", name);
 }
 
+[[nodiscard]] std::optional<std::filesystem::path>
+findConfiguredTool(const std::filesystem::path &configuredPath,
+                   std::string_view executable) {
+  if (!configuredPath.empty()) {
+    std::error_code error;
+    const std::filesystem::path absolute =
+        std::filesystem::absolute(configuredPath, error);
+    const std::filesystem::path &candidate = error ? configuredPath : absolute;
+    return std::filesystem::is_regular_file(candidate)
+               ? std::optional<std::filesystem::path>(candidate)
+               : std::nullopt;
+  }
+  return findExecutableInPath(executable);
+}
+
+[[nodiscard]] std::optional<std::filesystem::path>
+findRgpTool(const std::filesystem::path &configuredPath) {
+  return findConfiguredTool(configuredPath, "RadeonDeveloperPanelCLI");
+}
+
+[[nodiscard]] std::optional<std::filesystem::path>
+findRenderDocTool(const std::filesystem::path &configuredPath) {
+  if (auto tool = findConfiguredTool(configuredPath, "renderdoccmd");
+      tool.has_value() || !configuredPath.empty()) {
+    return tool;
+  }
+#if defined(_WIN32)
+  const std::string programFiles = readProcessEnvironment("ProgramFiles");
+  if (!programFiles.empty()) {
+    const std::filesystem::path installed =
+        std::filesystem::path(programFiles) / "RenderDoc" / "renderdoccmd.exe";
+    if (std::filesystem::is_regular_file(installed)) {
+      return installed;
+    }
+  }
+#endif
+  return std::nullopt;
+}
+
 [[nodiscard]] int
 processExitCode(const nuri::tools::core::ProcessResult &result) {
   if (result.status != nuri::tools::core::ProcessStatus::Exited ||
@@ -791,7 +880,8 @@ void writeProcessLog(std::ostream &log, std::string_view displayCommand,
 [[nodiscard]] int
 runCommandToLog(const nuri::tools::core::ProcessCommand &command,
                 std::string_view displayCommand,
-                const std::filesystem::path &logPath) {
+                const std::filesystem::path &logPath,
+                const nuri::tools::core::ProcessOptions &options = {}) {
   if (!logPath.parent_path().empty()) {
     std::filesystem::create_directories(logPath.parent_path());
   }
@@ -800,7 +890,7 @@ runCommandToLog(const nuri::tools::core::ProcessCommand &command,
     return -1;
   }
   const nuri::tools::core::ProcessResult result =
-      nuri::tools::core::runProcess(command);
+      nuri::tools::core::runProcess(command, options);
   writeProcessLog(log, displayCommand, result);
   return processExitCode(result);
 }
@@ -1525,6 +1615,286 @@ startTracyCaptureIfRequested(const BenchmarkCase &benchmarkCase,
   session.started = true;
   report.warnings.push_back("Tracy diagnostic capture is active; run is not "
                             "valid for authoritative comparison");
+  return session;
+}
+
+struct RgpCaptureSession {
+  std::filesystem::path tracePath{};
+  std::filesystem::path logPath{};
+  std::string command{};
+  std::future<int> exitCode{};
+  bool started = false;
+
+  void finish(BenchmarkReport &report) {
+    if (!started) {
+      return;
+    }
+    started = false;
+    const int code = exitCode.valid() ? exitCode.get() : -1;
+    report.rgp.captureExitCode = code;
+    report.rgp.tracePath = tracePath;
+    report.rgp.captureLogPath = logPath;
+    report.rgp.captureCommand = command;
+    addArtifactOnce(report.artifacts.rgpArtifacts, logPath);
+    std::ifstream log(logPath, std::ios::binary);
+    std::string line;
+    constexpr std::string_view counterPrefix =
+        "Successfully processed derived counters for ";
+    while (std::getline(log, line)) {
+      const size_t counter = line.find(counterPrefix);
+      if (counter != std::string::npos) {
+        report.rgp.derivedCounterCount = static_cast<uint32_t>(parseU64Field(
+            std::string_view(line).substr(counter + counterPrefix.size())));
+      }
+    }
+    if (code != 0) {
+      report.warnings.push_back("RGP shader diagnostic capture exited with "
+                                "code " +
+                                std::to_string(code));
+      return;
+    }
+    std::error_code error;
+    const uint64_t size = std::filesystem::file_size(tracePath, error);
+    if (error || size == 0u) {
+      report.warnings.push_back(
+          "RGP shader diagnostic did not produce a non-empty trace");
+      return;
+    }
+    report.rgp.available = true;
+    report.rgp.traceSizeBytes = size;
+    addArtifactOnce(report.artifacts.rgpArtifacts, tracePath);
+    if (report.rgp.derivedCounterCount == 0u) {
+      report.warnings.push_back(
+          "RGP trace captured but no processed derived counters were reported; "
+          "recapture before counter-based shader diagnosis");
+    }
+  }
+};
+
+[[nodiscard]] RgpCaptureSession
+startRgpCaptureIfRequested(const BenchmarkCase &benchmarkCase,
+                           const BenchmarkRunOptions &options,
+                           BenchmarkReport &report) {
+  RgpCaptureSession session{};
+  const BenchmarkGpuDiagnosticOptions &diagnostic = options.gpuDiagnostic;
+  const bool requested =
+      diagnostic.kind == BenchmarkGpuDiagnosticKind::RgpShader;
+  report.rgp.requested = requested;
+  report.rgp.captureFrame = diagnostic.captureFrame;
+  report.rgp.counterCollectionRequested = requested;
+  if (!requested) {
+    return session;
+  }
+  const std::optional<std::filesystem::path> tool =
+      findRgpTool(diagnostic.toolPath);
+  if (!tool.has_value()) {
+    report.warnings.push_back(
+        "RGP shader diagnostic requested but RadeonDeveloperPanelCLI was not "
+        "found; pass --rgp-tool or add it to PATH");
+    return session;
+  }
+  if (diagnostic.timeout <= std::chrono::milliseconds::zero()) {
+    report.warnings.push_back(
+        "RGP shader diagnostic timeout must be greater than zero");
+    return session;
+  }
+
+  report.rgp.toolPath = *tool;
+  const std::filesystem::path rgpDir = report.artifacts.artifactDir / "rgp";
+  const std::string baseName =
+      benchmarkCase.id + "_" + utcTimestampForPath() + "_shader";
+  session.tracePath = rgpDir / (baseName + ".rgp");
+  session.logPath = rgpDir / (baseName + ".log");
+  std::filesystem::create_directories(rgpDir);
+  const std::filesystem::path absoluteTracePath =
+      std::filesystem::absolute(session.tracePath);
+  std::string processFilter = options.processExecutable.stem().string();
+  if (processFilter.empty()) {
+    processFilter = "nuri-bench";
+  }
+  const std::string captureTrigger =
+      "--rgp-auto-capture=frame:" + std::to_string(diagnostic.captureFrame);
+  session.command = quoteCommandArg(*tool) + " -m profiling -p " +
+                    quoteCommandArg(processFilter) + " -o " +
+                    quoteCommandArg(absoluteTracePath) + " " + captureTrigger +
+                    " --rgp-capture-mode frame --rgp-counter-collection "
+                    "--rgp-sqtt-buffer-size default --verbose";
+  nuri::tools::core::ProcessCommand command{
+      .executable = *tool,
+      .arguments = {"-m", "profiling", "-p", processFilter, "-o",
+                    pathToUtf8(absoluteTracePath), captureTrigger,
+                    "--rgp-capture-mode", "frame", "--rgp-counter-collection",
+                    "--rgp-sqtt-buffer-size", "default", "--verbose"}};
+  session.exitCode = std::async(
+      std::launch::async,
+      [command = std::move(command), displayCommand = session.command,
+       logPath = session.logPath, timeout = diagnostic.timeout] {
+        return runCommandToLog(command, displayCommand, logPath,
+                               {.timeout = timeout});
+      });
+  session.started = true;
+  report.warnings.push_back(
+      "RGP capture is a shader diagnostic only; its counters, clocks, and "
+      "timings are not overall GPU performance evidence");
+  return session;
+}
+
+#if defined(_WIN32)
+using RenderDocGenericFn = void (*)();
+using RenderDocGetApiFn = int (*)(int, void **);
+using RenderDocGetApiVersionFn = void (*)(int *, int *, int *);
+using RenderDocGetNumCapturesFn = uint32_t (*)();
+using RenderDocGetCaptureFn = uint32_t (*)(uint32_t, char *, uint32_t *,
+                                           uint64_t *);
+using RenderDocTriggerCaptureFn = void (*)();
+
+// Stable prefix of RenderDoc's public RENDERDOC_API_1_0_0 function table.
+struct RenderDocApiPrefix {
+  RenderDocGetApiVersionFn getApiVersion = nullptr;
+  RenderDocGenericFn unused[10]{};
+  RenderDocGenericFn setCaptureFilePathTemplate = nullptr;
+  RenderDocGenericFn getCaptureFilePathTemplate = nullptr;
+  RenderDocGetNumCapturesFn getNumCaptures = nullptr;
+  RenderDocGetCaptureFn getCapture = nullptr;
+  RenderDocTriggerCaptureFn triggerCapture = nullptr;
+};
+#endif
+
+struct RenderDocCaptureSession {
+#if defined(_WIN32)
+  RenderDocApiPrefix *api = nullptr;
+#endif
+  uint32_t initialCaptureCount = 0u;
+  bool requested = false;
+  bool triggered = false;
+  bool finished = false;
+
+  [[nodiscard]] bool ready() const noexcept {
+#if defined(_WIN32)
+    return api != nullptr;
+#else
+    return false;
+#endif
+  }
+
+  void trigger(uint64_t frameIndex, BenchmarkReport &report) {
+#if defined(_WIN32)
+    if (api != nullptr && !triggered &&
+        frameIndex == report.renderDoc.captureFrame) {
+      api->triggerCapture();
+      triggered = true;
+      report.renderDoc.captureTriggered = true;
+    }
+#else
+    (void)frameIndex;
+    (void)report;
+#endif
+  }
+
+  void finish(BenchmarkReport &report) {
+    if (finished || !requested) {
+      return;
+    }
+    finished = true;
+#if defined(_WIN32)
+    if (api == nullptr) {
+      return;
+    }
+    if (!triggered) {
+      report.warnings.push_back(
+          "RenderDoc capture frame was not reached by the diagnostic run");
+      return;
+    }
+    for (uint32_t attempt = 0u;
+         api->getNumCaptures() <= initialCaptureCount && attempt < 100u;
+         ++attempt) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    const uint32_t captureCount = api->getNumCaptures();
+    if (captureCount <= initialCaptureCount) {
+      report.warnings.push_back(
+          "RenderDoc did not publish a capture after the requested frame");
+      return;
+    }
+    uint32_t pathLength = 0u;
+    const uint32_t captureIndex = captureCount - 1u;
+    if (api->getCapture(captureIndex, nullptr, &pathLength, nullptr) == 0u ||
+        pathLength == 0u) {
+      report.warnings.push_back("RenderDoc did not return the capture path");
+      return;
+    }
+    std::string path(pathLength, '\0');
+    if (api->getCapture(captureIndex, path.data(), &pathLength, nullptr) ==
+        0u) {
+      report.warnings.push_back("RenderDoc capture path query failed");
+      return;
+    }
+    path.resize(std::char_traits<char>::length(path.c_str()));
+    report.renderDoc.capturePath = std::filesystem::path(path);
+    std::error_code error;
+    report.renderDoc.captureSizeBytes =
+        std::filesystem::file_size(report.renderDoc.capturePath, error);
+    if (error || report.renderDoc.captureSizeBytes == 0u) {
+      report.warnings.push_back(
+          "RenderDoc did not produce a non-empty capture file");
+      return;
+    }
+    report.renderDoc.available = true;
+    addArtifactOnce(report.artifacts.renderDocArtifacts,
+                    report.renderDoc.capturePath);
+#else
+    report.warnings.push_back(
+        "RenderDoc in-app capture is currently supported on Windows only");
+#endif
+  }
+};
+
+[[nodiscard]] RenderDocCaptureSession
+startRenderDocCaptureIfRequested(const BenchmarkRunOptions &options,
+                                 BenchmarkReport &report) {
+  RenderDocCaptureSession session{};
+  const BenchmarkGpuDiagnosticOptions &diagnostic = options.gpuDiagnostic;
+  session.requested =
+      diagnostic.kind == BenchmarkGpuDiagnosticKind::RenderDocFrame;
+  report.renderDoc.requested = session.requested;
+  report.renderDoc.captureFrame = diagnostic.captureFrame;
+  if (!session.requested) {
+    return session;
+  }
+#if defined(_WIN32)
+  HMODULE module = GetModuleHandleA("renderdoc.dll");
+  if (module == nullptr) {
+    report.warnings.push_back(
+        "RenderDoc diagnostic child was not injected with renderdoc.dll");
+    return session;
+  }
+  const auto getApi = reinterpret_cast<RenderDocGetApiFn>(
+      GetProcAddress(module, "RENDERDOC_GetAPI"));
+  void *api = nullptr;
+  constexpr int kRenderDocApiVersion100 = 10000;
+  if (getApi == nullptr || getApi(kRenderDocApiVersion100, &api) == 0 ||
+      api == nullptr) {
+    report.warnings.push_back("RenderDoc in-app API 1.0.0 is unavailable");
+    return session;
+  }
+  session.api = static_cast<RenderDocApiPrefix *>(api);
+  if (session.api->getApiVersion == nullptr ||
+      session.api->getNumCaptures == nullptr ||
+      session.api->getCapture == nullptr ||
+      session.api->triggerCapture == nullptr) {
+    session.api = nullptr;
+    report.warnings.push_back("RenderDoc in-app API table is incomplete");
+    return session;
+  }
+  int major = 0;
+  int minor = 0;
+  int patch = 0;
+  session.api->getApiVersion(&major, &minor, &patch);
+  report.renderDoc.apiVersion = std::to_string(major) + "." +
+                                std::to_string(minor) + "." +
+                                std::to_string(patch);
+  session.initialCaptureCount = session.api->getNumCaptures();
+#endif
   return session;
 }
 
@@ -3087,6 +3457,46 @@ processFailureMessage(const nuri::tools::core::ProcessResult &process) {
   return "unknown repetition process error";
 }
 
+[[nodiscard]] bool
+summarizeRenderDocChromeTrace(const std::filesystem::path &path,
+                              BenchmarkRenderDocReport &renderDoc) {
+  std::ifstream file(path, std::ios::binary);
+  std::ostringstream text;
+  text << file.rdbuf();
+  std::string json = text.str();
+  yyjson_read_err error{};
+  std::unique_ptr<yyjson_doc, decltype(&yyjson_doc_free)> document(
+      yyjson_read_opts(json.data(), json.size(), 0u, nullptr, &error),
+      &yyjson_doc_free);
+  if (!document) {
+    return false;
+  }
+  yyjson_val *events =
+      yyjson_obj_get(yyjson_doc_get_root(document.get()), "traceEvents");
+  if (!yyjson_is_arr(events)) {
+    return false;
+  }
+  renderDoc.chromeEventCount = static_cast<uint32_t>(yyjson_arr_size(events));
+  size_t index = 0u;
+  size_t maximum = 0u;
+  yyjson_val *event = nullptr;
+  yyjson_arr_foreach(events, index, maximum, event) {
+    const char *rawName = yyjson_get_str(yyjson_obj_get(event, "name"));
+    if (rawName == nullptr) {
+      continue;
+    }
+    const std::string_view name(rawName);
+    renderDoc.drawCallCount += name.starts_with("vkCmdDraw");
+    renderDoc.dispatchCallCount += name.starts_with("vkCmdDispatch");
+    renderDoc.barrierCallCount +=
+        name.find("Barrier") != std::string_view::npos;
+    renderDoc.copyCallCount += name.starts_with("vkCmdCopy") ||
+                               name.starts_with("vkCmdBlit") ||
+                               name.starts_with("vkCmdResolve");
+  }
+  return true;
+}
+
 } // namespace
 
 BenchmarkRunResult
@@ -3157,31 +3567,9 @@ runBenchmarkCaseIsolated(BenchmarkCase benchmarkCase,
   report.repeatObservations.count = 0u;
 
   const auto finalize = [&]() -> BenchmarkRunResult {
-    auto reportWrite = writeBenchmarkReportFile(report, result.reportPath,
-                                                options.verboseFrames);
-    if (reportWrite.hasError()) {
-      result.exitCode = BenchmarkExitCode::RuntimeError;
-      result.message = reportWrite.error();
-      report.run.validForComparison = false;
-      report.profile.authoritative = false;
-      report.warnings.push_back(reportWrite.error());
-    }
-    auto envelopeWrite = writeBenchmarkCaseEnvelope(
-        result, report, artifactDir, result.envelopePath, runId,
-        options.verboseFrames, !reportWrite.hasError());
-    if (envelopeWrite.hasError()) {
-      result.exitCode = BenchmarkExitCode::RuntimeError;
-      result.message = envelopeWrite.error();
-      report.run.validForComparison = false;
-      report.profile.authoritative = false;
-      report.warnings.push_back(envelopeWrite.error());
-      if (!reportWrite.hasError()) {
-        (void)writeBenchmarkReportFile(report, result.reportPath,
+    return finalizeBenchmarkCaseResult(std::move(result), std::move(report),
+                                       artifactDir, runId,
                                        options.verboseFrames);
-      }
-    }
-    result.report = std::move(report);
-    return std::move(result);
   };
 
   if (repetitions == 0u) {
@@ -3513,15 +3901,282 @@ runBenchmarkCaseIsolated(BenchmarkCase benchmarkCase,
   return finalize();
 }
 
+BenchmarkRunResult
+runBenchmarkCaseRenderDoc(BenchmarkCase benchmarkCase,
+                          const BenchmarkRunOptions &options) {
+  BenchmarkRunResult result{};
+  const BenchmarkGpuDiagnosticOptions &diagnostic = options.gpuDiagnostic;
+  std::string runId = nuri::tools::core::createRunId();
+  std::filesystem::path artifactDir = options.artifactDir;
+  if (artifactDir.empty()) {
+    auto workspace = nuri::tools::core::createRunWorkspace(
+        benchmarkRepoRoot() / "artifacts" / "bench");
+    if (workspace.hasError()) {
+      result.exitCode = BenchmarkExitCode::RuntimeError;
+      result.message = workspace.error();
+      return result;
+    }
+    runId = workspace.value().runId;
+    artifactDir = workspace.value().root;
+  }
+  result.reportPath = options.jsonOut.empty()
+                          ? artifactDir / "cases" / (benchmarkCase.id + ".json")
+                          : options.jsonOut;
+  result.envelopePath = options.envelopeOut.empty() ? artifactDir / "run.json"
+                                                    : options.envelopeOut;
+  if (result.envelopePath.lexically_normal() ==
+      result.reportPath.lexically_normal()) {
+    result.envelopePath = artifactDir / "result.json";
+  }
+
+  BenchmarkReport report{};
+  report.generatedAtUtc = utcTimestampIso8601();
+  report.command = options.command;
+  report.benchmarkCase = benchmarkCase;
+  report.run.validForComparison = false;
+  report.profile.id = options.baselineProfileId;
+  report.profile.profileAuthoritative = options.baselineProfileAuthoritative;
+  report.profile.authoritative = false;
+  report.profile.authorityBlockers.push_back(
+      "RenderDoc frame-forensics execution cannot be compared or accepted as "
+      "a benchmark baseline");
+  report.artifacts.artifactDir = artifactDir;
+  report.renderDoc.requested = true;
+  report.renderDoc.captureFrame = diagnostic.captureFrame;
+
+  const auto finalize = [&]() -> BenchmarkRunResult {
+    return finalizeBenchmarkCaseResult(std::move(result), std::move(report),
+                                       artifactDir, runId,
+                                       options.verboseFrames);
+  };
+
+  const std::optional<std::filesystem::path> tool =
+      findRenderDocTool(diagnostic.toolPath);
+  if (!tool.has_value()) {
+    result.exitCode = BenchmarkExitCode::EnvironmentUnavailable;
+    result.message =
+        "RenderDoc diagnostic requested but renderdoccmd was not found; pass "
+        "--renderdoc-tool or add it to PATH";
+    report.warnings.push_back(result.message);
+    return finalize();
+  }
+  report.renderDoc.toolPath = *tool;
+  if (options.processExecutable.empty()) {
+    result.exitCode = BenchmarkExitCode::InvalidInput;
+    result.message = "RenderDoc diagnostic requires a process executable";
+    report.warnings.push_back(result.message);
+    return finalize();
+  }
+  if (diagnostic.timeout <= std::chrono::milliseconds::zero()) {
+    result.exitCode = BenchmarkExitCode::InvalidInput;
+    result.message = "RenderDoc diagnostic timeout must be greater than zero";
+    report.warnings.push_back(result.message);
+    return finalize();
+  }
+
+  const std::filesystem::path renderDocDir = artifactDir / "renderdoc";
+  std::filesystem::create_directories(renderDocDir);
+  const std::string baseName = benchmarkCase.id + "_" + utcTimestampForPath() +
+                               "_frame" +
+                               std::to_string(diagnostic.captureFrame);
+  const std::filesystem::path captureTemplate = renderDocDir / baseName;
+  const std::filesystem::path launchLog = renderDocDir / (baseName + ".log");
+  const std::filesystem::path workerDir = renderDocDir / (baseName + "_worker");
+  const std::filesystem::path workerReport = workerDir / "report.json";
+  const std::filesystem::path workerEnvelope = workerDir / "run.json";
+  nuri::tools::core::ProcessCommand command{
+      .executable = *tool,
+      .arguments = {
+          "capture", "-w", "-d", pathToUtf8(benchmarkRepoRoot()), "-c",
+          pathToUtf8(std::filesystem::absolute(captureTemplate)),
+          pathToUtf8(options.processExecutable), "__run-child", "--case",
+          benchmarkCase.id, "--repetition-index", "0", "--artifact-dir",
+          pathToUtf8(workerDir), "--renderdoc-diagnostic", "--renderdoc-tool",
+          pathToUtf8(*tool), "--renderdoc-capture-frame",
+          std::to_string(diagnostic.captureFrame)}};
+  if (!options.baselineProfileId.empty()) {
+    command.arguments.push_back("--profile");
+    command.arguments.push_back(options.baselineProfileId);
+  }
+  if (options.samplesOverride.has_value()) {
+    command.arguments.push_back("--samples");
+    command.arguments.push_back(std::to_string(*options.samplesOverride));
+  }
+  if (options.verboseFrames) {
+    command.arguments.push_back("--verbose-frames");
+  }
+  std::string captureCommand = quoteCommandArg(*tool);
+  for (const std::string &argument : command.arguments) {
+    captureCommand += " " + quoteCommandArg(argument);
+  }
+  report.renderDoc.captureCommand = captureCommand;
+  const ScopedEnvVar fifoPresentMode("NURI_PRESENT_MODE", "fifo");
+  const nuri::tools::core::ProcessResult process =
+      nuri::tools::core::runProcess(command,
+                                    {.workingDirectory = benchmarkRepoRoot(),
+                                     .timeout = diagnostic.timeout});
+  {
+    std::ofstream log(launchLog, std::ios::binary);
+    writeProcessLog(log, report.renderDoc.captureCommand, process);
+  }
+  report.renderDoc.captureLogPath = launchLog;
+  report.renderDoc.launcherExitCode = processExitCode(process);
+  addArtifactOnce(report.artifacts.renderDocArtifacts, launchLog);
+
+  std::ifstream envelopeFile(workerEnvelope, std::ios::binary);
+  std::ostringstream envelopeText;
+  envelopeText << envelopeFile.rdbuf();
+  envelopeFile.close();
+  auto childEnvelope =
+      nuri::tools::core::readResultEnvelopeV2(envelopeText.str());
+  auto childReport = readBenchmarkReportFile(workerReport);
+  std::error_code workerCleanupError;
+  std::filesystem::remove_all(workerDir, workerCleanupError);
+  const bool childInvalid = childReport.hasError() || childEnvelope.hasError();
+  if (!childInvalid) {
+    report = std::move(childReport.value());
+  }
+  if (workerCleanupError) {
+    report.warnings.push_back("failed to remove RenderDoc worker workspace: " +
+                              workerCleanupError.message());
+  }
+  if (childInvalid) {
+    result.exitCode = BenchmarkExitCode::RuntimeError;
+    result.message =
+        childReport.hasError() ? childReport.error() : childEnvelope.error();
+    report.warnings.push_back(result.message);
+    return finalize();
+  }
+  report.command = options.command;
+  report.artifacts.artifactDir = artifactDir;
+  report.renderDoc.toolPath = *tool;
+  report.renderDoc.captureLogPath = launchLog;
+  report.renderDoc.captureCommand = std::move(captureCommand);
+  report.renderDoc.launcherExitCode = processExitCode(process);
+  addArtifactOnce(report.artifacts.renderDocArtifacts, launchLog);
+
+  if (childEnvelope.value().exitCode != 0) {
+    result.exitCode = static_cast<BenchmarkExitCode>(
+        std::clamp(childEnvelope.value().exitCode, 1, 5));
+    result.message = "RenderDoc diagnostic child did not complete";
+    report.warnings.push_back(result.message);
+    return finalize();
+  }
+  if (!report.renderDoc.available || report.renderDoc.capturePath.empty()) {
+    result.exitCode = BenchmarkExitCode::RuntimeError;
+    result.message = "RenderDoc diagnostic capture did not complete";
+    report.warnings.push_back(result.message);
+    return finalize();
+  }
+
+  report.renderDoc.chromeTracePath = report.renderDoc.capturePath;
+  report.renderDoc.chromeTracePath.replace_extension(".chrome.json");
+  report.renderDoc.conversionLogPath =
+      renderDocDir / (baseName + "_convert.log");
+  nuri::tools::core::ProcessCommand convertCommand{
+      .executable = *tool,
+      .arguments = {"convert", "-f", pathToUtf8(report.renderDoc.capturePath),
+                    "-o", pathToUtf8(report.renderDoc.chromeTracePath), "-c",
+                    "chrome.json"}};
+  const std::string convertDisplay =
+      quoteCommandArg(*tool) + " convert -f " +
+      quoteCommandArg(report.renderDoc.capturePath) + " -o " +
+      quoteCommandArg(report.renderDoc.chromeTracePath) + " -c chrome.json";
+  report.renderDoc.conversionExitCode = runCommandToLog(
+      convertCommand, convertDisplay, report.renderDoc.conversionLogPath,
+      {.workingDirectory = benchmarkRepoRoot(), .timeout = diagnostic.timeout});
+  addArtifactOnce(report.artifacts.renderDocArtifacts,
+                  report.renderDoc.conversionLogPath);
+  std::error_code sizeError;
+  report.renderDoc.chromeTraceSizeBytes =
+      std::filesystem::file_size(report.renderDoc.chromeTracePath, sizeError);
+  if (report.renderDoc.conversionExitCode == 0 && !sizeError &&
+      report.renderDoc.chromeTraceSizeBytes > 0u) {
+    addArtifactOnce(report.artifacts.renderDocArtifacts,
+                    report.renderDoc.chromeTracePath);
+    if (!summarizeRenderDocChromeTrace(report.renderDoc.chromeTracePath,
+                                       report.renderDoc)) {
+      report.warnings.push_back(
+          "RenderDoc Chrome trace was created but could not be summarized");
+    }
+  } else {
+    report.renderDoc.chromeTracePath.clear();
+    report.renderDoc.chromeTraceSizeBytes = 0u;
+    report.warnings.push_back(
+        "RenderDoc capture succeeded but Chrome trace conversion failed");
+  }
+
+  report.renderDoc.thumbnailPath = report.renderDoc.capturePath;
+  report.renderDoc.thumbnailPath.replace_extension(".png");
+  const std::filesystem::path thumbnailLog =
+      renderDocDir / (baseName + "_thumbnail.log");
+  nuri::tools::core::ProcessCommand thumbnailCommand{
+      .executable = *tool,
+      .arguments = {"thumb", "--out",
+                    pathToUtf8(report.renderDoc.thumbnailPath),
+                    pathToUtf8(report.renderDoc.capturePath)}};
+  const int thumbnailExit = runCommandToLog(
+      thumbnailCommand,
+      quoteCommandArg(*tool) + " thumb --out " +
+          quoteCommandArg(report.renderDoc.thumbnailPath) + " " +
+          quoteCommandArg(report.renderDoc.capturePath),
+      thumbnailLog,
+      {.workingDirectory = benchmarkRepoRoot(), .timeout = diagnostic.timeout});
+  addArtifactOnce(report.artifacts.renderDocArtifacts, thumbnailLog);
+  if (thumbnailExit == 0 &&
+      std::filesystem::is_regular_file(report.renderDoc.thumbnailPath)) {
+    addArtifactOnce(report.artifacts.renderDocArtifacts,
+                    report.renderDoc.thumbnailPath);
+  } else {
+    report.renderDoc.thumbnailPath.clear();
+    report.warnings.push_back(
+        "RenderDoc capture succeeded but thumbnail extraction failed");
+  }
+
+  result.exitCode = BenchmarkExitCode::Success;
+  result.message = "RenderDoc frame-forensics diagnostic capture complete";
+  return finalize();
+}
+
 BenchmarkRunResult runBenchmarkCase(BenchmarkCase benchmarkCase,
                                     const BenchmarkRunOptions &options) {
   BenchmarkRunResult result{};
+  const BenchmarkGpuDiagnosticOptions &diagnostic = options.gpuDiagnostic;
+  const bool rgpDiagnostic =
+      diagnostic.kind == BenchmarkGpuDiagnosticKind::RgpShader;
+  const bool renderDocDiagnostic =
+      diagnostic.kind == BenchmarkGpuDiagnosticKind::RenderDocFrame;
   if (!options.baselineProfileId.empty()) {
     benchmarkCase.authoritative = false;
     benchmarkCase.configSignature.clear();
   }
-  const uint32_t samples =
+  if (renderDocDiagnostic) {
+    benchmarkCase.presentMode = "fifo";
+  }
+  const uint32_t requestedSamples =
       options.samplesOverride.value_or(benchmarkCase.samples);
+  uint32_t samples = requestedSamples;
+  if (rgpDiagnostic) {
+    constexpr uint32_t kRgpMinimumFrameBudget = 1'000u;
+    const uint32_t framesPerSample =
+        std::max(benchmarkCase.warmupFrames + benchmarkCase.measurementFrames +
+                     benchmarkCase.cooldownFrames,
+                 1u);
+    const uint32_t minimumSamples =
+        (kRgpMinimumFrameBudget + framesPerSample - 1u) / framesPerSample;
+    samples = std::max(samples, minimumSamples);
+  }
+  if (renderDocDiagnostic) {
+    const uint32_t framesPerSample =
+        std::max(benchmarkCase.warmupFrames + benchmarkCase.measurementFrames +
+                     benchmarkCase.cooldownFrames,
+                 1u);
+    const uint64_t requiredFrames =
+        static_cast<uint64_t>(diagnostic.captureFrame) + 1u;
+    const uint32_t minimumSamples = static_cast<uint32_t>(
+        (requiredFrames + framesPerSample - 1u) / framesPerSample);
+    samples = std::max(samples, minimumSamples);
+  }
   benchmarkCase.samples = samples;
   std::string backendSource;
   const std::string backend = resolveBackendName(benchmarkCase, backendSource);
@@ -3596,6 +4251,13 @@ BenchmarkRunResult runBenchmarkCase(BenchmarkCase benchmarkCase,
   report.run.drainTimeoutMs = benchmarkCase.drainTimeoutMs;
   report.run.fixedDeltaSeconds = benchmarkCase.fixedDeltaSeconds;
   report.artifacts.artifactDir = artifactDir;
+  report.rgp.requested = rgpDiagnostic;
+  report.rgp.captureFrame = diagnostic.captureFrame;
+  report.rgp.counterCollectionRequested = rgpDiagnostic;
+  report.renderDoc.requested = renderDocDiagnostic;
+  report.renderDoc.toolPath =
+      renderDocDiagnostic ? diagnostic.toolPath : std::filesystem::path{};
+  report.renderDoc.captureFrame = diagnostic.captureFrame;
   report.timingDrain.drainTimeoutMs = benchmarkCase.drainTimeoutMs;
   report.environment =
       collectBenchmarkEnvironment(backend, backendSource, presentMode,
@@ -3621,31 +4283,56 @@ BenchmarkRunResult runBenchmarkCase(BenchmarkCase benchmarkCase,
     report.warnings.push_back(
         "Tracy diagnostic mode is not valid for authoritative comparison");
   }
+  if (rgpDiagnostic) {
+    report.run.validForComparison = false;
+    report.profile.authoritative = false;
+    report.profile.authorityBlockers.push_back(
+        "RGP shader diagnostic execution cannot be compared or accepted as a "
+        "benchmark baseline");
+    report.warnings.push_back(
+        "RGP is restricted to shader diagnosis; ignore benchmark timing data "
+        "from this capture run");
+    if (samples != requestedSamples) {
+      report.warnings.push_back(
+          "RGP shader diagnostic increased sample windows from " +
+          std::to_string(requestedSamples) + " to " + std::to_string(samples) +
+          " to keep the capture target alive");
+    }
+  }
+  if (renderDocDiagnostic) {
+    report.run.validForComparison = false;
+    report.profile.authoritative = false;
+    report.profile.authorityBlockers.push_back(
+        "RenderDoc frame-forensics execution cannot be compared or accepted "
+        "as a benchmark baseline");
+    report.warnings.push_back(
+        "RenderDoc is restricted to frame forensics; capture/replay timings "
+        "and counters are not GPU performance evidence");
+    report.warnings.push_back(
+        "RenderDoc diagnostic forced FIFO present mode for capture stability");
+    if (samples != requestedSamples) {
+      report.warnings.push_back(
+          "RenderDoc diagnostic increased sample windows from " +
+          std::to_string(requestedSamples) + " to " + std::to_string(samples) +
+          " to reach capture frame " + std::to_string(diagnostic.captureFrame));
+    }
+  }
 
   const auto finalizeResult = [&]() -> BenchmarkRunResult {
-    auto reportWrite =
-        writeBenchmarkReportFile(report, reportPath, options.verboseFrames);
-    if (reportWrite.hasError()) {
-      result.exitCode = BenchmarkExitCode::RuntimeError;
-      result.message = reportWrite.error();
-      report.run.validForComparison = false;
-      report.warnings.push_back(reportWrite.error());
+    if (diagnostic.kind != BenchmarkGpuDiagnosticKind::None) {
+      report.frames.clear();
+      report.sampleStats.clear();
+      report.stats.clear();
+      report.unavailableMetrics.clear();
+      report.unregisteredObservedMetrics.clear();
+      report.repeatObservations = {};
+      report.warnings.push_back(
+          "Benchmark timing samples are intentionally omitted from GPU "
+          "diagnostic reports");
     }
-    auto envelopeWrite = writeBenchmarkCaseEnvelope(
-        result, report, artifactDir, envelopePath, runId, options.verboseFrames,
-        !reportWrite.hasError());
-    if (envelopeWrite.hasError()) {
-      result.exitCode = BenchmarkExitCode::RuntimeError;
-      result.message = envelopeWrite.error();
-      report.run.validForComparison = false;
-      report.warnings.push_back(envelopeWrite.error());
-      if (!reportWrite.hasError()) {
-        (void)writeBenchmarkReportFile(report, reportPath,
+    return finalizeBenchmarkCaseResult(std::move(result), std::move(report),
+                                       artifactDir, runId,
                                        options.verboseFrames);
-      }
-    }
-    result.report = std::move(report);
-    return std::move(result);
   };
 
   const auto validateRequiredMetrics =
@@ -3667,6 +4354,16 @@ BenchmarkRunResult runBenchmarkCase(BenchmarkCase benchmarkCase,
     result.exitCode = BenchmarkExitCode::InvalidInput;
     result.message =
         "authoritative benchmark profiles require isolated repetitions";
+    report.run.validForComparison = false;
+    report.warnings.push_back(result.message);
+    computeBenchmarkReportStats(report);
+    return finalizeResult();
+  }
+  if (options.tracyDiagnostic &&
+      diagnostic.kind != BenchmarkGpuDiagnosticKind::None) {
+    result.exitCode = BenchmarkExitCode::InvalidInput;
+    result.message = "Tracy, RGP, and RenderDoc diagnostics must be collected "
+                     "in separate runs";
     report.run.validForComparison = false;
     report.warnings.push_back(result.message);
     computeBenchmarkReportStats(report);
@@ -3710,6 +4407,15 @@ BenchmarkRunResult runBenchmarkCase(BenchmarkCase benchmarkCase,
   }
 
   TracyCaptureSession tracySession{};
+  RgpCaptureSession rgpSession{};
+  RenderDocCaptureSession renderDocSession{};
+  const auto finishDiagnosticsAndFinalize = [&]() -> BenchmarkRunResult {
+    renderDocSession.finish(report);
+    rgpSession.finish(report);
+    tracySession.finish(report);
+    computeBenchmarkReportStats(report);
+    return finalizeResult();
+  };
   try {
     BenchmarkLogGuard logGuard(artifactDir / "logs" /
                                (benchmarkCase.id + ".log"));
@@ -3734,14 +4440,26 @@ BenchmarkRunResult runBenchmarkCase(BenchmarkCase benchmarkCase,
       result.message = configResult.error();
       report.run.validForComparison = false;
       report.warnings.push_back(configResult.error());
-      computeBenchmarkReportStats(report);
-      return finalizeResult();
+      return finishDiagnosticsAndFinalize();
     }
     RuntimeConfig config = std::move(configResult.value());
     config.window.title = "nuri-bench " + benchmarkCase.id;
     config.window.width = static_cast<int32_t>(benchmarkCase.resolution[0]);
     config.window.height = static_cast<int32_t>(benchmarkCase.resolution[1]);
     config.window.mode = WindowMode::Windowed;
+
+    rgpSession = startRgpCaptureIfRequested(benchmarkCase, options, report);
+    if (rgpDiagnostic && !rgpSession.started) {
+      result.exitCode = report.rgp.toolPath.empty()
+                            ? BenchmarkExitCode::EnvironmentUnavailable
+                            : BenchmarkExitCode::InvalidInput;
+      result.message = report.warnings.back();
+      report.run.validForComparison = false;
+      return finishDiagnosticsAndFinalize();
+    }
+    if (rgpSession.started) {
+      std::this_thread::sleep_for(std::chrono::seconds(1));
+    }
 
     std::unique_ptr<Window> window =
         Window::create(config.window.title, config.window.width,
@@ -3751,8 +4469,7 @@ BenchmarkRunResult runBenchmarkCase(BenchmarkCase benchmarkCase,
       result.message = "failed to create benchmark window";
       report.run.validForComparison = false;
       report.warnings.push_back(result.message);
-      computeBenchmarkReportStats(report);
-      return finalizeResult();
+      return finishDiagnosticsAndFinalize();
     }
     std::unique_ptr<GPUDevice> gpu = GPUDevice::create(*window);
     if (!gpu) {
@@ -3760,8 +4477,7 @@ BenchmarkRunResult runBenchmarkCase(BenchmarkCase benchmarkCase,
       result.message = "failed to create GPU device";
       report.run.validForComparison = false;
       report.warnings.push_back(result.message);
-      computeBenchmarkReportStats(report);
-      return finalizeResult();
+      return finishDiagnosticsAndFinalize();
     }
     report.environment.swapchainImageCount = gpu->getSwapchainImageCount();
     const GPUAdapterInfo adapter = gpu->getAdapterInfo();
@@ -3778,8 +4494,7 @@ BenchmarkRunResult runBenchmarkCase(BenchmarkCase benchmarkCase,
       result.message = gpuRequirementMessage;
       report.run.validForComparison = false;
       report.warnings.push_back(result.message);
-      computeBenchmarkReportStats(report);
-      return finalizeResult();
+      return finishDiagnosticsAndFinalize();
     }
 
     TrackingMemoryResource rendererMemoryTracker;
@@ -3799,8 +4514,7 @@ BenchmarkRunResult runBenchmarkCase(BenchmarkCase benchmarkCase,
       result.message = pipelineResult.error();
       report.run.validForComparison = false;
       report.warnings.push_back(result.message);
-      computeBenchmarkReportStats(report);
-      return finalizeResult();
+      return finishDiagnosticsAndFinalize();
     }
 
     RenderScene scene(&sceneMemory);
@@ -3813,8 +4527,7 @@ BenchmarkRunResult runBenchmarkCase(BenchmarkCase benchmarkCase,
       result.message = sceneResult.error();
       report.run.validForComparison = false;
       report.warnings.push_back(result.message);
-      computeBenchmarkReportStats(report);
-      return finalizeResult();
+      return finishDiagnosticsAndFinalize();
     }
     auto assetsReady = waitForBenchmarkAssets(*renderer, scene, sceneLoad);
     const double sceneResourcePrepareMs = elapsedMs(sceneResourcePrepareBegin);
@@ -3823,8 +4536,15 @@ BenchmarkRunResult runBenchmarkCase(BenchmarkCase benchmarkCase,
       result.message = assetsReady.error();
       report.run.validForComparison = false;
       report.warnings.push_back(result.message);
-      computeBenchmarkReportStats(report);
-      return finalizeResult();
+      return finishDiagnosticsAndFinalize();
+    }
+
+    renderDocSession = startRenderDocCaptureIfRequested(options, report);
+    if (renderDocDiagnostic && !renderDocSession.ready()) {
+      result.exitCode = BenchmarkExitCode::EnvironmentUnavailable;
+      result.message = report.warnings.back();
+      report.run.validForComparison = false;
+      return finishDiagnosticsAndFinalize();
     }
 
     RenderSettings settings = benchmarkCase.settings;
@@ -3842,6 +4562,9 @@ BenchmarkRunResult runBenchmarkCase(BenchmarkCase benchmarkCase,
       NURI_PROFILER_FRAME("BenchmarkFrame");
       NURI_PROFILER_ZONE_STATIC("BenchmarkFrame", NURI_PROFILER_COLOR_SUBMIT);
       window->pollEvents();
+      if (renderDocDiagnostic) {
+        renderDocSession.trigger(frameIndex, report);
+      }
       auto evaluatedCamera =
           evaluateBenchmarkCameraAtFrame(benchmarkCase, sampleFrame);
       if (evaluatedCamera.hasError()) {
@@ -3946,9 +4669,7 @@ BenchmarkRunResult runBenchmarkCase(BenchmarkCase benchmarkCase,
           result.message = frameResult.error();
           report.warnings.push_back(result.message);
           report.run.validForComparison = false;
-          tracySession.finish(report);
-          computeBenchmarkReportStats(report);
-          return finalizeResult();
+          return finishDiagnosticsAndFinalize();
         }
       }
       for (uint32_t i = 0u; i < benchmarkCase.measurementFrames; ++i) {
@@ -3959,9 +4680,7 @@ BenchmarkRunResult runBenchmarkCase(BenchmarkCase benchmarkCase,
           result.message = frameResult.error();
           report.warnings.push_back(result.message);
           report.run.validForComparison = false;
-          tracySession.finish(report);
-          computeBenchmarkReportStats(report);
-          return finalizeResult();
+          return finishDiagnosticsAndFinalize();
         }
       }
       for (uint32_t i = 0u; i < benchmarkCase.cooldownFrames; ++i) {
@@ -4033,13 +4752,30 @@ BenchmarkRunResult runBenchmarkCase(BenchmarkCase benchmarkCase,
           " single-command-buffer frames report scoped GPU work outside the "
           "same frame's whole-GPU interval");
     }
+    renderDocSession.finish(report);
+    rgpSession.finish(report);
   } catch (const std::exception &ex) {
     result.exitCode = BenchmarkExitCode::RuntimeError;
     result.message = ex.what();
     report.run.validForComparison = false;
     report.warnings.push_back(result.message);
   }
+  renderDocSession.finish(report);
+  rgpSession.finish(report);
   tracySession.finish(report);
+
+  if (rgpDiagnostic && !report.rgp.available &&
+      result.exitCode == BenchmarkExitCode::Success) {
+    result.exitCode = BenchmarkExitCode::RuntimeError;
+    result.message = "RGP shader diagnostic capture did not complete";
+    report.warnings.push_back(result.message);
+  }
+  if (renderDocDiagnostic && !report.renderDoc.available &&
+      result.exitCode == BenchmarkExitCode::Success) {
+    result.exitCode = BenchmarkExitCode::RuntimeError;
+    result.message = "RenderDoc diagnostic capture did not complete";
+    report.warnings.push_back(result.message);
+  }
 
   computeBenchmarkReportStats(report);
   const auto markUnavailable = [&](std::string_view metric) {

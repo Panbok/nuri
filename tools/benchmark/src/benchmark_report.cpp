@@ -127,6 +127,8 @@ validateBenchmarkReportV1(yyjson_val *root) {
       JsonField{"run", JsonType::Object},
       JsonField{"artifacts", JsonType::Object},
       JsonField{"tracy", JsonType::Object, false},
+      JsonField{"rgp", JsonType::Object, false},
+      JsonField{"renderDoc", JsonType::Object, false},
       JsonField{"frames", JsonType::Array},
       JsonField{"sampleStats", JsonType::Array},
       JsonField{"stats", JsonType::Object},
@@ -315,6 +317,8 @@ validateBenchmarkReportV1(yyjson_val *root) {
       JsonField{"artifactDir", JsonType::String},
       JsonField{"caseReports", JsonType::Array},
       JsonField{"tracy", JsonType::Array},
+      JsonField{"rgp", JsonType::Array, false},
+      JsonField{"renderDoc", JsonType::Array, false},
   };
   yyjson_val *artifacts = yyjson_obj_get(root, "artifacts");
   valid = validateObject(artifacts, artifactFields, "$.artifacts");
@@ -326,8 +330,11 @@ validateBenchmarkReportV1(yyjson_val *root) {
   if (valid.hasError()) {
     return valid;
   }
-  for (std::string_view field : {"caseReports", "tracy"}) {
+  for (std::string_view field : {"caseReports", "tracy", "rgp", "renderDoc"}) {
     yyjson_val *paths = yyjson_obj_getn(artifacts, field.data(), field.size());
+    if (!paths) {
+      continue;
+    }
     yyjson_arr_iter iterator{};
     yyjson_arr_iter_init(paths, &iterator);
     yyjson_val *entry = nullptr;
@@ -346,6 +353,73 @@ validateBenchmarkReportV1(yyjson_val *root) {
         return valid;
       }
       ++index;
+    }
+  }
+
+  if (yyjson_val *rgp = yyjson_obj_get(root, "rgp")) {
+    static constexpr std::array rgpFields{
+        JsonField{"requested", JsonType::Boolean},
+        JsonField{"available", JsonType::Boolean},
+        JsonField{"purpose", JsonType::String},
+        JsonField{"toolPath", JsonType::String},
+        JsonField{"tracePath", JsonType::String},
+        JsonField{"captureLogPath", JsonType::String},
+        JsonField{"captureCommand", JsonType::String},
+        JsonField{"captureFrame", JsonType::Unsigned},
+        JsonField{"counterCollectionRequested", JsonType::Boolean},
+        JsonField{"derivedCounterCount", JsonType::Unsigned},
+        JsonField{"captureExitCode", JsonType::Number},
+        JsonField{"traceSizeBytes", JsonType::Unsigned},
+    };
+    valid = validateObject(rgp, rgpFields, "$.rgp");
+    if (valid.hasError()) {
+      return valid;
+    }
+    for (std::string_view field : {"toolPath", "tracePath", "captureLogPath"}) {
+      valid = nuri::tools::core::validateJsonArtifactPath(rgp, field, "$.rgp");
+      if (valid.hasError()) {
+        return valid;
+      }
+    }
+  }
+
+  if (yyjson_val *renderDoc = yyjson_obj_get(root, "renderDoc")) {
+    static constexpr std::array renderDocFields{
+        JsonField{"requested", JsonType::Boolean},
+        JsonField{"available", JsonType::Boolean},
+        JsonField{"captureTriggered", JsonType::Boolean},
+        JsonField{"purpose", JsonType::String},
+        JsonField{"apiVersion", JsonType::String},
+        JsonField{"toolPath", JsonType::String},
+        JsonField{"capturePath", JsonType::String},
+        JsonField{"captureLogPath", JsonType::String},
+        JsonField{"chromeTracePath", JsonType::String},
+        JsonField{"conversionLogPath", JsonType::String},
+        JsonField{"thumbnailPath", JsonType::String},
+        JsonField{"captureCommand", JsonType::String},
+        JsonField{"captureFrame", JsonType::Unsigned},
+        JsonField{"launcherExitCode", JsonType::Number},
+        JsonField{"conversionExitCode", JsonType::Number},
+        JsonField{"captureSizeBytes", JsonType::Unsigned},
+        JsonField{"chromeTraceSizeBytes", JsonType::Unsigned},
+        JsonField{"chromeEventCount", JsonType::Unsigned},
+        JsonField{"drawCallCount", JsonType::Unsigned},
+        JsonField{"dispatchCallCount", JsonType::Unsigned},
+        JsonField{"barrierCallCount", JsonType::Unsigned},
+        JsonField{"copyCallCount", JsonType::Unsigned},
+    };
+    valid = validateObject(renderDoc, renderDocFields, "$.renderDoc");
+    if (valid.hasError()) {
+      return valid;
+    }
+    for (std::string_view field :
+         {"toolPath", "capturePath", "captureLogPath", "chromeTracePath",
+          "conversionLogPath", "thumbnailPath"}) {
+      valid = nuri::tools::core::validateJsonArtifactPath(renderDoc, field,
+                                                          "$.renderDoc");
+      if (valid.hasError()) {
+        return valid;
+      }
     }
   }
 
@@ -1376,6 +1450,64 @@ yyjson_mut_val *makeTracyObject(yyjson_mut_doc *doc,
   return object;
 }
 
+yyjson_mut_val *makeRgpObject(yyjson_mut_doc *doc,
+                              const BenchmarkRgpReport &rgp) {
+  yyjson_mut_val *object = yyjson_mut_obj(doc);
+  yyjson_mut_obj_add_bool(doc, object, "requested", rgp.requested);
+  yyjson_mut_obj_add_bool(doc, object, "available", rgp.available);
+  addString(doc, object, "purpose", rgp.purpose);
+  addPath(doc, object, "toolPath", rgp.toolPath);
+  addPath(doc, object, "tracePath", rgp.tracePath);
+  addPath(doc, object, "captureLogPath", rgp.captureLogPath);
+  addString(doc, object, "captureCommand", rgp.captureCommand);
+  yyjson_mut_obj_add_uint(doc, object, "captureFrame", rgp.captureFrame);
+  yyjson_mut_obj_add_bool(doc, object, "counterCollectionRequested",
+                          rgp.counterCollectionRequested);
+  yyjson_mut_obj_add_uint(doc, object, "derivedCounterCount",
+                          rgp.derivedCounterCount);
+  yyjson_mut_obj_add_sint(doc, object, "captureExitCode", rgp.captureExitCode);
+  yyjson_mut_obj_add_uint(doc, object, "traceSizeBytes", rgp.traceSizeBytes);
+  return object;
+}
+
+yyjson_mut_val *makeRenderDocObject(yyjson_mut_doc *doc,
+                                    const BenchmarkRenderDocReport &renderDoc) {
+  yyjson_mut_val *object = yyjson_mut_obj(doc);
+  yyjson_mut_obj_add_bool(doc, object, "requested", renderDoc.requested);
+  yyjson_mut_obj_add_bool(doc, object, "available", renderDoc.available);
+  yyjson_mut_obj_add_bool(doc, object, "captureTriggered",
+                          renderDoc.captureTriggered);
+  addString(doc, object, "purpose", renderDoc.purpose);
+  addString(doc, object, "apiVersion", renderDoc.apiVersion);
+  addPath(doc, object, "toolPath", renderDoc.toolPath);
+  addPath(doc, object, "capturePath", renderDoc.capturePath);
+  addPath(doc, object, "captureLogPath", renderDoc.captureLogPath);
+  addPath(doc, object, "chromeTracePath", renderDoc.chromeTracePath);
+  addPath(doc, object, "conversionLogPath", renderDoc.conversionLogPath);
+  addPath(doc, object, "thumbnailPath", renderDoc.thumbnailPath);
+  addString(doc, object, "captureCommand", renderDoc.captureCommand);
+  yyjson_mut_obj_add_uint(doc, object, "captureFrame", renderDoc.captureFrame);
+  yyjson_mut_obj_add_sint(doc, object, "launcherExitCode",
+                          renderDoc.launcherExitCode);
+  yyjson_mut_obj_add_sint(doc, object, "conversionExitCode",
+                          renderDoc.conversionExitCode);
+  yyjson_mut_obj_add_uint(doc, object, "captureSizeBytes",
+                          renderDoc.captureSizeBytes);
+  yyjson_mut_obj_add_uint(doc, object, "chromeTraceSizeBytes",
+                          renderDoc.chromeTraceSizeBytes);
+  yyjson_mut_obj_add_uint(doc, object, "chromeEventCount",
+                          renderDoc.chromeEventCount);
+  yyjson_mut_obj_add_uint(doc, object, "drawCallCount",
+                          renderDoc.drawCallCount);
+  yyjson_mut_obj_add_uint(doc, object, "dispatchCallCount",
+                          renderDoc.dispatchCallCount);
+  yyjson_mut_obj_add_uint(doc, object, "barrierCallCount",
+                          renderDoc.barrierCallCount);
+  yyjson_mut_obj_add_uint(doc, object, "copyCallCount",
+                          renderDoc.copyCallCount);
+  return object;
+}
+
 [[nodiscard]] std::string readString(yyjson_val *object, const char *key,
                                      std::string defaultValue = {}) {
   yyjson_val *value = yyjson_obj_get(object, key);
@@ -1383,6 +1515,11 @@ yyjson_mut_val *makeTracyObject(yyjson_mut_doc *doc,
     return defaultValue;
   }
   return std::string(yyjson_get_str(value), yyjson_get_len(value));
+}
+
+[[nodiscard]] std::filesystem::path readPath(yyjson_val *object,
+                                             const char *key) {
+  return std::filesystem::path(readString(object, key));
 }
 
 [[nodiscard]] bool readBool(yyjson_val *object, const char *key,
@@ -1859,7 +1996,7 @@ readRepeatObservationsInfo(yyjson_val *object) {
     return zone;
   }
   zone.name = readString(object, "name");
-  zone.sourceFile = std::filesystem::path(readString(object, "sourceFile"));
+  zone.sourceFile = readPath(object, "sourceFile");
   zone.sourceLine = readU32(object, "sourceLine");
   zone.totalNs = readU64(object, "totalNs");
   zone.totalPercent = readReal(object, "totalPercent");
@@ -1898,7 +2035,7 @@ readTracyZoneArray(yyjson_val *array) {
   }
   node.name = readString(object, "name");
   node.thread = readString(object, "thread");
-  node.sourceFile = std::filesystem::path(readString(object, "sourceFile"));
+  node.sourceFile = readPath(object, "sourceFile");
   node.sourceLine = readU32(object, "sourceLine");
   node.totalNs = readU64(object, "totalNs");
   node.selfNs = readU64(object, "selfNs");
@@ -1923,8 +2060,7 @@ readTracyZoneArray(yyjson_val *array) {
   if (!yyjson_is_obj(object)) {
     return flameGraph;
   }
-  flameGraph.eventsCsvPath =
-      std::filesystem::path(readString(object, "eventsCsvPath"));
+  flameGraph.eventsCsvPath = readPath(object, "eventsCsvPath");
   flameGraph.eventsExportCommand = readString(object, "eventsExportCommand");
   flameGraph.frameScoped = readBool(object, "frameScoped");
   flameGraph.eventCount = readU64(object, "eventCount");
@@ -1940,17 +2076,12 @@ readTracyZoneArray(yyjson_val *array) {
     return tracy;
   }
   tracy.available = readBool(object, "available");
-  tracy.tracePath = std::filesystem::path(readString(object, "tracePath"));
-  tracy.captureLogPath =
-      std::filesystem::path(readString(object, "captureLogPath"));
-  tracy.zonesCsvPath =
-      std::filesystem::path(readString(object, "zonesCsvPath"));
-  tracy.selfZonesCsvPath =
-      std::filesystem::path(readString(object, "selfZonesCsvPath"));
-  tracy.gpuEventsCsvPath =
-      std::filesystem::path(readString(object, "gpuEventsCsvPath"));
-  tracy.exportLogPath =
-      std::filesystem::path(readString(object, "exportLogPath"));
+  tracy.tracePath = readPath(object, "tracePath");
+  tracy.captureLogPath = readPath(object, "captureLogPath");
+  tracy.zonesCsvPath = readPath(object, "zonesCsvPath");
+  tracy.selfZonesCsvPath = readPath(object, "selfZonesCsvPath");
+  tracy.gpuEventsCsvPath = readPath(object, "gpuEventsCsvPath");
+  tracy.exportLogPath = readPath(object, "exportLogPath");
   tracy.captureCommand = readString(object, "captureCommand");
   tracy.zonesExportCommand = readString(object, "zonesExportCommand");
   tracy.selfZonesExportCommand = readString(object, "selfZonesExportCommand");
@@ -1967,7 +2098,69 @@ readTracyZoneArray(yyjson_val *array) {
   return tracy;
 }
 
+[[nodiscard]] BenchmarkRgpReport readRgpReport(yyjson_val *object) {
+  BenchmarkRgpReport rgp{};
+  if (!yyjson_is_obj(object)) {
+    return rgp;
+  }
+  rgp.requested = readBool(object, "requested");
+  rgp.available = readBool(object, "available");
+  rgp.purpose = readString(object, "purpose", "shader-diagnostic-only");
+  rgp.toolPath = readPath(object, "toolPath");
+  rgp.tracePath = readPath(object, "tracePath");
+  rgp.captureLogPath = readPath(object, "captureLogPath");
+  rgp.captureCommand = readString(object, "captureCommand");
+  rgp.captureFrame = readU32(object, "captureFrame", 30u);
+  rgp.counterCollectionRequested =
+      readBool(object, "counterCollectionRequested");
+  rgp.derivedCounterCount = readU32(object, "derivedCounterCount");
+  rgp.captureExitCode = readS32(object, "captureExitCode", -1);
+  rgp.traceSizeBytes = readU64(object, "traceSizeBytes");
+  return rgp;
+}
+
+[[nodiscard]] BenchmarkRenderDocReport readRenderDocReport(yyjson_val *object) {
+  BenchmarkRenderDocReport renderDoc{};
+  if (!yyjson_is_obj(object)) {
+    return renderDoc;
+  }
+  renderDoc.requested = readBool(object, "requested");
+  renderDoc.available = readBool(object, "available");
+  renderDoc.captureTriggered = readBool(object, "captureTriggered");
+  renderDoc.purpose = readString(object, "purpose", "frame-forensics-only");
+  renderDoc.apiVersion = readString(object, "apiVersion");
+  renderDoc.toolPath = readPath(object, "toolPath");
+  renderDoc.capturePath = readPath(object, "capturePath");
+  renderDoc.captureLogPath = readPath(object, "captureLogPath");
+  renderDoc.chromeTracePath = readPath(object, "chromeTracePath");
+  renderDoc.conversionLogPath = readPath(object, "conversionLogPath");
+  renderDoc.thumbnailPath = readPath(object, "thumbnailPath");
+  renderDoc.captureCommand = readString(object, "captureCommand");
+  renderDoc.captureFrame = readU32(object, "captureFrame", 30u);
+  renderDoc.launcherExitCode = readS32(object, "launcherExitCode", -1);
+  renderDoc.conversionExitCode = readS32(object, "conversionExitCode", -1);
+  renderDoc.captureSizeBytes = readU64(object, "captureSizeBytes");
+  renderDoc.chromeTraceSizeBytes = readU64(object, "chromeTraceSizeBytes");
+  renderDoc.chromeEventCount = readU32(object, "chromeEventCount");
+  renderDoc.drawCallCount = readU32(object, "drawCallCount");
+  renderDoc.dispatchCallCount = readU32(object, "dispatchCallCount");
+  renderDoc.barrierCallCount = readU32(object, "barrierCallCount");
+  renderDoc.copyCallCount = readU32(object, "copyCallCount");
+  return renderDoc;
+}
+
 } // namespace
+
+std::string_view
+benchmarkDiagnosticLabel(const BenchmarkReport &report) noexcept {
+  if (report.environment.tracyDiagnostic) {
+    return "Tracy";
+  }
+  if (report.rgp.requested) {
+    return "RGP shader";
+  }
+  return report.renderDoc.requested ? "RenderDoc" : std::string_view{};
+}
 
 void computeBenchmarkReportStats(BenchmarkReport &report) {
   report.stats.clear();
@@ -2162,9 +2355,19 @@ writeBenchmarkReportJson(const BenchmarkReport &report, bool verboseFrames) {
   yyjson_mut_obj_add_val(
       doc.get(), artifacts, "tracy",
       makePathArray(doc.get(), report.artifacts.tracyArtifacts));
+  yyjson_mut_obj_add_val(
+      doc.get(), artifacts, "rgp",
+      makePathArray(doc.get(), report.artifacts.rgpArtifacts));
+  yyjson_mut_obj_add_val(
+      doc.get(), artifacts, "renderDoc",
+      makePathArray(doc.get(), report.artifacts.renderDocArtifacts));
   yyjson_mut_obj_add_val(doc.get(), root, "artifacts", artifacts);
   yyjson_mut_obj_add_val(doc.get(), root, "tracy",
                          makeTracyObject(doc.get(), report.tracy));
+  yyjson_mut_obj_add_val(doc.get(), root, "rgp",
+                         makeRgpObject(doc.get(), report.rgp));
+  yyjson_mut_obj_add_val(doc.get(), root, "renderDoc",
+                         makeRenderDocObject(doc.get(), report.renderDoc));
 
   yyjson_mut_val *frames = yyjson_mut_arr(doc.get());
   for (const BenchmarkFrameRecord &frame : report.frames) {
@@ -2338,8 +2541,7 @@ readBenchmarkReportFile(const std::filesystem::path &path) {
     report.benchmarkCase.variant = readString(caseObject, "variant");
     report.benchmarkCase.description = readString(caseObject, "description");
     report.benchmarkCase.backend = readString(caseObject, "backend", "default");
-    report.benchmarkCase.manifestPath =
-        std::filesystem::path(readString(caseObject, "manifestPath"));
+    report.benchmarkCase.manifestPath = readPath(caseObject, "manifestPath");
     yyjson_val *resolution = yyjson_obj_get(caseObject, "resolution");
     if (yyjson_is_arr(resolution) && yyjson_arr_size(resolution) == 2u) {
       report.benchmarkCase.resolution[0] =
@@ -2391,8 +2593,7 @@ readBenchmarkReportFile(const std::filesystem::path &path) {
           readString(scene, "kind", report.benchmarkCase.scene.kind);
       report.benchmarkCase.scene.pathBase =
           readString(scene, "pathBase", report.benchmarkCase.scene.pathBase);
-      report.benchmarkCase.scene.path =
-          std::filesystem::path(readString(scene, "path"));
+      report.benchmarkCase.scene.path = readPath(scene, "path");
       report.benchmarkCase.scene.flipUVs =
           readBool(scene, "flipUVs", report.benchmarkCase.scene.flipUVs);
       report.benchmarkCase.scene.generateMeshlets =
@@ -2475,8 +2676,7 @@ readBenchmarkReportFile(const std::filesystem::path &path) {
 
   yyjson_val *environment = yyjson_obj_get(root, "environment");
   if (yyjson_is_obj(environment)) {
-    report.environment.repoRoot =
-        std::filesystem::path(readString(environment, "repoRoot"));
+    report.environment.repoRoot = readPath(environment, "repoRoot");
     report.environment.commitHash = readString(environment, "commitHash");
     report.environment.branchName = readString(environment, "branchName");
     report.environment.dirty = readBool(environment, "dirty");
@@ -2547,14 +2747,19 @@ readBenchmarkReportFile(const std::filesystem::path &path) {
 
   yyjson_val *artifacts = yyjson_obj_get(root, "artifacts");
   if (yyjson_is_obj(artifacts)) {
-    report.artifacts.artifactDir =
-        std::filesystem::path(readString(artifacts, "artifactDir"));
+    report.artifacts.artifactDir = readPath(artifacts, "artifactDir");
     report.artifacts.caseReports =
         readPathArray(yyjson_obj_get(artifacts, "caseReports"));
     report.artifacts.tracyArtifacts =
         readPathArray(yyjson_obj_get(artifacts, "tracy"));
+    report.artifacts.rgpArtifacts =
+        readPathArray(yyjson_obj_get(artifacts, "rgp"));
+    report.artifacts.renderDocArtifacts =
+        readPathArray(yyjson_obj_get(artifacts, "renderDoc"));
   }
   report.tracy = readTracyReport(yyjson_obj_get(root, "tracy"));
+  report.rgp = readRgpReport(yyjson_obj_get(root, "rgp"));
+  report.renderDoc = readRenderDocReport(yyjson_obj_get(root, "renderDoc"));
 
   yyjson_val *frames = yyjson_obj_get(root, "frames");
   if (yyjson_is_arr(frames)) {

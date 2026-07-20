@@ -235,6 +235,17 @@ compareBenchmarkReports(const BenchmarkReport &current,
                         const BenchmarkReport &baseline,
                         const BenchmarkCompareOptions &options) {
   BenchmarkComparisonReport out{};
+  std::string_view diagnostic = benchmarkDiagnosticLabel(current);
+  if (diagnostic.empty()) {
+    diagnostic = benchmarkDiagnosticLabel(baseline);
+  }
+  if (!diagnostic.empty()) {
+    out.valid = false;
+    out.errors.push_back(std::string(diagnostic) +
+                         " diagnostic reports cannot be compared, including "
+                         "with --force");
+    return out;
+  }
   addCompatibilityError(out, options.force,
                         current.benchmarkCase.id != baseline.benchmarkCase.id,
                         "case id mismatch");

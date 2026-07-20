@@ -209,9 +209,11 @@ validateSourceReport(const BenchmarkBaselineSource &source,
     return Result<void, std::string>::makeError(
         "planBenchmarkBaseline: source authority does not satisfy profile");
   }
-  if (report.environment.tracyDiagnostic) {
+  if (const std::string_view diagnostic = benchmarkDiagnosticLabel(report);
+      !diagnostic.empty()) {
     return Result<void, std::string>::makeError(
-        "planBenchmarkBaseline: Tracy diagnostic reports cannot be accepted");
+        "planBenchmarkBaseline: " + std::string(diagnostic) +
+        " diagnostic reports cannot be accepted");
   }
   if (!validThresholds(report.benchmarkCase.thresholds)) {
     return Result<void, std::string>::makeError(

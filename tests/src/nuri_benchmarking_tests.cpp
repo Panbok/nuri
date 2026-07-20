@@ -242,6 +242,22 @@ writeGovernedBenchmarkSource(const std::filesystem::path &runRoot,
                            : std::move(source.value());
 }
 
+struct DiagnosticReportCase {
+  std::string_view label;
+  void (*mark)(BenchmarkReport &);
+};
+
+const std::array<DiagnosticReportCase, 3> kDiagnosticReportCases{{
+    {"Tracy",
+     [](BenchmarkReport &report) {
+       report.environment.tracyDiagnostic = true;
+     }},
+    {"RGP shader",
+     [](BenchmarkReport &report) { report.rgp.requested = true; }},
+    {"RenderDoc",
+     [](BenchmarkReport &report) { report.renderDoc.requested = true; }},
+}};
+
 BenchmarkCase makeCheckFixtureCase() {
   BenchmarkCase benchmarkCase{};
   benchmarkCase.id = "test.check";
@@ -1296,6 +1312,11 @@ TEST(NuriBenchmarkingTest, ReportWritesReadsAndComputesMeasuredStats) {
   report.artifacts.caseReports = {"artifacts/bench/test/case.json"};
   report.artifacts.tracyArtifacts = {"artifacts/bench/test/tracy/case.tracy",
                                      "artifacts/bench/test/tracy/case.log"};
+  report.artifacts.rgpArtifacts = {"artifacts/bench/test/rgp/case.rgp",
+                                   "artifacts/bench/test/rgp/case.log"};
+  report.artifacts.renderDocArtifacts = {
+      "artifacts/bench/test/renderdoc/case.rdc",
+      "artifacts/bench/test/renderdoc/case.chrome.json"};
   report.tracy.available = true;
   report.tracy.tracePath = "artifacts/bench/test/tracy/case.tracy";
   report.tracy.captureLogPath = "artifacts/bench/test/tracy/case.log";
@@ -1386,6 +1407,42 @@ TEST(NuriBenchmarkingTest, ReportWritesReadsAndComputesMeasuredStats) {
               }},
           }},
       }},
+  };
+  report.rgp = BenchmarkRgpReport{
+      .requested = true,
+      .available = true,
+      .toolPath = "tools/RadeonDeveloperPanelCLI.exe",
+      .tracePath = "artifacts/bench/test/rgp/case.rgp",
+      .captureLogPath = "artifacts/bench/test/rgp/case.log",
+      .captureCommand = "RadeonDeveloperPanelCLI --rgp-counter-collection",
+      .captureFrame = 30u,
+      .counterCollectionRequested = true,
+      .derivedCounterCount = 9u,
+      .captureExitCode = 0,
+      .traceSizeBytes = 4096u,
+  };
+  report.renderDoc = BenchmarkRenderDocReport{
+      .requested = true,
+      .available = true,
+      .captureTriggered = true,
+      .apiVersion = "1.7.0",
+      .toolPath = "tools/renderdoccmd.exe",
+      .capturePath = "artifacts/bench/test/renderdoc/case.rdc",
+      .captureLogPath = "artifacts/bench/test/renderdoc/case.log",
+      .chromeTracePath = "artifacts/bench/test/renderdoc/case.chrome.json",
+      .conversionLogPath = "artifacts/bench/test/renderdoc/case-convert.log",
+      .thumbnailPath = "artifacts/bench/test/renderdoc/case.png",
+      .captureCommand = "renderdoccmd capture nuri-bench.exe",
+      .captureFrame = 30u,
+      .launcherExitCode = 0,
+      .conversionExitCode = 0,
+      .captureSizeBytes = 8192u,
+      .chromeTraceSizeBytes = 2048u,
+      .chromeEventCount = 128u,
+      .drawCallCount = 12u,
+      .dispatchCallCount = 6u,
+      .barrierCallCount = 10u,
+      .copyCallCount = 2u,
   };
   report.timingDrain.drainComplete = false;
   report.timingDrain.drainFrames = 4u;
@@ -1515,6 +1572,8 @@ TEST(NuriBenchmarkingTest, ReportWritesReadsAndComputesMeasuredStats) {
   EXPECT_EQ(loaded.value().artifacts.caseReports[0],
             std::filesystem::path("artifacts/bench/test/case.json"));
   ASSERT_EQ(loaded.value().artifacts.tracyArtifacts.size(), 2u);
+  ASSERT_EQ(loaded.value().artifacts.rgpArtifacts.size(), 2u);
+  ASSERT_EQ(loaded.value().artifacts.renderDocArtifacts.size(), 2u);
   EXPECT_TRUE(loaded.value().tracy.available);
   EXPECT_EQ(loaded.value().tracy.tracePath,
             std::filesystem::path("artifacts/bench/test/tracy/case.tracy"));
@@ -1579,6 +1638,31 @@ TEST(NuriBenchmarkingTest, ReportWritesReadsAndComputesMeasuredStats) {
   ASSERT_EQ(frameNode.children.size(), 1u);
   EXPECT_EQ(frameNode.children[0].name,
             "nuri::RenderPipeline::buildRenderGraph");
+  EXPECT_TRUE(loaded.value().rgp.requested);
+  EXPECT_TRUE(loaded.value().rgp.available);
+  EXPECT_EQ(loaded.value().rgp.purpose, "shader-diagnostic-only");
+  EXPECT_EQ(loaded.value().rgp.tracePath,
+            std::filesystem::path("artifacts/bench/test/rgp/case.rgp"));
+  EXPECT_EQ(loaded.value().rgp.captureFrame, 30u);
+  EXPECT_TRUE(loaded.value().rgp.counterCollectionRequested);
+  EXPECT_EQ(loaded.value().rgp.derivedCounterCount, 9u);
+  EXPECT_EQ(loaded.value().rgp.captureExitCode, 0);
+  EXPECT_EQ(loaded.value().rgp.traceSizeBytes, 4096u);
+  EXPECT_TRUE(loaded.value().renderDoc.requested);
+  EXPECT_TRUE(loaded.value().renderDoc.available);
+  EXPECT_TRUE(loaded.value().renderDoc.captureTriggered);
+  EXPECT_EQ(loaded.value().renderDoc.purpose, "frame-forensics-only");
+  EXPECT_EQ(loaded.value().renderDoc.apiVersion, "1.7.0");
+  EXPECT_EQ(loaded.value().renderDoc.captureFrame, 30u);
+  EXPECT_EQ(loaded.value().renderDoc.launcherExitCode, 0);
+  EXPECT_EQ(loaded.value().renderDoc.conversionExitCode, 0);
+  EXPECT_EQ(loaded.value().renderDoc.captureSizeBytes, 8192u);
+  EXPECT_EQ(loaded.value().renderDoc.chromeTraceSizeBytes, 2048u);
+  EXPECT_EQ(loaded.value().renderDoc.chromeEventCount, 128u);
+  EXPECT_EQ(loaded.value().renderDoc.drawCallCount, 12u);
+  EXPECT_EQ(loaded.value().renderDoc.dispatchCallCount, 6u);
+  EXPECT_EQ(loaded.value().renderDoc.barrierCallCount, 10u);
+  EXPECT_EQ(loaded.value().renderDoc.copyCallCount, 2u);
   EXPECT_EQ(loaded.value().timingDrain.drainComplete, false);
   EXPECT_EQ(loaded.value().timingDrain.drainFrames, 4u);
   EXPECT_EQ(loaded.value().timingDrain.missingGpuTimingFrames, 1u);
@@ -1724,6 +1808,49 @@ TEST(NuriBenchmarkingTest, CompareReportsPassWarnFailAndInvalidPreconditions) {
   EXPECT_NE(std::find(invalid.errors.begin(), invalid.errors.end(),
                       "dirty source trees are not valid comparison evidence"),
             invalid.errors.end());
+}
+
+TEST(NuriBenchmarkingTest, DiagnosticReportsCannotBeComparedEvenWhenForced) {
+  const BenchmarkReport baseline = makeComparableReport(10.0, 12.0, 8.0, 9.0);
+  for (const DiagnosticReportCase &testCase : kDiagnosticReportCases) {
+    SCOPED_TRACE(testCase.label);
+    BenchmarkReport diagnostic = makeComparableReport(10.1, 12.1, 8.1, 9.1);
+    testCase.mark(diagnostic);
+    diagnostic.run.validForComparison = false;
+
+    const BenchmarkComparisonReport comparison = compareBenchmarkReports(
+        diagnostic, baseline, BenchmarkCompareOptions{.force = true});
+
+    EXPECT_FALSE(comparison.valid);
+    EXPECT_TRUE(comparison.metrics.empty());
+    ASSERT_EQ(comparison.errors.size(), 1u);
+    EXPECT_NE(comparison.errors.front().find(testCase.label),
+              std::string::npos);
+  }
+}
+
+TEST(NuriBenchmarkingTest, DiagnosticReportsCannotBecomeBenchmarkBaselines) {
+  for (const DiagnosticReportCase &testCase : kDiagnosticReportCases) {
+    SCOPED_TRACE(testCase.label);
+    const std::filesystem::path tempRoot =
+        makeTempPath("benchmark_diagnostic_baseline_rejection", "");
+    const std::filesystem::path runRoot = tempRoot / "run";
+    std::filesystem::create_directories(runRoot);
+    BenchmarkBaselineSource source = writeGovernedBenchmarkSource(runRoot);
+    testCase.mark(source.report);
+    ASSERT_FALSE(
+        writeBenchmarkReportFile(source.report, source.reportPath, true)
+            .hasError());
+
+    const auto plan = planBenchmarkBaseline(
+        source, makeInvestigativeBaselineProfile(), "diagnostic evidence",
+        "test-agent", tempRoot / "baselines");
+
+    ASSERT_TRUE(plan.hasError());
+    EXPECT_NE(plan.error().find(testCase.label), std::string::npos);
+    std::error_code error;
+    std::filesystem::remove_all(tempRoot, error);
+  }
 }
 
 TEST(NuriBenchmarkingTest, ComparisonUsesBaselineOwnedThresholds) {
