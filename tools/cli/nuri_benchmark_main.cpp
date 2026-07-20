@@ -214,7 +214,8 @@ int main(int argc, char **argv) {
   run->add_flag("--dry-run", dryRun, "Resolve config without renderer init");
   run->add_flag("--print-effective-config", printEffectiveConfig,
                 "Print resolved config before running");
-  run->add_flag("--tracy-diagnostic", tracyDiagnostic, "Diagnostic run");
+  run->add_flag("--tracy-diagnostic", tracyDiagnostic,
+                "Capture benchmark-owned Tracy CPU/GPU diagnostics");
   run->add_flag("--verbose-frames", verboseFrames,
                 "Include verbose frame renderer metrics");
   run->callback([&]() {
@@ -416,7 +417,8 @@ int main(int argc, char **argv) {
       ->required();
   child->add_flag("--dry-run", childDryRun,
                   "Resolve config without renderer init");
-  child->add_flag("--tracy-diagnostic", childTracyDiagnostic, "Diagnostic run");
+  child->add_flag("--tracy-diagnostic", childTracyDiagnostic,
+                  "Capture benchmark-owned Tracy CPU/GPU diagnostics");
   child->add_flag("--verbose-frames", childVerboseFrames,
                   "Include verbose frame renderer metrics");
   child->callback([&]() {

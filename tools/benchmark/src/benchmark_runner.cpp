@@ -903,6 +903,19 @@ void trimLineEnd(std::string &line) {
   return end == cleaned.c_str() ? 0.0 : value;
 }
 
+void sortAndLimitTracyZones(std::vector<BenchmarkTracyZoneStats> &zones) {
+  std::sort(zones.begin(), zones.end(),
+            [](const BenchmarkTracyZoneStats &lhs,
+               const BenchmarkTracyZoneStats &rhs) {
+              return lhs.totalNs != rhs.totalNs ? lhs.totalNs > rhs.totalNs
+                                                : lhs.name < rhs.name;
+            });
+  constexpr size_t kMaxTracyZoneRows = 80u;
+  if (zones.size() > kMaxTracyZoneRows) {
+    zones.resize(kMaxTracyZoneRows);
+  }
+}
+
 [[nodiscard]] std::vector<BenchmarkTracyZoneStats>
 readTracyZoneCsv(const std::filesystem::path &path) {
   std::ifstream file(path, std::ios::binary);
@@ -939,18 +952,104 @@ readTracyZoneCsv(const std::filesystem::path &path) {
     zones.push_back(std::move(zone));
   }
 
-  std::sort(zones.begin(), zones.end(),
-            [](const BenchmarkTracyZoneStats &lhs,
-               const BenchmarkTracyZoneStats &rhs) {
-              if (lhs.totalNs != rhs.totalNs) {
-                return lhs.totalNs > rhs.totalNs;
-              }
-              return lhs.name < rhs.name;
-            });
-  constexpr size_t kMaxTracyZoneRows = 80u;
-  if (zones.size() > kMaxTracyZoneRows) {
-    zones.resize(kMaxTracyZoneRows);
+  sortAndLimitTracyZones(zones);
+  return zones;
+}
+
+[[nodiscard]] bool
+tracyCsvExporterSupportsGpuEvents(const std::filesystem::path &exportTool) {
+  const nuri::tools::core::ProcessResult result =
+      nuri::tools::core::runProcess(nuri::tools::core::ProcessCommand{
+          .executable = exportTool,
+          .arguments = {"--help"},
+      });
+  const std::string help = result.standardOutput + result.standardError;
+  return help.find("--gpu") != std::string::npos ||
+         help.find("Report each gpu zone event") != std::string::npos;
+}
+
+[[nodiscard]] std::vector<BenchmarkTracyZoneStats>
+readTracyGpuEventCsv(const std::filesystem::path &path,
+                     uint64_t &outEventCount) {
+  outEventCount = 0u;
+  std::ifstream file(path, std::ios::binary);
+  if (!file) {
+    return {};
   }
+  std::string line;
+  if (!std::getline(file, line)) {
+    return {};
+  }
+  trimLineEnd(line);
+  const std::vector<std::string> header = splitCsvLine(line);
+  const auto findColumn = [&header](std::string_view name) {
+    const auto found = std::find(header.begin(), header.end(), name);
+    return found == header.end()
+               ? std::numeric_limits<size_t>::max()
+               : static_cast<size_t>(std::distance(header.begin(), found));
+  };
+  const size_t nameColumn = findColumn("name");
+  const size_t sourceColumn = findColumn("src_file");
+  const size_t durationColumn = findColumn("GPU execution time");
+  if (nameColumn == std::numeric_limits<size_t>::max() ||
+      sourceColumn == std::numeric_limits<size_t>::max() ||
+      durationColumn == std::numeric_limits<size_t>::max()) {
+    return {};
+  }
+  const size_t requiredColumn =
+      std::max({nameColumn, sourceColumn, durationColumn});
+  std::map<std::pair<std::string, std::string>, std::vector<double>> samples;
+  while (std::getline(file, line)) {
+    trimLineEnd(line);
+    if (line.empty()) {
+      continue;
+    }
+    std::vector<std::string> fields = splitCsvLine(line);
+    if (fields.size() <= requiredColumn) {
+      continue;
+    }
+    const uint64_t durationNs = parseU64Field(fields[durationColumn]);
+    if (fields[nameColumn].empty() || durationNs == 0u) {
+      continue;
+    }
+    auto [sample, inserted] = samples.try_emplace(std::pair{
+        std::move(fields[nameColumn]), std::move(fields[sourceColumn])});
+    (void)inserted;
+    sample->second.push_back(static_cast<double>(durationNs));
+    ++outEventCount;
+  }
+
+  uint64_t allZonesTotalNs = 0u;
+  std::vector<BenchmarkTracyZoneStats> zones;
+  zones.reserve(samples.size());
+  for (const auto &[key, durations] : samples) {
+    auto statsResult = computeMetricStats(durations);
+    if (statsResult.hasError()) {
+      continue;
+    }
+    const MetricStats &stats = statsResult.value();
+    BenchmarkTracyZoneStats zone{};
+    zone.name = key.first;
+    zone.sourceFile = std::filesystem::path(key.second);
+    zone.count = stats.count;
+    zone.totalNs = static_cast<uint64_t>(
+        std::llround(stats.mean * static_cast<double>(stats.count)));
+    zone.meanNs = stats.mean;
+    zone.medianNs = static_cast<uint64_t>(std::llround(stats.median));
+    zone.p95Ns = static_cast<uint64_t>(std::llround(stats.p95));
+    zone.minNs = static_cast<uint64_t>(std::llround(stats.min));
+    zone.maxNs = static_cast<uint64_t>(std::llround(stats.max));
+    zone.stddevNs = stats.stddev;
+    allZonesTotalNs += zone.totalNs;
+    zones.push_back(std::move(zone));
+  }
+  for (BenchmarkTracyZoneStats &zone : zones) {
+    zone.totalPercent = allZonesTotalNs == 0u
+                            ? 0.0
+                            : 100.0 * static_cast<double>(zone.totalNs) /
+                                  static_cast<double>(allZonesTotalNs);
+  }
+  sortAndLimitTracyZones(zones);
   return zones;
 }
 
@@ -1220,10 +1319,6 @@ void readTracyCaptureSummary(BenchmarkTracyReport &tracy) {
 struct TracyCaptureSession {
   std::filesystem::path tracePath{};
   std::filesystem::path logPath{};
-  std::filesystem::path zonesCsvPath{};
-  std::filesystem::path selfZonesCsvPath{};
-  std::filesystem::path eventsCsvPath{};
-  std::filesystem::path exportLogPath{};
   std::string command{};
   std::future<int> exitCode{};
   bool started = false;
@@ -1259,13 +1354,14 @@ struct TracyCaptureSession {
       return;
     }
 
-    zonesCsvPath =
+    const std::filesystem::path zonesCsvPath =
         tracePath.parent_path() / (tracePath.stem().string() + ".zones.csv");
-    selfZonesCsvPath = tracePath.parent_path() /
-                       (tracePath.stem().string() + ".zones_self.csv");
-    eventsCsvPath =
+    const std::filesystem::path selfZonesCsvPath =
+        tracePath.parent_path() /
+        (tracePath.stem().string() + ".zones_self.csv");
+    const std::filesystem::path eventsCsvPath =
         tracePath.parent_path() / (tracePath.stem().string() + ".events.csv");
-    exportLogPath =
+    const std::filesystem::path exportLogPath =
         tracePath.parent_path() / (tracePath.stem().string() + ".export.log");
 
     const std::filesystem::path absoluteTracePath =
@@ -1274,6 +1370,8 @@ struct TracyCaptureSession {
     report.tracy.selfZonesCsvPath = selfZonesCsvPath;
     report.tracy.exportLogPath = exportLogPath;
     report.tracy.flameGraph.eventsCsvPath = eventsCsvPath;
+    report.tracy.gpuEventsExportSupported =
+        tracyCsvExporterSupportsGpuEvents(*exportTool);
     report.tracy.zonesExportCommand =
         quoteCommandArg(*exportTool) + " " + quoteCommandArg(absoluteTracePath);
     report.tracy.selfZonesExportCommand = quoteCommandArg(*exportTool) +
@@ -1331,6 +1429,35 @@ struct TracyCaptureSession {
       report.warnings.push_back(
           "tracy-csvexport event export exited with code " +
           std::to_string(eventsCode));
+    }
+
+    if (report.tracy.gpuEventsExportSupported) {
+      const std::filesystem::path gpuEventsCsvPath =
+          tracePath.parent_path() /
+          (tracePath.stem().string() + ".gpu_events.csv");
+      report.tracy.gpuEventsCsvPath = gpuEventsCsvPath;
+      report.tracy.gpuEventsExportCommand = quoteCommandArg(*exportTool) +
+                                            " -g " +
+                                            quoteCommandArg(absoluteTracePath);
+      const nuri::tools::core::ProcessCommand gpuEventsCommand{
+          .executable = *exportTool,
+          .arguments = {"-g", pathToUtf8(absoluteTracePath)}};
+      const int gpuEventsCode = runCommandToFile(
+          gpuEventsCommand, report.tracy.gpuEventsExportCommand,
+          gpuEventsCsvPath, exportLogPath);
+      if (gpuEventsCode == 0) {
+        report.tracy.gpuZones = readTracyGpuEventCsv(
+            gpuEventsCsvPath, report.tracy.gpuZoneEventCount);
+        addArtifactOnce(report.artifacts.tracyArtifacts, gpuEventsCsvPath);
+      } else {
+        report.warnings.push_back(
+            "tracy-csvexport GPU event export exited with code " +
+            std::to_string(gpuEventsCode));
+      }
+    } else {
+      report.warnings.push_back(
+          "tracy-csvexport does not support GPU event CSV export; the raw "
+          "trace remains available for Tracy GPU-zone inspection");
     }
 
     addArtifactOnce(report.artifacts.tracyArtifacts, exportLogPath);

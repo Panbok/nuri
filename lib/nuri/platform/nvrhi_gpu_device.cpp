@@ -38,6 +38,9 @@
 #include <unordered_set>
 #include <variant>
 #include <vulkan/vulkan.hpp>
+#if defined(NURI_PROFILING)
+#include <tracy/TracyVulkan.hpp>
+#endif
 #if defined(_WIN32)
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -1099,6 +1102,9 @@ struct GPUDeviceImpl {
   VkDevice device = VK_NULL_HANDLE;
   VkQueue graphicsQueue = VK_NULL_HANDLE;
   VkQueue assetCopyQueue = VK_NULL_HANDLE;
+#if defined(NURI_PROFILING)
+  TracyVkCtx tracyGraphicsContext = nullptr;
+#endif
   uint32_t graphicsQueueFamily = 0u;
   bool hasDedicatedAssetCopyQueue = false;
   bool graphicsQueueTimestampsSupported = false;
@@ -1406,6 +1412,44 @@ void destroyWholeFrameTimingSlot(Impl &impl, NvrhiWholeFrameTimingSlot &slot) {
   }
   return true;
 }
+#if defined(NURI_PROFILING)
+[[nodiscard]] bool initializeTracyGraphicsContext(Impl &impl) {
+  if (!impl.graphicsQueueTimestampsSupported || impl.device == VK_NULL_HANDLE ||
+      impl.graphicsQueue == VK_NULL_HANDLE ||
+      impl.availableWholeFrameTimingSlots.empty()) {
+    return false;
+  }
+  VkCommandPool commandPool = VK_NULL_HANDLE;
+  const VkCommandPoolCreateInfo poolInfo{
+      .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+      .flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT,
+      .queueFamilyIndex = impl.graphicsQueueFamily,
+  };
+  if (vkCreateCommandPool(impl.device, &poolInfo, nullptr, &commandPool) !=
+      VK_SUCCESS) {
+    return false;
+  }
+  VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+  const VkCommandBufferAllocateInfo allocateInfo{
+      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+      .commandPool = commandPool,
+      .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+      .commandBufferCount = 1u,
+  };
+  if (vkAllocateCommandBuffers(impl.device, &allocateInfo, &commandBuffer) ==
+      VK_SUCCESS) {
+    impl.tracyGraphicsContext = TracyVkContext(
+        impl.physicalDevice, impl.device, impl.graphicsQueue, commandBuffer);
+    if (impl.tracyGraphicsContext != nullptr) {
+      constexpr std::string_view kContextName = "Nuri Graphics";
+      TracyVkContextName(impl.tracyGraphicsContext, kContextName.data(),
+                         static_cast<uint16_t>(kContextName.size()));
+    }
+  }
+  vkDestroyCommandPool(impl.device, commandPool, nullptr);
+  return impl.tracyGraphicsContext != nullptr;
+}
+#endif
 [[nodiscard]] NvrhiWholeFrameTimingSlot
 acquireWholeFrameTimingSlot(Impl &impl) {
   if (impl.availableWholeFrameTimingSlots.empty()) {
@@ -1440,6 +1484,11 @@ acquireWholeFrameTimingSlot(Impl &impl) {
   }
   vkCmdWriteTimestamp2(endCommandBuffer, VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT,
                        result.queryPool, 1u);
+#if defined(NURI_PROFILING)
+  if (impl.tracyGraphicsContext != nullptr) {
+    TracyVkCollect(impl.tracyGraphicsContext, endCommandBuffer);
+  }
+#endif
   result.commandLists[1]->close();
   return result;
 }
@@ -2349,6 +2398,13 @@ void destroyDebugMessenger(Impl &impl) {
         "GPUDevice: whole-frame GPU timing disabled because its fixed "
         "query ring could not be created");
   }
+#if defined(NURI_PROFILING)
+  if (!initializeTracyGraphicsContext(impl)) {
+    NURI_LOG_WARNING(
+        "GPUDevice: Tracy graphics profiling is unavailable because the "
+        "graphics timestamp context could not be created");
+  }
+#endif
   return Result<bool, std::string>::makeResult(true);
 }
 [[nodiscard]] Result<bool, std::string> createGlobalBindingLayouts(Impl &impl) {
@@ -2698,6 +2754,12 @@ void destroyVulkan(Impl &impl) {
     impl.nvrhiDevice->runGarbageCollection();
     collectCompletedGpuTimingSubmissions(impl);
   }
+#if defined(NURI_PROFILING)
+  if (impl.tracyGraphicsContext != nullptr) {
+    TracyVkDestroy(impl.tracyGraphicsContext);
+    impl.tracyGraphicsContext = nullptr;
+  }
+#endif
   for (PendingGpuTimingSubmission &pending : impl.pendingGpuTimingSubmissions) {
     destroyWholeFrameTimingSlot(impl, pending.wholeFrameTiming);
   }
@@ -3794,6 +3856,27 @@ recordRenderPass(Impl &impl,
                  std::vector<nvrhi::FramebufferHandle> *framebuffers,
                  std::vector<NvrhiTimingQuery> *timingQueries,
                  nvrhi::ICommandList &commandList, const RenderPass &pass) {
+#if defined(NURI_PROFILING)
+  constexpr size_t kMaxMarkerLabelBytes = 255u;
+  constexpr std::string_view kUnnamedPass = "Unnamed Render Pass";
+  const std::string_view profilerLabel =
+      pass.debugLabel.empty() ? kUnnamedPass : pass.debugLabel;
+  std::array<char, kMaxMarkerLabelBytes + 1u> markerLabel{};
+  const size_t markerLabelSize =
+      std::min(profilerLabel.size(), kMaxMarkerLabelBytes);
+  std::memcpy(markerLabel.data(), profilerLabel.data(), markerLabelSize);
+  nvrhi::utils::ScopedMarker passMarker(&commandList, markerLabel.data());
+  const nvrhi::Object nativeCommandBuffer =
+      commandList.getNativeObject(nvrhi::ObjectTypes::VK_CommandBuffer);
+  const VkCommandBuffer vkCommandBuffer =
+      static_cast<VkCommandBuffer>(nativeCommandBuffer);
+  tracy::VkCtxScope tracyGpuPassZone(
+      impl.tracyGraphicsContext, __LINE__, __FILE__, std::strlen(__FILE__),
+      __FUNCTION__, std::strlen(__FUNCTION__), profilerLabel.data(),
+      profilerLabel.size(), vkCommandBuffer,
+      impl.tracyGraphicsContext != nullptr &&
+          vkCommandBuffer != VK_NULL_HANDLE);
+#endif
   ScopedNvrhiPassTiming passTiming(impl, commandList, timingQueries,
                                    pass.gpuTimingScope, pass.debugLabel);
   const bool copyOnly = pass.executionMode == RenderPassExecutionMode::CopyOnly;

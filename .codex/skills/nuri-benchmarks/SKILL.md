@@ -44,15 +44,64 @@ Tracy is a benchmark diagnostic artifact, not a separate first-choice workflow.
 - For a diagnostic trace, build/run with Tracy enabled and ask the benchmark to
   own the capture:
   `scripts/run_benchmarks.bat release cpu run --case <id> --tracy-diagnostic --artifact-dir artifacts/bench/<run-id>`.
+  The `cpu` profiling mode enables both CPU and Vulkan GPU Tracy instrumentation.
+  Render-graph passes appear as GPU zones on the `Nuri Graphics` context and as
+  Vulkan debug-marker ranges for external GPU profilers.
 - Visual correctness is still separate: run `nuri-snapshot run` after renderer
   changes. Do not approve visual baselines unless explicitly asked.
 
+## GPU Evidence
+
+- Profiling-off release `nuri-bench` remains the performance oracle. Use
+  `gpu.frame_ms` for the graphics-queue frame envelope, relevant
+  `gpu.scopes.*` metrics for feature totals, and
+  `rendergraph.pass.*.gpu_ms` for pass-level regression localization.
+- `gpu.scopes_sum_ms` is not whole-frame GPU time: it excludes untimed work,
+  queue gaps, present, and child scopes whose parent is already present.
+- A Tracy diagnostic is intentionally non-authoritative because its timestamp
+  queries and debug markers perturb the workload. Use it after a profiling-off
+  regression is reproduced.
+- Start with the benchmark JSON. Under `tracy`, inspect `tracePath`,
+  `gpuEventsExportSupported`, `gpuZoneEventCount`, `gpuZones`, and
+  `gpuEventsCsvPath`. GPU zone rows report total, mean, P50, P95, maximum, and
+  event count. The HTML report shows the same table.
+- The raw `.tracy` trace can contain GPU pass zones even when the installed
+  `tracy-csvexport` is too old to support `-g`. In that case the report records
+  `gpuEventsExportSupported: false`; open the trace in the matching Tracy GUI
+  and do not claim that GPU CSV aggregation was collected.
+- The benchmark-tools vcpkg feature installs `tracy-capture` and
+  `tracy-csvexport`. Keep Tracy capture/client/exporter versions matched. A
+  missing capture tool is an unavailable diagnostic environment, not a renderer
+  regression.
+
+## Shader And Vendor Diagnostics
+
+- Tracy answers **which pass is slow and when it executes**. It does not explain
+  shader occupancy, register pressure, cache behavior, divergence, or stall
+  reasons.
+- On NVIDIA, open a Tracy-identified pass in Nsight Graphics Shader Profiler.
+  Use the Vulkan pass marker to correlate it, then inspect source/ISA hotspots,
+  registers per thread, theoretical occupancy, instruction mix, and stall
+  reasons.
+- On AMD, use Radeon GPU Profiler for queue timing, barriers, wave occupancy,
+  and instruction timing. Use Radeon GPU Analyzer for offline GLSL/SPIR-V ISA,
+  VGPR/SGPR, and LDS analysis.
+- RenderDoc is a correctness and frame-inspection tool here, not the authority
+  for frame-time or shader-throughput conclusions.
+- Vendor counters, Vulkan pipeline statistics, static SPIR-V instruction counts,
+  and pipeline executable properties are diagnostic and device/driver specific.
+  Never use them as portable baseline gates. Normalize shader experiments by
+  unchanged workload counts where possible and pin GPU, driver, build, settings,
+  resolution, and power/clock policy.
+- Pair a vendor capture with the owning real-renderer benchmark case. A synthetic
+  shader microbenchmark may answer a focused algorithm question, but cannot
+  replace the full pass because bandwidth, cache, occupancy, and scheduling
+  interactions differ.
+
 ## Policy
 
-- Treat `gpu.scopes_sum_ms` as a pass-scope sum, not a full GPU frame time. It
-  excludes untimed work, queue gaps, and present.
 - Prefer required benchmark metrics for gates: `cpu.render_submit_ms`,
-  `gpu.scopes_sum_ms`, relevant `gpu.scopes.*`, and relevant
+  `gpu.frame_ms`, `gpu.scopes_sum_ms`, relevant `gpu.scopes.*`, and relevant
   `rendergraph.pass.*.{cpu_ms,gpu_ms}` rows.
 - Renderer benchmark cases should use the project perf profile unless a case is
   intentionally a smoke exception: GTAO Ultra, Shadows enabled Ultra, TAA Ultra.

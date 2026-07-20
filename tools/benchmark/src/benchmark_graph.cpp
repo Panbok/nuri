@@ -317,9 +317,12 @@ struct PassTimingRow {
 };
 
 struct TracyZoneRow {
-  std::string reportLabel{};
-  BenchmarkTracyZoneStats zone{};
+  std::string_view reportLabel{};
+  const BenchmarkTracyZoneStats *zone = nullptr;
 };
+
+using TracyZoneMember =
+    std::vector<BenchmarkTracyZoneStats> BenchmarkTracyReport::*;
 
 [[nodiscard]] bool parsePassTimingMetric(std::string_view metric,
                                          PassTimingMetricKey &key, bool &cpu) {
@@ -636,26 +639,26 @@ void appendTracyFlameGraphs(std::ostringstream &out,
 
 [[nodiscard]] std::vector<TracyZoneRow>
 collectTracyZoneRows(std::span<const BenchmarkReport> reports,
-                     std::span<const std::string> labels, bool selfTime) {
+                     std::span<const std::string> labels,
+                     TracyZoneMember zoneMember) {
   std::vector<TracyZoneRow> rows;
   for (size_t reportIndex = 0u; reportIndex < reports.size(); ++reportIndex) {
     const std::vector<BenchmarkTracyZoneStats> &zones =
-        selfTime ? reports[reportIndex].tracy.selfZones
-                 : reports[reportIndex].tracy.zones;
+        reports[reportIndex].tracy.*zoneMember;
     for (const BenchmarkTracyZoneStats &zone : zones) {
       rows.push_back(
-          TracyZoneRow{.reportLabel = labels[reportIndex], .zone = zone});
+          TracyZoneRow{.reportLabel = labels[reportIndex], .zone = &zone});
     }
   }
   std::sort(rows.begin(), rows.end(),
             [](const TracyZoneRow &lhs, const TracyZoneRow &rhs) {
-              if (lhs.zone.totalNs != rhs.zone.totalNs) {
-                return lhs.zone.totalNs > rhs.zone.totalNs;
+              if (lhs.zone->totalNs != rhs.zone->totalNs) {
+                return lhs.zone->totalNs > rhs.zone->totalNs;
               }
               if (lhs.reportLabel != rhs.reportLabel) {
                 return lhs.reportLabel < rhs.reportLabel;
               }
-              return lhs.zone.name < rhs.zone.name;
+              return lhs.zone->name < rhs.zone->name;
             });
   constexpr size_t kMaxTracyRows = 80u;
   if (rows.size() > kMaxTracyRows) {
@@ -667,8 +670,10 @@ collectTracyZoneRows(std::span<const BenchmarkReport> reports,
 void appendTracyZoneTable(std::ostringstream &out,
                           std::span<const BenchmarkReport> reports,
                           std::span<const std::string> labels, bool selfTime) {
+  const TracyZoneMember zoneMember = selfTime ? &BenchmarkTracyReport::selfZones
+                                              : &BenchmarkTracyReport::zones;
   const std::vector<TracyZoneRow> rows =
-      collectTracyZoneRows(reports, labels, selfTime);
+      collectTracyZoneRows(reports, labels, zoneMember);
   out << "<h3>"
       << (selfTime ? "Top Tracy Self-Time Zones" : "Top Tracy Inclusive Zones")
       << "</h3>";
@@ -684,14 +689,50 @@ void appendTracyZoneTable(std::ostringstream &out,
          "<th scope=\"col\">Max</th><th scope=\"col\">Share</th>"
          "</tr></thead><tbody>";
   for (const TracyZoneRow &row : rows) {
+    const BenchmarkTracyZoneStats &zone = *row.zone;
     out << "<tr><td>" << escapeHtml(row.reportLabel) << "</td><td>"
-        << escapeHtml(row.zone.name) << "</td><td>"
-        << escapeHtml(sourceLocation(row.zone)) << "</td><td>"
-        << formatCount(row.zone.count) << "</td><td>"
-        << formatNsAsMs(static_cast<double>(row.zone.totalNs)) << "</td><td>"
-        << formatNsAsMs(row.zone.meanNs) << "</td><td>"
-        << formatNsAsMs(static_cast<double>(row.zone.maxNs)) << "</td><td>"
-        << formatPercent(row.zone.totalPercent) << "</td></tr>";
+        << escapeHtml(zone.name) << "</td><td>"
+        << escapeHtml(sourceLocation(zone)) << "</td><td>"
+        << formatCount(zone.count) << "</td><td>"
+        << formatNsAsMs(static_cast<double>(zone.totalNs)) << "</td><td>"
+        << formatNsAsMs(zone.meanNs) << "</td><td>"
+        << formatNsAsMs(static_cast<double>(zone.maxNs)) << "</td><td>"
+        << formatPercent(zone.totalPercent) << "</td></tr>";
+  }
+  out << "</tbody></table></div>";
+}
+
+void appendTracyGpuZoneTable(std::ostringstream &out,
+                             std::span<const BenchmarkReport> reports,
+                             std::span<const std::string> labels) {
+  const std::vector<TracyZoneRow> rows =
+      collectTracyZoneRows(reports, labels, &BenchmarkTracyReport::gpuZones);
+  out << "<h3>Tracy GPU Zones</h3>";
+  if (rows.empty()) {
+    out << "<p class=\"empty\">No Tracy GPU zone rows were exported. The raw "
+           "trace may still contain GPU zones when the installed exporter "
+           "does not support <code>-g</code>.</p>";
+    return;
+  }
+  out << "<div class=\"table-wrap tracy-table-wrap\"><table><thead><tr>"
+         "<th scope=\"col\">Report</th><th scope=\"col\">GPU zone</th>"
+         "<th scope=\"col\">Source</th><th scope=\"col\">Count</th>"
+         "<th scope=\"col\">Total</th><th scope=\"col\">Mean</th>"
+         "<th scope=\"col\">P50</th><th scope=\"col\">P95</th>"
+         "<th scope=\"col\">Max</th><th scope=\"col\">Share</th>"
+         "</tr></thead><tbody>";
+  for (const TracyZoneRow &row : rows) {
+    const BenchmarkTracyZoneStats &zone = *row.zone;
+    out << "<tr><td>" << escapeHtml(row.reportLabel) << "</td><td>"
+        << escapeHtml(zone.name) << "</td><td>"
+        << escapeHtml(sourceLocation(zone)) << "</td><td>"
+        << formatCount(zone.count) << "</td><td>"
+        << formatNsAsMs(static_cast<double>(zone.totalNs)) << "</td><td>"
+        << formatNsAsMs(zone.meanNs) << "</td><td>"
+        << formatNsAsMs(static_cast<double>(zone.medianNs)) << "</td><td>"
+        << formatNsAsMs(static_cast<double>(zone.p95Ns)) << "</td><td>"
+        << formatNsAsMs(static_cast<double>(zone.maxNs)) << "</td><td>"
+        << formatPercent(zone.totalPercent) << "</td></tr>";
   }
   out << "</tbody></table></div>";
 }
@@ -722,7 +763,7 @@ void appendReportTable(std::ostringstream &out,
         << escapeHtml(report.environment.buildType) << "</td><td>"
         << report.run.warmupFrames << " / " << report.run.measurementFrames
         << " / " << report.run.cooldownFrames << "</td><td>"
-        << (report.environment.tracyEnabled ? "cpu" : "off") << "</td><td>"
+        << (report.environment.tracyEnabled ? "cpu+gpu" : "off") << "</td><td>"
         << (report.timingDrain.drainComplete ? "complete" : "timeout")
         << ", missing " << report.timingDrain.missingGpuTimingFrames
         << ", dropped " << report.timingDrain.droppedGpuTimingReports
@@ -751,7 +792,8 @@ void appendTracySection(std::ostringstream &out,
   if (!hasTracy) {
     out << "<section class=\"panel tracy-panel\" id=\"tracy\"><div "
            "class=\"section-head\"><div><h2>Tracy diagnostics</h2><p>CPU "
-           "call-stack evidence for targeted performance investigation.</p>"
+           "call-stack and GPU queue evidence for targeted performance "
+           "investigation.</p>"
            "</div><span class=\"status-badge status-unavailable\">not "
            "collected</span></div><div class=\"diagnostics tone-warn\" "
            "role=\"status\"><h3>Tracy diagnostics were not collected</h3>"
@@ -766,8 +808,8 @@ void appendTracySection(std::ostringstream &out,
   out << "<section class=\"panel tracy-panel\" id=\"tracy\"><div "
          "class=\"section-head\">"
          "<div><h2>Tracy Capture Stats</h2><p>Diagnostic capture summary and "
-         "top zones exported from tracy-csvexport. Inclusive rows include "
-         "child-zone time; self-time rows remove child-zone time.</p></div>"
+         "CPU and GPU zones exported from tracy-csvexport. Inclusive CPU rows "
+         "include child-zone time; self-time rows remove it.</p></div>"
          "<span>diagnostic</span></div><div class=\"table-wrap\"><table "
          "class=\"tracy-summary-table\">"
          "<caption>Tracy diagnostic capture availability and exported "
@@ -775,8 +817,9 @@ void appendTracySection(std::ostringstream &out,
          "<thead><tr><th scope=\"col\">Report</th><th scope=\"col\">Status</th>"
          "<th scope=\"col\">Frames</th><th scope=\"col\">Span</th>"
          "<th scope=\"col\">Zone events</th><th scope=\"col\">Inclusive "
-         "rows</th>"
-         "<th scope=\"col\">Self rows</th><th scope=\"col\">Artifacts</th>"
+         "rows</th><th scope=\"col\">Self rows</th>"
+         "<th scope=\"col\">GPU events</th><th scope=\"col\">GPU rows</th>"
+         "<th scope=\"col\">Artifacts</th>"
          "</tr></thead><tbody>";
   for (size_t i = 0u; i < reports.size(); ++i) {
     const BenchmarkReport &report = reports[i];
@@ -790,7 +833,9 @@ void appendTracySection(std::ostringstream &out,
         << report.tracy.captureTimeSpanSeconds << " s</td><td>"
         << formatCount(report.tracy.captureZoneEventCount) << "</td><td>"
         << report.tracy.zones.size() << "</td><td>"
-        << report.tracy.selfZones.size()
+        << report.tracy.selfZones.size() << "</td><td>"
+        << formatCount(report.tracy.gpuZoneEventCount) << "</td><td>"
+        << report.tracy.gpuZones.size()
         << "</td><td><nav class=\"artifact-links\" aria-label=\"Tracy "
            "artifacts for "
         << escapeHtml(labels[i]) << "\">";
@@ -807,6 +852,7 @@ void appendTracySection(std::ostringstream &out,
     appendArtifact(report.tracy.zonesCsvPath, "inclusive CSV");
     appendArtifact(report.tracy.selfZonesCsvPath, "self-time CSV");
     appendArtifact(report.tracy.flameGraph.eventsCsvPath, "flame events");
+    appendArtifact(report.tracy.gpuEventsCsvPath, "GPU events");
     if (!hasArtifact) {
       out << "<span class=\"muted\">not produced</span>";
     }
@@ -816,6 +862,7 @@ void appendTracySection(std::ostringstream &out,
   appendTracyFlameGraphs(out, reports, labels);
   appendTracyZoneTable(out, reports, labels, false);
   appendTracyZoneTable(out, reports, labels, true);
+  appendTracyGpuZoneTable(out, reports, labels);
   out << "</section>";
 }
 

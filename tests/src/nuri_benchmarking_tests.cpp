@@ -1302,13 +1302,18 @@ TEST(NuriBenchmarkingTest, ReportWritesReadsAndComputesMeasuredStats) {
   report.tracy.zonesCsvPath = "artifacts/bench/test/tracy/case.zones.csv";
   report.tracy.selfZonesCsvPath =
       "artifacts/bench/test/tracy/case.zones_self.csv";
+  report.tracy.gpuEventsCsvPath =
+      "artifacts/bench/test/tracy/case.gpu_events.csv";
   report.tracy.exportLogPath = "artifacts/bench/test/tracy/case.export.log";
   report.tracy.captureCommand = "tracy-capture -o case.tracy";
   report.tracy.zonesExportCommand = "tracy-csvexport case.tracy";
   report.tracy.selfZonesExportCommand = "tracy-csvexport -e case.tracy";
+  report.tracy.gpuEventsExportCommand = "tracy-csvexport -g case.tracy";
+  report.tracy.gpuEventsExportSupported = true;
   report.tracy.captureFrameCount = 8u;
   report.tracy.captureTimeSpanSeconds = 1.25;
   report.tracy.captureZoneEventCount = 128u;
+  report.tracy.gpuZoneEventCount = 6u;
   report.tracy.zones.push_back(BenchmarkTracyZoneStats{
       .name = "nuri::RenderPipeline::buildRenderGraph",
       .sourceFile = "lib/nuri/gfx/pipeline/render_pipeline.cpp",
@@ -1317,6 +1322,8 @@ TEST(NuriBenchmarkingTest, ReportWritesReadsAndComputesMeasuredStats) {
       .totalPercent = 12.5,
       .count = 3u,
       .meanNs = 500'000.0,
+      .medianNs = 500'000u,
+      .p95Ns = 750'000u,
       .minNs = 250'000u,
       .maxNs = 750'000u,
       .stddevNs = 125'000.0,
@@ -1332,6 +1339,19 @@ TEST(NuriBenchmarkingTest, ReportWritesReadsAndComputesMeasuredStats) {
       .minNs = 200'000u,
       .maxNs = 450'000u,
       .stddevNs = 80'000.0,
+  });
+  report.tracy.gpuZones.push_back(BenchmarkTracyZoneStats{
+      .name = "Opaque Visibility",
+      .sourceFile = "lib/nuri/platform/nvrhi_gpu_device.cpp",
+      .totalNs = 4'500'000u,
+      .totalPercent = 62.5,
+      .count = 3u,
+      .meanNs = 1'500'000.0,
+      .medianNs = 1'450'000u,
+      .p95Ns = 1'700'000u,
+      .minNs = 1'350'000u,
+      .maxNs = 1'700'000u,
+      .stddevNs = 180'000.0,
   });
   report.tracy.flameGraph.eventsCsvPath =
       "artifacts/bench/test/tracy/case.events.csv";
@@ -1506,6 +1526,9 @@ TEST(NuriBenchmarkingTest, ReportWritesReadsAndComputesMeasuredStats) {
       loaded.value().tracy.selfZonesCsvPath,
       std::filesystem::path("artifacts/bench/test/tracy/case.zones_self.csv"));
   EXPECT_EQ(
+      loaded.value().tracy.gpuEventsCsvPath,
+      std::filesystem::path("artifacts/bench/test/tracy/case.gpu_events.csv"));
+  EXPECT_EQ(
       loaded.value().tracy.exportLogPath,
       std::filesystem::path("artifacts/bench/test/tracy/case.export.log"));
   EXPECT_EQ(loaded.value().tracy.captureCommand, "tracy-capture -o case.tracy");
@@ -1513,9 +1536,13 @@ TEST(NuriBenchmarkingTest, ReportWritesReadsAndComputesMeasuredStats) {
             "tracy-csvexport case.tracy");
   EXPECT_EQ(loaded.value().tracy.selfZonesExportCommand,
             "tracy-csvexport -e case.tracy");
+  EXPECT_EQ(loaded.value().tracy.gpuEventsExportCommand,
+            "tracy-csvexport -g case.tracy");
+  EXPECT_TRUE(loaded.value().tracy.gpuEventsExportSupported);
   EXPECT_EQ(loaded.value().tracy.captureFrameCount, 8u);
   EXPECT_DOUBLE_EQ(loaded.value().tracy.captureTimeSpanSeconds, 1.25);
   EXPECT_EQ(loaded.value().tracy.captureZoneEventCount, 128u);
+  EXPECT_EQ(loaded.value().tracy.gpuZoneEventCount, 6u);
   ASSERT_EQ(loaded.value().tracy.zones.size(), 1u);
   EXPECT_EQ(loaded.value().tracy.zones[0].name,
             "nuri::RenderPipeline::buildRenderGraph");
@@ -1524,8 +1551,14 @@ TEST(NuriBenchmarkingTest, ReportWritesReadsAndComputesMeasuredStats) {
   EXPECT_EQ(loaded.value().tracy.zones[0].sourceLine, 132u);
   EXPECT_EQ(loaded.value().tracy.zones[0].totalNs, 1'500'000u);
   EXPECT_DOUBLE_EQ(loaded.value().tracy.zones[0].totalPercent, 12.5);
+  EXPECT_EQ(loaded.value().tracy.zones[0].medianNs, 500'000u);
+  EXPECT_EQ(loaded.value().tracy.zones[0].p95Ns, 750'000u);
   ASSERT_EQ(loaded.value().tracy.selfZones.size(), 1u);
   EXPECT_EQ(loaded.value().tracy.selfZones[0].name, "nuri::Renderer::render");
+  ASSERT_EQ(loaded.value().tracy.gpuZones.size(), 1u);
+  EXPECT_EQ(loaded.value().tracy.gpuZones[0].name, "Opaque Visibility");
+  EXPECT_EQ(loaded.value().tracy.gpuZones[0].medianNs, 1'450'000u);
+  EXPECT_EQ(loaded.value().tracy.gpuZones[0].p95Ns, 1'700'000u);
   EXPECT_EQ(
       loaded.value().tracy.flameGraph.eventsCsvPath,
       std::filesystem::path("artifacts/bench/test/tracy/case.events.csv"));

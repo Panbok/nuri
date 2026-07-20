@@ -92,6 +92,8 @@ struct BenchmarkTracyZoneStats {
   double totalPercent = 0.0;
   uint64_t count = 0u;
   double meanNs = 0.0;
+  uint64_t medianNs = 0u;
+  uint64_t p95Ns = 0u;
   uint64_t minNs = 0u;
   uint64_t maxNs = 0u;
   double stddevNs = 0.0;
@@ -124,15 +126,20 @@ struct BenchmarkTracyReport {
   std::filesystem::path captureLogPath{};
   std::filesystem::path zonesCsvPath{};
   std::filesystem::path selfZonesCsvPath{};
+  std::filesystem::path gpuEventsCsvPath{};
   std::filesystem::path exportLogPath{};
   std::string captureCommand{};
   std::string zonesExportCommand{};
   std::string selfZonesExportCommand{};
+  std::string gpuEventsExportCommand{};
+  bool gpuEventsExportSupported = false;
   uint64_t captureFrameCount = 0u;
   double captureTimeSpanSeconds = 0.0;
   uint64_t captureZoneEventCount = 0u;
+  uint64_t gpuZoneEventCount = 0u;
   std::vector<BenchmarkTracyZoneStats> zones{};
   std::vector<BenchmarkTracyZoneStats> selfZones{};
+  std::vector<BenchmarkTracyZoneStats> gpuZones{};
   BenchmarkTracyFlameGraph flameGraph{};
 };
 

@@ -42,7 +42,14 @@
     "benchmark-tools": {
       "description": "Build the nuri renderer benchmarking tools",
       "dependencies": [
-        "cli11"
+        "cli11",
+        {
+          "name": "tracy",
+          "default-features": false,
+          "features": [
+            "cli-tools"
+          ]
+        }
       ]
     },
     "snapshot-tools": {

@@ -1287,6 +1287,8 @@ yyjson_mut_val *makeTracyZoneObject(yyjson_mut_doc *doc,
   yyjson_mut_obj_add_real(doc, object, "totalPercent", zone.totalPercent);
   yyjson_mut_obj_add_uint(doc, object, "count", zone.count);
   yyjson_mut_obj_add_real(doc, object, "meanNs", zone.meanNs);
+  yyjson_mut_obj_add_uint(doc, object, "medianNs", zone.medianNs);
+  yyjson_mut_obj_add_uint(doc, object, "p95Ns", zone.p95Ns);
   yyjson_mut_obj_add_uint(doc, object, "minNs", zone.minNs);
   yyjson_mut_obj_add_uint(doc, object, "maxNs", zone.maxNs);
   yyjson_mut_obj_add_real(doc, object, "stddevNs", zone.stddevNs);
@@ -1345,21 +1347,30 @@ yyjson_mut_val *makeTracyObject(yyjson_mut_doc *doc,
   addPath(doc, object, "captureLogPath", tracy.captureLogPath);
   addPath(doc, object, "zonesCsvPath", tracy.zonesCsvPath);
   addPath(doc, object, "selfZonesCsvPath", tracy.selfZonesCsvPath);
+  addPath(doc, object, "gpuEventsCsvPath", tracy.gpuEventsCsvPath);
   addPath(doc, object, "exportLogPath", tracy.exportLogPath);
   addString(doc, object, "captureCommand", tracy.captureCommand);
   addString(doc, object, "zonesExportCommand", tracy.zonesExportCommand);
   addString(doc, object, "selfZonesExportCommand",
             tracy.selfZonesExportCommand);
+  addString(doc, object, "gpuEventsExportCommand",
+            tracy.gpuEventsExportCommand);
+  yyjson_mut_obj_add_bool(doc, object, "gpuEventsExportSupported",
+                          tracy.gpuEventsExportSupported);
   yyjson_mut_obj_add_uint(doc, object, "captureFrameCount",
                           tracy.captureFrameCount);
   yyjson_mut_obj_add_real(doc, object, "captureTimeSpanSeconds",
                           tracy.captureTimeSpanSeconds);
   yyjson_mut_obj_add_uint(doc, object, "captureZoneEventCount",
                           tracy.captureZoneEventCount);
+  yyjson_mut_obj_add_uint(doc, object, "gpuZoneEventCount",
+                          tracy.gpuZoneEventCount);
   yyjson_mut_obj_add_val(doc, object, "zones",
                          makeTracyZoneArray(doc, tracy.zones));
   yyjson_mut_obj_add_val(doc, object, "selfZones",
                          makeTracyZoneArray(doc, tracy.selfZones));
+  yyjson_mut_obj_add_val(doc, object, "gpuZones",
+                         makeTracyZoneArray(doc, tracy.gpuZones));
   yyjson_mut_obj_add_val(doc, object, "flameGraph",
                          makeTracyFlameGraphObject(doc, tracy.flameGraph));
   return object;
@@ -1854,6 +1865,8 @@ readRepeatObservationsInfo(yyjson_val *object) {
   zone.totalPercent = readReal(object, "totalPercent");
   zone.count = readU64(object, "count");
   zone.meanNs = readReal(object, "meanNs");
+  zone.medianNs = readU64(object, "medianNs");
+  zone.p95Ns = readU64(object, "p95Ns");
   zone.minNs = readU64(object, "minNs");
   zone.maxNs = readU64(object, "maxNs");
   zone.stddevNs = readReal(object, "stddevNs");
@@ -1934,16 +1947,22 @@ readTracyZoneArray(yyjson_val *array) {
       std::filesystem::path(readString(object, "zonesCsvPath"));
   tracy.selfZonesCsvPath =
       std::filesystem::path(readString(object, "selfZonesCsvPath"));
+  tracy.gpuEventsCsvPath =
+      std::filesystem::path(readString(object, "gpuEventsCsvPath"));
   tracy.exportLogPath =
       std::filesystem::path(readString(object, "exportLogPath"));
   tracy.captureCommand = readString(object, "captureCommand");
   tracy.zonesExportCommand = readString(object, "zonesExportCommand");
   tracy.selfZonesExportCommand = readString(object, "selfZonesExportCommand");
+  tracy.gpuEventsExportCommand = readString(object, "gpuEventsExportCommand");
+  tracy.gpuEventsExportSupported = readBool(object, "gpuEventsExportSupported");
   tracy.captureFrameCount = readU64(object, "captureFrameCount");
   tracy.captureTimeSpanSeconds = readReal(object, "captureTimeSpanSeconds");
   tracy.captureZoneEventCount = readU64(object, "captureZoneEventCount");
+  tracy.gpuZoneEventCount = readU64(object, "gpuZoneEventCount");
   tracy.zones = readTracyZoneArray(yyjson_obj_get(object, "zones"));
   tracy.selfZones = readTracyZoneArray(yyjson_obj_get(object, "selfZones"));
+  tracy.gpuZones = readTracyZoneArray(yyjson_obj_get(object, "gpuZones"));
   tracy.flameGraph = readTracyFlameGraph(yyjson_obj_get(object, "flameGraph"));
   return tracy;
 }
