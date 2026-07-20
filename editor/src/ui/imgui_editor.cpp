@@ -79,8 +79,9 @@ constexpr std::array<const char *, 4> kTextureFilterAnisotropyLabels = {
     "2x", "4x", "8x", "16x"};
 constexpr std::array<const char *, 3> kTextureFilterModeLabels = {
     "Bilinear", "Trilinear", "Anisotropic"};
-constexpr std::array<const char *, 4> kAntiAliasingModeLabels = {
-    "None", "TAA", "Spatial Fallback", "MSAA 4x"};
+constexpr std::array<const char *, 3> kAntiAliasingModeLabels = {"None", "TAA",
+                                                                 "MSAA"};
+constexpr std::array<const char *, 2> kMsaaSampleCountLabels = {"4x", "8x"};
 constexpr std::array<const char *, 5> kTemporalAAQualityPresetLabels = {
     "Performance", "Balanced", "Quality", "Ultra", "Custom"};
 constexpr std::array<const char *, 2> kAmbientOcclusionModeLabels = {"Disabled",
@@ -340,8 +341,24 @@ const char *antiAliasingModeDisplayName(AntiAliasingMode mode) {
     return "Spatial Fallback";
   case AntiAliasingMode::MSAA4x:
     return "MSAA 4x";
+  case AntiAliasingMode::MSAA8x:
+    return "MSAA 8x";
   }
   return "Unknown";
+}
+
+[[nodiscard]] int antiAliasingEditorModeIndex(AntiAliasingMode mode) {
+  switch (sanitizeAntiAliasingMode(mode)) {
+  case AntiAliasingMode::TAA:
+    return 1;
+  case AntiAliasingMode::MSAA4x:
+  case AntiAliasingMode::MSAA8x:
+    return 2;
+  case AntiAliasingMode::None:
+  case AntiAliasingMode::SpatialFallback:
+    return 0;
+  }
+  return 0;
 }
 
 const char *temporalAAQualityPresetDisplayName(TemporalAAQualityPreset preset) {
@@ -689,6 +706,8 @@ const char *bakeJobKindName(bakery::BakeJobKind kind) {
   switch (kind) {
   case bakery::BakeJobKind::BrdfLut:
     return "BRDF LUT";
+  case bakery::BakeJobKind::SmaaLuts:
+    return "SMAA LUTs";
   case bakery::BakeJobKind::EnvmapPrefilter:
     return "Envmap Prefilter";
   case bakery::BakeJobKind::SceneTextureArtifacts:
@@ -2009,7 +2028,7 @@ void drawAmbientOcclusionSettings(
                      "%.2f");
   const bool temporalAccumulationDisabled =
       ao.mode == AmbientOcclusionMode::Disabled || !opaque.enabled ||
-      sanitizeAntiAliasingMode(antiAliasing.mode) == AntiAliasingMode::MSAA4x;
+      isMsaaMode(antiAliasing.mode);
   ImGui::BeginDisabled(temporalAccumulationDisabled);
   ImGui::Checkbox("Temporal Accumulation##AmbientOcclusion",
                   &ao.temporalAccumulation);
@@ -2580,14 +2599,26 @@ void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
                               RenderPipeline *renderPipeline,
                               const RenderFrameMetrics &frameMetrics) {
   sanitizeAntiAliasingSettings(aa);
-  int modeIndex = static_cast<int>(aa.mode);
-  modeIndex = std::clamp(modeIndex, 0,
-                         static_cast<int>(kAntiAliasingModeLabels.size()) - 1);
+  if (aa.mode == AntiAliasingMode::SpatialFallback) {
+    aa.mode = AntiAliasingMode::None;
+  }
+  int modeIndex = antiAliasingEditorModeIndex(aa.mode);
   if (ImGui::Combo("Mode##AntiAliasing", &modeIndex,
                    kAntiAliasingModeLabels.data(),
                    static_cast<int>(kAntiAliasingModeLabels.size()))) {
-    aa.mode = static_cast<AntiAliasingMode>(modeIndex);
+    aa.mode = modeIndex == 1   ? AntiAliasingMode::TAA
+              : modeIndex == 2 ? AntiAliasingMode::MSAA4x
+                               : AntiAliasingMode::None;
     sanitizeAntiAliasingSettings(aa);
+  }
+  if (isMsaaMode(aa.mode)) {
+    int sampleCountIndex = aa.mode == AntiAliasingMode::MSAA8x ? 1 : 0;
+    if (ImGui::Combo("Samples##AntiAliasing", &sampleCountIndex,
+                     kMsaaSampleCountLabels.data(),
+                     static_cast<int>(kMsaaSampleCountLabels.size()))) {
+      aa.mode = sampleCountIndex == 1 ? AntiAliasingMode::MSAA8x
+                                      : AntiAliasingMode::MSAA4x;
+    }
   }
 
   const bool temporalControlsDisabled =
@@ -2725,8 +2756,7 @@ void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
     aa.debug.jitterEnabled = false;
     aa.debug.freezeJitter = false;
   }
-  const bool msaaControlsDisabled =
-      sanitizeAntiAliasingMode(aa.mode) != AntiAliasingMode::MSAA4x;
+  const bool msaaControlsDisabled = !isMsaaMode(aa.mode);
   ImGui::BeginDisabled(msaaControlsDisabled);
   ImGui::Checkbox("Post-MSAA Spatial Cleanup##AntiAliasing",
                   &aa.debug.spatialPostMsaaCleanup);
@@ -4108,6 +4138,23 @@ void drawBakeryWindow(bool &open, BakeryUiState &state,
     } else {
       std::ostringstream oss;
       oss << "Queued BRDF LUT job #" << enqueueResult.value().value;
+      state.status = oss.str();
+    }
+  }
+
+  ImGui::SameLine();
+  if (ImGui::Button("Queue SMAA LUTs")) {
+    state.status.clear();
+    state.error.clear();
+    auto enqueueResult =
+        bakery->enqueue(bakery::BakeRequest{bakery::SmaaLutsBakeRequest{
+            .forceRebuild = state.forceRebuild,
+        }});
+    if (enqueueResult.hasError()) {
+      state.error = enqueueResult.error();
+    } else {
+      std::ostringstream oss;
+      oss << "Queued SMAA LUTs job #" << enqueueResult.value().value;
       state.status = oss.str();
     }
   }

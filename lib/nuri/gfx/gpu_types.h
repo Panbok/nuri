@@ -266,6 +266,8 @@ enum class GPUFeature : uint8_t {
 struct GpuMultisampleCapabilities {
   bool sample4Color = false;
   bool sample4Depth = false;
+  bool sample8Color = false;
+  bool sample8Depth = false;
   bool depthResolveMin = false;
   bool alphaToCoverage = false;
   bool sampleRateShading = false;

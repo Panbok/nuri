@@ -3,6 +3,7 @@
 #include "nuri/gfx/frame/render_frame_context.h"
 #include "nuri/gfx/fullscreen.h"
 #include "nuri/gfx/pipeline/render_pipeline.h"
+#include "nuri/gfx/smaa_lut_contract.h"
 #include "nuri/pch.h"
 #include <algorithm>
 #include <array>
@@ -56,10 +57,6 @@ constexpr float kSpatialAATaaCleanupLocalContrastFactor = 1.45f;
 constexpr float kSpatialAAFallbackCornerRounding = 0.25f;
 constexpr float kSpatialAATaaCleanupCornerRounding = 0.40f;
 constexpr uint32_t kSpatialAAMaxSearchSteps = 16u;
-constexpr uint32_t kAreaLutWidth = 160u;
-constexpr uint32_t kAreaLutHeight = 560u;
-constexpr uint32_t kSearchLutWidth = 64u;
-constexpr uint32_t kSearchLutHeight = 16u;
 struct SpatialAAPushConstants {
   uint32_t sourceTexId = 0u;
   uint32_t edgeTexId = 0u;
@@ -121,7 +118,7 @@ shouldRunSpatialAA(const RenderFrameContext &frame) noexcept {
   if (mode == AntiAliasingMode::SpatialFallback) {
     return true;
   }
-  if (mode == AntiAliasingMode::MSAA4x) {
+  if (presentationAAPlanForFrame(frame).coverage != CoverageMode::Sample1) {
     return false;
   }
   if (mode != AntiAliasingMode::TAA || isTaaDebugView(debugView)) {
@@ -147,7 +144,7 @@ shouldRunPostTransparentSpatialAA(const RenderFrameContext &frame) noexcept {
   const AntiAliasingDebugView debugView =
       sanitizeAntiAliasingDebugView(aaDebug.view);
   const PresentationAAPlan presentationAA = presentationAAPlanForFrame(frame);
-  if (presentationAA.coverage == CoverageMode::Sample4) {
+  if (presentationAA.coverage != CoverageMode::Sample1) {
     return presentationAA.spatialCleanup ==
                SpatialCleanupPoint::PostTransparency &&
            !isAADebugOutputView(debugView);
@@ -182,7 +179,7 @@ isSpatialCleanupActive(const RenderFrameContext &frame) noexcept {
       sanitizeAntiAliasingMode(settings.antiAliasing.mode);
   const RenderSettings::AntiAliasingDebugSettings aaDebug =
       effectiveTemporalAADebugSettings(settings.antiAliasing);
-  if (mode == AntiAliasingMode::MSAA4x) {
+  if (presentationAAPlanForFrame(frame).coverage != CoverageMode::Sample1) {
     return aaDebug.spatialPostMsaaCleanup;
   }
   return mode == AntiAliasingMode::TAA && aaDebug.spatialPostTaaCleanup &&
@@ -279,21 +276,31 @@ SpatialAAPass::SpatialAAPass(GPUDevice &gpu, RuntimeCompositeConfig config,
                              SpatialAAPlacement placement)
     : gpu_(gpu), config_(std::move(config)), placement_(placement) {
   auto result = initialize();
-  if (result.hasError())
+  if (result.hasError()) {
     initializationError_ = result.error();
+    destroyResources();
+    return;
+  }
+  (void)ensureLuts();
 }
 
 SpatialAAPass::~SpatialAAPass() { destroyResources(); }
 
 void SpatialAAPass::destroyResources() {
-  for (RenderPipelineHandle pipeline : pipelines_)
+  for (RenderPipelineHandle &pipeline : pipelines_) {
     if (nuri::isValid(pipeline))
       gpu_.destroyRenderPipeline(pipeline);
-  if (nuri::isValid(vertexShader_))
+    pipeline = {};
+  }
+  if (nuri::isValid(vertexShader_)) {
     gpu_.destroyShaderModule(vertexShader_);
-  for (ShaderHandle shader : fragmentShaders_)
+  }
+  vertexShader_ = {};
+  for (ShaderHandle &shader : fragmentShaders_) {
     if (nuri::isValid(shader))
       gpu_.destroyShaderModule(shader);
+    shader = {};
+  }
   for (auto &textures : scratchTextures_) {
     for (TextureHandle texture : textures)
       if (nuri::isValid(texture))
@@ -304,12 +311,16 @@ void SpatialAAPass::destroyResources() {
   scratchHeight_ = 0u;
   scratchRingCount_ = 0u;
   outputScratchFormat_ = Format::Count;
-  for (TextureHandle lut : luts_)
+  for (TextureHandle &lut : luts_) {
     if (nuri::isValid(lut))
       gpu_.destroyTexture(lut);
-  for (SamplerHandle sampler : samplers_)
+    lut = {};
+  }
+  for (SamplerHandle &sampler : samplers_) {
     if (nuri::isValid(sampler))
       gpu_.destroySampler(sampler);
+    sampler = {};
+  }
 }
 
 Result<bool, std::string> SpatialAAPass::initialize() {
@@ -361,25 +372,40 @@ Result<bool, std::string> SpatialAAPass::initialize() {
       return Result<bool, std::string>::makeError(sampler.error());
     samplers_[index] = sampler.value();
   }
-  auto area =
-      createSmaaLut(gpu_, basePath / "smaa_area_rgba8.bin", kAreaLutWidth,
-                    kAreaLutHeight, "spatial_aa_smaa_area_lut");
-  if (area.hasError())
-    return Result<bool, std::string>::makeError(area.error());
-  luts_[AreaLut] = area.value();
-  auto search =
-      createSmaaLut(gpu_, basePath / "smaa_search_rgba8.bin", kSearchLutWidth,
-                    kSearchLutHeight, "spatial_aa_smaa_search_lut");
-  if (search.hasError())
-    return Result<bool, std::string>::makeError(search.error());
-  luts_[SearchLut] = search.value();
+  return Result<bool, std::string>::makeResult(true);
+}
+
+Result<bool, std::string> SpatialAAPass::ensureLuts() {
+  const std::filesystem::path basePath = resolveShaderBasePath(config_);
+  constexpr std::array filenames{std::string_view{smaa_lut::kAreaFilename},
+                                 std::string_view{smaa_lut::kSearchFilename}};
+  constexpr std::array widths{smaa_lut::kAreaWidth, smaa_lut::kSearchWidth};
+  constexpr std::array heights{smaa_lut::kAreaHeight, smaa_lut::kSearchHeight};
+  constexpr std::array names{std::string_view{"spatial_aa_smaa_area_lut"},
+                             std::string_view{"spatial_aa_smaa_search_lut"}};
+  for (size_t index = 0; index < luts_.size(); ++index) {
+    if (nuri::isValid(luts_[index])) {
+      continue;
+    }
+    auto result = createSmaaLut(gpu_, basePath / filenames[index],
+                                widths[index], heights[index], names[index]);
+    if (result.hasError()) {
+      return Result<bool, std::string>::makeError(result.error());
+    }
+    luts_[index] = result.value();
+  }
   return Result<bool, std::string>::makeResult(true);
 }
 
 Result<bool, std::string>
 SpatialAAPass::ensureScratchTextures(FrameBuildContext &ctx) {
-  if (!initializationError_.empty())
+  if (!initializationError_.empty()) {
     return Result<bool, std::string>::makeError(initializationError_);
+  }
+  auto luts = ensureLuts();
+  if (luts.hasError()) {
+    return luts;
+  }
   const TextureHandle sourceTexture =
       placement_ == SpatialAAPlacement::PostTransparent
           ? ctx.shared.frameColorTexture
@@ -462,8 +488,8 @@ Result<bool, std::string> SpatialAAPass::prepare(FrameBuildContext &ctx) {
     const RenderSettings &settings = renderSettingsOrDefault(ctx.frame);
     const RenderSettings::AntiAliasingDebugSettings aaDebug =
         effectiveTemporalAADebugSettings(settings.antiAliasing);
-    if (presentationAAPlanForFrame(ctx.frame).coverage ==
-        CoverageMode::Sample4) {
+    if (presentationAAPlanForFrame(ctx.frame).coverage !=
+        CoverageMode::Sample1) {
       ctx.frame.metrics.antiAliasing.msaaSpatialCleanupEnabled =
           presentationAAPlanForFrame(ctx.frame).spatialCleanup ==
           SpatialCleanupPoint::PostTransparency;
@@ -529,14 +555,14 @@ Result<bool, std::string> SpatialAAPass::build(FrameBuildContext &ctx) {
       effectiveTemporalAADebugSettings(settings.antiAliasing);
   const AntiAliasingDebugView debugView =
       sanitizeAntiAliasingDebugView(aaDebug.view);
-  const AntiAliasingMode aaMode =
-      sanitizeAntiAliasingMode(settings.antiAliasing.mode);
+  const bool multisampled =
+      presentationAAPlanForFrame(ctx.frame).coverage != CoverageMode::Sample1;
   const bool fallbackActive =
       postTransparent ? false : isSpatialFallbackActive(ctx.frame);
   const bool cleanupActive =
       postTransparent ? true : isSpatialCleanupActive(ctx.frame);
   const SpatialAAProfile profile =
-      postTransparent && aaMode != AntiAliasingMode::MSAA4x
+      postTransparent && !multisampled
           ? SpatialAAProfile{
                 .edgeThreshold = kSpatialAATaaCleanupEdgeThreshold,
                 .resolveStrength = kSpatialAATaaCleanupResolveStrength,
@@ -576,9 +602,8 @@ Result<bool, std::string> SpatialAAPass::build(FrameBuildContext &ctx) {
     aaMetrics.spatialAAFallbackActive = fallbackActive;
     aaMetrics.spatialAACleanupActive = cleanupActive;
     aaMetrics.msaaSpatialCleanupEnabled =
-        aaMode == AntiAliasingMode::MSAA4x && aaDebug.spatialPostMsaaCleanup;
-    aaMetrics.msaaSpatialCleanupActive =
-        aaMode == AntiAliasingMode::MSAA4x && cleanupActive;
+        multisampled && aaDebug.spatialPostMsaaCleanup;
+    aaMetrics.msaaSpatialCleanupActive = multisampled && cleanupActive;
     aaMetrics.spatialAAWidth = dimensions.width;
     aaMetrics.spatialAAHeight = dimensions.height;
     aaMetrics.spatialAATextureBytes = textureStorageBytes(gpu_, edgeTexture) +
@@ -594,7 +619,7 @@ Result<bool, std::string> SpatialAAPass::build(FrameBuildContext &ctx) {
     if (cleanupActive) {
       ++aaMetrics.spatialAACleanupFrameCount;
     }
-  } else if (aaMode == AntiAliasingMode::MSAA4x) {
+  } else if (multisampled) {
     aaMetrics.spatialAAEnabled = true;
     aaMetrics.spatialAACleanupActive = true;
     aaMetrics.msaaSpatialCleanupEnabled = true;
@@ -629,7 +654,7 @@ Result<bool, std::string> SpatialAAPass::build(FrameBuildContext &ctx) {
     return Result<bool, std::string>::makeError(addEdge.error());
   }
   if (postTransparent) {
-    if (aaMode == AntiAliasingMode::MSAA4x) {
+    if (multisampled) {
       ++aaMetrics.spatialAAPassCount;
       ++aaMetrics.spatialAAEdgePassCount;
     } else {
@@ -671,7 +696,7 @@ Result<bool, std::string> SpatialAAPass::build(FrameBuildContext &ctx) {
       return Result<bool, std::string>::makeError(addBlend.error());
     }
     if (postTransparent) {
-      if (aaMode == AntiAliasingMode::MSAA4x) {
+      if (multisampled) {
         ++aaMetrics.spatialAAPassCount;
         ++aaMetrics.spatialAABlendPassCount;
       } else {
@@ -741,7 +766,7 @@ Result<bool, std::string> SpatialAAPass::build(FrameBuildContext &ctx) {
     return Result<bool, std::string>::makeError(addOutput.error());
   }
   if (postTransparent) {
-    if (aaMode == AntiAliasingMode::MSAA4x) {
+    if (multisampled) {
       ++aaMetrics.spatialAAPassCount;
       ++aaMetrics.spatialAANeighborhoodPassCount;
     } else {
@@ -782,7 +807,7 @@ Result<bool, std::string> SpatialAAPass::build(FrameBuildContext &ctx) {
     return Result<bool, std::string>::makeError(addCopy.error());
   }
   if (postTransparent) {
-    if (aaMode == AntiAliasingMode::MSAA4x) {
+    if (multisampled) {
       ++aaMetrics.spatialAAPassCount;
       ++aaMetrics.spatialAACopyBackPassCount;
     } else {

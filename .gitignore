@@ -25,3 +25,5 @@ __pycache__/
 !/.codex/skills/nuri-autotests/**
 !/.codex/skills/nuri-renderer-design/
 !/.codex/skills/nuri-renderer-design/**
+!/.codex/skills/compress-codebase/
+!/.codex/skills/compress-codebase/**

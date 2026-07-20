@@ -73,13 +73,14 @@ FrameCompositionProvider::prepare(FrameBuildContext &ctx) {
     ctx.shared.textureRequirements |=
         FrameTextureRequirementFlags::PresentCapture;
   }
-  if (sanitizeAntiAliasingMode(settings.antiAliasing.mode) ==
-      AntiAliasingMode::MSAA4x) {
+  const CoverageMode coverage = ctx.frame.presentationAA.coverage;
+  const uint32_t sampleCount = coverageSampleCount(coverage);
+  if (coverage != CoverageMode::Sample1) {
     ctx.shared.textureRequirements |=
         FrameTextureRequirementFlags::MsaaSceneColor |
         FrameTextureRequirementFlags::MsaaSceneDepth;
   }
-  auto ensureResult = ensureTextures(ctx.shared.textureRequirements);
+  auto ensureResult = ensureTextures(ctx.shared.textureRequirements, coverage);
   if (ensureResult.hasError()) {
     return ensureResult;
   }
@@ -223,10 +224,8 @@ FrameCompositionProvider::prepare(FrameBuildContext &ctx) {
       aoMetrics.ambientOcclusionTextureBytes *
           static_cast<uint64_t>(aoMetrics.ambientOcclusionTextureCount);
   AntiAliasingFrameMetrics &aaMetrics = ctx.frame.metrics.antiAliasing;
-  aaMetrics.msaaEnabled =
-      sanitizeAntiAliasingMode(settings.antiAliasing.mode) ==
-      AntiAliasingMode::MSAA4x;
-  aaMetrics.msaaSampleCount = aaMetrics.msaaEnabled ? kMsaa4xSampleCount : 1u;
+  aaMetrics.msaaEnabled = coverage != CoverageMode::Sample1;
+  aaMetrics.msaaSampleCount = sampleCount;
   aaMetrics.msaaSpatialCleanupEnabled =
       aaMetrics.msaaEnabled &&
       settings.antiAliasing.debug.spatialPostMsaaCleanup;
@@ -247,15 +246,14 @@ FrameCompositionProvider::prepare(FrameBuildContext &ctx) {
           ? msaaPixelCount *
                 static_cast<uint64_t>(
                     formatTexelBytes(kFrameCompositionSceneColorFormat)) *
-                static_cast<uint64_t>(kMsaa4xSampleCount)
+                static_cast<uint64_t>(sampleCount)
           : 0u;
   aaMetrics.msaaDepthTextureBytes =
-      aaMetrics.msaaDepthAllocated
-          ? msaaPixelCount *
-                static_cast<uint64_t>(
-                    formatTexelBytes(kFrameCompositionDepthFormat)) *
-                static_cast<uint64_t>(kMsaa4xSampleCount)
-          : 0u;
+      aaMetrics.msaaDepthAllocated ? msaaPixelCount *
+                                         static_cast<uint64_t>(formatTexelBytes(
+                                             kFrameCompositionDepthFormat)) *
+                                         static_cast<uint64_t>(sampleCount)
+                                   : 0u;
   aaMetrics.msaaTotalBytes =
       aaMetrics.msaaColorTextureBytes *
           static_cast<uint64_t>(aaMetrics.msaaColorTextureCount) +
@@ -362,8 +360,9 @@ void FrameCompositionProvider::onFrameAbandoned(
 }
 
 Result<bool, std::string> FrameCompositionProvider::ensureTextures(
-    FrameTextureRequirementFlags requirements) {
-  constexpr std::array<RingDesc, static_cast<size_t>(Ring::Count)> rings{{
+    FrameTextureRequirementFlags requirements, CoverageMode coverage) {
+  const uint32_t sampleCount = coverageSampleCount(coverage);
+  const std::array<RingDesc, static_cast<size_t>(Ring::Count)> rings{{
       {Ring::SceneColor, FrameTextureRequirementFlags::SceneColor,
        kFrameCompositionSceneColorFormat, TextureUsage::AttachmentSampled,
        "frame_scene_color"},
@@ -382,10 +381,10 @@ Result<bool, std::string> FrameCompositionProvider::ensureTextures(
        "frame_scene_depth"},
       {Ring::MsaaSceneColor, FrameTextureRequirementFlags::MsaaSceneColor,
        kFrameCompositionSceneColorFormat, TextureUsage::Attachment,
-       "frame_msaa_scene_color", 0u, kMsaa4xSampleCount},
+       "frame_msaa_scene_color", 0u, static_cast<uint8_t>(sampleCount)},
       {Ring::MsaaSceneDepth, FrameTextureRequirementFlags::MsaaSceneDepth,
        kFrameCompositionDepthFormat, TextureUsage::Attachment,
-       "frame_msaa_scene_depth", 0u, kMsaa4xSampleCount},
+       "frame_msaa_scene_depth", 0u, static_cast<uint8_t>(sampleCount)},
       {Ring::MotionVectors, FrameTextureRequirementFlags::MotionVectors,
        kFrameCompositionMotionVectorFormat, TextureUsage::AttachmentSampled,
        "frame_motion_vectors"},
@@ -423,7 +422,9 @@ Result<bool, std::string> FrameCompositionProvider::ensureTextures(
       framebufferWidth_ != safeWidth || framebufferHeight_ != safeHeight;
   const bool ringChanged = textureRingCount_ != ringCount;
   const bool requirementsChanged = allocatedRequirements_ != requirements;
-  if (!dimensionsChanged && !ringChanged && !requirementsChanged) {
+  const bool coverageChanged = allocatedCoverage_ != coverage;
+  if (!dimensionsChanged && !ringChanged && !requirementsChanged &&
+      !coverageChanged) {
     return Result<bool, std::string>::makeResult(true);
   }
   const FrameTextureRequirementFlags previousRequirements =
@@ -436,13 +437,17 @@ Result<bool, std::string> FrameCompositionProvider::ensureTextures(
   framebufferWidth_ = safeWidth;
   framebufferHeight_ = safeHeight;
   textureRingCount_ = ringCount;
+  allocatedCoverage_ = coverage;
   allocatedRequirements_ = requirements;
   for (const RingDesc &ring : rings) {
     const bool needs =
         hasFrameTextureRequirementFlag(requirements, ring.requirement);
     const bool had =
         hasFrameTextureRequirementFlag(previousRequirements, ring.requirement);
-    if (needs && (fullRecreate || !had)) {
+    const bool ringCoverageChanged =
+        coverageChanged && (ring.ring == Ring::MsaaSceneColor ||
+                            ring.ring == Ring::MsaaSceneDepth);
+    if (needs && (fullRecreate || !had || ringCoverageChanged)) {
       auto result = recreateTextureRing(ring);
       if (result.hasError()) {
         invalidateAllocationState();
@@ -459,6 +464,7 @@ void FrameCompositionProvider::invalidateAllocationState() noexcept {
   framebufferWidth_ = 0u;
   framebufferHeight_ = 0u;
   textureRingCount_ = 0u;
+  allocatedCoverage_ = CoverageMode::Sample1;
   allocatedRequirements_ = FrameTextureRequirementFlags::None;
   for (size_t i = 0; i < textureRings_.size(); ++i) {
     destroyTextureRing(static_cast<Ring>(i));

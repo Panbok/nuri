@@ -533,7 +533,7 @@ private:
   selectReactiveMaskPipeline(RenderPipelineHandle sourcePipeline) const;
   [[nodiscard]] RenderPipelineHandle
   selectDepthPipeline(RenderPipelineHandle sourcePipeline, bool alphaMasked,
-                      bool msaa) const;
+                      CoverageMode coverage) const;
   [[nodiscard]] RenderPipelineHandle
   selectNormalPipeline(RenderPipelineHandle sourcePipeline) const;
   [[nodiscard]] RenderPipelineHandle
@@ -541,19 +541,28 @@ private:
   [[nodiscard]] RenderPipelineHandle
   selectShadowInspectPipeline(RenderPipelineHandle sourcePipeline) const;
   [[nodiscard]] RenderPipelineHandle
-  selectMsaaScenePipeline(RenderPipelineHandle sourcePipeline,
-                          bool alphaMasked) const;
+  selectMsaaScenePipeline(RenderPipelineHandle sourcePipeline, bool alphaMasked,
+                          CoverageMode coverage) const;
+  [[nodiscard]] MeshletPipelineHandle
+  selectMeshletScenePipeline(bool compacted, CoverageMode coverage,
+                             bool doubleSided) const;
+  [[nodiscard]] MeshletPipelineHandle
+  selectMeshletDepthPipeline(CoverageMode coverage, bool alphaMasked,
+                             bool doubleSided) const;
   [[nodiscard]] bool isDoubleSidedPipeline(RenderPipelineHandle handle) const;
   [[nodiscard]] bool isTessPipeline(RenderPipelineHandle handle) const;
   Result<bool, std::string> ensureSceneDepthSampler();
   [[nodiscard]] static constexpr size_t
-  overlayPipelineIndex(OverlayPipelineKind kind, bool msaa) noexcept {
+  overlayPipelineIndex(OverlayPipelineKind kind,
+                       CoverageMode coverage) noexcept {
     return static_cast<size_t>(kind) +
-           (msaa ? static_cast<size_t>(OverlayPipelineKind::Count) : 0u);
+           coverageModeIndex(coverage) *
+               static_cast<size_t>(OverlayPipelineKind::Count);
   }
-  [[nodiscard]] RenderPipelineHandle overlayPipeline(OverlayPipelineKind kind,
-                                                     bool msaa) const noexcept;
-  bool ensureOverlayPipeline(OverlayPipelineKind kind, bool requireMsaa);
+  [[nodiscard]] RenderPipelineHandle
+  overlayPipeline(OverlayPipelineKind kind,
+                  CoverageMode coverage) const noexcept;
+  bool ensureOverlayPipeline(OverlayPipelineKind kind, CoverageMode coverage);
   void resetOverlayPipelineState();
   void invalidateAutoLodHistory();
   void invalidateStaticBatchCache();
@@ -601,18 +610,25 @@ private:
   std::optional<glm::mat4> sceneDepthPyramidSourceViewProj_{};
   SamplerHandle sceneDepthSampler_{};
   std::array<ShaderHandle, ShaderSlotCount> shaders_{};
-  std::array<RenderPipelineHandle, 16> meshScenePipelines_{};
+  std::array<RenderPipelineHandle, 8 * kCoverageModeCount>
+      meshScenePipelines_{};
   std::array<RenderPipelineHandle, 4> meshPickPipelines_{};
   std::array<RenderPipelineHandle, 4> meshShadowInspectPipelines_{};
   std::array<RenderPipelineHandle, 4> meshVelocityPipelines_{};
   std::array<RenderPipelineHandle, 2> meshReactiveMaskPipelines_{};
   std::array<RenderPipelineHandle, 4> meshNormalPipelines_{};
-  std::array<RenderPipelineHandle, 16> meshDepthPipelines_{};
-  std::array<RenderPipelineHandle, 8> overlayPipelines_{};
+  std::array<RenderPipelineHandle, 8 * kCoverageModeCount>
+      meshDepthPipelines_{};
+  std::array<RenderPipelineHandle,
+             static_cast<size_t>(OverlayPipelineKind::Count) *
+                 kCoverageModeCount>
+      overlayPipelines_{};
   RenderPipelineHandle depthPyramidPipelineHandle_{};
   RenderPipelineHandle depthMotionVectorPipelineHandle_{};
-  std::array<MeshletPipelineHandle, 8> meshletScenePipelines_{};
-  std::array<MeshletPipelineHandle, 8> meshletDepthPipelines_{};
+  std::array<MeshletPipelineHandle, 4 * kCoverageModeCount>
+      meshletScenePipelines_{};
+  std::array<MeshletPipelineHandle, 4 * kCoverageModeCount>
+      meshletDepthPipelines_{};
   std::array<MeshletPipelineHandle, 4> meshletNormalPipelines_{};
   std::array<MeshletPipelineHandle, 2> meshletVelocityPipelines_{};
   std::array<MeshletPipelineHandle, 2> meshletReactiveMaskPipelines_{};
@@ -621,7 +637,9 @@ private:
   size_t instanceBaseMatricesBufferCapacityBytes_ = 0;
   bool initialized_ = false;
   bool tessellationUnsupported_ = false;
-  std::array<bool, 8> overlayPipelineUnsupported_{};
+  std::array<bool, static_cast<size_t>(OverlayPipelineKind::Count) *
+                       kCoverageModeCount>
+      overlayPipelineUnsupported_{};
   bool meshletPipelineInitialized_ = false;
   const RenderScene *cachedScene_ = nullptr;
   uint64_t cachedTopologyVersion_ = std::numeric_limits<uint64_t>::max();

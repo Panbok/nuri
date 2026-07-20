@@ -16,6 +16,8 @@ using namespace nuri;
   constexpr PresentationAAGpuCapabilities kTestGpuCapabilities{
       .sample4Color = true,
       .sample4Depth = true,
+      .sample8Color = true,
+      .sample8Depth = true,
       .depthResolveMin = true,
       .alphaToCoverage = true,
       .sampleRateShading = false,
@@ -62,6 +64,13 @@ TEST(TemporalFrameServiceTest,
   EXPECT_TRUE(plan.needsReactiveMask);
   EXPECT_FALSE(plan.jitterScene);
   EXPECT_EQ(plan.spatialCleanup, SpatialCleanupPoint::Off);
+
+  settings.antiAliasing.mode = AntiAliasingMode::MSAA8x;
+  plan = requirePlan(settings);
+  EXPECT_EQ(plan.coverage, CoverageMode::Sample8);
+  EXPECT_EQ(plan.reconstruction, ColorReconstruction::Off);
+  EXPECT_TRUE(plan.gtaoTemporal);
+  EXPECT_FALSE(plan.jitterScene);
 
   settings.antiAliasing.mode = AntiAliasingMode::TAA;
   settings.antiAliasing.temporalProvider =

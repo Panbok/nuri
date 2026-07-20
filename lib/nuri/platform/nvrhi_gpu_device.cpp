@@ -1040,12 +1040,14 @@ queryMultisampleCapabilities(VkPhysicalDevice device,
   if (device == VK_NULL_HANDLE) {
     return {};
   }
-  const auto supports4x = [device](VkFormat format, VkImageUsageFlags usage) {
+  const auto supportsSampleCount = [device](VkFormat format,
+                                            VkImageUsageFlags usage,
+                                            VkSampleCountFlagBits sampleCount) {
     VkImageFormatProperties properties{};
     return vkGetPhysicalDeviceImageFormatProperties(
                device, format, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL, usage,
                0u, &properties) == VK_SUCCESS &&
-           (properties.sampleCounts & VK_SAMPLE_COUNT_4_BIT) != 0u;
+           (properties.sampleCounts & sampleCount) != 0u;
   };
   VkPhysicalDeviceDepthStencilResolveProperties resolveProperties{
       .sType =
@@ -1056,15 +1058,24 @@ queryMultisampleCapabilities(VkPhysicalDevice device,
       .pNext = &resolveProperties,
   };
   vkGetPhysicalDeviceProperties2(device, &properties);
-  const bool sample4Color = supports4x(VK_FORMAT_R16G16B16A16_SFLOAT,
-                                       VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
+  const bool sample4Color = supportsSampleCount(
+      VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+      VK_SAMPLE_COUNT_4_BIT);
+  const bool sample8Color = supportsSampleCount(
+      VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+      VK_SAMPLE_COUNT_8_BIT);
   return GpuMultisampleCapabilities{
       .sample4Color = sample4Color,
-      .sample4Depth = supports4x(VK_FORMAT_D32_SFLOAT,
-                                 VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT),
+      .sample4Depth = supportsSampleCount(
+          VK_FORMAT_D32_SFLOAT, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+          VK_SAMPLE_COUNT_4_BIT),
+      .sample8Color = sample8Color,
+      .sample8Depth = supportsSampleCount(
+          VK_FORMAT_D32_SFLOAT, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+          VK_SAMPLE_COUNT_8_BIT),
       .depthResolveMin = (resolveProperties.supportedDepthResolveModes &
                           VK_RESOLVE_MODE_MIN_BIT) != 0u,
-      .alphaToCoverage = sample4Color,
+      .alphaToCoverage = sample4Color || sample8Color,
       .sampleRateShading = sampleRateShadingEnabled,
   };
 }

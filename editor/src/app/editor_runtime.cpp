@@ -223,6 +223,9 @@ debugShadowInspectProbeConfig() {
       stringEqualsIgnoreCase(view, "msaa4x")) {
     return AntiAliasingMode::MSAA4x;
   }
+  if (stringEqualsIgnoreCase(view, "msaa8x")) {
+    return AntiAliasingMode::MSAA8x;
+  }
   NURI_LOG_WARNING("EditorRuntime: ignoring unrecognized NURI_DEBUG_AA_MODE=%s",
                    value->c_str());
   return std::nullopt;

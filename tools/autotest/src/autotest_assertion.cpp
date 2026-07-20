@@ -412,10 +412,15 @@ void flattenAutotestRendererMetrics(std::map<std::string, double> &out,
   addMetric(out, "renderer.aa.taa_copy_back_passes", aa.taaCopyBackPassCount);
   addMetric(out, "renderer.aa.spatial_aa_passes", aa.spatialAAPassCount);
   addMetric(out, "renderer.aa.msaa_resolve_passes", aa.msaaResolvePassCount);
+  addMetric(out, "renderer.aa.msaa_sample_count", aa.msaaSampleCount);
   addBoolMetric(out, "renderer.aa.msaa_sample4_color_supported",
                 aa.msaaSample4ColorSupported);
   addBoolMetric(out, "renderer.aa.msaa_sample4_depth_supported",
                 aa.msaaSample4DepthSupported);
+  addBoolMetric(out, "renderer.aa.msaa_sample8_color_supported",
+                aa.msaaSample8ColorSupported);
+  addBoolMetric(out, "renderer.aa.msaa_sample8_depth_supported",
+                aa.msaaSample8DepthSupported);
   addBoolMetric(out, "renderer.aa.msaa_depth_resolve_min_supported",
                 aa.msaaDepthResolveMinSupported);
   addBoolMetric(out, "renderer.aa.msaa_alpha_to_coverage_supported",

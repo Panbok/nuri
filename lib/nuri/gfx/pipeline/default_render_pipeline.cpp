@@ -21,9 +21,7 @@ namespace nuri {
 namespace {
 bool needsMsaaResolve(const FrameBuildContext &ctx) {
   const AntiAliasingFrameMetrics &metrics = ctx.frame.metrics.antiAliasing;
-  return sanitizeAntiAliasingMode(
-             renderSettingsOrDefault(ctx.frame).antiAliasing.mode) ==
-             AntiAliasingMode::MSAA4x &&
+  return ctx.frame.presentationAA.coverage != CoverageMode::Sample1 &&
          !(metrics.msaaColorResolveTargetBound &&
            metrics.msaaDepthResolveTargetBound);
 }

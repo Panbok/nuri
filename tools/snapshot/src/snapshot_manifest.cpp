@@ -592,7 +592,8 @@ parseSettings(yyjson_val *object, RenderSettings &settings) {
         {{"None", AntiAliasingMode::None},
          {"TAA", AntiAliasingMode::TAA},
          {"SpatialFallback", AntiAliasingMode::SpatialFallback},
-         {"MSAA4x", AntiAliasingMode::MSAA4x}});
+         {"MSAA4x", AntiAliasingMode::MSAA4x},
+         {"MSAA8x", AntiAliasingMode::MSAA8x}});
     if (result.hasError()) {
       return result;
     }

@@ -60,6 +60,7 @@ enum class AntiAliasingMode : uint8_t {
   TAA = 1,
   SpatialFallback = 2,
   MSAA4x = 3,
+  MSAA8x = 4,
 };
 
 enum class TemporalReconstructionProvider : uint8_t {
@@ -71,6 +72,8 @@ enum class TemporalReconstructionProvider : uint8_t {
 enum class CoverageMode : uint8_t {
   Sample1 = 0,
   Sample4 = 1,
+  Sample8 = 2,
+  Count,
 };
 
 enum class ColorReconstruction : uint8_t {
@@ -102,6 +105,8 @@ enum class PresentationAAUnsupportedReason : uint8_t {
   Sample4Depth = 2,
   DepthResolveMin = 3,
   AlphaToCoverage = 4,
+  Sample8Color = 5,
+  Sample8Depth = 6,
 };
 
 struct PresentationAAProviderCapabilities {
@@ -347,6 +352,7 @@ static constexpr Format kFrameCompositionFrameColorFormat =
     Format::RGBA16_FLOAT;
 static constexpr Format kFrameCompositionDepthFormat = Format::D32_FLOAT;
 static constexpr uint32_t kMsaa4xSampleCount = 4u;
+static constexpr uint32_t kMsaa8xSampleCount = 8u;
 static constexpr Format kFrameCompositionMotionVectorFormat =
     Format::RG16_FLOAT;
 static constexpr Format kFrameCompositionReactiveMaskFormat = Format::R8_UNORM;
@@ -425,8 +431,36 @@ sanitizeToneMapper(ToneMapper mapper) noexcept {
 
 [[nodiscard]] constexpr AntiAliasingMode
 sanitizeAntiAliasingMode(AntiAliasingMode mode) noexcept {
-  return sanitizeContiguousEnum(mode, AntiAliasingMode::MSAA4x,
+  return sanitizeContiguousEnum(mode, AntiAliasingMode::MSAA8x,
                                 AntiAliasingMode::None);
+}
+
+[[nodiscard]] constexpr bool isMsaaMode(AntiAliasingMode mode) noexcept {
+  const AntiAliasingMode sanitized = sanitizeAntiAliasingMode(mode);
+  return sanitized == AntiAliasingMode::MSAA4x ||
+         sanitized == AntiAliasingMode::MSAA8x;
+}
+
+inline constexpr size_t kCoverageModeCount =
+    static_cast<size_t>(CoverageMode::Count);
+
+[[nodiscard]] constexpr size_t
+coverageModeIndex(CoverageMode coverage) noexcept {
+  return static_cast<size_t>(coverage);
+}
+
+[[nodiscard]] constexpr uint32_t
+coverageSampleCount(CoverageMode coverage) noexcept {
+  switch (coverage) {
+  case CoverageMode::Sample4:
+    return kMsaa4xSampleCount;
+  case CoverageMode::Sample8:
+    return kMsaa8xSampleCount;
+  case CoverageMode::Sample1:
+  case CoverageMode::Count:
+    return 1u;
+  }
+  return 1u;
 }
 
 [[nodiscard]] constexpr TemporalReconstructionProvider
@@ -2034,6 +2068,8 @@ struct AntiAliasingFrameMetrics {
   bool msaaSampleShadingEnabled = false;
   bool msaaSample4ColorSupported = false;
   bool msaaSample4DepthSupported = false;
+  bool msaaSample8ColorSupported = false;
+  bool msaaSample8DepthSupported = false;
   bool msaaDepthResolveMinSupported = false;
   bool msaaAlphaToCoverageSupported = false;
   bool msaaSampleRateShadingSupported = false;

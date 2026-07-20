@@ -541,6 +541,8 @@ template <typename Enum> [[nodiscard]] uint32_t enumValue(Enum value) {
     return "SpatialFallback";
   case AntiAliasingMode::MSAA4x:
     return "MSAA4x";
+  case AntiAliasingMode::MSAA8x:
+    return "MSAA8x";
   }
   return "Unknown";
 }
@@ -1483,7 +1485,8 @@ readEnumValue(yyjson_val *object, const char *key, Enum defaultValue,
                       {{"None", AntiAliasingMode::None},
                        {"TAA", AntiAliasingMode::TAA},
                        {"SpatialFallback", AntiAliasingMode::SpatialFallback},
-                       {"MSAA4x", AntiAliasingMode::MSAA4x}});
+                       {"MSAA4x", AntiAliasingMode::MSAA4x},
+                       {"MSAA8x", AntiAliasingMode::MSAA8x}});
     settings.antiAliasing.temporalProvider =
         readEnumValue(antiAliasing, "temporalProvider",
                       settings.antiAliasing.temporalProvider,

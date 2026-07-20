@@ -58,7 +58,8 @@ private:
     bool fixedSize = false;
   };
   Result<bool, std::string>
-  ensureTextures(FrameTextureRequirementFlags requirements);
+  ensureTextures(FrameTextureRequirementFlags requirements,
+                 CoverageMode coverage);
   Result<bool, std::string> recreateTextureRing(const RingDesc &desc);
   void invalidateAllocationState() noexcept;
   void destroyTextureRing(Ring ring);
@@ -74,6 +75,7 @@ private:
   uint32_t textureRingCount_ = 0u;
   uint32_t framebufferWidth_ = 0u;
   uint32_t framebufferHeight_ = 0u;
+  CoverageMode allocatedCoverage_ = CoverageMode::Sample1;
   HistoryRegistry historyRegistry_{};
   FrameTextureRequirementFlags pendingHistoryRequirements_ =
       FrameTextureRequirementFlags::None;

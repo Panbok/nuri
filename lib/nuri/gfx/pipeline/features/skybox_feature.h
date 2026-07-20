@@ -82,10 +82,9 @@ private:
   GPUDevice &gpu_;
   SkyboxFeatureConfig config_{};
   std::unique_ptr<Shader> skyboxShader_;
-  OwnedRenderPipelineHandle skyboxPipeline_;
-  OwnedRenderPipelineHandle skyboxMsaaPipeline_;
-  OwnedRenderPipelineHandle skyboxDepthPipeline_;
-  OwnedRenderPipelineHandle skyboxMsaaDepthPipeline_;
+  std::array<OwnedRenderPipelineHandle, kCoverageModeCount> skyboxPipelines_;
+  std::array<OwnedRenderPipelineHandle, kCoverageModeCount>
+      skyboxDepthPipelines_;
   std::vector<FrameBufferSlot> frameBufferSlots_;
   BufferHandle preparedFrameBuffer_{};
   ShaderHandle skyboxVertexShader_{};

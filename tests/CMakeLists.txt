@@ -368,6 +368,20 @@ nuri_add_gtest_suite_with_sources(
   ${CMAKE_SOURCE_DIR}/editor/src/app/editor_animation_player_service.cpp
 )
 
+nuri_add_gtest_suite_with_sources(
+  nuri_smaa_lut_baker_tests
+  "smaa_lut_baker::"
+  src/smaa_lut_baker_tests.cpp
+  ${CMAKE_SOURCE_DIR}/editor/src/bakery/smaa_lut_baker.cpp
+)
+
+nuri_add_gtest_suite_with_sources(
+  nuri_spatial_aa_renderer_tests
+  "spatial_aa_renderer::"
+  src/spatial_aa_feature_tests.cpp
+  ${CMAKE_SOURCE_DIR}/editor/src/bakery/smaa_lut_baker.cpp
+)
+
 nuri_add_gtest_suite(
   nuri_scene_animation_tests
   src/scene_animation_tests.cpp

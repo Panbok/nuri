@@ -1,5 +1,6 @@
 #include "nuri/gfx/pipeline/features/skybox_feature.h"
 #include "nuri/core/profiling.h"
+#include "nuri/gfx/frame/presentation_aa_plan.h"
 #include "nuri/gfx/frame/render_frame_context.h"
 #include "nuri/gfx/pipeline/render_pipeline.h"
 #include "nuri/pch.h"
@@ -8,10 +9,9 @@
 namespace nuri {
 namespace {
 constexpr uint32_t kSkyboxVertexCount = 36;
-[[nodiscard]] bool isMsaa4xSelected(const RenderFrameContext &frame) noexcept {
-  const RenderSettings &settings = renderSettingsOrDefault(frame);
-  return sanitizeAntiAliasingMode(settings.antiAliasing.mode) ==
-         AntiAliasingMode::MSAA4x;
+[[nodiscard]] CoverageMode
+selectedCoverage(const RenderFrameContext &frame) noexcept {
+  return presentationAAPlanForFrame(frame).coverage;
 }
 } // namespace
 
@@ -21,10 +21,12 @@ SkyboxPass::SkyboxPass(GPUDevice &gpu, const SkyboxFeatureConfig &config)
 SkyboxPass::~SkyboxPass() {
   destroyFrameBuffers();
   skyboxShader_.reset();
-  skyboxMsaaDepthPipeline_.reset();
-  skyboxDepthPipeline_.reset();
-  skyboxMsaaPipeline_.reset();
-  skyboxPipeline_.reset();
+  for (OwnedRenderPipelineHandle &pipeline : skyboxDepthPipelines_) {
+    pipeline.reset();
+  }
+  for (OwnedRenderPipelineHandle &pipeline : skyboxPipelines_) {
+    pipeline.reset();
+  }
   skyboxVertexShader_ = {};
   skyboxFragmentShader_ = {};
 }
@@ -45,7 +47,8 @@ Result<bool, std::string> SkyboxPass::build(FrameBuildContext &ctx) {
     return Result<bool, std::string>::makeResult(true);
   }
   RenderGraphGraphicsPassDesc passDesc{};
-  const bool msaaSelected = isMsaa4xSelected(ctx.frame);
+  const CoverageMode coverage = selectedCoverage(ctx.frame);
+  const bool msaaSelected = coverage != CoverageMode::Sample1;
   const bool usedMsaa = msaaSelected &&
                         nuri::isValid(ctx.shared.msaaSceneColorTexture) &&
                         nuri::isValid(ctx.shared.msaaSceneColorGraphTexture) &&
@@ -85,13 +88,17 @@ Result<bool, std::string> SkyboxPass::build(FrameBuildContext &ctx) {
                       .clearStencil = 0u};
     passDesc.depthTexture = sceneDepthGraphTexture;
     drawItem_.pipeline =
-        usedMsaa ? skyboxMsaaDepthPipeline_.get() : skyboxDepthPipeline_.get();
+        skyboxDepthPipelines_[coverageModeIndex(
+                                  usedMsaa ? coverage : CoverageMode::Sample1)]
+            .get();
     drawItem_.useDepthState = true;
     drawItem_.depthState = {.compareOp = CompareOp::LessEqual,
                             .isDepthWriteEnabled = false};
   } else {
     drawItem_.pipeline =
-        usedMsaa ? skyboxMsaaPipeline_.get() : skyboxPipeline_.get();
+        skyboxPipelines_[coverageModeIndex(usedMsaa ? coverage
+                                                    : CoverageMode::Sample1)]
+            .get();
     drawItem_.useDepthState = false;
     drawItem_.depthState = {};
   }
@@ -234,35 +241,41 @@ Result<bool, std::string> SkyboxPass::createPipeline() {
       .topology = Topology::Triangle,
       .blendEnabled = false,
   };
-  RenderPipelineDesc skyboxMsaaDesc = skyboxDesc;
-  skyboxMsaaDesc.numSamples = kMsaa4xSampleCount;
   RenderPipelineDesc skyboxDepthDesc = skyboxDesc;
   skyboxDepthDesc.depthFormat = kFrameCompositionDepthFormat;
   skyboxDepthDesc.rasterState = makeRasterPipelineState(DepthState{
       .compareOp = CompareOp::LessEqual,
       .isDepthWriteEnabled = false,
   });
-  RenderPipelineDesc skyboxMsaaDepthDesc = skyboxDepthDesc;
-  skyboxMsaaDepthDesc.numSamples = kMsaa4xSampleCount;
-  struct PipelineSpec {
-    const RenderPipelineDesc &desc;
-    std::string_view name;
-    OwnedRenderPipelineHandle &owner;
-  };
-  const std::array specs{
-      PipelineSpec{skyboxDesc, "skybox", skyboxPipeline_},
-      PipelineSpec{skyboxMsaaDesc, "skybox_msaa4x", skyboxMsaaPipeline_},
-      PipelineSpec{skyboxDepthDesc, "skybox_depth_tested",
-                   skyboxDepthPipeline_},
-      PipelineSpec{skyboxMsaaDepthDesc, "skybox_msaa4x_depth_tested",
-                   skyboxMsaaDepthPipeline_},
-  };
-  for (const PipelineSpec &spec : specs) {
-    auto result = gpu_.createRenderPipeline(spec.desc, spec.name);
-    if (result.hasError()) {
-      return Result<bool, std::string>::makeError(result.error());
+  const GpuMultisampleCapabilities multisampleCapabilities =
+      gpu_.getMultisampleCapabilities();
+  const bool supports8x = multisampleCapabilities.sample8Color &&
+                          multisampleCapabilities.sample8Depth;
+  constexpr std::array colorNames{"skybox", "skybox_msaa4x", "skybox_msaa8x"};
+  constexpr std::array depthNames{"skybox_depth_tested",
+                                  "skybox_msaa4x_depth_tested",
+                                  "skybox_msaa8x_depth_tested"};
+  const std::array enabled{true, true, supports8x};
+  for (size_t index = 0; index < kCoverageModeCount; ++index) {
+    if (!enabled[index]) {
+      continue;
     }
-    spec.owner.reset(gpu_, result.value());
+    const CoverageMode coverage = static_cast<CoverageMode>(index);
+    RenderPipelineDesc colorDesc = skyboxDesc;
+    colorDesc.numSamples = coverageSampleCount(coverage);
+    auto colorResult = gpu_.createRenderPipeline(colorDesc, colorNames[index]);
+    if (colorResult.hasError()) {
+      return Result<bool, std::string>::makeError(colorResult.error());
+    }
+    skyboxPipelines_[index].reset(gpu_, colorResult.value());
+
+    RenderPipelineDesc depthDesc = skyboxDepthDesc;
+    depthDesc.numSamples = colorDesc.numSamples;
+    auto depthResult = gpu_.createRenderPipeline(depthDesc, depthNames[index]);
+    if (depthResult.hasError()) {
+      return Result<bool, std::string>::makeError(depthResult.error());
+    }
+    skyboxDepthPipelines_[index].reset(gpu_, depthResult.value());
   }
   return Result<bool, std::string>::makeResult(true);
 }
@@ -352,8 +365,8 @@ SkyboxPass::prepareSkyboxDraw(FrameBuildContext &ctx) {
       .frameDataAddress = baseAddress,
   };
   drawItem_ = DrawItem{};
-  drawItem_.pipeline = isMsaa4xSelected(frame) ? skyboxMsaaPipeline_.get()
-                                               : skyboxPipeline_.get();
+  drawItem_.pipeline =
+      skyboxPipelines_[coverageModeIndex(selectedCoverage(frame))].get();
   drawItem_.vertexCount = kSkyboxVertexCount;
   drawItem_.pushConstants = std::span<const std::byte>(
       reinterpret_cast<const std::byte *>(&pushConstants_),

@@ -9,6 +9,7 @@ set(NURI_EDITOR_SOURCES
   src/bakery/brdf_lut_baker.cpp
   src/bakery/envmap_prefilter_baker.cpp
   src/bakery/scene_asset_baker.cpp
+  src/bakery/smaa_lut_baker.cpp
   src/app/built_in_scenes.cpp
   src/app/editor_animation_player_service.cpp
   src/app/editor_application.cpp

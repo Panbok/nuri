@@ -1975,6 +1975,8 @@ void addRendererFrameMetrics(BenchmarkFrameMeasurements &measurements,
                aa.spatialAAPassCount);
   addIfNonzero(measurements, "renderer.aa.msaa_resolve_passes",
                aa.msaaResolvePassCount);
+  addIfNonzero(measurements, "renderer.aa.msaa_sample_count",
+               aa.msaaSampleCount);
   addIfNonzero(measurements, "renderer.aa.msaa_color_textures",
                aa.msaaColorTextureCount);
   addIfNonzero(measurements, "renderer.aa.msaa_depth_textures",
@@ -1983,6 +1985,10 @@ void addRendererFrameMetrics(BenchmarkFrameMeasurements &measurements,
                aa.msaaSample4ColorSupported);
   addIfNonzero(measurements, "renderer.aa.msaa_sample4_depth_supported",
                aa.msaaSample4DepthSupported);
+  addIfNonzero(measurements, "renderer.aa.msaa_sample8_color_supported",
+               aa.msaaSample8ColorSupported);
+  addIfNonzero(measurements, "renderer.aa.msaa_sample8_depth_supported",
+               aa.msaaSample8DepthSupported);
   addIfNonzero(measurements, "renderer.aa.msaa_depth_resolve_min_supported",
                aa.msaaDepthResolveMinSupported);
   addIfNonzero(measurements, "renderer.aa.msaa_alpha_to_coverage_supported",

@@ -44,6 +44,7 @@ private:
   uint32_t scratchRingCount_ = 0u;
   Format outputScratchFormat_ = Format::Count;
   Result<bool, std::string> initialize();
+  Result<bool, std::string> ensureLuts();
   Result<bool, std::string> ensureScratchTextures(FrameBuildContext &ctx);
   void destroyResources();
 };

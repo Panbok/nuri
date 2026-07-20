@@ -932,19 +932,24 @@ TEST(RenderGraphRendererTest, TemporalAAQualityPresetDrivesEffectiveSettings) {
             TemporalAAHdrWeightingMode::Luminance);
 }
 
-TEST(RenderGraphRendererTest, Msaa4xAntiAliasingModeSanitizesTemporalState) {
+TEST(RenderGraphRendererTest, MsaaAntiAliasingModesSanitizeTemporalState) {
   RenderSettings::AntiAliasingSettings aa{};
-  aa.mode = AntiAliasingMode::MSAA4x;
+  aa.mode = AntiAliasingMode::MSAA8x;
   aa.qualityPreset = static_cast<TemporalAAQualityPreset>(UINT8_MAX);
   aa.debug.jitterEnabled = true;
   aa.debug.freezeJitter = true;
 
   sanitizeAntiAliasingSettings(aa);
 
-  EXPECT_EQ(aa.mode, AntiAliasingMode::MSAA4x);
+  EXPECT_EQ(aa.mode, AntiAliasingMode::MSAA8x);
   EXPECT_EQ(aa.qualityPreset, TemporalAAQualityPreset::Quality);
   EXPECT_EQ(sanitizeAntiAliasingMode(AntiAliasingMode::MSAA4x),
             AntiAliasingMode::MSAA4x);
+  EXPECT_EQ(sanitizeAntiAliasingMode(AntiAliasingMode::MSAA8x),
+            AntiAliasingMode::MSAA8x);
+  EXPECT_EQ(coverageSampleCount(CoverageMode::Sample4), 4u);
+  EXPECT_EQ(coverageSampleCount(CoverageMode::Sample8), 8u);
+  EXPECT_EQ(coverageSampleCount(CoverageMode::Sample1), 1u);
   EXPECT_FALSE(aa.debug.jitterEnabled);
   EXPECT_FALSE(aa.debug.freezeJitter);
 }
@@ -956,6 +961,8 @@ TEST(RenderGraphRendererTest,
   const PresentationAAGpuCapabilities supported{
       .sample4Color = true,
       .sample4Depth = true,
+      .sample8Color = true,
+      .sample8Depth = true,
       .depthResolveMin = true,
       .alphaToCoverage = true,
       .sampleRateShading = true,
@@ -971,12 +978,19 @@ TEST(RenderGraphRendererTest,
   EXPECT_TRUE(planResult.value().sampleShadingSupported);
   EXPECT_FALSE(planResult.value().sampleShadingEnabled);
 
+  settings.antiAliasing.mode = AntiAliasingMode::MSAA8x;
+  planResult = buildPresentationAAPlan(settings, {}, supported);
+  ASSERT_FALSE(planResult.hasError()) << planResult.error();
+  EXPECT_EQ(planResult.value().coverage, CoverageMode::Sample8);
+
+  settings.antiAliasing.mode = AntiAliasingMode::MSAA4x;
+
   const auto expectUnsupported = [&settings, &supported](
                                      PresentationAAGpuCapabilities caps,
                                      PresentationAAUnsupportedReason reason) {
     auto result = buildPresentationAAPlan(settings, {}, caps);
     ASSERT_TRUE(result.hasError());
-    EXPECT_EQ(msaa4xUnsupportedReason(caps), reason);
+    EXPECT_EQ(msaaUnsupportedReason(settings.antiAliasing.mode, caps), reason);
     EXPECT_NE(result.error().find(presentationAAUnsupportedReasonName(reason)),
               std::string::npos);
   };
@@ -992,6 +1006,20 @@ TEST(RenderGraphRendererTest,
   caps = supported;
   caps.alphaToCoverage = false;
   expectUnsupported(caps, PresentationAAUnsupportedReason::AlphaToCoverage);
+
+  settings.antiAliasing.mode = AntiAliasingMode::MSAA8x;
+  caps = supported;
+  caps.sample8Color = false;
+  auto result = buildPresentationAAPlan(settings, {}, caps);
+  ASSERT_TRUE(result.hasError());
+  EXPECT_EQ(msaaUnsupportedReason(settings.antiAliasing.mode, caps),
+            PresentationAAUnsupportedReason::Sample8Color);
+  caps = supported;
+  caps.sample8Depth = false;
+  result = buildPresentationAAPlan(settings, {}, caps);
+  ASSERT_TRUE(result.hasError());
+  EXPECT_EQ(msaaUnsupportedReason(settings.antiAliasing.mode, caps),
+            PresentationAAUnsupportedReason::Sample8Depth);
 }
 
 TEST(RenderGraphRendererTest,

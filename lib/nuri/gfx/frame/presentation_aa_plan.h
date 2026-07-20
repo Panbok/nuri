@@ -5,13 +5,18 @@
 #include <string_view>
 namespace nuri {
 
-[[nodiscard]] constexpr PresentationAAUnsupportedReason msaa4xUnsupportedReason(
+[[nodiscard]] constexpr PresentationAAUnsupportedReason msaaUnsupportedReason(
+    AntiAliasingMode mode,
     const PresentationAAGpuCapabilities &capabilities) noexcept {
-  if (!capabilities.sample4Color) {
-    return PresentationAAUnsupportedReason::Sample4Color;
+  const bool sample8 =
+      sanitizeAntiAliasingMode(mode) == AntiAliasingMode::MSAA8x;
+  if (!(sample8 ? capabilities.sample8Color : capabilities.sample4Color)) {
+    return sample8 ? PresentationAAUnsupportedReason::Sample8Color
+                   : PresentationAAUnsupportedReason::Sample4Color;
   }
-  if (!capabilities.sample4Depth) {
-    return PresentationAAUnsupportedReason::Sample4Depth;
+  if (!(sample8 ? capabilities.sample8Depth : capabilities.sample4Depth)) {
+    return sample8 ? PresentationAAUnsupportedReason::Sample8Depth
+                   : PresentationAAUnsupportedReason::Sample4Depth;
   }
   if (!capabilities.depthResolveMin) {
     return PresentationAAUnsupportedReason::DepthResolveMin;
@@ -31,6 +36,10 @@ namespace nuri {
     return "sample4_color_unsupported";
   case PresentationAAUnsupportedReason::Sample4Depth:
     return "sample4_depth_unsupported";
+  case PresentationAAUnsupportedReason::Sample8Color:
+    return "sample8_color_unsupported";
+  case PresentationAAUnsupportedReason::Sample8Depth:
+    return "sample8_depth_unsupported";
   case PresentationAAUnsupportedReason::DepthResolveMin:
     return "depth_resolve_min_unsupported";
   case PresentationAAUnsupportedReason::AlphaToCoverage:
@@ -60,14 +69,17 @@ buildPresentationAAPlan(
     plan.spatialCleanup = SpatialCleanupPoint::PreComposition;
     break;
   case AntiAliasingMode::MSAA4x:
+  case AntiAliasingMode::MSAA8x:
     if (const PresentationAAUnsupportedReason unsupportedReason =
-            msaa4xUnsupportedReason(gpuCapabilities);
+            msaaUnsupportedReason(mode, gpuCapabilities);
         unsupportedReason != PresentationAAUnsupportedReason::None) {
       return Result<PresentationAAPlan, std::string>::makeError(
-          "MSAA4x unsupported: " +
+          std::string(mode == AntiAliasingMode::MSAA8x ? "MSAA8x" : "MSAA4x") +
+          " unsupported: " +
           std::string(presentationAAUnsupportedReasonName(unsupportedReason)));
     }
-    plan.coverage = CoverageMode::Sample4;
+    plan.coverage = mode == AntiAliasingMode::MSAA8x ? CoverageMode::Sample8
+                                                     : CoverageMode::Sample4;
     plan.alphaCoverage = AlphaCoveragePolicy::ThresholdedAlphaToCoverage;
     plan.transparency = TransparencyAAPolicy::SingleSamplePostResolve;
     plan.sampleShadingSupported = gpuCapabilities.sampleRateShading;

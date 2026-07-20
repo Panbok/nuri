@@ -57,14 +57,16 @@ RenderPipeline::buildRenderGraph(RenderFrameContext &frame,
   AntiAliasingFrameMetrics &aaMetrics = frame.metrics.antiAliasing;
   aaMetrics.msaaSample4ColorSupported = gpuCapabilities.sample4Color;
   aaMetrics.msaaSample4DepthSupported = gpuCapabilities.sample4Depth;
+  aaMetrics.msaaSample8ColorSupported = gpuCapabilities.sample8Color;
+  aaMetrics.msaaSample8DepthSupported = gpuCapabilities.sample8Depth;
   aaMetrics.msaaDepthResolveMinSupported = gpuCapabilities.depthResolveMin;
   aaMetrics.msaaAlphaToCoverageSupported = gpuCapabilities.alphaToCoverage;
   aaMetrics.msaaSampleRateShadingSupported = gpuCapabilities.sampleRateShading;
+  const AntiAliasingMode antiAliasingMode = sanitizeAntiAliasingMode(
+      renderSettingsOrDefault(frame).antiAliasing.mode);
   aaMetrics.msaaUnsupportedReason =
-      sanitizeAntiAliasingMode(
-          renderSettingsOrDefault(frame).antiAliasing.mode) ==
-              AntiAliasingMode::MSAA4x
-          ? msaa4xUnsupportedReason(gpuCapabilities)
+      isMsaaMode(antiAliasingMode)
+          ? msaaUnsupportedReason(antiAliasingMode, gpuCapabilities)
           : PresentationAAUnsupportedReason::None;
   auto presentationPlan = buildPresentationAAPlan(
       renderSettingsOrDefault(frame), {}, gpuCapabilities);

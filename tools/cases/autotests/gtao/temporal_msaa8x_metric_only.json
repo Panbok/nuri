@@ -1,0 +1,156 @@
+{
+  "schemaVersion": 1,
+  "id": "gtao.procedural.temporal_msaa8x_metric_only",
+  "suite": "gtao",
+  "description": "Metric-only proof that Ultra GTAO temporal accumulation remains active with pure MSAA8x",
+  "scene": {
+    "kind": "procedural",
+    "generator": "nuri.procedural.reactive_mask.v1",
+    "seed": 47,
+    "contentHash": "nuri.procedural.reactive_mask.v1:47"
+  },
+  "backend": "default",
+  "resolution": [640, 360],
+  "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 12,
+  "endFrame": 20,
+  "authoritative": false,
+  "presentMode": "immediate",
+  "windowMode": "visible",
+  "renderGraph": {
+    "workerCount": 1,
+    "parallelCompile": false,
+    "parallelRecording": false
+  },
+  "camera": {
+    "position": [-0.35, 0.35, 3.25],
+    "target": [0.0, 0.25, 0.0],
+    "verticalFovDegrees": 55.0,
+    "nearPlane": 0.05,
+    "farPlane": 100.0
+  },
+  "timeline": {
+    "cameraPaths": [
+      {
+        "id": "gtao_temporal_pan",
+        "startFrame": 0,
+        "endFrame": 20,
+        "interpolation": "smoothstep",
+        "keyframes": [
+          {
+            "frame": 0,
+            "position": [-0.35, 0.35, 3.25],
+            "target": [0.0, 0.25, 0.0]
+          },
+          {
+            "frame": 20,
+            "position": [0.35, 0.42, 3.0],
+            "target": [0.0, 0.22, 0.0]
+          }
+        ]
+      }
+    ]
+  },
+  "settings": {
+    "opaque": {
+      "enabled": true,
+      "enableDepthPrepass": true,
+      "enableInstanceCompute": true,
+      "enableInstanceAnimation": false,
+      "enableMeshLod": false,
+      "enableTessellation": false,
+      "forcedMeshLod": -1
+    },
+    "antiAliasing": {
+      "mode": "MSAA8x",
+      "temporalProvider": "Reference",
+      "qualityPreset": "Ultra",
+      "spatialPostMsaaCleanup": false
+    },
+    "ambientOcclusion": {
+      "mode": "GTAO",
+      "preset": "Ultra"
+    },
+    "shadow": {
+      "enabled": true,
+      "qualityPreset": "Ultra"
+    },
+    "hdrPostProcess": {
+      "bloomEnabled": false,
+      "adaptationEnabled": false
+    },
+    "transmission": {
+      "enabled": false
+    },
+    "transparent": {
+      "enabled": false
+    },
+    "textureFiltering": {
+      "mode": "Anisotropic",
+      "anisotropy": 8
+    }
+  },
+  "checkpoints": [
+    {
+      "id": "temporal_steady_state",
+      "frame": 20,
+      "assertions": [
+        {
+          "id": "gtao_active",
+          "metric": "renderer.ao.active",
+          "equals": 1
+        },
+        {
+          "id": "gtao_temporal_pass",
+          "metric": "renderer.ao.temporal_passes",
+          "greaterOrEqual": 1
+        },
+        {
+          "id": "gtao_motion_class",
+          "metric": "renderer.ao.temporal_motion_class_consumed",
+          "equals": 1
+        },
+        {
+          "id": "gtao_previous_depth",
+          "metric": "renderer.ao.temporal_previous_depth_consumed",
+          "equals": 1
+        },
+        {
+          "id": "msaa_present",
+          "metric": "renderer.aa.msaa_resolve_passes",
+          "greaterOrEqual": 1
+        },
+        {
+          "id": "msaa_8x_selected",
+          "metric": "renderer.aa.msaa_sample_count",
+          "equals": 8
+        },
+        {
+          "id": "msaa_8x_color_supported",
+          "metric": "renderer.aa.msaa_sample8_color_supported",
+          "equals": 1
+        },
+        {
+          "id": "msaa_8x_depth_supported",
+          "metric": "renderer.aa.msaa_sample8_depth_supported",
+          "equals": 1
+        },
+        {
+          "id": "taa_absent",
+          "metric": "renderer.aa.taa_resolve_passes",
+          "equals": 0
+        },
+        {
+          "id": "cleanup_absent",
+          "metric": "renderer.aa.spatial_aa_passes",
+          "equals": 0
+        }
+      ]
+    }
+  ],
+  "requirements": {
+    "assets": ["modelsRoot:common/flat_plane.obj"],
+    "backends": [],
+    "allowVisibleWindow": true
+  }
+}
