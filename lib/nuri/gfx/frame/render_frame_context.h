@@ -2536,9 +2536,6 @@ struct FrameSharedResources {
   TextureHandle msaaSceneColorTexture{};
   TextureHandle sceneColorHalfResTexture{};
   TextureHandle sceneColorQuarterResTexture{};
-  TextureHandle transparentTransmissionFeedbackTexture{};
-  TextureHandle transparentTransmissionFeedbackHalfResTexture{};
-  TextureHandle transparentTransmissionFeedbackQuarterResTexture{};
   RenderGraphTextureId sceneColorGraphTexture{};
   RenderGraphTextureId msaaSceneColorGraphTexture{};
   TextureHandle frameColorTexture{};
@@ -2569,16 +2566,26 @@ struct FrameSharedResources {
   bool exposureHistoryValid = false;
 };
 
-enum TransparentStageDrawFlags : uint32_t {
-  kTransparentStageDrawFlagNone = 0u,
-  kTransparentStageDrawFlagRequiresFrameColorFeedback = 1u << 0u,
+enum class TransparentStageFeedbackRefreshMode : uint8_t {
+  BeforeEachDraw = 0,
+  OnceBeforeFirstDraw = 1,
+};
+
+using TransparentStageAppendFeedbackRefreshFn = Result<bool, std::string> (*)(
+    void *user, RenderFrameContext &frame, RenderGraphBuilder &graph);
+
+struct TransparentStageFeedbackRefresh {
+  void *user = nullptr;
+  TransparentStageAppendFeedbackRefreshFn appendRefresh = nullptr;
+  TransparentStageFeedbackRefreshMode mode =
+      TransparentStageFeedbackRefreshMode::BeforeEachDraw;
 };
 
 struct TransparentStageSortableDraw {
   DrawItem draw{};
   float sortDepth = 0.0f;
   uint32_t stableOrder = 0;
-  uint32_t flags = kTransparentStageDrawFlagNone;
+  bool requiresFrameColorFeedback = false;
   uint32_t dependencyOffset = 0;
   uint32_t dependencyCount = 0;
 };
@@ -2588,6 +2595,7 @@ struct TransparentStageContribution {
   std::span<const DrawItem> fixedDraws{};
   std::span<const BufferHandle> dependencyBuffers{};
   std::span<const TextureHandle> textureReads{};
+  TransparentStageFeedbackRefresh feedbackRefresh{};
 };
 
 using TransparentContributionCollectFn = Result<bool, std::string> (*)(

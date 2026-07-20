@@ -583,6 +583,7 @@ TEST(TransmissionRendererTest, StableSortedTransmissionRecomputesSortDepths) {
   frame.resources = &resources;
   frame.settings = &settings;
   frame.camera.view = glm::mat4(1.0f);
+  settings.opaque.enableCpuFrustumCulling = false;
   frame.sharedResources.sceneColorTexture = sceneColorTexture->handle();
   frame.sharedResources.frameColorTexture = frameColorTexture->handle();
   frame.sharedResources.materialTableGpuData = materialGpu;

@@ -2016,6 +2016,14 @@ void addRendererFrameMetrics(BenchmarkFrameMeasurements &measurements,
   addBytesAsMiB(measurements, "gpu.memory.aa.spatial_aa_total_mb",
                 aa.spatialAATotalBytes);
   addBytesAsMiB(measurements, "gpu.memory.aa.msaa_total_mb", aa.msaaTotalBytes);
+  addIfNonzero(measurements, "renderer.aa.transparent_transmission_blend_draws",
+               aa.transparentTransmissionBlendDrawCount);
+  addIfNonzero(measurements,
+               "renderer.aa.transparent_transmission_feedback_refreshes",
+               aa.transparentTransmissionFeedbackRefreshCount);
+  addIfNonzero(measurements,
+               "renderer.aa.transparent_transmission_feedback_available",
+               aa.transparentTransmissionFeedbackSourceAvailable);
 
   const AmbientOcclusionFrameMetrics &ao = metrics.ambientOcclusion;
   addIfNonzero(measurements, "renderer.ao.normal_prepass_draws",

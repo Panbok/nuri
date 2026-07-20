@@ -71,6 +71,7 @@ private:
   Result<bool, std::string> ensurePipelines(Format colorFormat,
                                             Format depthFormat,
                                             RasterPipelineState rasterState);
+  Result<bool, std::string> ensureFeedbackCopyPipeline(Format colorFormat);
   Result<bool, std::string>
   ensureInstanceMatricesRingCapacity(size_t requiredBytes);
   Result<bool, std::string>
@@ -79,6 +80,11 @@ private:
   ensureBlendedFrameDataRingCapacity(size_t requiredBytes);
   Result<bool, std::string>
   ensureTransparentFeedbackTextures(RenderFrameContext &frame);
+  [[nodiscard]] TransparentStageFeedbackRefreshMode
+  selectTransparentFeedbackRefreshMode(uint32_t visibleDrawCount);
+  Result<bool, std::string>
+  appendTransparentFeedbackRefresh(RenderFrameContext &frame,
+                                   RenderGraphBuilder &graph);
   void rebuildSceneCache(const SceneDrawDatabase &database,
                          const RenderScene &scene);
   void refreshDrawTemplateTransforms();
@@ -96,12 +102,15 @@ private:
   std::pmr::vector<DynamicBufferSlot> instanceMatricesRing_;
   std::pmr::vector<DynamicBufferSlot> instanceRemapRing_;
   std::pmr::vector<DynamicBufferSlot> blendedFrameDataRing_;
-  std::array<ShaderHandle, 2> shaders_{};
+  std::array<ShaderHandle, 4> shaders_{};
   std::array<RenderPipelineHandle, 4> meshPipelines_{};
+  RenderPipelineHandle feedbackCopyPipelineHandle_{};
   Format meshPipelineColorFormat_ = Format::Count;
   Format meshPipelineDepthFormat_ = Format::Count;
   RasterPipelineState meshPipelineRasterState_{};
+  Format feedbackCopyPipelineColorFormat_ = Format::Count;
   bool initialized_ = false;
+  bool loggedTransparentFeedbackFallbackWarning_ = false;
   const RenderScene *cachedScene_ = nullptr;
   uint64_t cachedTopologyVersion_ = std::numeric_limits<uint64_t>::max();
   uint64_t cachedMaterialVersion_ = std::numeric_limits<uint64_t>::max();
@@ -141,18 +150,23 @@ private:
       std::numeric_limits<uint64_t>::max();
   std::filesystem::path transmissionVertexPath_{};
   std::filesystem::path transmissionFragmentPath_{};
+  std::filesystem::path feedbackCopyVertexPath_{};
+  std::filesystem::path feedbackCopyFragmentPath_{};
   TextureHandle preparedSceneColorTexture_{};
   TextureHandle preparedSceneColorHalfResTexture_{};
   TextureHandle preparedSceneColorQuarterResTexture_{};
   TextureHandle preparedFrameColorTexture_{};
   TextureHandle preparedDepthTexture_{};
   RenderGraphTextureId preparedSceneDepthGraphTexture_{};
+  std::array<TextureHandle, kFrameCompositionSceneColorMipCount>
+      preparedTransparentFeedbackTextures_{};
   std::array<std::pmr::vector<TextureHandle>,
              kFrameCompositionSceneColorMipCount>
       transparentFeedbackTextures_;
   uint32_t transparentFeedbackWidth_ = 0u;
   uint32_t transparentFeedbackHeight_ = 0u;
   uint32_t transparentFeedbackRingCount_ = 0u;
+  uint32_t preparedTransparentFeedbackCandidateCount_ = 0u;
 };
 
 NURI_API void registerTransmissionStage(

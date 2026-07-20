@@ -64,7 +64,6 @@ private:
   Result<bool, std::string> createShaders();
   Result<bool, std::string> ensurePipelines(Format colorFormat,
                                             Format depthFormat);
-  Result<bool, std::string> ensureFeedbackCopyPipeline(Format colorFormat);
   Result<bool, std::string>
   ensureInstanceMatricesRingCapacity(size_t requiredBytes);
   Result<bool, std::string>
@@ -88,9 +87,6 @@ private:
       std::span<const TextureHandle> textureReads,
       std::span<const BufferHandle> dependencyBuffers,
       std::string_view debugLabel);
-  Result<bool, std::string>
-  appendTransparentTransmissionFeedbackRefresh(RenderFrameContext &frame,
-                                               RenderGraphBuilder &graph);
   void resetCachedState();
   void resetFrameBuildState();
   void destroyPipelineState();
@@ -105,18 +101,15 @@ private:
   std::pmr::memory_resource *memory_ = std::pmr::get_default_resource();
   std::pmr::vector<DynamicBufferSlot> instanceMatricesRing_;
   std::pmr::vector<DynamicBufferSlot> instanceRemapRing_;
-  std::array<ShaderHandle, 6> shaders_{};
+  std::array<ShaderHandle, 4> shaders_{};
   RenderPipelineHandle meshPipelineHandle_{};
   RenderPipelineHandle meshDoubleSidedPipelineHandle_{};
   RenderPipelineHandle meshPickPipelineHandle_{};
   RenderPipelineHandle meshPickDoubleSidedPipelineHandle_{};
-  RenderPipelineHandle feedbackCopyPipelineHandle_{};
   Format meshPipelineColorFormat_ = Format::Count;
   Format meshPipelineDepthFormat_ = Format::Count;
   Format pickPipelineDepthFormat_ = Format::Count;
-  Format feedbackCopyPipelineColorFormat_ = Format::Count;
   bool initialized_ = false;
-  bool loggedTransmissionFeedbackFallbackWarning_ = false;
   bool transparentUsesJitteredProjection_ = true;
   const RenderScene *cachedScene_ = nullptr;
   uint64_t cachedTopologyVersion_ = std::numeric_limits<uint64_t>::max();
@@ -137,6 +130,7 @@ private:
   std::pmr::vector<FixedDrawEntry> contributorFixedDraws_;
   std::pmr::vector<TextureHandle> contributorTextureReads_;
   std::pmr::vector<BufferHandle> contributorDependencyBuffers_;
+  TransparentStageFeedbackRefresh feedbackRefresh_{};
   std::pmr::vector<PushConstants> drawPushConstants_;
   std::pmr::vector<PushConstants> pickPushConstants_;
   std::pmr::vector<TransparentStageSortableDraw> meshSortableDraws_;
@@ -150,8 +144,6 @@ private:
   std::pmr::vector<TextureHandle> passTextureReads_;
   std::pmr::vector<BufferHandle> passDependencyBuffers_;
   std::filesystem::path alphaPickFragmentPath_{};
-  std::filesystem::path feedbackCopyVertexPath_{};
-  std::filesystem::path feedbackCopyFragmentPath_{};
 };
 
 NURI_API void registerTransparentStages(
