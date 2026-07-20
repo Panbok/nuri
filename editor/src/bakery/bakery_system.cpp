@@ -5,6 +5,7 @@
 #include "nuri/bakery/brdf_lut_baker.h"
 #include "nuri/bakery/envmap_prefilter_baker.h"
 #include "nuri/bakery/scene_asset_baker.h"
+#include "nuri/bakery/smaa_lut_baker.h"
 #include "nuri/core/log.h"
 #include "nuri/core/profiling.h"
 #include "nuri/core/thread_priority.h"
@@ -49,6 +50,8 @@ maxWriteCompletionsPerTick(BakeryExecutionProfile profile) {
   switch (kind) {
   case BakeJobKind::BrdfLut:
     return "BRDF LUT";
+  case BakeJobKind::SmaaLuts:
+    return "SMAA LUTs";
   case BakeJobKind::EnvmapPrefilter:
     return "Envmap Prefilter";
   case BakeJobKind::SceneTextureArtifacts:
@@ -88,6 +91,10 @@ struct BakerySystem::Impl {
     std::optional<detail::EnvWritePayload> payload{};
   };
 
+  struct SmaaJobData {
+    detail::SmaaLutBakePlan plan{};
+  };
+
   struct SceneJobData {
     detail::SceneTextureArtifactBakePlan plan{};
     std::shared_future<
@@ -110,7 +117,9 @@ struct BakerySystem::Impl {
     uint32_t totalSteps = 0;
     std::string summary{};
     std::string error{};
-    std::variant<std::monostate, BrdfJobData, EnvJobData, SceneJobData> data{};
+    std::variant<std::monostate, BrdfJobData, SmaaJobData, EnvJobData,
+                 SceneJobData>
+        data{};
   };
 
   struct BrdfWriteTask {
@@ -122,9 +131,13 @@ struct BakerySystem::Impl {
     detail::EnvWritePayload payload{};
   };
 
+  struct SmaaWriteTask {
+    detail::SmaaLutBakePlan plan{};
+  };
+
   struct WriteTask {
     BakeJobId jobId{};
-    std::variant<BrdfWriteTask, EnvWriteTask> payload{};
+    std::variant<BrdfWriteTask, SmaaWriteTask, EnvWriteTask> payload{};
   };
 
   struct WriteCompletion {
@@ -174,6 +187,8 @@ struct BakerySystem::Impl {
     job.id = id;
     if (std::holds_alternative<BrdfLutBakeRequest>(request)) {
       job.kind = BakeJobKind::BrdfLut;
+    } else if (std::holds_alternative<SmaaLutsBakeRequest>(request)) {
+      job.kind = BakeJobKind::SmaaLuts;
     } else if (std::holds_alternative<EnvmapPrefilterBakeRequest>(request)) {
       job.kind = BakeJobKind::EnvmapPrefilter;
     } else if (std::holds_alternative<SceneTextureArtifactsBakeRequest>(
@@ -357,6 +372,8 @@ struct BakerySystem::Impl {
                     std::span<const std::byte>(payload.bytes.data(),
                                                payload.bytes.size()),
                     payload.outputPath);
+              } else if constexpr (std::is_same_v<T, SmaaWriteTask>) {
+                return detail::bakeSmaaLutsToDisk(payload.plan);
               } else {
                 return detail::writeEnvmapPrefilterOutputs(payload.payload);
               }
@@ -414,6 +431,7 @@ struct BakerySystem::Impl {
         setFailed(*job, completion.result.error());
       } else {
         job->state = BakeJobState::Succeeded;
+        job->completedSteps = job->totalSteps;
         job->summary = completion.summary;
         job->error.clear();
         const std::string_view kindName = jobKindName(job->kind);
@@ -457,6 +475,27 @@ struct BakerySystem::Impl {
         job.completedSteps = 0u;
         job.summary = "Cache check complete";
         job.state = BakeJobState::GpuSetup;
+        return;
+      }
+
+      if (job.kind == BakeJobKind::SmaaLuts) {
+        const auto *request = std::get_if<SmaaLutsBakeRequest>(&job.request);
+        if (request == nullptr) {
+          setFailed(job, "BakerySystem: SMAA request payload mismatch");
+          return;
+        }
+        auto plan = detail::planSmaaLutBake(config, request->forceRebuild);
+        if (!plan.shouldBake) {
+          job.state = BakeJobState::Skipped;
+          job.summary = "Up-to-date";
+          job.error.clear();
+          return;
+        }
+        job.data = SmaaJobData{.plan = std::move(plan)};
+        job.totalSteps = 1u;
+        job.completedSteps = 0u;
+        job.summary = "Cache check complete";
+        job.state = BakeJobState::WriteQueued;
         return;
       }
 
@@ -743,6 +782,13 @@ struct BakerySystem::Impl {
           .outputPath = data->plan.outputPath,
           .bytes = std::move(data->outputBytes),
       };
+    } else if (job.kind == BakeJobKind::SmaaLuts) {
+      auto *data = std::get_if<SmaaJobData>(&job.data);
+      if (data == nullptr) {
+        setFailed(job, "BakerySystem: missing SMAA write data");
+        return;
+      }
+      task.payload = SmaaWriteTask{.plan = std::move(data->plan)};
     } else if (job.kind == BakeJobKind::EnvmapPrefilter) {
       auto *data = std::get_if<EnvJobData>(&job.data);
       if (data == nullptr || !data->payload.has_value()) {
@@ -781,6 +827,10 @@ struct BakerySystem::Impl {
       if (auto *data = std::get_if<BrdfJobData>(&job.data); data != nullptr) {
         detail::cleanupBrdfLutBake(*gpu, data->gpu);
       }
+      return;
+    }
+
+    if (job.kind == BakeJobKind::SmaaLuts) {
       return;
     }
 

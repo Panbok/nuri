@@ -10,6 +10,7 @@ namespace nuri::bakery {
 
 enum class BakeJobKind : uint8_t {
   BrdfLut,
+  SmaaLuts,
   EnvmapPrefilter,
   SceneTextureArtifacts
 };
@@ -37,6 +38,10 @@ struct BrdfLutBakeRequest {
   bool forceRebuild = false;
 };
 
+struct SmaaLutsBakeRequest {
+  bool forceRebuild = false;
+};
+
 struct EnvmapPrefilterBakeRequest {
   std::filesystem::path environmentHdrPath;
   bool forceRebuild = false;
@@ -51,8 +56,9 @@ struct SceneTextureArtifactsBakeRequest {
   bool forceRebuild = false;
 };
 
-using BakeRequest = std::variant<BrdfLutBakeRequest, EnvmapPrefilterBakeRequest,
-                                 SceneTextureArtifactsBakeRequest>;
+using BakeRequest =
+    std::variant<BrdfLutBakeRequest, SmaaLutsBakeRequest,
+                 EnvmapPrefilterBakeRequest, SceneTextureArtifactsBakeRequest>;
 
 struct BakeJobSnapshot {
   BakeJobId id{};
