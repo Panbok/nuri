@@ -85,7 +85,7 @@ private:
     ShaderSlotCount
   };
   using FrameData = ForwardSceneFrameData;
-  static_assert(sizeof(FrameData) == 464,
+  static_assert(sizeof(FrameData) == 488,
                 "ShadowRenderer::FrameData must match shader layout");
   struct PushConstants {
     uint64_t frameDataAddress = 0;

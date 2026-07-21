@@ -1,0 +1,79 @@
+{
+  "schemaVersion": 1,
+  "id": "correctness.procedural.ddgi_probe_inspect",
+  "suite": "correctness",
+  "description": "Runs a bounded selected-probe ray-query diagnostic and verifies asynchronous identity-safe readback",
+  "scene": {
+    "kind": "procedural",
+    "generator": "nuri.procedural.ddgi_probe_states.v1",
+    "seed": 1,
+    "contentHash": "nuri.procedural.ddgi_probe_states.v1:1"
+  },
+  "backend": "default",
+  "resolution": [640, 360],
+  "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 4,
+  "endFrame": 10,
+  "authoritative": false,
+  "presentMode": "immediate",
+  "windowMode": "visible",
+  "renderGraph": {
+    "workerCount": 1,
+    "parallelCompile": false,
+    "parallelRecording": false
+  },
+  "camera": {
+    "position": [0.0, 0.75, 4.2],
+    "target": [0.0, 0.25, 0.0],
+    "verticalFovDegrees": 60.0,
+    "nearPlane": 0.05,
+    "farPlane": 100.0
+  },
+  "settings": {
+    "ddgi": {
+      "enabled": true,
+      "preset": "Low",
+      "raysPerProbe": 64,
+      "maxProbeUpdatesPerFrame": 144,
+      "maxRayQueriesPerFrame": 18432,
+      "relocation": true,
+      "classification": true,
+      "showSelectedProbeRays": true
+    },
+    "opaque": {"enableInstanceAnimation": false},
+    "antiAliasing": {"mode": "None"},
+    "ambientOcclusion": {"mode": "Disabled"},
+    "shadow": {"enabled": true, "qualityPreset": "Low"}
+  },
+  "ddgiProbeInspection": {
+    "frame": 5,
+    "volumeIndex": 0,
+    "probeId": 0,
+    "rayCount": 64
+  },
+  "checkpoints": [
+    {
+      "id": "probe_inspection_readback",
+      "frame": 10,
+      "captures": [
+        {"target": "frame_color_hdr", "profile": "hdr_color", "required": true, "compare": false}
+      ],
+      "assertions": [
+        {"id": "inspection_available", "metric": "renderer.ddgi.inspection_available", "equals": 1},
+        {"id": "inspection_identity_valid", "metric": "renderer.ddgi.inspection_valid", "equals": 1},
+        {"id": "inspection_ray_count", "metric": "renderer.ddgi.inspection_ray_count", "equals": 64},
+        {"id": "inspection_observed_hits", "metric": "renderer.ddgi.inspection_hit_count", "greaterOrEqual": 1},
+        {"id": "inspection_no_candidate_overflow", "metric": "renderer.ddgi.inspection_candidate_overflows", "equals": 0},
+        {"id": "inspection_no_event_overflow", "metric": "renderer.ddgi.inspection_event_overflows", "equals": 0},
+        {"id": "ddgi_no_fallback", "metric": "renderer.ddgi.fallback_reason", "equals": 0}
+      ]
+    }
+  ],
+  "requirements": {
+    "assets": ["modelsRoot:common/flat_plane.obj"],
+    "backends": [],
+    "allowVisibleWindow": true,
+    "accelerationStructure": true,
+    "rayQuery": true
+  }
+}

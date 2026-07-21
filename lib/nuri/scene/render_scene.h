@@ -11,6 +11,7 @@
 #include <memory_resource>
 #include <optional>
 #include <span>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -37,6 +38,19 @@ struct NURI_API EnvironmentHandles {
   constexpr bool operator==(const EnvironmentHandles &) const = default;
 };
 
+struct NURI_API RenderDDGIVolume {
+  DDGIVolumeId id = kInvalidDDGIVolumeId;
+  NodeId node = kInvalidNodeId;
+  std::string_view name{};
+  glm::uvec3 probeCounts{16u, 8u, 16u};
+  glm::vec3 probeSpacing{2.0f};
+  float blendDistance = 2.0f;
+  float maxRayDistance = 20.0f;
+  int32_t priority = 0;
+  DDGIVolumeMode mode = DDGIVolumeMode::Authored;
+  glm::mat4 worldFromLocal{1.0f};
+};
+
 class NURI_API RenderScene {
 public:
   explicit RenderScene(
@@ -60,6 +74,9 @@ public:
   }
   template <typename Fn> void forEachLightId(Fn &&fn) const {
     sceneGraph_.forEachLightId(std::forward<Fn>(fn));
+  }
+  [[nodiscard]] std::span<const RenderDDGIVolume> ddgiVolumes() const noexcept {
+    return ddgiVolumes_;
   }
   [[nodiscard]] uint64_t topologyVersion() const noexcept {
     return topologyVersion_;
@@ -92,6 +109,15 @@ public:
   [[nodiscard]] uint64_t lightTransformVersion() const noexcept {
     return lightTransformVersion_;
   }
+  [[nodiscard]] uint64_t ddgiVolumeTopologyVersion() const noexcept {
+    return ddgiVolumeTopologyVersion_;
+  }
+  [[nodiscard]] uint64_t ddgiVolumeTransformVersion() const noexcept {
+    return ddgiVolumeTransformVersion_;
+  }
+  [[nodiscard]] uint64_t ddgiVolumeSettingsVersion() const noexcept {
+    return ddgiVolumeSettingsVersion_;
+  }
   void bindResources(ResourceManager *resources);
   [[nodiscard]] const ResourceManager *resources() const noexcept {
     return resources_;
@@ -112,6 +138,8 @@ private:
   void rebuildPackedDirectionalLights();
   void rebuildPackedLocalLights();
   bool commitPackedLights();
+  bool commitDDGIVolumes();
+  void rebuildDDGIVolumes();
   void sanitizeGraphRenderableRefs();
   void noteLightTopologyChanged() noexcept;
   void noteLightTransformChanged() noexcept;
@@ -132,6 +160,7 @@ private:
   std::pmr::vector<LocalLightGpuData> packedLocalLights_;
   std::pmr::vector<LightId> packedDirectionalLightIds_;
   std::pmr::vector<LightId> packedLocalLightIds_;
+  std::pmr::vector<RenderDDGIVolume> ddgiVolumes_;
   ResourceManager *resources_ = nullptr;
   EnvironmentHandles environment_{};
   uint64_t id_ = 0u;
@@ -140,6 +169,9 @@ private:
   uint64_t deformationVersion_ = 0u;
   uint64_t lightTopologyVersion_ = 0u;
   uint64_t lightTransformVersion_ = 0u;
+  uint64_t ddgiVolumeTopologyVersion_ = 0u;
+  uint64_t ddgiVolumeTransformVersion_ = 0u;
+  uint64_t ddgiVolumeSettingsVersion_ = 0u;
   uint64_t environmentVersion_ = 0u;
   std::shared_ptr<IncrementalCommitState> incrementalCommit_{};
   uint32_t retirementCursor_ = 0u;

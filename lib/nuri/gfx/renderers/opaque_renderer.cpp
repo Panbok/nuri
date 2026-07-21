@@ -3584,17 +3584,19 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     passDependencyBufferAccessModes_.clear();
     preResolvedDrawBuffers_.clear();
     passDependencyTextures_.clear();
-    if (animationSceneData != nullptr &&
-        !animationSceneData->preDispatches.empty()) {
-      preDispatches_.insert(preDispatches_.end(),
-                            animationSceneData->preDispatches.begin(),
-                            animationSceneData->preDispatches.end());
-    }
     const bool hasIndirectDraws = !indirectDrawItems_.empty();
     if (nuri::isValid(sceneGpu->buffer)) {
       appendUniqueDependency(passDependencyBuffers_,
                              passDependencyBufferAccessModes_, sceneGpu->buffer,
                              RenderGraphAccessMode::Read);
+    }
+    for (const BufferHandle handle : sceneGpu->indirectDependencyBuffers) {
+      appendUniqueDependency(passDependencyBuffers_,
+                             passDependencyBufferAccessModes_, handle,
+                             RenderGraphAccessMode::Read);
+    }
+    for (const TextureHandle handle : sceneGpu->indirectDependencyTextures) {
+      appendUniqueDependency(passDependencyTextures_, handle);
     }
     for (const BufferHandle materialHandle :
          {materialGpu->headerBuffer, materialGpu->clearcoatBuffer,

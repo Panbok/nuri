@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "id": "correctness.procedural.ddgi_overlap_fallback",
+  "suite": "correctness",
+  "description": "Publishes overlapping authored volumes with stable priority ordering and captures the shared gather path including its sky remainder",
+  "scene": {"kind": "procedural", "generator": "nuri.procedural.ddgi_overlap_fallback.v1", "seed": 1, "contentHash": "nuri.procedural.ddgi_overlap_fallback.v1:1"},
+  "backend": "default",
+  "resolution": [640, 360],
+  "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 4,
+  "endFrame": 10,
+  "authoritative": false,
+  "presentMode": "immediate",
+  "windowMode": "visible",
+  "renderGraph": {"workerCount": 1, "parallelCompile": false, "parallelRecording": false},
+  "camera": {"position": [0.0, 0.75, 4.2], "target": [0.0, 0.25, 0.0], "verticalFovDegrees": 60.0, "nearPlane": 0.05, "farPlane": 100.0},
+  "settings": {
+    "ddgi": {"enabled": true, "preset": "Low", "raysPerProbe": 64, "maxProbeUpdatesPerFrame": 244, "maxRayQueriesPerFrame": 31232, "debugView": "VolumeId"},
+    "opaque": {"enableInstanceAnimation": false},
+    "antiAliasing": {"mode": "None"},
+    "ambientOcclusion": {"mode": "Disabled"},
+    "shadow": {"enabled": false}
+  },
+  "checkpoints": [
+    {
+      "id": "priority_overlap_ready",
+      "frame": 9,
+      "captures": [
+        {"target": "frame_color_hdr", "profile": "hdr_color", "required": true, "compare": false},
+        {"target": "ddgi_volume0_irradiance_atlas", "profile": "hdr_color", "required": true, "compare": false},
+        {"target": "ddgi_volume1_irradiance_atlas", "profile": "hdr_color", "required": true, "compare": false}
+      ],
+      "assertions": [
+        {"id": "two_overlap_volumes_active", "metric": "renderer.ddgi.active_volumes", "equals": 2},
+        {"id": "two_overlap_volumes_ready", "metric": "renderer.ddgi.ready_volumes", "equals": 2},
+        {"id": "all_overlap_probes_present", "metric": "renderer.ddgi.total_probes", "equals": 244},
+        {"id": "shared_gather_has_no_global_fallback", "metric": "renderer.ddgi.fallback_reason", "equals": 0},
+        {"id": "volume_id_debug_path_active", "metric": "renderer.ddgi.debug_view", "equals": 2}
+      ]
+    }
+  ],
+  "requirements": {"assets": ["modelsRoot:common/flat_plane.obj"], "backends": [], "allowVisibleWindow": true, "accelerationStructure": true, "rayQuery": true}
+}

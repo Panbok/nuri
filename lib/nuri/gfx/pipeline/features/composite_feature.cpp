@@ -1325,6 +1325,14 @@ Result<bool, std::string> PresentToneMapPass::build(FrameBuildContext &ctx) {
                           RenderCaptureLifetimeClass::FrameSharedRingTexture,
                           "linear_hdr", "hdr_color", "PresentToneMapPass",
                           "frame_color_hdr");
+  if (renderSettingsOrDefault(ctx.frame).ddgi.debugView !=
+      DDGIDebugView::None) {
+    publishRequestedCapture(ctx.frame, gpu_, "ddgi_debug_preview", source,
+                            RenderCaptureValueKind::DebugPreview,
+                            RenderCaptureLifetimeClass::FrameSharedRingTexture,
+                            "linear_hdr", "debug_preview", "PresentToneMapPass",
+                            "ddgi_debug_preview");
+  }
   if (isRenderCaptureRequested(ctx.frame, "final_color") &&
       nuri::isValid(ctx.shared.presentCaptureTexture)) {
     const RenderGraphTextureId capture =

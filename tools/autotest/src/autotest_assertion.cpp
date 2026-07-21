@@ -63,6 +63,16 @@ shouldIncludeGpuScopeInSum(const std::map<std::string, double> &metrics,
       id == "gpu.scopes.gtao_temporal_ms") {
     return false;
   }
+  if (metrics.find("gpu.scopes.ray_tracing_scene_ms") != metrics.end() &&
+      (id == "gpu.scopes.ray_tracing_blas_ms" ||
+       id == "gpu.scopes.ray_tracing_tlas_ms")) {
+    return false;
+  }
+  if (metrics.find("gpu.scopes.ddgi_ms") != metrics.end() &&
+      (id == "gpu.scopes.ddgi_trace_ms" || id == "gpu.scopes.ddgi_update_ms" ||
+       id == "gpu.scopes.ddgi_relocate_classify_ms")) {
+    return false;
+  }
   return true;
 }
 
@@ -356,6 +366,130 @@ void flattenAutotestRendererMetrics(std::map<std::string, double> &out,
   addBytesAsMiB(out, "gpu.memory.shadow.cascade_texture_mb",
                 shadow.cascadeTextureBytes);
 
+  const RayTracingSceneFrameMetrics &rayTracing = metrics.rayTracingScene;
+  addMetric(out, "renderer.ray_tracing.static_instances",
+            rayTracing.staticInstances);
+  addMetric(out, "renderer.ray_tracing.dynamic_instances",
+            rayTracing.dynamicInstances);
+  addMetric(out, "renderer.ray_tracing.excluded_dynamic_instances",
+            rayTracing.excludedDynamicInstances);
+  addMetric(out, "renderer.ray_tracing.static_blas_count",
+            rayTracing.staticBlasCount);
+  addMetric(out, "renderer.ray_tracing.dynamic_blas_count",
+            rayTracing.dynamicBlasCount);
+  addMetric(out, "renderer.ray_tracing.tlas_count", rayTracing.tlasCount);
+  addMetric(out, "renderer.ray_tracing.unique_static_geometry",
+            rayTracing.uniqueStaticGeometry);
+  addMetric(out, "renderer.ray_tracing.geometry_records",
+            rayTracing.geometryRecords);
+  addMetric(out, "renderer.ray_tracing.triangles", rayTracing.triangles);
+  addMetric(out, "renderer.ray_tracing.queued_blas_builds",
+            rayTracing.queuedBlasBuilds);
+  addMetric(out, "renderer.ray_tracing.decoded_vertices",
+            rayTracing.decodedVertices);
+  addMetric(out, "renderer.ray_tracing.decode_dispatches",
+            rayTracing.decodeDispatches);
+  addMetric(out, "renderer.ray_tracing.blas_builds", rayTracing.blasBuilds);
+  addMetric(out, "renderer.ray_tracing.tlas_builds", rayTracing.tlasBuilds);
+  addMetric(out, "renderer.ray_tracing.tlas_updates", rayTracing.tlasUpdates);
+  addMetric(out, "renderer.ray_tracing.dynamic_blas_updates",
+            rayTracing.dynamicBlasUpdates);
+  addMetric(out, "renderer.ray_tracing.dynamic_vertex_dispatches",
+            rayTracing.dynamicVertexDispatches);
+  addMetric(out, "renderer.ray_tracing.readiness",
+            static_cast<uint32_t>(rayTracing.readiness));
+  addMetric(out, "renderer.ray_tracing.consumed_rebuild_epoch",
+            rayTracing.consumedRebuildEpoch);
+  addBytesAsMiB(out, "gpu.memory.ray_tracing.decoded_positions_mb",
+                rayTracing.decodedPositionBytes);
+  addBytesAsMiB(out, "gpu.memory.ray_tracing.tables_mb", rayTracing.tableBytes);
+  addMetric(out, "gpu.scopes.ray_tracing_scene_ms", rayTracing.gpuTimeMs);
+  addMetric(out, "gpu.scopes.ray_tracing_blas_ms", rayTracing.blasGpuTimeMs);
+  addMetric(out, "gpu.scopes.ray_tracing_tlas_ms", rayTracing.tlasGpuTimeMs);
+  addMetric(out, "renderer.ray_tracing.gpu_timing_available",
+            rayTracing.gpuTimingAvailable);
+
+  const DDGIFrameMetrics &ddgi = metrics.ddgi;
+  addMetric(out, "renderer.ddgi.active_volumes", ddgi.activeVolumes);
+  addMetric(out, "renderer.ddgi.ready_volumes", ddgi.readyVolumes);
+  addMetric(out, "renderer.ddgi.total_probes", ddgi.totalProbes);
+  addMetric(out, "renderer.ddgi.vigilant_probes", ddgi.vigilantProbes);
+  addMetric(out, "renderer.ddgi.uninitialized_probes",
+            ddgi.uninitializedProbes);
+  addMetric(out, "renderer.ddgi.off_probes", ddgi.offProbes);
+  addMetric(out, "renderer.ddgi.sleeping_probes", ddgi.sleepingProbes);
+  addMetric(out, "renderer.ddgi.newly_awake_probes", ddgi.newlyAwakeProbes);
+  addMetric(out, "renderer.ddgi.awake_probes", ddgi.awakeProbes);
+  addMetric(out, "renderer.ddgi.newly_vigilant_probes",
+            ddgi.newlyVigilantProbes);
+  addMetric(out, "renderer.ddgi.relocated_probes", ddgi.relocatedProbes);
+  addMetric(out, "renderer.ddgi.probe_state_readback_available",
+            ddgi.probeStateReadbackAvailable);
+  addMetric(out, "renderer.ddgi.max_relocation", ddgi.maxRelocation);
+  addMetric(out, "renderer.ddgi.updated_probes", ddgi.updatedProbes);
+  addMetric(out, "renderer.ddgi.primary_queries", ddgi.primaryQueries);
+  addMetric(out, "renderer.ddgi.secondary_queries_reserved",
+            ddgi.secondaryQueriesReserved);
+  addMetric(out, "renderer.ddgi.secondary_queries_unused",
+            ddgi.secondaryQueriesUnused);
+  addMetric(out, "renderer.ddgi.secondary_queries", ddgi.secondaryQueries);
+  addMetric(out, "renderer.ddgi.primary_candidate_intersections",
+            ddgi.primaryCandidateIntersections);
+  addMetric(out, "renderer.ddgi.secondary_candidate_intersections",
+            ddgi.secondaryCandidateIntersections);
+  addMetric(out, "renderer.ddgi.alpha_candidate_rejections",
+            ddgi.alphaCandidateRejections);
+  addMetric(out, "renderer.ddgi.backface_candidate_rejections",
+            ddgi.backfaceCandidateRejections);
+  addMetric(out, "renderer.ddgi.candidate_overflows", ddgi.candidateOverflows);
+  addMetric(out, "renderer.ddgi.local_light_truncations",
+            ddgi.localLightTruncations);
+  addMetric(out, "renderer.ddgi.ray_query_capacity", ddgi.rayQueryCapacity);
+  addMetric(out, "renderer.ddgi.probe_update_capacity",
+            ddgi.probeUpdateCapacity);
+  addMetric(out, "renderer.ddgi.reset_count", ddgi.resetCount);
+  addMetric(out, "renderer.ddgi.scroll_count", ddgi.scrollCount);
+  addMetric(out, "renderer.ddgi.invalidated_probes", ddgi.invalidatedProbes);
+  addMetric(out, "renderer.ddgi.failed_volumes", ddgi.failedVolumes);
+  addMetric(out, "renderer.ddgi.volume_failure_reason",
+            static_cast<uint32_t>(ddgi.volumeFailureReason));
+  addMetric(out, "renderer.ddgi.history_ready", ddgi.historyReady);
+  addMetric(out, "renderer.ddgi.irradiance_response_remaining",
+            ddgi.irradianceResponseRemaining);
+  addMetric(out, "renderer.ddgi.distance_response_remaining",
+            ddgi.distanceResponseRemaining);
+  addMetric(out, "renderer.ddgi.inspection_available",
+            ddgi.inspectionAvailable);
+  addMetric(out, "renderer.ddgi.inspection_valid", ddgi.inspectionValid);
+  addMetric(out, "renderer.ddgi.inspection_ray_count", ddgi.inspectionRayCount);
+  addMetric(out, "renderer.ddgi.inspection_hit_count", ddgi.inspectionHitCount);
+  addMetric(out, "renderer.ddgi.inspection_miss_count",
+            ddgi.inspectionMissCount);
+  addMetric(out, "renderer.ddgi.inspection_candidate_overflows",
+            ddgi.inspectionCandidateOverflows);
+  addMetric(out, "renderer.ddgi.inspection_event_overflows",
+            ddgi.inspectionEventOverflows);
+  addMetric(out, "renderer.ddgi.sky_fallback_active", ddgi.skyFallbackActive);
+  addMetric(out, "renderer.ddgi.submitted_sequence", ddgi.submittedSequence);
+  addMetric(out, "renderer.ddgi.layout_generation", ddgi.layoutGeneration);
+  addMetric(out, "renderer.ddgi.resource_generation", ddgi.resourceGeneration);
+  addMetric(out, "renderer.ddgi.device_epoch", ddgi.deviceEpoch);
+  addMetric(out, "renderer.ddgi.consumed_reset_epoch", ddgi.consumedResetEpoch);
+  addMetric(out, "renderer.ddgi.consumed_force_update_epoch",
+            ddgi.consumedForceUpdateEpoch);
+  addMetric(out, "renderer.ddgi.fallback_reason",
+            static_cast<uint32_t>(ddgi.fallbackReason));
+  addMetric(out, "renderer.ddgi.debug_view",
+            static_cast<uint32_t>(ddgi.debugView));
+  addMetric(out, "gpu.scopes.ddgi_ms", ddgi.gpuTimeMs);
+  addMetric(out, "gpu.scopes.ddgi_trace_ms", ddgi.traceGpuTimeMs);
+  addMetric(out, "gpu.scopes.ddgi_update_ms", ddgi.updateGpuTimeMs);
+  addMetric(out, "gpu.scopes.ddgi_relocate_classify_ms",
+            ddgi.relocateClassifyGpuTimeMs);
+  addMetric(out, "renderer.ddgi.gpu_timing_available", ddgi.gpuTimingAvailable);
+  addBytesAsMiB(out, "gpu.memory.ddgi.persistent_mb", ddgi.persistentBytes);
+  addBytesAsMiB(out, "gpu.memory.ddgi.frame_batch_mb", ddgi.frameBatchBytes);
+
   const AntiAliasingFrameMetrics &aa = metrics.antiAliasing;
   addBoolMetric(out, "renderer.aa.history_valid", aa.historyValid);
   addBoolMetric(out, "renderer.aa.temporal_data_valid", aa.temporalDataValid);
@@ -543,6 +677,29 @@ void applyAutotestGpuTimingReport(
   applyGpuScope(frames, report, GpuTimingScope::GTAOTemporal,
                 report.gtaoTemporalSourceFrameIndex,
                 "gpu.scopes.gtao_temporal_ms", report.gtaoTemporalTimeMs);
+  applyGpuScope(frames, report, GpuTimingScope::RayTracingScene,
+                report.rayTracingSceneSourceFrameIndex,
+                "gpu.scopes.ray_tracing_scene_ms",
+                report.rayTracingSceneTimeMs);
+  applyGpuScope(frames, report, GpuTimingScope::RayTracingBLAS,
+                report.rayTracingBlasSourceFrameIndex,
+                "gpu.scopes.ray_tracing_blas_ms", report.rayTracingBlasTimeMs);
+  applyGpuScope(frames, report, GpuTimingScope::RayTracingTLAS,
+                report.rayTracingTlasSourceFrameIndex,
+                "gpu.scopes.ray_tracing_tlas_ms", report.rayTracingTlasTimeMs);
+  applyGpuScope(frames, report, GpuTimingScope::DDGI,
+                report.ddgiSourceFrameIndex, "gpu.scopes.ddgi_ms",
+                report.ddgiTimeMs);
+  applyGpuScope(frames, report, GpuTimingScope::DDGITrace,
+                report.ddgiTraceSourceFrameIndex, "gpu.scopes.ddgi_trace_ms",
+                report.ddgiTraceTimeMs);
+  applyGpuScope(frames, report, GpuTimingScope::DDGIUpdate,
+                report.ddgiUpdateSourceFrameIndex, "gpu.scopes.ddgi_update_ms",
+                report.ddgiUpdateTimeMs);
+  applyGpuScope(frames, report, GpuTimingScope::DDGIRelocateClassify,
+                report.ddgiRelocateClassifySourceFrameIndex,
+                "gpu.scopes.ddgi_relocate_classify_ms",
+                report.ddgiRelocateClassifyTimeMs);
 
   for (auto &[frameIndex, metrics] : frames) {
     double sum = 0.0;

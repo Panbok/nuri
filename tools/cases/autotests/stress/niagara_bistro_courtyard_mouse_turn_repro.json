@@ -1,0 +1,118 @@
+{
+  "schemaVersion": 1,
+  "id": "stress.niagara_bistro.courtyard_mouse_turn_repro",
+  "suite": "stress",
+  "description": "Diagnostic consecutive-frame Bistro courtyard mouse turn for current-frame Hi-Z facade self-occlusion",
+  "scene": {
+    "kind": "prefab",
+    "pathBase": "modelsRoot",
+    "path": "NiagaraBistro/bistrox.gltf",
+    "importOptions": {
+      "mesh": {
+        "generateMeshlets": true,
+        "meshletMaxVertices": 64,
+        "meshletMaxPrimitives": 124,
+        "meshletConeWeight": 0.0
+      }
+    }
+  },
+  "environment": {
+    "cubemap": {"pathBase": "texturesRoot", "path": "qwantani_moon_noon_puresky_4k.hdr", "kind": "EquirectHdrCubemap", "debugName": "tool_qwantani_cubemap", "required": true},
+    "irradiance": {"pathBase": "texturesRoot", "path": "qwantani_moon_noon_puresky_4k_irradiance.ktx2", "kind": "Ktx2Cubemap", "debugName": "tool_qwantani_irradiance"},
+    "prefilteredGgx": {"pathBase": "texturesRoot", "path": "qwantani_moon_noon_puresky_4k_prefilter_ggx.ktx2", "kind": "Ktx2Cubemap", "debugName": "tool_qwantani_prefilter_ggx"},
+    "prefilteredCharlie": {"pathBase": "texturesRoot", "path": "qwantani_moon_noon_puresky_4k_prefilter_charlie.ktx2", "kind": "Ktx2Cubemap", "debugName": "tool_qwantani_prefilter_charlie"},
+    "brdfLut": {"pathBase": "texturesRoot", "path": "brdf_lut.ktx2", "kind": "Ktx2Texture2D", "debugName": "tool_brdf_lut"}
+  },
+  "backend": "nvrhi",
+  "resolution": [1920, 1080],
+  "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 12,
+  "endFrame": 20,
+  "authoritative": false,
+  "presentMode": "immediate",
+  "windowMode": "visible",
+  "renderGraph": {"workerCount": 1, "parallelCompile": false, "parallelRecording": false},
+  "camera": {
+    "position": [22.0, 7.0, 31.0],
+    "target": [35.0, 2.0, 10.0],
+    "verticalFovDegrees": 60.0,
+    "nearPlane": 0.05,
+    "farPlane": 500.0
+  },
+  "settings": {
+    "opaque": {
+      "enabled": true,
+      "meshletMode": "Opportunistic",
+      "hybridClassicMaxMeshlets": 128,
+      "enableMeshletFrustumCulling": true,
+      "enableMeshletConeCulling": true,
+      "enableDepthPrepass": true,
+      "enableDepthPyramid": true,
+      "enableInstanceCompute": false,
+      "enableInstanceAnimation": false,
+      "enableMeshLod": false,
+      "enableTessellation": false,
+      "forcedMeshLod": 0
+    },
+    "visibility": {
+      "mainViewMode": "GpuDriven",
+      "occlusionMode": "CurrentFrameHiZExperimental",
+      "enableMeshletFrustumCulling": true,
+      "enableMeshletConeCulling": true,
+      "enableIndirectMeshDispatch": true,
+      "enableMeshletPreTaskCompaction": true,
+      "visibleOnUncertain": true
+    },
+    "antiAliasing": {"mode": "TAA", "temporalProvider": "Reference", "qualityPreset": "Ultra"},
+    "ambientOcclusion": {"mode": "GTAO", "preset": "Ultra"},
+    "shadow": {"enabled": true, "qualityPreset": "Ultra"},
+    "hdrPostProcess": {"bloomEnabled": false, "adaptationEnabled": false},
+    "transmission": {"enabled": false},
+    "transparent": {"enabled": false},
+    "textureFiltering": {"mode": "Anisotropic", "anisotropy": 8}
+  },
+  "timeline": {
+    "cameraPaths": [{
+      "id": "courtyard_mouse_turn",
+      "startFrame": 0,
+      "endFrame": 20,
+      "interpolation": "linear",
+      "keyframes": [
+        {"frame": 0, "position": [22.0, 7.0, 31.0], "target": [35.0, 2.0, 10.0]},
+        {"frame": 12, "position": [22.0, 7.0, 31.0], "target": [35.0, 2.0, 10.0]},
+        {"frame": 16, "position": [22.0, 7.0, 31.0], "target": [43.0, 3.0, 25.0]},
+        {"frame": 20, "position": [22.0, 7.0, 31.0], "target": [45.0, 3.0, 45.0]}
+      ]
+    }],
+    "events": [{"frame": 0, "type": "resetTemporalHistory", "eventReason": "scenario_start"}]
+  },
+  "checkpoints": [
+    {"id": "turn_12", "frame": 12, "captures": [{"target": "final_color", "profile": "ldr_color", "required": true, "compare": false}, {"target": "scene_color_hdr", "profile": "hdr_color", "required": true, "compare": false}, {"target": "scene_depth", "profile": "depth", "required": true, "compare": false}, {"target": "material_normals", "profile": "normal", "required": true, "compare": false}]},
+    {"id": "turn_13", "frame": 13, "captures": [{"target": "final_color", "profile": "ldr_color", "required": true, "compare": false}, {"target": "scene_color_hdr", "profile": "hdr_color", "required": true, "compare": false}, {"target": "scene_depth", "profile": "depth", "required": true, "compare": false}, {"target": "material_normals", "profile": "normal", "required": true, "compare": false}]},
+    {"id": "turn_14", "frame": 14, "captures": [{"target": "final_color", "profile": "ldr_color", "required": true, "compare": false}, {"target": "scene_color_hdr", "profile": "hdr_color", "required": true, "compare": false}, {"target": "scene_depth", "profile": "depth", "required": true, "compare": false}, {"target": "material_normals", "profile": "normal", "required": true, "compare": false}]},
+    {"id": "turn_15", "frame": 15, "captures": [{"target": "final_color", "profile": "ldr_color", "required": true, "compare": false}, {"target": "scene_color_hdr", "profile": "hdr_color", "required": true, "compare": false}, {"target": "scene_depth", "profile": "depth", "required": true, "compare": false}, {"target": "material_normals", "profile": "normal", "required": true, "compare": false}]},
+    {"id": "turn_16", "frame": 16, "captures": [{"target": "final_color", "profile": "ldr_color", "required": true, "compare": false}, {"target": "scene_color_hdr", "profile": "hdr_color", "required": true, "compare": false}, {"target": "scene_depth", "profile": "depth", "required": true, "compare": false}, {"target": "material_normals", "profile": "normal", "required": true, "compare": false}]},
+    {"id": "turn_17", "frame": 17, "captures": [{"target": "final_color", "profile": "ldr_color", "required": true, "compare": false}, {"target": "scene_color_hdr", "profile": "hdr_color", "required": true, "compare": false}, {"target": "scene_depth", "profile": "depth", "required": true, "compare": false}, {"target": "material_normals", "profile": "normal", "required": true, "compare": false}]},
+    {"id": "turn_18", "frame": 18, "captures": [{"target": "final_color", "profile": "ldr_color", "required": true, "compare": false}, {"target": "scene_color_hdr", "profile": "hdr_color", "required": true, "compare": false}, {"target": "scene_depth", "profile": "depth", "required": true, "compare": false}, {"target": "material_normals", "profile": "normal", "required": true, "compare": false}], "assertions": [{"id": "current_hiz_active_at_regression_frame", "metric": "renderer.visibility.current_frame_hiz_active", "equals": 1}, {"id": "occlusion_rejections_remain_conservative", "metric": "renderer.visibility.meshlet_rejected_occlusion", "lessOrEqual": 180}, {"id": "occlusion_rejections_remain_active", "metric": "renderer.visibility.meshlet_rejected_occlusion", "greaterOrEqual": 1}]},
+    {"id": "turn_19", "frame": 19, "captures": [{"target": "final_color", "profile": "ldr_color", "required": true, "compare": false}, {"target": "scene_color_hdr", "profile": "hdr_color", "required": true, "compare": false}, {"target": "scene_depth", "profile": "depth", "required": true, "compare": false}, {"target": "material_normals", "profile": "normal", "required": true, "compare": false}]},
+    {"id": "turn_20", "frame": 20, "captures": [{"target": "final_color", "profile": "ldr_color", "required": true, "compare": false}, {"target": "scene_color_hdr", "profile": "hdr_color", "required": true, "compare": false}, {"target": "scene_depth", "profile": "depth", "required": true, "compare": false}, {"target": "material_normals", "profile": "normal", "required": true, "compare": false}], "assertions": [{"id": "current_hiz_active", "metric": "renderer.visibility.current_frame_hiz_active", "equals": 1}, {"id": "occlusion_rejections_observed", "metric": "renderer.visibility.meshlet_rejected_occlusion", "greaterOrEqual": 1}]}
+  ],
+  "metricWindows": [{
+    "id": "mouse_turn",
+    "frames": [12, 20],
+    "assertions": [
+      {"id": "current_hiz_stays_active", "metric": "renderer.visibility.current_frame_hiz_active", "equals": 1},
+      {"id": "current_hiz_is_fresh", "metric": "renderer.visibility.meshlet_occlusion_source_age", "equals": 0},
+      {"id": "meshlet_occlusion_available", "metric": "renderer.visibility.meshlet_occlusion_available", "equals": 1},
+      {"id": "no_meshlet_payload_overflow", "metric": "renderer.visibility.meshlet_payload_overflow_count", "equals": 0},
+      {"id": "gtao_stays_active", "metric": "renderer.ao.active", "equals": 1},
+      {"id": "four_shadow_cascades", "metric": "renderer.shadow.cascades", "equals": 4},
+      {"id": "taa_stays_active", "metric": "renderer.aa.taa_resolve_passes", "equals": 1}
+    ]
+  }],
+  "requirements": {
+    "assets": ["modelsRoot:NiagaraBistro/bistrox.gltf", "texturesRoot:qwantani_moon_noon_puresky_4k.hdr"],
+    "backends": ["nvrhi"],
+    "allowVisibleWindow": true
+  }
+}

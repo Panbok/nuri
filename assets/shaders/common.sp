@@ -203,6 +203,8 @@ layout(std430, buffer_reference) readonly buffer ShadowFrameBuffer {
   ShadowCascadeGpuData cascades[kMaxShadowCascades];
 };
 
+#include "ddgi_types.sp"
+
 layout(std430, buffer_reference) readonly buffer FrameDataBuffer {
   mat4 view;
   // Current scene projection. Temporal AA applies jitter here when enabled;
@@ -250,6 +252,11 @@ layout(std430, buffer_reference) readonly buffer FrameDataBuffer {
   uint materialSamplerReserved0;
   uint materialSamplerReserved1;
   uint materialSamplerReserved2;
+  uvec2 ddgiFrameBufferAddress;
+  uint ddgiFlags;
+  uint ddgiDebugView;
+  uint ddgiReserved0;
+  uint ddgiReserved1;
   mat4 previousViewProj;
   uvec4 sceneDepthPyramidInfo;
 };
@@ -352,6 +359,7 @@ layout(std430, buffer_reference) readonly buffer ShadowDrawBuffer {
   ShadowDrawGpuData values[];
 };
 
+#ifndef NURI_CUSTOM_PUSH_CONSTANTS
 #ifdef NURI_MESHLET_COMMON
 struct MeshletDescriptorGpuData {
   uvec4 offsetsCounts;
@@ -546,6 +554,7 @@ layout(push_constant) uniform PushConstants {
   uint shadowCascadeIndex;
 } pc;
 #endif
+#endif
 
 const uint kDebugVisualizationNone = 0u;
 const uint kDebugVisualizationWireOverlay = 1u;
@@ -694,7 +703,8 @@ vec2 decodePackedUv1From(PackedVertexWordBuffer vertexBuffer,
                            packedVertexFormat));
 }
 
-#ifndef NURI_OPAQUE_MESHLET_BATCHED
+#if !defined(NURI_OPAQUE_MESHLET_BATCHED) && \
+    !defined(NURI_CUSTOM_PUSH_CONSTANTS)
 uint packedVertexWord(uint vertexIndex, uint wordIndex) {
   return packedVertexWordFrom(pc.vertexBuffer, vertexIndex, wordIndex,
                               pc.packedVertexFormat);
@@ -868,6 +878,7 @@ MaterialSpecularGpuData defaultMaterialSpecularData() {
   return data;
 }
 
+#ifndef NURI_CUSTOM_PUSH_CONSTANTS
 MaterialData loadMaterialDataCore(uint materialIndex, bool includeTransmission) {
   MaterialData material;
   material.clearcoat = defaultMaterialClearcoatData();
@@ -913,6 +924,7 @@ MaterialData loadMaterialData(uint materialIndex) {
 MaterialData loadMaterialDataWithoutTransmission(uint materialIndex) {
   return loadMaterialDataCore(materialIndex, false);
 }
+#endif
 
 void disableMaterialTextures(inout MaterialData material) {
   material.header.commonTextureIndices = uvec4(kInvalidTextureBindlessIndex);

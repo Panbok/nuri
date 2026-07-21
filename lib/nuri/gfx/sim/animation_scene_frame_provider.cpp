@@ -30,6 +30,19 @@ AnimationSceneFrameProvider::prepare(FrameBuildContext &ctx) {
     return Result<bool, std::string>::makeResult(true);
   }
   ctx.frame.sharedResources.animationSceneGpuData = *frameData;
+  if (!frameData->preDispatches.empty()) {
+    auto pass = ctx.graph.addGraphicsPass(RenderGraphGraphicsPassDesc{
+        .executionMode = RenderPassExecutionMode::ComputeOnly,
+        .hasColorAttachment = false,
+        .preDispatches = frameData->preDispatches,
+        .gpuTimingScope = GpuTimingScope::None,
+        .debugLabel = "Animation Scene Deformation",
+        .debugColor = 0xff33cc88u,
+    });
+    if (pass.hasError()) {
+      return Result<bool, std::string>::makeError(pass.error());
+    }
+  }
   return Result<bool, std::string>::makeResult(true);
 }
 

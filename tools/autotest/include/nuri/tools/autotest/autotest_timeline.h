@@ -19,6 +19,7 @@ struct AutotestFramePlan {
   bool cameraCut = false;
   bool drainOnly = false;
   std::string resetReason{};
+  std::vector<const AutotestTimelineEvent *> sceneEvents{};
   std::vector<const AutotestCheckpoint *> checkpoints{};
 };
 

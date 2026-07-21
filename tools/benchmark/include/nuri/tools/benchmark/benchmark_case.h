@@ -86,6 +86,8 @@ struct BenchmarkRequirements {
   std::vector<std::string> backends{};
   bool allowVisibleWindow = true;
   bool msaa4x = false;
+  bool accelerationStructure = false;
+  bool rayQuery = false;
 };
 
 struct BenchmarkCase {

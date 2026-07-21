@@ -413,20 +413,21 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
     NURI_PROFILER_ZONE_END();
     materialTextureAccessCacheValid_ = true;
   }
-  if (environmentDirty || materialDirty || !staticPassTextureReadsValid_) {
-    staticPassTextureReads_.clear();
-    staticPassTextureReads_.reserve(environmentTextureAccessHandles_.size() +
-                                    materialTextureAccessHandles_.size());
-    for (const TextureHandle handle : environmentTextureAccessHandles_) {
-      appendUniqueForwardHandle(staticPassTextureReads_, handle);
-    }
-    for (const TextureHandle handle : materialTextureAccessHandles_) {
-      appendUniqueForwardHandle(staticPassTextureReads_, handle);
-    }
-    staticPassTextureReadsValid_ = true;
-  }
   const ForwardSceneGpuData *sceneGpu =
       &*frame.sharedResources.forwardSceneGpuData;
+  staticPassTextureReads_.clear();
+  staticPassTextureReads_.reserve(environmentTextureAccessHandles_.size() +
+                                  materialTextureAccessHandles_.size() +
+                                  sceneGpu->indirectDependencyTextures.size());
+  for (const TextureHandle handle : environmentTextureAccessHandles_) {
+    appendUniqueForwardHandle(staticPassTextureReads_, handle);
+  }
+  for (const TextureHandle handle : materialTextureAccessHandles_) {
+    appendUniqueForwardHandle(staticPassTextureReads_, handle);
+  }
+  for (const TextureHandle handle : sceneGpu->indirectDependencyTextures) {
+    appendUniqueForwardHandle(staticPassTextureReads_, handle);
+  }
   const MaterialTableGpuData *materialGpu =
       &*frame.sharedResources.materialTableGpuData;
   const AnimationSceneFrameData *animationSceneData =
@@ -757,6 +758,9 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
                               instanceMatricesBufferHandle);
     appendUniqueForwardHandle(passDependencyBuffers_,
                               instanceRemapRing_[frameSlot].buffer->handle());
+    for (const BufferHandle handle : sceneGpu->indirectDependencyBuffers) {
+      appendUniqueForwardHandle(passDependencyBuffers_, handle);
+    }
     blendedDependencyBuffers_ = passDependencyBuffers_;
     if (nuri::isValid(blendedFrameDataBufferHandle)) {
       appendUniqueForwardHandle(blendedDependencyBuffers_,
@@ -1363,7 +1367,6 @@ void TransmissionRenderer::resetCachedState() {
   cachedEnvironmentHandles_ = {};
   environmentTextureAccessCacheValid_ = false;
   materialTextureAccessCacheValid_ = false;
-  staticPassTextureReadsValid_ = false;
   meshDrawTemplates_.clear();
   instanceMatrices_.clear();
   instanceRemap_.clear();

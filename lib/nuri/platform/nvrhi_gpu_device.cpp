@@ -179,6 +179,7 @@ template <typename T, typename E, size_t N>
                                      nvrhi::Format::RG16_FLOAT,
                                      nvrhi::Format::R8_UNORM,
                                      nvrhi::Format::R16_UNORM,
+                                     nvrhi::Format::RGB32_FLOAT,
                                      nvrhi::Format::UNKNOWN};
   return enumValue(format, values);
 }
@@ -200,6 +201,7 @@ template <typename T, typename E, size_t N>
                                      VK_FORMAT_R16G16_SFLOAT,
                                      VK_FORMAT_R8_UNORM,
                                      VK_FORMAT_R16_UNORM,
+                                     VK_FORMAT_R32G32B32_SFLOAT,
                                      VK_FORMAT_UNDEFINED};
   return enumValue(format, values);
 }
@@ -504,13 +506,67 @@ compileGlslToSpirv(ShaderStage stage, const char *code,
   return format == IndexFormat::U16 ? nvrhi::Format::R16_UINT
                                     : nvrhi::Format::R32_UINT;
 }
+[[nodiscard]] nvrhi::rt::AccelStructBuildFlags
+toNvrhiBuildFlags(AccelerationStructureBuildFlags flags) noexcept {
+  nvrhi::rt::AccelStructBuildFlags result =
+      nvrhi::rt::AccelStructBuildFlags::None;
+  if (hasAccelerationStructureBuildFlag(
+          flags, AccelerationStructureBuildFlags::PreferFastTrace)) {
+    result = result | nvrhi::rt::AccelStructBuildFlags::PreferFastTrace;
+  }
+  if (hasAccelerationStructureBuildFlag(
+          flags, AccelerationStructureBuildFlags::PreferFastBuild)) {
+    result = result | nvrhi::rt::AccelStructBuildFlags::PreferFastBuild;
+  }
+  if (hasAccelerationStructureBuildFlag(
+          flags, AccelerationStructureBuildFlags::AllowUpdate)) {
+    result = result | nvrhi::rt::AccelStructBuildFlags::AllowUpdate;
+  }
+  return result;
+}
+[[nodiscard]] nvrhi::rt::GeometryFlags
+toNvrhiGeometryFlags(AccelerationStructureGeometryFlags flags) noexcept {
+  nvrhi::rt::GeometryFlags result = nvrhi::rt::GeometryFlags::None;
+  if (hasAccelerationStructureGeometryFlag(
+          flags, AccelerationStructureGeometryFlags::Opaque)) {
+    result = result | nvrhi::rt::GeometryFlags::Opaque;
+  }
+  if (hasAccelerationStructureGeometryFlag(
+          flags,
+          AccelerationStructureGeometryFlags::NoDuplicateAnyHitInvocation)) {
+    result = result | nvrhi::rt::GeometryFlags::NoDuplicateAnyHitInvocation;
+  }
+  return result;
+}
+[[nodiscard]] nvrhi::rt::InstanceFlags
+toNvrhiInstanceFlags(AccelerationStructureInstanceFlags flags) noexcept {
+  using Source = AccelerationStructureInstanceFlags;
+  nvrhi::rt::InstanceFlags result = nvrhi::rt::InstanceFlags::None;
+  const auto has = [flags](Source requested) {
+    return (static_cast<uint8_t>(flags) & static_cast<uint8_t>(requested)) !=
+           0u;
+  };
+  if (has(Source::TriangleCullDisable)) {
+    result = result | nvrhi::rt::InstanceFlags::TriangleCullDisable;
+  }
+  if (has(Source::TriangleFrontCounterClockwise)) {
+    result = result | nvrhi::rt::InstanceFlags::TriangleFrontCounterclockwise;
+  }
+  if (has(Source::ForceOpaque)) {
+    result = result | nvrhi::rt::InstanceFlags::ForceOpaque;
+  }
+  if (has(Source::ForceNonOpaque)) {
+    result = result | nvrhi::rt::InstanceFlags::ForceNonOpaque;
+  }
+  return result;
+}
 [[nodiscard]] bool isDepthFormat(Format format) {
   return format == Format::D16_UNORM || format == Format::D32_FLOAT;
 }
 [[nodiscard]] size_t bytesPerBlock(Format format) {
-  static constexpr std::array<size_t, 18> values{4u, 4u,  4u,  4u, 8u, 16u,
-                                                 4u, 16u, 16u, 8u, 8u, 4u,
-                                                 8u, 2u,  4u,  1u, 2u, 0u};
+  static constexpr std::array<size_t, 19> values{4u,  4u,  4u, 4u, 8u, 16u, 4u,
+                                                 16u, 16u, 8u, 8u, 4u, 8u,  2u,
+                                                 4u,  1u,  2u, 0u, 0u};
   return enumValue(format, values);
 }
 [[nodiscard]] uint32_t blockExtent(Format format) {
@@ -519,8 +575,9 @@ compileGlslToSpirv(ShaderStage stage, const char *code,
              : 1u;
 }
 [[nodiscard]] size_t textureReadbackBytesPerPixel(Format format) {
-  static constexpr std::array<size_t, 18> values{
-      4u, 4u, 4u, 4u, 8u, 16u, 4u, 0u, 0u, 0u, 0u, 4u, 8u, 2u, 4u, 1u, 2u, 0u};
+  static constexpr std::array<size_t, 19> values{4u, 4u, 4u, 4u, 8u, 16u, 4u,
+                                                 0u, 0u, 0u, 0u, 4u, 8u,  2u,
+                                                 4u, 1u, 2u, 0u, 0u};
   return enumValue(format, values);
 }
 [[nodiscard]] uint32_t mipSize(uint32_t base, uint32_t mip) {
@@ -558,6 +615,10 @@ toNvrhiTextureState(GraphicsBarrierState state,
                           : nvrhi::ResourceStates::RenderTarget;
   case GraphicsBarrierState::Present:
     return nvrhi::ResourceStates::Present;
+  case GraphicsBarrierState::AccelerationStructureBuildRead:
+  case GraphicsBarrierState::AccelerationStructureBuildWrite:
+  case GraphicsBarrierState::RayQueryRead:
+  case GraphicsBarrierState::AccelerationStructureBuildInput:
   case GraphicsBarrierState::Unknown:
   default:
     return nvrhi::ResourceStates::Common;
@@ -577,8 +638,13 @@ toNvrhiBufferState(GraphicsBarrierState state,
                                         GraphicsBarrierAccessMode::Write)
                ? nvrhi::ResourceStates::UnorderedAccess
                : nvrhi::ResourceStates::ShaderResource;
+  case GraphicsBarrierState::AccelerationStructureBuildInput:
+    return nvrhi::ResourceStates::AccelStructBuildInput;
   case GraphicsBarrierState::Attachment:
   case GraphicsBarrierState::Present:
+  case GraphicsBarrierState::AccelerationStructureBuildRead:
+  case GraphicsBarrierState::AccelerationStructureBuildWrite:
+  case GraphicsBarrierState::RayQueryRead:
   case GraphicsBarrierState::Unknown:
   default:
     return nvrhi::ResourceStates::Common;
@@ -592,6 +658,9 @@ permanentReadBufferState(BufferUsage usage) {
                                 nvrhi::ResourceStates::IndirectArgument;
   if (hasBufferUsage(usage, BufferUsage::Uniform)) {
     state = state | nvrhi::ResourceStates::ConstantBuffer;
+  }
+  if (hasBufferUsage(usage, BufferUsage::AccelerationStructureBuildInput)) {
+    state = state | nvrhi::ResourceStates::AccelStructBuildInput;
   }
   return state;
 }
@@ -623,6 +692,8 @@ permanentReadBufferState(BufferUsage usage) {
     return std::string(source);
   }
   using namespace std::string_view_literals;
+  const bool requiresRayQuery =
+      source.find("NURI_SHADER_FEATURE_RAY_QUERY") != std::string_view::npos;
   static constexpr std::string_view version = "#version 460\n";
   static constexpr std::string_view bufferReference =
       "#extension GL_EXT_buffer_reference : require\n";
@@ -636,6 +707,7 @@ permanentReadBufferState(BufferUsage usage) {
       "#extension GL_EXT_samplerless_texture_functions : require\n";
   static constexpr std::string_view computeBindings =
       R"glsl(layout (set = 0, binding = 0) uniform texture2D kTextures2D[];
+layout (set = 2, binding = 0) uniform textureCube kTexturesCube[];
 layout (set = 0, binding = 1) uniform sampler kSamplers[];
 vec4 textureBindless2D(uint textureid, uint samplerid, vec2 uv) {
   return texture(nonuniformEXT(sampler2D(kTextures2D[textureid], kSamplers[samplerid])), uv);
@@ -646,6 +718,16 @@ vec4 textureBindless2DLod(uint textureid, uint samplerid, vec2 uv, float lod) {
 ivec2 textureBindlessSize2D(uint textureid) {
   return textureSize(nonuniformEXT(kTextures2D[textureid]), 0);
 }
+vec4 textureBindlessCube(uint textureid, uint samplerid, vec3 uvw) {
+  return texture(nonuniformEXT(samplerCube(kTexturesCube[textureid], kSamplers[samplerid])), uvw);
+}
+vec4 textureBindlessCubeLod(uint textureid, uint samplerid, vec3 uvw, float lod) {
+  return textureLod(nonuniformEXT(samplerCube(kTexturesCube[textureid], kSamplers[samplerid])), uvw, lod);
+}
+)glsl";
+  static constexpr std::string_view rayQueryBinding =
+      R"glsl(#extension GL_EXT_ray_query : require
+layout(set = 5, binding = 0) uniform accelerationStructureEXT kSceneTlas;
 )glsl";
   static constexpr std::string_view fragmentBindings =
       R"glsl(layout (set = 0, binding = 0) uniform texture2D kTextures2D[];
@@ -719,17 +801,18 @@ layout (set = 3, binding = 1) uniform samplerShadow kSamplersShadow[];
     patched += common;
     patched += samplerless;
     if (stage == ShaderStage::Compute) {
+      if (requiresRayQuery) {
+        patched += rayQueryBinding;
+      }
       patched += computeBindings;
     }
     break;
   case ShaderStage::Fragment:
     patched += common;
     patched += samplerless;
-    if (source.find("kTLAS[") != std::string_view::npos) {
+    if (requiresRayQuery) {
       patched += bufferReference;
-      patched += R"glsl(#extension GL_EXT_ray_query : require
-layout(set = 0, binding = 4) uniform accelerationStructureEXT kTLAS[];
-)glsl";
+      patched += rayQueryBinding;
     }
     patched += fragmentBindings;
     for (const auto &[token, code] : fragmentHelpers) {
@@ -778,6 +861,12 @@ struct BufferResource {
   VkDeviceMemory mappedMemory = VK_NULL_HANDLE;
   bool hostVisible = false;
   bool immutable = false;
+  BufferUsage usage = BufferUsage::None;
+};
+struct AccelerationStructureResource {
+  nvrhi::rt::AccelStructHandle accelerationStructure{};
+  AccelerationStructureFacts facts{};
+  std::string debugName;
 };
 class NvrhiPreparedGpuBuffer final : public PreparedGpuBuffer {
 public:
@@ -817,6 +906,7 @@ private:
 struct ShaderResource {
   nvrhi::ShaderHandle shader{};
   std::string debugName;
+  bool requiresRayQuery = false;
 };
 using PipelineVariantKey = RasterPipelineState;
 struct PipelineVariantKeyHasher {
@@ -849,6 +939,14 @@ struct RenderPipelineResource {
 struct ComputePipelineResource {
   nvrhi::ComputePipelineHandle pipeline{};
   nvrhi::ShaderHandle specializedShader{};
+  nvrhi::BindingLayoutHandle rayQueryBindingLayout{};
+  bool requiresRayQuery = false;
+  std::string debugName;
+};
+struct RayQueryBindingResource {
+  nvrhi::BindingSetHandle bindingSet{};
+  ComputePipelineHandle pipeline{};
+  AccelerationStructureHandle accelerationStructure{};
   std::string debugName;
 };
 struct MeshletPipelineResource {
@@ -1144,6 +1242,7 @@ struct GPUDeviceImpl {
   bool meshletFeaturesEnabled = false;
   bool meshletsSupported = false;
   MeshletLimits meshletLimits{};
+  DeviceCaps caps{};
   ResourceTable<SamplerHandle, ResourceSlot<nvrhi::SamplerHandle>> samplers;
   SamplerHandle cubemapSampler{};
   SamplerHandle bilinearSampler{};
@@ -1157,6 +1256,10 @@ struct GPUDeviceImpl {
       computePipelines;
   ResourceTable<MeshletPipelineHandle, MeshletPipelineResource>
       meshletPipelines;
+  ResourceTable<AccelerationStructureHandle, AccelerationStructureResource>
+      accelerationStructures;
+  ResourceTable<RayQueryBindingHandle, RayQueryBindingResource>
+      rayQueryBindings;
   std::vector<FramebufferTexture> framebufferTextures;
   std::vector<CachedFramebuffer> cachedFramebuffers;
   uint64_t swapchainGeneration = 1u;
@@ -1164,7 +1267,8 @@ struct GPUDeviceImpl {
       std::variant<BufferResource, TextureResource,
                    ResourceSlot<nvrhi::SamplerHandle>, ShaderResource,
                    RenderPipelineResource, ComputePipelineResource,
-                   MeshletPipelineResource>;
+                   MeshletPipelineResource, AccelerationStructureResource,
+                   RayQueryBindingResource>;
   enum class RetiredResourceTable : uint8_t {
     Buffer,
     Texture,
@@ -1173,6 +1277,8 @@ struct GPUDeviceImpl {
     RenderPipeline,
     ComputePipeline,
     MeshletPipeline,
+    AccelerationStructure,
+    RayQueryBinding,
   };
   struct RetiredResource {
     RetiredNativeResource resource{};
@@ -1259,6 +1365,12 @@ void recycleRetiredResourceSlot(Impl &impl,
     break;
   case Impl::RetiredResourceTable::MeshletPipeline:
     impl.meshletPipelines.recycleRetired(retired.slotIndex);
+    break;
+  case Impl::RetiredResourceTable::AccelerationStructure:
+    impl.accelerationStructures.recycleRetired(retired.slotIndex);
+    break;
+  case Impl::RetiredResourceTable::RayQueryBinding:
+    impl.rayQueryBindings.recycleRetired(retired.slotIndex);
     break;
   }
 }
@@ -2155,6 +2267,8 @@ void destroyDebugMessenger(Impl &impl) {
   }
   vkGetPhysicalDeviceProperties(impl.physicalDevice,
                                 &impl.physicalDeviceProperties);
+  impl.caps.maxTextureDimension2D =
+      impl.physicalDeviceProperties.limits.maxImageDimension2D;
   uint32_t queueFamilyCount = 0u;
   vkGetPhysicalDeviceQueueFamilyProperties(impl.physicalDevice,
                                            &queueFamilyCount, nullptr);
@@ -2192,9 +2306,23 @@ void destroyDebugMessenger(Impl &impl) {
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
       .pNext = &supported13,
   };
+  VkPhysicalDeviceAccelerationStructureFeaturesKHR supportedAcceleration{
+      .sType =
+          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR,
+      .pNext = &supported12,
+  };
+  VkPhysicalDeviceRayQueryFeaturesKHR supportedRayQuery{
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR,
+      .pNext = &supportedAcceleration,
+  };
+  VkPhysicalDeviceRayTracingPipelineFeaturesKHR supportedRayTracingPipeline{
+      .sType =
+          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR,
+      .pNext = &supportedRayQuery,
+  };
   VkPhysicalDeviceMeshShaderFeaturesEXT supportedMesh{
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT,
-      .pNext = &supported12,
+      .pNext = &supportedRayTracingPipeline,
   };
   VkPhysicalDeviceFeatures2 supported2{
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
@@ -2205,6 +2333,45 @@ void destroyDebugMessenger(Impl &impl) {
   impl.meshletFeaturesEnabled = false;
   impl.meshletsSupported = false;
   impl.meshletLimits = {};
+  impl.caps.rayTracing = {};
+  impl.caps.rayTracing.bufferDeviceAddress =
+      supported12.bufferDeviceAddress == VK_TRUE;
+  const bool accelerationExtensionsPresent =
+      hasDeviceExtension(impl.physicalDevice,
+                         VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME) &&
+      hasDeviceExtension(impl.physicalDevice,
+                         VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME);
+  const bool rayQueryExtensionPresent =
+      hasDeviceExtension(impl.physicalDevice, VK_KHR_RAY_QUERY_EXTENSION_NAME);
+  const bool enableRayQuerySubset =
+      accelerationExtensionsPresent && rayQueryExtensionPresent &&
+      supportedAcceleration.accelerationStructure == VK_TRUE &&
+      supportedRayQuery.rayQuery == VK_TRUE &&
+      supported12.bufferDeviceAddress == VK_TRUE;
+  const bool rayTracingPipelineExtensionPresent = hasDeviceExtension(
+      impl.physicalDevice, VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME);
+  const bool enableRayTracingPipeline =
+      enableRayQuerySubset && rayTracingPipelineExtensionPresent &&
+      supportedRayTracingPipeline.rayTracingPipeline == VK_TRUE;
+  if (enableRayQuerySubset) {
+    VkPhysicalDeviceAccelerationStructurePropertiesKHR properties{
+        .sType =
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR,
+    };
+    VkPhysicalDeviceProperties2 properties2{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+        .pNext = &properties,
+    };
+    vkGetPhysicalDeviceProperties2(impl.physicalDevice, &properties2);
+    impl.caps.rayTracing.accelerationStructure = true;
+    impl.caps.rayTracing.rayQuery = true;
+    impl.caps.rayTracing.rayTracingPipeline = enableRayTracingPipeline;
+    impl.caps.rayTracing.maxGeometryCount = properties.maxGeometryCount;
+    impl.caps.rayTracing.maxInstanceCount = properties.maxInstanceCount;
+    impl.caps.rayTracing.maxPrimitiveCount = properties.maxPrimitiveCount;
+    impl.caps.rayTracing.minScratchOffsetAlignment =
+        properties.minAccelerationStructureScratchOffsetAlignment;
+  }
   const bool meshShaderExtensionPresent = hasDeviceExtension(
       impl.physicalDevice, VK_EXT_MESH_SHADER_EXTENSION_NAME);
   const bool meshShaderFeaturesPresent = supportedMesh.taskShader == VK_TRUE &&
@@ -2248,9 +2415,34 @@ void destroyDebugMessenger(Impl &impl) {
   enabled12.runtimeDescriptorArray = VK_TRUE;
   enabled12.timelineSemaphore = VK_TRUE;
   enabled12.bufferDeviceAddress = VK_TRUE;
+  VkPhysicalDeviceAccelerationStructureFeaturesKHR enabledAcceleration{
+      .sType =
+          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR,
+  };
+  VkPhysicalDeviceRayQueryFeaturesKHR enabledRayQuery{
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR,
+  };
+  VkPhysicalDeviceRayTracingPipelineFeaturesKHR enabledRayTracingPipeline{
+      .sType =
+          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR,
+  };
+  void *enabledFeatureChain = &enabled12;
+  if (enableRayQuerySubset) {
+    enabledAcceleration.accelerationStructure = VK_TRUE;
+    enabledAcceleration.pNext = enabledFeatureChain;
+    enabledFeatureChain = &enabledAcceleration;
+    enabledRayQuery.rayQuery = VK_TRUE;
+    enabledRayQuery.pNext = enabledFeatureChain;
+    enabledFeatureChain = &enabledRayQuery;
+  }
+  if (enableRayTracingPipeline) {
+    enabledRayTracingPipeline.rayTracingPipeline = VK_TRUE;
+    enabledRayTracingPipeline.pNext = enabledFeatureChain;
+    enabledFeatureChain = &enabledRayTracingPipeline;
+  }
   VkPhysicalDeviceMeshShaderFeaturesEXT enabledMesh{
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT,
-      .pNext = &enabled12,
+      .pNext = enabledFeatureChain,
   };
   if (enableMeshShaderExtension) {
     enabledMesh.taskShader = VK_TRUE;
@@ -2259,7 +2451,7 @@ void destroyDebugMessenger(Impl &impl) {
   VkPhysicalDeviceFeatures2 enabled2{
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
       .pNext = enableMeshShaderExtension ? static_cast<void *>(&enabledMesh)
-                                         : static_cast<void *>(&enabled12),
+                                         : enabledFeatureChain,
   };
   enabled2.features.samplerAnisotropy = supported2.features.samplerAnisotropy;
   enabled2.features.fillModeNonSolid = supported2.features.fillModeNonSolid;
@@ -2268,6 +2460,16 @@ void destroyDebugMessenger(Impl &impl) {
   enabled2.features.tessellationShader = VK_TRUE;
   enabled2.features.geometryShader = VK_TRUE;
   impl.deviceExtensions = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+  if (enableRayQuerySubset) {
+    impl.deviceExtensions.push_back(
+        VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME);
+    impl.deviceExtensions.push_back(VK_KHR_RAY_QUERY_EXTENSION_NAME);
+    impl.deviceExtensions.push_back(
+        VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME);
+  }
+  if (enableRayTracingPipeline) {
+    impl.deviceExtensions.push_back(VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME);
+  }
   if (enableMeshShaderExtension) {
     impl.deviceExtensions.push_back(VK_EXT_MESH_SHADER_EXTENSION_NAME);
     impl.meshletExtensionEnabled = true;
@@ -2787,6 +2989,8 @@ void destroyVulkan(Impl &impl) {
   impl.renderPipelines.clear();
   impl.computePipelines.clear();
   impl.meshletPipelines.clear();
+  impl.accelerationStructures.clear();
+  impl.rayQueryBindings.clear();
   impl.framebufferTextures.clear();
   destroySwapchain(impl);
   impl.immediateCommandList = nullptr;
@@ -3679,6 +3883,27 @@ recordComputeDispatches(Impl &impl, nvrhi::ICommandList &commandList,
     const ComputeDispatchItem &dispatch = dispatches[dispatchIndex];
     ComputePipelineResource *pipeline =
         impl.computePipelines.get(dispatch.pipeline);
+    if (pipeline == nullptr) {
+      return Result<bool, std::string>::makeError(
+          "compute dispatch references a stale pipeline");
+    }
+    RayQueryBindingResource *rayQueryBinding =
+        nuri::isValid(dispatch.rayQueryBinding)
+            ? impl.rayQueryBindings.get(dispatch.rayQueryBinding)
+            : nullptr;
+    if (pipeline->requiresRayQuery) {
+      if (rayQueryBinding == nullptr ||
+          !areSameHandle(rayQueryBinding->pipeline, dispatch.pipeline) ||
+          !impl.accelerationStructures.isValid(
+              rayQueryBinding->accelerationStructure)) {
+        return Result<bool, std::string>::makeError(
+            "ray-query dispatch is missing a compatible live direct TLAS "
+            "binding");
+      }
+    } else if (nuri::isValid(dispatch.rayQueryBinding)) {
+      return Result<bool, std::string>::makeError(
+          "non-ray-query dispatch declares a direct TLAS binding");
+    }
     if (!dependencyStatesPreplanned) {
       requestBufferDependencyStates(impl, commandList,
                                     dispatch.dependencyBuffers, true);
@@ -3742,6 +3967,9 @@ recordComputeDispatches(Impl &impl, nvrhi::ICommandList &commandList,
     nvrhi::ComputeState state{};
     state.setPipeline(pipeline->pipeline.Get());
     bindGlobalSets(state, impl);
+    if (rayQueryBinding != nullptr) {
+      state.bindings.push_back(rayQueryBinding->bindingSet);
+    }
     commandList.setComputeState(state);
     std::array<std::byte, kPushConstantByteSize> push{};
     makePaddedPushConstants(dispatch.pushConstants, push);
@@ -3851,6 +4079,141 @@ recordMeshDispatches(Impl &impl, nvrhi::ICommandList &commandList,
   }
   return Result<bool, std::string>::makeResult(true);
 }
+[[nodiscard]] Result<bool, std::string> recordAccelerationStructureBuilds(
+    Impl &impl, nvrhi::ICommandList &commandList,
+    std::span<const AccelerationStructureBuildItem> builds) {
+  static thread_local std::vector<nvrhi::rt::GeometryDesc> nativeGeometries;
+  static thread_local std::vector<nvrhi::rt::InstanceDesc> nativeInstances;
+  const auto lowerGeometries =
+      [&impl](
+          std::span<const AccelerationStructureTriangleGeometryDesc> geometries)
+      -> Result<bool, std::string> {
+    nativeGeometries.clear();
+    nativeGeometries.reserve(geometries.size());
+    for (uint32_t index = 0u; index < geometries.size(); ++index) {
+      const auto &geometry = geometries[index];
+      BufferResource *vertices = impl.buffers.get(geometry.vertexBuffer);
+      BufferResource *indices = impl.buffers.get(geometry.indexBuffer);
+      if (vertices == nullptr || indices == nullptr) {
+        return Result<bool, std::string>::makeError(std::format(
+            "AS build geometry {} references a stale buffer", index));
+      }
+      if (nuri::isValid(geometry.transformBuffer)) {
+        return Result<bool, std::string>::makeError(
+            "AS geometry transform buffers require the private Vulkan build "
+            "path and are not supported by the NVRHI lowering");
+      }
+      nvrhi::rt::GeometryTriangles triangles{};
+      triangles.setVertexBuffer(vertices->buffer.Get())
+          .setIndexBuffer(indices->buffer.Get())
+          .setVertexFormat(nvrhi::Format::RGB32_FLOAT)
+          .setIndexFormat(toNvrhiIndexFormat(geometry.indexFormat))
+          .setVertexOffset(geometry.vertexByteOffset)
+          .setIndexOffset(geometry.indexByteOffset)
+          .setVertexStride(geometry.vertexStrideBytes)
+          .setVertexCount(geometry.vertexCount)
+          .setIndexCount(geometry.indexCount);
+      nativeGeometries.push_back(
+          nvrhi::rt::GeometryDesc{}.setTriangles(triangles).setFlags(
+              toNvrhiGeometryFlags(geometry.flags)));
+    }
+    return Result<bool, std::string>::makeResult(true);
+  };
+  for (const AccelerationStructureBuildItem &item : builds) {
+    Result<bool, std::string> result = std::visit(
+        [&](const auto &command) -> Result<bool, std::string> {
+          using Command = std::decay_t<decltype(command)>;
+          AccelerationStructureResource *destination =
+              impl.accelerationStructures.get(command.destination);
+          if (destination == nullptr) {
+            return Result<bool, std::string>::makeError(
+                "AS build references a stale destination");
+          }
+          constexpr bool kBlas = std::is_same_v<Command, BuildBlasItem> ||
+                                 std::is_same_v<Command, UpdateBlasItem>;
+          constexpr bool kUpdate = std::is_same_v<Command, UpdateBlasItem> ||
+                                   std::is_same_v<Command, UpdateTlasItem>;
+          const AccelerationStructureKind expectedKind =
+              kBlas ? AccelerationStructureKind::BottomLevel
+                    : AccelerationStructureKind::TopLevel;
+          if (destination->facts.kind != expectedKind) {
+            return Result<bool, std::string>::makeError(
+                "AS build command kind does not match its destination");
+          }
+          if constexpr (kUpdate) {
+            if (!hasAccelerationStructureBuildFlag(
+                    destination->facts.buildFlags,
+                    AccelerationStructureBuildFlags::AllowUpdate)) {
+              return Result<bool, std::string>::makeError(
+                  "AS update destination was not created with allow-update");
+            }
+          }
+          nvrhi::rt::AccelStructBuildFlags flags =
+              toNvrhiBuildFlags(destination->facts.buildFlags);
+          if constexpr (kUpdate) {
+            flags = flags | nvrhi::rt::AccelStructBuildFlags::PerformUpdate;
+          }
+          if constexpr (kBlas) {
+            if (command.geometries.size() != destination->facts.geometryCount) {
+              return Result<bool, std::string>::makeError(
+                  "BLAS build geometry count is incompatible with the "
+                  "destination capacity");
+            }
+            auto native = lowerGeometries(command.geometries);
+            if (native.hasError()) {
+              return Result<bool, std::string>::makeError(native.error());
+            }
+            commandList.buildBottomLevelAccelStruct(
+                destination->accelerationStructure.Get(),
+                nativeGeometries.data(), nativeGeometries.size(), flags);
+          } else {
+            const auto validation = validateAccelerationStructureInstances(
+                command.instances, destination->facts.maxInstanceCount);
+            if (validation.reason !=
+                AccelerationStructureValidationReason::None) {
+              return Result<bool, std::string>::makeError(
+                  std::format("invalid TLAS instance (reason={}, "
+                              "instance={})",
+                              static_cast<uint32_t>(validation.reason),
+                              validation.itemIndex));
+            }
+            nativeInstances.clear();
+            nativeInstances.reserve(command.instances.size());
+            for (const AccelerationStructureInstanceDesc &instance :
+                 command.instances) {
+              AccelerationStructureResource *bottomLevel =
+                  impl.accelerationStructures.get(instance.bottomLevel);
+              if (bottomLevel == nullptr ||
+                  bottomLevel->facts.kind !=
+                      AccelerationStructureKind::BottomLevel) {
+                return Result<bool, std::string>::makeError(
+                    "TLAS instance references a stale or non-BLAS handle");
+              }
+              nvrhi::rt::InstanceDesc native{};
+              std::memcpy(native.transform,
+                          instance.transform.rowMajor3x4.data(),
+                          sizeof(native.transform));
+              native.setInstanceID(instance.customIndex)
+                  .setInstanceContributionToHitGroupIndex(0u)
+                  .setInstanceMask(instance.mask)
+                  .setFlags(toNvrhiInstanceFlags(instance.flags))
+                  .setBLAS(bottomLevel->accelerationStructure.Get());
+              nativeInstances.push_back(native);
+            }
+            commandList.buildTopLevelAccelStruct(
+                destination->accelerationStructure.Get(),
+                nativeInstances.data(), nativeInstances.size(), flags);
+          }
+          return Result<bool, std::string>::makeResult(true);
+        },
+        item.command);
+    if (result.hasError()) {
+      return result;
+    }
+  }
+  return Result<bool, std::string>::makeResult(true);
+}
+
 [[nodiscard]] Result<bool, std::string>
 recordRenderPass(Impl &impl,
                  std::vector<nvrhi::FramebufferHandle> *framebuffers,
@@ -3879,6 +4242,16 @@ recordRenderPass(Impl &impl,
 #endif
   ScopedNvrhiPassTiming passTiming(impl, commandList, timingQueries,
                                    pass.gpuTimingScope, pass.debugLabel);
+  if (pass.executionMode ==
+      RenderPassExecutionMode::AccelerationStructureBuild) {
+    auto result = recordAccelerationStructureBuilds(
+        impl, commandList, pass.accelerationStructureBuilds);
+    if (result.hasError()) {
+      return result;
+    }
+    passTiming.commit();
+    return Result<bool, std::string>::makeResult(true);
+  }
   const bool copyOnly = pass.executionMode == RenderPassExecutionMode::CopyOnly;
   if (copyOnly) {
     for (const TextureCopyItem &copy : pass.textureCopies) {
@@ -4420,6 +4793,13 @@ prepareBufferResource(Impl &impl, const BufferDesc &desc,
     return Result<BufferResource, std::string>::makeError(
         "Buffer usage is empty");
   }
+  if ((hasBufferUsage(desc.usage,
+                      BufferUsage::AccelerationStructureBuildInput) ||
+       hasBufferUsage(desc.usage, BufferUsage::AccelerationStructureStorage)) &&
+      !impl.caps.rayTracing.accelerationStructure) {
+    return Result<BufferResource, std::string>::makeError(
+        "Acceleration-structure buffer usage is unsupported by this device");
+  }
   if (desc.immutable && desc.storage != Storage::Device) {
     return Result<BufferResource, std::string>::makeError(
         "Immutable buffers must use device-local storage");
@@ -4438,6 +4818,10 @@ prepareBufferResource(Impl &impl, const BufferDesc &desc,
       .setCanHaveUAVs(hasBufferUsage(desc.usage, BufferUsage::Storage))
       .setCanHaveRawViews(hasBufferUsage(desc.usage, BufferUsage::Storage))
       .setIsDrawIndirectArgs(hasBufferUsage(desc.usage, BufferUsage::Indirect))
+      .setIsAccelStructBuildInput(hasBufferUsage(
+          desc.usage, BufferUsage::AccelerationStructureBuildInput))
+      .setIsAccelStructStorage(
+          hasBufferUsage(desc.usage, BufferUsage::AccelerationStructureStorage))
       .setInitialState(nvrhi::ResourceStates::Common)
       .setKeepInitialState(true);
   if (desc.storage == Storage::HostVisible) {
@@ -4454,7 +4838,8 @@ prepareBufferResource(Impl &impl, const BufferDesc &desc,
                           .mapped = nullptr,
                           .mappedMemory = VK_NULL_HANDLE,
                           .hostVisible = desc.storage == Storage::HostVisible,
-                          .immutable = desc.immutable};
+                          .immutable = desc.immutable,
+                          .usage = desc.usage};
   if (resource.hostVisible) {
     const nvrhi::Object nativeMemory =
         buffer->getNativeObject(nvrhi::ObjectTypes::VK_DeviceMemory);
@@ -4659,6 +5044,13 @@ GPUDevice::createShaderModule(const ShaderDesc &desc) {
     return Result<ShaderHandle, std::string>::makeError(
         "Shader source is empty");
   }
+  const bool requiresRayQuery =
+      desc.source.find("NURI_SHADER_FEATURE_RAY_QUERY") !=
+      std::string_view::npos;
+  if (requiresRayQuery && !impl_->caps.rayTracing.rayQuery) {
+    return Result<ShaderHandle, std::string>::makeError(
+        "ray-query shader requested on an unsupported device");
+  }
   const std::string moduleName(desc.moduleName);
   const std::string patched = patchGlslPrelude(desc.stage, desc.source);
   const glslang_resource_t resource = makeGlslangResource(
@@ -4682,7 +5074,9 @@ GPUDevice::createShaderModule(const ShaderDesc &desc) {
     return Result<ShaderHandle, std::string>::makeError(
         "Failed to create NVRHI shader");
   }
-  ShaderResource resourceSlot{.shader = shader, .debugName = moduleName};
+  ShaderResource resourceSlot{.shader = shader,
+                              .debugName = moduleName,
+                              .requiresRayQuery = requiresRayQuery};
   ShaderHandle handle = impl_->shaders.allocate(std::move(resourceSlot));
   return Result<ShaderHandle, std::string>::makeResult(handle);
 }
@@ -4784,6 +5178,12 @@ GPUDevice::createComputePipeline(const ComputePipelineDesc &desc,
   const auto reserved = impl_->computePipelines.reserve(std::string(debugName));
   ComputePipelineResource &resource = *reserved.resource;
   resource.debugName = std::string(debugName);
+  if (shader == nullptr) {
+    impl_->computePipelines.deallocate(reserved.handle);
+    return Result<ComputePipelineHandle, std::string>::makeError(
+        "GPUDevice::createComputePipeline: shader handle is invalid");
+  }
+  resource.requiresRayQuery = shader->requiresRayQuery;
   nvrhi::IShader *computeShader = shader->shader.Get();
   if (!desc.specInfo.entries.empty()) {
     auto specialized = specializeShader(*impl_, shader->shader, desc.specInfo,
@@ -4799,6 +5199,20 @@ GPUDevice::createComputePipeline(const ComputePipelineDesc &desc,
   nvrhi::ComputePipelineDesc pipelineDesc{};
   pipelineDesc.setComputeShader(computeShader);
   pipelineDesc.bindingLayouts = globalBindingLayouts(*impl_);
+  if (resource.requiresRayQuery) {
+    nvrhi::BindingLayoutDesc rayQueryLayout{};
+    rayQueryLayout.setVisibility(nvrhi::ShaderType::Compute)
+        .addItem(nvrhi::BindingLayoutItem::RayTracingAccelStruct(0u));
+    resource.rayQueryBindingLayout =
+        impl_->nvrhiDevice->createBindingLayout(rayQueryLayout);
+    if (!resource.rayQueryBindingLayout) {
+      impl_->computePipelines.deallocate(reserved.handle);
+      return Result<ComputePipelineHandle, std::string>::makeError(
+          "GPUDevice::createComputePipeline: failed to create direct "
+          "ray-query binding layout");
+    }
+    pipelineDesc.bindingLayouts.push_back(resource.rayQueryBindingLayout);
+  }
   resource.pipeline = impl_->nvrhiDevice->createComputePipeline(pipelineDesc);
   if (!resource.pipeline) {
     impl_->computePipelines.deallocate(reserved.handle);
@@ -4807,6 +5221,48 @@ GPUDevice::createComputePipeline(const ComputePipelineDesc &desc,
   }
   return Result<ComputePipelineHandle, std::string>::makeResult(
       reserved.handle);
+}
+
+Result<RayQueryBindingHandle, std::string> GPUDevice::createRayQueryBinding(
+    ComputePipelineHandle pipelineHandle,
+    AccelerationStructureHandle topLevelAccelerationStructure,
+    std::string_view debugName) {
+  ComputePipelineResource *pipeline =
+      impl_->computePipelines.get(pipelineHandle);
+  AccelerationStructureResource *accelerationStructure =
+      impl_->accelerationStructures.get(topLevelAccelerationStructure);
+  if (pipeline == nullptr || !pipeline->requiresRayQuery ||
+      !pipeline->rayQueryBindingLayout) {
+    return Result<RayQueryBindingHandle, std::string>::makeError(
+        "GPUDevice::createRayQueryBinding: pipeline is not ray-query "
+        "compatible");
+  }
+  if (accelerationStructure == nullptr ||
+      accelerationStructure->facts.kind !=
+          AccelerationStructureKind::TopLevel) {
+    return Result<RayQueryBindingHandle, std::string>::makeError(
+        "GPUDevice::createRayQueryBinding: acceleration structure is not a "
+        "live TLAS");
+  }
+  nvrhi::BindingSetDesc bindingDesc{};
+  bindingDesc.setTrackLiveness(true).addItem(
+      nvrhi::BindingSetItem::RayTracingAccelStruct(
+          0u, accelerationStructure->accelerationStructure.Get()));
+  nvrhi::BindingSetHandle bindingSet = impl_->nvrhiDevice->createBindingSet(
+      bindingDesc, pipeline->rayQueryBindingLayout);
+  if (!bindingSet) {
+    return Result<RayQueryBindingHandle, std::string>::makeError(
+        "GPUDevice::createRayQueryBinding: failed to allocate direct binding "
+        "set");
+  }
+  RayQueryBindingResource resource{
+      .bindingSet = std::move(bindingSet),
+      .pipeline = pipelineHandle,
+      .accelerationStructure = topLevelAccelerationStructure,
+      .debugName = std::string(debugName),
+  };
+  return Result<RayQueryBindingHandle, std::string>::makeResult(
+      impl_->rayQueryBindings.allocate(std::move(resource)));
 }
 
 Result<MeshletPipelineHandle, std::string>
@@ -4873,6 +5329,11 @@ void GPUDevice::destroyRenderPipeline(RenderPipelineHandle pipeline) {
 void GPUDevice::destroyComputePipeline(ComputePipelineHandle pipeline) {
   retireResource(*impl_, impl_->computePipelines, pipeline,
                  Impl::RetiredResourceTable::ComputePipeline);
+}
+
+void GPUDevice::destroyRayQueryBinding(RayQueryBindingHandle binding) {
+  retireResource(*impl_, impl_->rayQueryBindings, binding,
+                 Impl::RetiredResourceTable::RayQueryBinding);
 }
 
 void GPUDevice::destroyMeshletPipeline(MeshletPipelineHandle pipeline) {
@@ -4947,6 +5408,10 @@ bool GPUDevice::isValid(ComputePipelineHandle h) const {
   return impl_->computePipelines.isValid(h);
 }
 
+bool GPUDevice::isValid(RayQueryBindingHandle h) const {
+  return impl_->rayQueryBindings.isValid(h);
+}
+
 bool GPUDevice::isValid(MeshletPipelineHandle h) const {
   return impl_->meshletPipelines.isValid(h);
 }
@@ -4980,13 +5445,25 @@ TextureUploadTelemetry GPUDevice::getTextureUploadTelemetry() const {
 GPUAdapterInfo GPUDevice::getAdapterInfo() const { return impl_->adapterInfo; }
 
 GpuMultisampleCapabilities GPUDevice::getMultisampleCapabilities() const {
-  return impl_->multisampleCapabilities;
+  return impl_ != nullptr ? impl_->multisampleCapabilities
+                          : GpuMultisampleCapabilities{};
+}
+
+DeviceCaps GPUDevice::getDeviceCaps() const {
+  return impl_ != nullptr ? impl_->caps : DeviceCaps{};
 }
 
 bool GPUDevice::supportsFeature(GPUFeature feature) const {
+  if (impl_ == nullptr) {
+    return false;
+  }
   switch (feature) {
   case GPUFeature::Meshlets:
     return impl_->meshletsSupported;
+  case GPUFeature::RayQuery:
+    return impl_->caps.rayTracing.rayQuery;
+  case GPUFeature::RayTracingAccelerationStructure:
+    return impl_->caps.rayTracing.accelerationStructure;
   case GPUFeature::RayTracingClusters:
     return impl_->nvrhiDevice->queryFeatureSupport(
         nvrhi::Feature::RayTracingClusters);
@@ -5057,6 +5534,157 @@ uint64_t GPUDevice::getBufferDeviceAddress(BufferHandle h,
     return 0u;
   }
   return buffer->buffer->getGpuVirtualAddress() + offset;
+}
+
+Result<AccelerationStructureHandle, std::string>
+GPUDevice::createBottomLevelAccelerationStructure(const BlasCreateDesc &desc,
+                                                  std::string_view debugName) {
+  if (impl_ == nullptr) {
+    return Result<AccelerationStructureHandle, std::string>::makeError(
+        "acceleration structures are unsupported by this GPU backend");
+  }
+  const AccelerationStructureValidationError validation =
+      validateBlasCreateDesc(desc, impl_->caps.rayTracing);
+  if (validation.reason != AccelerationStructureValidationReason::None) {
+    return Result<AccelerationStructureHandle, std::string>::makeError(
+        std::format("invalid BLAS descriptor (reason={}, geometry={})",
+                    static_cast<uint32_t>(validation.reason),
+                    validation.itemIndex));
+  }
+  nvrhi::rt::AccelStructDesc nativeDesc{};
+  nativeDesc.setBuildFlags(toNvrhiBuildFlags(desc.buildFlags))
+      .setDebugName(std::string(debugName))
+      .setTrackLiveness(true)
+      .setIsTopLevel(false);
+  nativeDesc.bottomLevelGeometries.reserve(desc.geometries.size());
+  for (uint32_t index = 0u; index < desc.geometries.size(); ++index) {
+    const AccelerationStructureTriangleGeometryDesc &geometry =
+        desc.geometries[index];
+    BufferResource *vertices = impl_->buffers.get(geometry.vertexBuffer);
+    BufferResource *indices = impl_->buffers.get(geometry.indexBuffer);
+    if (vertices == nullptr || indices == nullptr ||
+        !hasBufferUsage(vertices->usage,
+                        BufferUsage::AccelerationStructureBuildInput) ||
+        !hasBufferUsage(indices->usage,
+                        BufferUsage::AccelerationStructureBuildInput)) {
+      return Result<AccelerationStructureHandle, std::string>::makeError(
+          std::format("BLAS geometry {} does not reference live AS build-input "
+                      "buffers",
+                      index));
+    }
+    const uint32_t indexStride =
+        geometry.indexFormat == IndexFormat::U16 ? 2u : 4u;
+    if (geometry.vertexByteOffset > vertices->byteSize ||
+        static_cast<uint64_t>(geometry.vertexCount - 1u) *
+                    geometry.vertexStrideBytes +
+                12u >
+            vertices->byteSize - geometry.vertexByteOffset ||
+        geometry.indexByteOffset > indices->byteSize ||
+        static_cast<uint64_t>(geometry.indexCount) * indexStride >
+            indices->byteSize - geometry.indexByteOffset) {
+      return Result<AccelerationStructureHandle, std::string>::makeError(
+          std::format("BLAS geometry {} exceeds its input buffer range",
+                      index));
+    }
+    nvrhi::rt::GeometryTriangles triangles{};
+    triangles.setVertexBuffer(vertices->buffer.Get())
+        .setIndexBuffer(indices->buffer.Get())
+        .setVertexFormat(nvrhi::Format::RGB32_FLOAT)
+        .setIndexFormat(toNvrhiIndexFormat(geometry.indexFormat))
+        .setVertexOffset(geometry.vertexByteOffset)
+        .setIndexOffset(geometry.indexByteOffset)
+        .setVertexStride(geometry.vertexStrideBytes)
+        .setVertexCount(geometry.vertexCount)
+        .setIndexCount(geometry.indexCount);
+    nativeDesc.addBottomLevelGeometry(
+        nvrhi::rt::GeometryDesc{}.setTriangles(triangles).setFlags(
+            toNvrhiGeometryFlags(geometry.flags)));
+  }
+  nvrhi::rt::AccelStructHandle accelerationStructure =
+      impl_->nvrhiDevice->createAccelStruct(nativeDesc);
+  if (!accelerationStructure) {
+    return Result<AccelerationStructureHandle, std::string>::makeError(
+        "failed to create NVRHI bottom-level acceleration structure");
+  }
+  AccelerationStructureResource resource{
+      .accelerationStructure = accelerationStructure,
+      .facts = {.kind = AccelerationStructureKind::BottomLevel,
+                .buildFlags = desc.buildFlags,
+                .geometryCount = static_cast<uint32_t>(desc.geometries.size()),
+                .maxInstanceCount = 0u,
+                .deviceAddress = accelerationStructure->getDeviceAddress()},
+      .debugName = std::string(debugName),
+  };
+  return Result<AccelerationStructureHandle, std::string>::makeResult(
+      impl_->accelerationStructures.allocate(std::move(resource)));
+}
+
+Result<AccelerationStructureHandle, std::string>
+GPUDevice::createTopLevelAccelerationStructure(const TlasCreateDesc &desc,
+                                               std::string_view debugName) {
+  if (impl_ == nullptr) {
+    return Result<AccelerationStructureHandle, std::string>::makeError(
+        "acceleration structures are unsupported by this GPU backend");
+  }
+  const AccelerationStructureValidationError validation =
+      validateTlasCreateDesc(desc, impl_->caps.rayTracing);
+  if (validation.reason != AccelerationStructureValidationReason::None) {
+    return Result<AccelerationStructureHandle, std::string>::makeError(
+        std::format("invalid TLAS descriptor (reason={})",
+                    static_cast<uint32_t>(validation.reason)));
+  }
+  nvrhi::rt::AccelStructDesc nativeDesc{};
+  nativeDesc.setTopLevelMaxInstances(desc.maxInstanceCount)
+      .setBuildFlags(toNvrhiBuildFlags(desc.buildFlags))
+      .setDebugName(std::string(debugName))
+      .setTrackLiveness(true);
+  nvrhi::rt::AccelStructHandle accelerationStructure =
+      impl_->nvrhiDevice->createAccelStruct(nativeDesc);
+  if (!accelerationStructure) {
+    return Result<AccelerationStructureHandle, std::string>::makeError(
+        "failed to create NVRHI top-level acceleration structure");
+  }
+  AccelerationStructureResource resource{
+      .accelerationStructure = accelerationStructure,
+      .facts = {.kind = AccelerationStructureKind::TopLevel,
+                .buildFlags = desc.buildFlags,
+                .geometryCount = 0u,
+                .maxInstanceCount = desc.maxInstanceCount,
+                .deviceAddress = accelerationStructure->getDeviceAddress()},
+      .debugName = std::string(debugName),
+  };
+  return Result<AccelerationStructureHandle, std::string>::makeResult(
+      impl_->accelerationStructures.allocate(std::move(resource)));
+}
+
+void GPUDevice::destroyAccelerationStructure(
+    AccelerationStructureHandle accelerationStructure) {
+  if (impl_ == nullptr) {
+    return;
+  }
+  retireResource(*impl_, impl_->accelerationStructures, accelerationStructure,
+                 Impl::RetiredResourceTable::AccelerationStructure);
+}
+
+bool GPUDevice::isValid(AccelerationStructureHandle h) const {
+  return impl_ != nullptr && impl_->accelerationStructures.isValid(h);
+}
+
+Result<AccelerationStructureFacts, std::string>
+GPUDevice::getAccelerationStructureFacts(AccelerationStructureHandle h) const {
+  if (impl_ == nullptr) {
+    return Result<AccelerationStructureFacts, std::string>::makeError(
+        "acceleration structures are unsupported by this GPU backend");
+  }
+  const AccelerationStructureResource *resource =
+      impl_->accelerationStructures.get(h);
+  if (resource == nullptr) {
+    return Result<AccelerationStructureFacts, std::string>::makeError(
+        "invalid acceleration-structure handle");
+  }
+  AccelerationStructureFacts facts = resource->facts;
+  facts.deviceAddress = resource->accelerationStructure->getDeviceAddress();
+  return Result<AccelerationStructureFacts, std::string>::makeResult(facts);
 }
 
 bool GPUDevice::resolveGeometry(GeometryAllocationHandle h,
@@ -5311,6 +5939,23 @@ Result<bool, std::string> GPUDevice::recordGraphicsBarriers(
           texture->texture.Get(), nvrhi::AllSubresources,
           toNvrhiTextureState(barrier.afterState, barrier.afterAccess,
                               isDepthFormat(texture->format)));
+      continue;
+    }
+    if (barrier.resourceKind ==
+        GraphicsBarrierResourceKind::AccelerationStructure) {
+      if (barrier.afterState == GraphicsBarrierState::Unknown) {
+        continue;
+      }
+      AccelerationStructureResource *accelerationStructure =
+          impl_->accelerationStructures.get(
+              barrier.accelerationStructureHandle());
+      const nvrhi::ResourceStates state =
+          barrier.afterState ==
+                  GraphicsBarrierState::AccelerationStructureBuildWrite
+              ? nvrhi::ResourceStates::AccelStructWrite
+              : nvrhi::ResourceStates::AccelStructRead;
+      commandList.setAccelStructState(
+          accelerationStructure->accelerationStructure.Get(), state);
       continue;
     }
     BufferResource *buffer = impl_->buffers.get(barrier.bufferHandle());

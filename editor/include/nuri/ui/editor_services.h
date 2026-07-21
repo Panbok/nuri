@@ -27,6 +27,7 @@ enum class SceneSelectionKind : uint8_t {
   Node = 1,
   NodeRenderable = 2,
   Light = 3,
+  DDGIVolume = 4,
 };
 
 // `kind` selects which payload members are meaningful:
@@ -34,12 +35,14 @@ enum class SceneSelectionKind : uint8_t {
 // - `Node`: only `node` is valid.
 // - `NodeRenderable`: `node`, `renderableId`, and `renderableIndex` are valid.
 // - `Light`: `node` and `lightId` are valid.
+// - `DDGIVolume`: `node` and `ddgiVolumeId` are valid.
 struct SceneEditorSelectionState {
   SceneSelectionKind kind = SceneSelectionKind::None;
   NodeId node = kInvalidNodeId;
   RenderableId renderableId = kInvalidRenderableId;
   uint32_t renderableIndex = 0u;
   LightId lightId = kInvalidLightId;
+  DDGIVolumeId ddgiVolumeId = kInvalidDDGIVolumeId;
 
   constexpr void clear() noexcept {
     kind = SceneSelectionKind::None;
@@ -47,6 +50,7 @@ struct SceneEditorSelectionState {
     renderableId = kInvalidRenderableId;
     renderableIndex = 0u;
     lightId = kInvalidLightId;
+    ddgiVolumeId = kInvalidDDGIVolumeId;
   }
 };
 

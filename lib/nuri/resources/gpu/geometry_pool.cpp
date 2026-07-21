@@ -14,7 +14,9 @@ namespace nuri {
 
 GeometryPool::GeometryPool(GPUDevice &gpu, GeometryPoolConfig config,
                            std::pmr::memory_resource *memory)
-    : gpu_(gpu), config_(config), memory_(ensureMemory(memory)),
+    : gpu_(gpu), accelerationStructureBuildInputEnabled_(
+                     gpu.getDeviceCaps().rayTracing.accelerationStructure),
+      config_(config), memory_(ensureMemory(memory)),
       pools_{ChunkPool(memory_), ChunkPool(memory_)}, allocations_(memory_),
       compactionJob_(memory_) {}
 
@@ -33,6 +35,9 @@ GeometryPool::createChunk(ChunkPool &pool, size_t minimumSize,
                           BufferUsage usage, std::string_view debugPrefix,
                           ChunkRole role) {
   const size_t requestedSize = std::max<size_t>(minimumSize, 1u);
+  if (accelerationStructureBuildInputEnabled_) {
+    usage = usage | BufferUsage::AccelerationStructureBuildInput;
+  }
   const BufferDesc desc{
       .usage = usage,
       .storage = Storage::Device,

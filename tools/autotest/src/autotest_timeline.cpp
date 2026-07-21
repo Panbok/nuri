@@ -137,6 +137,10 @@ compileAutotestTimeline(const AutotestCase &testCase) {
             "setSettings event requires settings");
       }
       plan.settings = event.settings;
+    } else if (event.type == "setDirectionalLightIntensity" ||
+               event.type == "setNodeTranslation" ||
+               event.type == "setDDGIVolumeProbeCounts") {
+      plan.sceneEvents.push_back(&event);
     } else {
       return Result<std::vector<AutotestFramePlan>, std::string>::makeError(
           "unsupported timeline event type '" + event.type + "'");

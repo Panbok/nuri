@@ -1,0 +1,101 @@
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+#define NURI_CUSTOM_PUSH_CONSTANTS 1
+#include "common.sp"
+#include "ddgi_common.sp"
+
+layout(set = 0, binding = 2, rgba16f) uniform image2D kImagesRGBA16F[];
+struct DDGIProbeUpdateEntryGpu { uint volumeSlot; uint probeId; uint rayBase; uint rayCount; };
+struct DDGIRayResultGpuData { vec4 radianceAndDistance; uvec4 metadata; };
+layout(std430, buffer_reference) readonly buffer DDGIProbeUpdateBuffer { DDGIProbeUpdateEntryGpu values[]; };
+layout(std430, buffer_reference) readonly buffer DDGIRayResultBuffer { DDGIRayResultGpuData values[]; };
+layout(push_constant) uniform PushConstants {
+  DDGIFrameBuffer frame; DDGIProbeUpdateBuffer updates; DDGIRayResultBuffer results;
+  uint updateCount; uint volumeSlot; uint outputTextureId; uint raysPerProbe;
+  float hysteresis; uint clearMode; uint historyValid; uint frameSeed;
+} pc;
+
+void main() {
+  if (pc.clearMode == 1u) {
+    const ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (all(lessThan(pixel, imageSize(kImagesRGBA16F[nonuniformEXT(pc.outputTextureId)]))))
+      imageStore(kImagesRGBA16F[nonuniformEXT(pc.outputTextureId)], pixel, vec4(0.0));
+    return;
+  }
+  if (pc.clearMode == 2u) {
+    const uint updateIndex = gl_WorkGroupID.x;
+    if (updateIndex >= pc.updateCount) return;
+    const DDGIProbeUpdateEntryGpu update = pc.updates.values[updateIndex];
+    if (update.volumeSlot != pc.volumeSlot) return;
+    DDGIVolumeGpuData volume = pc.frame.volumes[pc.volumeSlot];
+    const uvec2 tile = uvec2(update.probeId % volume.irradianceAtlas.z,
+                             update.probeId / volume.irradianceAtlas.z);
+    for (uint texel = gl_LocalInvocationIndex; texel < 100u; texel += 64u) {
+      const uvec2 tilePixel = uvec2(texel % 10u, texel / 10u);
+      imageStore(kImagesRGBA16F[nonuniformEXT(pc.outputTextureId)],
+                 ivec2(tile * 10u + tilePixel), vec4(0.0));
+    }
+    return;
+  }
+  const uint updateIndex = gl_WorkGroupID.x;
+  if (updateIndex >= pc.updateCount) return;
+  const DDGIProbeUpdateEntryGpu update = pc.updates.values[updateIndex];
+  if (update.volumeSlot != pc.volumeSlot) return;
+  DDGIVolumeGpuData volume = pc.frame.volumes[pc.volumeSlot];
+  const uint probeState =
+      volume.probeStates.values[update.probeId].stateAgeFlags.x;
+  if (probeState == kDDGIProbeStateUninitialized ||
+      probeState == kDDGIProbeStateOff ||
+      probeState == kDDGIProbeStateSleeping) return;
+  const uint localLinear = gl_LocalInvocationIndex;
+  const uvec2 tile = uvec2(update.probeId % volume.irradianceAtlas.z,
+                           update.probeId / volume.irradianceAtlas.z);
+  for (uint texel = localLinear; texel < 64u; texel += 64u) {
+    const uvec2 interior = uvec2(texel % 8u, texel / 8u);
+    const uvec2 tilePixel = interior + 1u;
+    const vec3 texelDirection = ddgiOctDecode(vec2(interior) / 7.0 * 2.0 - 1.0);
+    vec3 sum = vec3(0.0); float weight = 0.0;
+    for (uint ray = 0u; ray < update.rayCount; ++ray) {
+      const vec3 direction = ddgiRayDirection(ray, update.rayCount,
+                                               pc.frameSeed);
+      const float w = max(dot(texelDirection, direction), 0.0);
+      sum += pc.results.values[update.rayBase + ray].radianceAndDistance.rgb * w;
+      weight += w;
+    }
+    const vec3 encoded = pow(max(sum / max(weight, 1.0e-6), vec3(0.0)),
+                              vec3(1.0 / kDDGIIrradianceGamma));
+    const ivec2 pixel = ivec2(tile * 10u + tilePixel);
+    const vec3 oldValue = imageLoad(kImagesRGBA16F[nonuniformEXT(pc.outputTextureId)], pixel).rgb;
+    const bool probeHistoryValid =
+        volume.probeStates.values[update.probeId].stateAgeFlags.y != 0u &&
+        probeState != kDDGIProbeStateNewlyAwake &&
+        probeState != kDDGIProbeStateNewlyVigilant;
+    float h = pc.historyValid != 0u && probeHistoryValid
+                  ? pc.hysteresis
+                  : 0.0;
+    const float change = max(max(abs(encoded.r - oldValue.r),
+                                 abs(encoded.g - oldValue.g)),
+                             abs(encoded.b - oldValue.b));
+    if (change > kDDGIIrradianceResetThreshold) {
+      h = 0.0;
+    } else if (change > kDDGIIrradianceChangeThreshold) {
+      h = max(h - kDDGIIrradianceHysteresisReduction, 0.0);
+    }
+    imageStore(kImagesRGBA16F[nonuniformEXT(pc.outputTextureId)], pixel,
+               vec4(mix(encoded, oldValue, h), 1.0));
+  }
+  memoryBarrierImage();
+  barrier();
+  for (uint texel = localLinear; texel < 100u; texel += 64u) {
+    const uvec2 tilePixel = uvec2(texel % 10u, texel / 10u);
+    if (all(greaterThan(tilePixel, uvec2(0u))) &&
+        all(lessThan(tilePixel, uvec2(9u)))) {
+      continue;
+    }
+    const ivec2 outputPixel = ivec2(tile * 10u + tilePixel);
+    const ivec2 copyPixel = ivec2(
+        tile * 10u + ddgiBorderCopyCoordinate(tilePixel, 8u));
+    imageStore(kImagesRGBA16F[nonuniformEXT(pc.outputTextureId)], outputPixel,
+               imageLoad(kImagesRGBA16F[nonuniformEXT(pc.outputTextureId)],
+                         copyPixel));
+  }
+}

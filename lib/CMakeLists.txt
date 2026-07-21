@@ -15,6 +15,11 @@ set(NURI_RENDERER_SOURCES
   nuri/core/runtime_config.cpp
   nuri/core/thread_priority.cpp
   nuri/gfx/debug_draw_3d.cpp
+  nuri/gfx/ddgi/ddgi_atlas.cpp
+  nuri/gfx/ddgi/ddgi_feature.cpp
+  nuri/gfx/ddgi/ddgi_scheduler.cpp
+  nuri/gfx/gpu_acceleration_structure.cpp
+  nuri/gfx/ddgi/ddgi_types.cpp
   nuri/gfx/frame/external_temporal_provider.cpp
   nuri/gfx/frame/temporal_frame_service.cpp
   nuri/gfx/frame/history_registry.cpp
@@ -33,6 +38,8 @@ set(NURI_RENDERER_SOURCES
   nuri/gfx/pipeline/providers/frame_composition_provider.cpp
   nuri/gfx/pipeline/providers/material_table_gpu_provider.cpp
   nuri/gfx/pipeline/providers/scene_lighting_provider.cpp
+  nuri/gfx/ray_tracing/ray_tracing_types.cpp
+  nuri/gfx/ray_tracing/ray_tracing_scene.cpp
   nuri/gfx/renderers/transmission_renderer.cpp
   nuri/gfx/renderers/transparent_renderer.cpp
   nuri/gfx/render_graph/render_graph.cpp
@@ -76,6 +83,7 @@ set(NURI_RENDERER_SOURCES
   nuri/scene/camera.cpp
   nuri/scene/camera_controller.cpp
   nuri/scene/camera_system.cpp
+  nuri/scene/ddgi_volume.cpp
   nuri/scene/render_scene.cpp
   nuri/scene/scene_animation_player.cpp
   nuri/scene/scene_graph.cpp

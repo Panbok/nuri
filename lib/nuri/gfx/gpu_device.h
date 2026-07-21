@@ -139,11 +139,16 @@ public:
   virtual Result<ComputePipelineHandle, std::string>
   createComputePipeline(const ComputePipelineDesc &desc,
                         std::string_view debugName = {});
+  virtual Result<RayQueryBindingHandle, std::string> createRayQueryBinding(
+      ComputePipelineHandle pipeline,
+      AccelerationStructureHandle topLevelAccelerationStructure,
+      std::string_view debugName = {});
   virtual Result<MeshletPipelineHandle, std::string>
   createMeshletPipeline(const MeshletPipelineDesc &desc,
                         std::string_view debugName = {});
   virtual void destroyRenderPipeline(RenderPipelineHandle pipeline);
   virtual void destroyComputePipeline(ComputePipelineHandle pipeline);
+  virtual void destroyRayQueryBinding(RayQueryBindingHandle binding);
   virtual void destroyMeshletPipeline(MeshletPipelineHandle pipeline);
   virtual void destroyBuffer(BufferHandle buffer);
   virtual void destroyTexture(TextureHandle texture);
@@ -155,6 +160,7 @@ public:
   virtual bool isValid(ShaderHandle h) const;
   virtual bool isValid(RenderPipelineHandle h) const;
   virtual bool isValid(ComputePipelineHandle h) const;
+  virtual bool isValid(RayQueryBindingHandle h) const;
   virtual bool isValid(MeshletPipelineHandle h) const;
   virtual Format getTextureFormat(TextureHandle h) const;
   virtual TextureDimensions getTextureDimensions(TextureHandle h) const;
@@ -163,6 +169,7 @@ public:
   getTextureUploadTelemetry() const;
   virtual GPUAdapterInfo getAdapterInfo() const;
   virtual GpuMultisampleCapabilities getMultisampleCapabilities() const;
+  [[nodiscard]] virtual DeviceCaps getDeviceCaps() const;
   virtual ExternalTemporalProviderBackend *externalTemporalProviderBackend() {
     return nullptr;
   }
@@ -183,6 +190,17 @@ public:
   virtual uint32_t getCubemapSamplerBindlessIndex() const;
   virtual uint64_t getBufferDeviceAddress(BufferHandle h,
                                           size_t offset = 0) const;
+  virtual Result<AccelerationStructureHandle, std::string>
+  createBottomLevelAccelerationStructure(const BlasCreateDesc &desc,
+                                         std::string_view debugName = {});
+  virtual Result<AccelerationStructureHandle, std::string>
+  createTopLevelAccelerationStructure(const TlasCreateDesc &desc,
+                                      std::string_view debugName = {});
+  virtual void destroyAccelerationStructure(
+      AccelerationStructureHandle accelerationStructure);
+  virtual bool isValid(AccelerationStructureHandle h) const;
+  virtual Result<AccelerationStructureFacts, std::string>
+  getAccelerationStructureFacts(AccelerationStructureHandle h) const;
   virtual bool resolveGeometry(GeometryAllocationHandle h,
                                GeometryAllocationView &out) const;
   virtual uint64_t geometryMutationVersion() const;

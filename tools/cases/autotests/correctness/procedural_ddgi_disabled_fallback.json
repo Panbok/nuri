@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "id": "correctness.procedural.ddgi_disabled_fallback",
+  "suite": "correctness",
+  "description": "Starts with DDGI explicitly disabled and verifies sky diffuse output without RT initialization, resources, passes, or capability requirements",
+  "scene": {"kind": "procedural", "generator": "nuri.procedural.ddgi_disabled_fallback.v1", "seed": 1, "contentHash": "nuri.procedural.ddgi_disabled_fallback.v1:1"},
+  "backend": "default",
+  "resolution": [640, 360],
+  "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 2,
+  "endFrame": 4,
+  "authoritative": false,
+  "presentMode": "immediate",
+  "windowMode": "visible",
+  "renderGraph": {"workerCount": 1, "parallelCompile": false, "parallelRecording": false},
+  "camera": {"position": [0.0, 0.75, 4.2], "target": [0.0, 0.25, 0.0], "verticalFovDegrees": 60.0, "nearPlane": 0.05, "farPlane": 100.0},
+  "settings": {
+    "ddgi": {"enabled": false, "debugView": "None"},
+    "opaque": {"enableInstanceAnimation": false},
+    "antiAliasing": {"mode": "None"},
+    "ambientOcclusion": {"mode": "Disabled"},
+    "shadow": {"enabled": false}
+  },
+  "checkpoints": [
+    {
+      "id": "sky_only_no_work",
+      "frame": 3,
+      "captures": [{"target": "frame_color_hdr", "profile": "hdr_color", "required": true, "compare": false}],
+      "assertions": [
+        {"id": "ddgi_disabled_reason", "metric": "renderer.ddgi.fallback_reason", "equals": 1},
+        {"id": "no_ddgi_volumes_active", "metric": "renderer.ddgi.active_volumes", "equals": 0},
+        {"id": "no_ddgi_queries", "metric": "renderer.ddgi.primary_queries", "equals": 0},
+        {"id": "no_ddgi_memory", "metric": "gpu.memory.ddgi.persistent_mb", "equals": 0},
+        {"id": "rt_not_initialized", "metric": "renderer.ray_tracing.readiness", "equals": 0},
+        {"id": "no_blas", "metric": "renderer.ray_tracing.static_blas_count", "equals": 0},
+        {"id": "no_tlas", "metric": "renderer.ray_tracing.tlas_count", "equals": 0}
+      ]
+    }
+  ],
+  "requirements": {"assets": ["modelsRoot:common/flat_plane.obj"], "backends": [], "allowVisibleWindow": true, "accelerationStructure": false, "rayQuery": false}
+}

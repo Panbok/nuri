@@ -33,6 +33,8 @@ public:
                                TextureHandle previewTexture);
   void setShadowInspectResult(
       const std::optional<ShadowInspectResult> &inspectResult);
+  void setDDGIProbeInspectResult(
+      const std::optional<DDGIProbeInspectResult> &inspectResult);
   void syncCameraControllerWidgetStateFromCamera(const Camera &camera);
   void setSceneSelectionUi(std::span<const EditorSceneSelectionOption> scenes,
                            std::string_view selectedSceneId, uint64_t version,
@@ -42,6 +44,8 @@ public:
   void bindScene(RenderScene &scene);
   [[nodiscard]] std::optional<std::string> takeSceneSelectionRequest();
   [[nodiscard]] bool takeSceneCancelRequest();
+  [[nodiscard]] std::optional<DDGIProbeInspectRequest>
+  takeDDGIProbeInspectRequest();
   [[nodiscard]] bool *gizmoControlsWindowOpenState();
   [[nodiscard]] bool *lightsWindowOpenState();
   [[nodiscard]] bool isGizmoControlsWindowOpen() const;

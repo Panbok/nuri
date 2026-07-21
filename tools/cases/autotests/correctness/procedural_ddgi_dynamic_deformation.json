@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "id": "correctness.procedural.ddgi_dynamic_deformation",
+  "suite": "correctness",
+  "description": "Publishes authoritative animated geometry, moves it, and verifies dynamic vertex preparation and BLAS update precede DDGI trace",
+  "scene": {"kind": "procedural", "generator": "nuri.procedural.ddgi_dynamic_deformation.v1", "seed": 1, "contentHash": "nuri.procedural.ddgi_dynamic_deformation.v1:1"},
+  "backend": "default",
+  "resolution": [640, 360],
+  "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 4,
+  "endFrame": 14,
+  "authoritative": false,
+  "presentMode": "immediate",
+  "windowMode": "visible",
+  "renderGraph": {"workerCount": 1, "parallelCompile": false, "parallelRecording": false},
+  "camera": {"position": [0.0, 0.75, 4.2], "target": [0.0, 0.25, 0.0], "verticalFovDegrees": 60.0, "nearPlane": 0.05, "farPlane": 100.0},
+  "settings": {
+    "ddgi": {"enabled": true, "preset": "Low", "raysPerProbe": 64, "maxProbeUpdatesPerFrame": 144, "maxRayQueriesPerFrame": 18432, "debugView": "Visibility"},
+    "opaque": {"enableInstanceAnimation": true},
+    "antiAliasing": {"mode": "None"},
+    "ambientOcclusion": {"mode": "Disabled"},
+    "shadow": {"enabled": true, "qualityPreset": "Low"}
+  },
+  "timeline": {
+    "events": [
+      {"frame": 8, "type": "setNodeTranslation", "target": "ShadowBlueCaster", "translation": [-0.7, 0.34, 0.0], "eventReason": "authoritative animated geometry change"}
+    ]
+  },
+  "checkpoints": [
+    {
+      "id": "dynamic_update",
+      "frame": 8,
+      "captures": [{"target": "frame_color_hdr", "profile": "hdr_color", "required": true, "compare": false}],
+      "assertions": [
+        {"id": "one_dynamic_blas", "metric": "renderer.ray_tracing.dynamic_blas_count", "equals": 1},
+        {"id": "dynamic_vertices_prepared", "metric": "renderer.ray_tracing.dynamic_vertex_dispatches", "greaterOrEqual": 1},
+        {"id": "dynamic_blas_updated", "metric": "renderer.ray_tracing.dynamic_blas_updates", "equals": 1},
+        {"id": "ddgi_trace_issued", "metric": "renderer.ddgi.primary_queries", "greaterOrEqual": 1},
+        {"id": "no_rebuild", "metric": "renderer.ray_tracing.blas_builds", "equals": 0}
+      ]
+    },
+    {
+      "id": "deformation_response",
+      "frame": 9,
+      "captures": [{"target": "frame_color_hdr", "profile": "hdr_color", "required": true, "compare": false}],
+      "assertions": [
+        {"id": "distance_response_active", "metric": "renderer.ddgi.distance_response_remaining", "greaterOrEqual": 1},
+        {"id": "history_valid", "metric": "renderer.ddgi.history_ready", "equals": 1},
+        {"id": "no_fallback", "metric": "renderer.ddgi.fallback_reason", "equals": 0}
+      ]
+    }
+  ],
+  "requirements": {"assets": ["modelsRoot:common/flat_plane.obj"], "backends": [], "allowVisibleWindow": true, "accelerationStructure": true, "rayQuery": true}
+}

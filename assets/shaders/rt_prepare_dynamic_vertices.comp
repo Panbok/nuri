@@ -1,0 +1,94 @@
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+#define NURI_CUSTOM_PUSH_CONSTANTS 1
+#include "common.sp"
+
+struct RtDynamicPackedVertex {
+  uint word0;
+  uint word1;
+  uint word2;
+  uint word3;
+  uint word4;
+  uint word5;
+  uint word6;
+  uint word7;
+};
+
+layout(std430, buffer_reference) buffer RtDynamicPackedVertexBuffer {
+  RtDynamicPackedVertex vertices[];
+};
+
+layout(push_constant) uniform PushConstants {
+  PackedVertexWordBuffer sourceVertices;
+  StaticVertexDecodeBuffer sourceDecode;
+  ReadonlyInstanceMatricesBuffer instanceData;
+  RtDynamicPackedVertexBuffer destinationVertices;
+  uint renderableIndex;
+  uint vertexOffset;
+  uint vertexCount;
+  uint vertexDecodeIndex;
+  uint packedVertexFormat;
+}
+pc;
+
+vec2 rtDynamicEncodeOct(vec3 direction) {
+  const float lengthSq = dot(direction, direction);
+  direction = lengthSq > 1.0e-10
+                  ? direction * inversesqrt(lengthSq)
+                  : vec3(0.0, 1.0, 0.0);
+  direction /= abs(direction.x) + abs(direction.y) + abs(direction.z);
+  vec2 encoded = direction.xy;
+  if (direction.z < 0.0) {
+    encoded = (vec2(1.0) - abs(encoded.yx)) * signNotZero(encoded);
+  }
+  return clamp(encoded, vec2(-1.0), vec2(1.0));
+}
+
+vec3 rtDynamicNormalizeOrZero(vec3 value) {
+  const float lengthSq = dot(value, value);
+  return lengthSq > 1.0e-10 ? value * inversesqrt(lengthSq) : vec3(0.0);
+}
+
+void main() {
+  const uint localVertex = gl_GlobalInvocationID.x;
+  if (localVertex >= pc.vertexCount) {
+    return;
+  }
+  const uint vertexIndex = pc.vertexOffset + localVertex;
+  const InstanceData instance = pc.instanceData.instances[pc.renderableIndex];
+  const vec3 localPosition = decodePackedPositionFrom(
+      pc.sourceVertices, pc.sourceDecode, pc.vertexDecodeIndex,
+      pc.packedVertexFormat, vertexIndex);
+  const vec3 localNormal = decodePackedNormalFrom(
+      pc.sourceVertices, pc.packedVertexFormat, vertexIndex);
+  const vec4 localTangent = decodePackedTangentFrom(
+      pc.sourceVertices, pc.packedVertexFormat, vertexIndex);
+  const mat3 normalMatrix = mat3(instance.normalMatCol0.xyz,
+                                 instance.normalMatCol1.xyz,
+                                 instance.normalMatCol2.xyz);
+  const vec3 worldPosition =
+      (instance.modelMatrix * vec4(localPosition, 1.0)).xyz;
+  const vec3 worldNormal = rtDynamicNormalizeOrZero(normalMatrix * localNormal);
+  vec3 worldTangent = mat3(instance.modelMatrix) * localTangent.xyz;
+  worldTangent -= worldNormal * dot(worldTangent, worldNormal);
+  worldTangent = rtDynamicNormalizeOrZero(worldTangent);
+
+  RtDynamicPackedVertex outputVertex;
+  outputVertex.word0 = floatBitsToUint(worldPosition.x);
+  outputVertex.word1 = floatBitsToUint(worldPosition.y);
+  outputVertex.word2 = floatBitsToUint(worldPosition.z);
+  outputVertex.word3 = packSnorm2x16(rtDynamicEncodeOct(worldNormal));
+  if (dot(worldTangent, worldTangent) > 1.0e-10) {
+    outputVertex.word4 = packSnorm2x16(rtDynamicEncodeOct(worldTangent));
+    outputVertex.word5 =
+        floatBitsToUint(localTangent.w >= 0.0 ? 1.0 : -1.0);
+  } else {
+    outputVertex.word4 = 0u;
+    outputVertex.word5 = 0u;
+  }
+  outputVertex.word6 = packHalf2x16(decodePackedUvFrom(
+      pc.sourceVertices, pc.packedVertexFormat, vertexIndex));
+  outputVertex.word7 = packHalf2x16(decodePackedUv1From(
+      pc.sourceVertices, pc.packedVertexFormat, vertexIndex));
+  pc.destinationVertices.vertices[vertexIndex] = outputVertex;
+}

@@ -159,7 +159,7 @@ private:
     BufferRingCount
   };
   using FrameData = ForwardSceneFrameData;
-  static_assert(sizeof(FrameData) == 464,
+  static_assert(sizeof(FrameData) == 488,
                 "OpaqueRenderer::FrameData must match shader FrameDataBuffer "
                 "layout");
   using PushConstants = ForwardMeshPushConstants;

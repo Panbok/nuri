@@ -1,0 +1,86 @@
+{
+  "schemaVersion": 1,
+  "id": "correctness.procedural.ddgi_light_change_convergence",
+  "suite": "correctness",
+  "description": "Changes the directional light without resetting DDGI and verifies the submitted fast-response window converges",
+  "scene": {
+    "kind": "procedural",
+    "generator": "nuri.procedural.ddgi_light_change_convergence.v1",
+    "seed": 1,
+    "contentHash": "nuri.procedural.ddgi_light_change_convergence.v1:1"
+  },
+  "backend": "default",
+  "resolution": [640, 360],
+  "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 4,
+  "endFrame": 24,
+  "authoritative": false,
+  "presentMode": "immediate",
+  "windowMode": "visible",
+  "renderGraph": {"workerCount": 1, "parallelCompile": false, "parallelRecording": false},
+  "camera": {
+    "position": [0.0, 0.75, 4.2],
+    "target": [0.0, 0.25, 0.0],
+    "verticalFovDegrees": 60.0,
+    "nearPlane": 0.05,
+    "farPlane": 100.0
+  },
+  "settings": {
+    "ddgi": {
+      "enabled": true,
+      "preset": "Low",
+      "raysPerProbe": 64,
+      "maxProbeUpdatesPerFrame": 144,
+      "maxRayQueriesPerFrame": 18432,
+      "debugView": "DiffuseIndirect"
+    },
+    "opaque": {"enableInstanceAnimation": false},
+    "antiAliasing": {"mode": "None"},
+    "ambientOcclusion": {"mode": "Disabled"},
+    "shadow": {"enabled": true, "qualityPreset": "Low"}
+  },
+  "timeline": {
+    "events": [
+      {"frame": 8, "type": "setDirectionalLightIntensity", "intensity": 1.5, "eventReason": "radiometric response"}
+    ]
+  },
+  "checkpoints": [
+    {
+      "id": "pre_change",
+      "frame": 7,
+      "captures": [{"target": "frame_color_hdr", "profile": "hdr_color", "required": true, "compare": false}],
+      "assertions": [
+        {"id": "pre_history_ready", "metric": "renderer.ddgi.history_ready", "equals": 1},
+        {"id": "pre_no_reset", "metric": "renderer.ddgi.reset_count", "equals": 0}
+      ]
+    },
+    {
+      "id": "response_window",
+      "frame": 9,
+      "captures": [{"target": "frame_color_hdr", "profile": "hdr_color", "required": true, "compare": false}],
+      "assertions": [
+        {"id": "response_active", "metric": "renderer.ddgi.irradiance_response_remaining", "greaterOrEqual": 1},
+        {"id": "response_updates", "metric": "renderer.ddgi.updated_probes", "greaterOrEqual": 1},
+        {"id": "response_without_reset", "metric": "renderer.ddgi.reset_count", "equals": 0},
+        {"id": "response_no_fallback", "metric": "renderer.ddgi.fallback_reason", "equals": 0}
+      ]
+    },
+    {
+      "id": "converged",
+      "frame": 22,
+      "captures": [{"target": "frame_color_hdr", "profile": "hdr_color", "required": true, "compare": false}],
+      "assertions": [
+        {"id": "response_consumed", "metric": "renderer.ddgi.irradiance_response_remaining", "equals": 0},
+        {"id": "history_still_ready", "metric": "renderer.ddgi.history_ready", "equals": 1},
+        {"id": "converged_without_reset", "metric": "renderer.ddgi.reset_count", "equals": 0}
+      ]
+    }
+  ],
+  "requirements": {
+    "assets": ["modelsRoot:common/flat_plane.obj"],
+    "backends": [],
+    "allowVisibleWindow": true,
+    "accelerationStructure": true,
+    "rayQuery": true
+  }
+}

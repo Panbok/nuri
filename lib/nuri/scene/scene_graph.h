@@ -3,6 +3,7 @@
 #include "nuri/core/result.h"
 #include "nuri/defines.h"
 #include "nuri/resources/gpu/resource_handles.h"
+#include "nuri/scene/ddgi_volume.h"
 #include "nuri/scene/light.h"
 #include "nuri/scene/scene_handles.h"
 #include "nuri/scene/scene_prefab.h"
@@ -29,9 +30,10 @@ struct ScenePrefabStructureCursor {
 };
 
 struct SceneGraphCapacityReservation {
-  static constexpr uint32_t kStageCount = 3u;
+  static constexpr uint32_t kStageCount = 4u;
   size_t nodeCapacity = 0u;
   size_t renderableCapacity = 0u;
+  size_t ddgiVolumeCapacity = 0u;
   uint32_t stage = 0u;
   [[nodiscard]] bool complete() const noexcept { return stage >= kStageCount; }
   [[nodiscard]] float progress() const noexcept {
@@ -141,6 +143,24 @@ public:
       }
     }
   }
+  [[nodiscard]] Result<DDGIVolumeId, std::string>
+  addDDGIVolume(NodeId node, const DDGIVolumeDesc &desc);
+  [[nodiscard]] bool removeDDGIVolume(DDGIVolumeId id);
+  [[nodiscard]] bool updateDDGIVolume(DDGIVolumeId id,
+                                      const DDGIVolumeDesc &desc);
+  [[nodiscard]] bool getDDGIVolume(DDGIVolumeId id, DDGIVolumeDesc &out) const;
+  [[nodiscard]] bool getDDGIVolumeNode(DDGIVolumeId id, NodeId &out) const;
+  template <typename Fn>
+  void forEachDDGIVolumeOnNode(NodeId node, Fn &&fn) const {
+    if (!nodeSlotValid(node)) {
+      return;
+    }
+    for (uint32_t index = nodes_.ddgiVolumeHead[indexOf(node)];
+         index != kInvalidIndex;
+         index = ddgiVolumes_.records[index].nextOnNode) {
+      fn(makeDDGIVolumeId(index, ddgiVolumes_.slots.generation(index)));
+    }
+  }
   [[nodiscard]] Result<NodeId, std::string>
   instantiatePrefabStructure(const ScenePrefab &prefab, NodeId parent,
                              SceneInstantiationMap *outMap = nullptr);
@@ -167,8 +187,16 @@ public:
       }
     }
   }
+  template <typename Fn> void forEachDDGIVolumeId(Fn &&fn) const {
+    for (uint32_t index = 0u; index < ddgiVolumes_.slots.slotCount(); ++index) {
+      if (ddgiVolumes_.slots.isLive(index)) {
+        fn(makeDDGIVolumeId(index, ddgiVolumes_.slots.generation(index)));
+      }
+    }
+  }
   void clearRenderables();
   void clearLights();
+  void clearDDGIVolumes();
 
 private:
   friend class RenderScene;
@@ -190,7 +218,8 @@ private:
                                             std::pmr::vector<uint32_t>{memory}},
           lightTail{std::pmr::vector<uint32_t>{memory},
                     std::pmr::vector<uint32_t>{memory},
-                    std::pmr::vector<uint32_t>{memory}} {}
+                    std::pmr::vector<uint32_t>{memory}},
+          ddgiVolumeHead(memory), ddgiVolumeTail(memory) {}
     GenerationPool slots;
     IndexArray parent;
     IndexArray firstChild;
@@ -206,6 +235,8 @@ private:
     IndexArray renderableTail;
     LightIndexArrays lightHead;
     LightIndexArrays lightTail;
+    IndexArray ddgiVolumeHead;
+    IndexArray ddgiVolumeTail;
   };
   struct RenderableStore {
     explicit RenderableStore(std::pmr::memory_resource *memory)
@@ -246,13 +277,36 @@ private:
     GenerationPool slots;
     std::pmr::vector<LightRecord> records;
   };
+  struct DDGIVolumeRecord {
+    explicit DDGIVolumeRecord(std::pmr::memory_resource *memory)
+        : name(memory) {}
+    uint32_t node = kInvalidIndex;
+    std::pmr::string name;
+    glm::uvec3 probeCounts{16u, 8u, 16u};
+    glm::vec3 probeSpacing{2.0f};
+    float blendDistance = 2.0f;
+    float maxRayDistance = 20.0f;
+    int32_t priority = 0;
+    DDGIVolumeMode mode = DDGIVolumeMode::Authored;
+    uint32_t nextOnNode = kInvalidIndex;
+    uint32_t prevOnNode = kInvalidIndex;
+    bool enabled = true;
+  };
+  struct DDGIVolumeStore {
+    explicit DDGIVolumeStore(std::pmr::memory_resource *memory)
+        : slots(memory), records(memory) {}
+    GenerationPool slots;
+    std::pmr::vector<DDGIVolumeRecord> records;
+  };
   [[nodiscard]] bool nodeSlotValid(NodeId id) const noexcept;
   [[nodiscard]] bool renderableSlotValid(RenderableId id) const noexcept;
   [[nodiscard]] bool lightSlotValid(LightId id) const noexcept;
+  [[nodiscard]] bool ddgiVolumeSlotValid(DDGIVolumeId id) const noexcept;
   [[nodiscard]] Result<SlotReservation, std::string> allocateNodeSlot();
   [[nodiscard]] Result<SlotReservation, std::string> allocateRenderableSlot();
   [[nodiscard]] Result<SlotReservation, std::string>
   allocateLightSlot(LightType type);
+  [[nodiscard]] Result<SlotReservation, std::string> allocateDDGIVolumeSlot();
   void markSubtreeDirty(uint32_t rootIndex);
   void resetWorldTransformSync() noexcept;
   void attachNode(uint32_t childIndex, uint32_t parentIndex);
@@ -263,6 +317,7 @@ private:
   void noteTopologyMutation() noexcept;
   void noteTransformMutation() noexcept;
   void markTransformDependentsDirty() noexcept;
+  void markDDGIVolumeTransformsDirty(uint32_t rootIndex) noexcept;
   void recycleRenderableSlot(uint32_t index) noexcept;
   [[nodiscard]] uint32_t localLightCount() const noexcept;
   std::pmr::memory_resource *memory_ = std::pmr::get_default_resource();
@@ -274,6 +329,7 @@ private:
   NodeStore nodes_;
   RenderableStore renderableComponents_;
   std::array<LightStore, kLightTypeCount> lights_;
+  DDGIVolumeStore ddgiVolumes_;
   NodeId rootNode_ = kInvalidNodeId;
   uint64_t topologyVersion_ = 0u;
   uint64_t transformVersion_ = 0u;
@@ -282,6 +338,9 @@ private:
   bool renderableDeformationsDirty_ = false;
   bool lightTopologyDirty_ = false;
   bool lightDataDirty_ = false;
+  bool ddgiVolumeTopologyDirty_ = false;
+  bool ddgiVolumeTransformsDirty_ = false;
+  bool ddgiVolumeSettingsDirty_ = false;
 };
 
 } // namespace nuri

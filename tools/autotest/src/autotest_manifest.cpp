@@ -256,6 +256,33 @@ readVec3(yyjson_val *object, std::string_view key, std::string_view path,
   return Result<glm::vec3, std::string>::makeResult(out);
 }
 
+[[nodiscard]] Result<glm::uvec3, std::string>
+readUVec3(yyjson_val *object, std::string_view key, std::string_view path,
+          glm::uvec3 defaultValue, bool required = false) {
+  yyjson_val *value = optionalObject(object, key);
+  if (value == nullptr) {
+    if (required) {
+      return Result<glm::uvec3, std::string>::makeError(jsonPath(path, key) +
+                                                        " is required");
+    }
+    return Result<glm::uvec3, std::string>::makeResult(defaultValue);
+  }
+  if (!yyjson_is_arr(value) || yyjson_arr_size(value) != 3u) {
+    return Result<glm::uvec3, std::string>::makeError(jsonPath(path, key) +
+                                                      " must be a uvec3 array");
+  }
+  glm::uvec3 out{};
+  for (uint32_t i = 0u; i < 3u; ++i) {
+    yyjson_val *entry = yyjson_arr_get(value, i);
+    if (!yyjson_is_uint(entry) || yyjson_get_uint(entry) > UINT32_MAX) {
+      return Result<glm::uvec3, std::string>::makeError(
+          jsonPath(path, key) + " entries must be uint32 values");
+    }
+    out[i] = static_cast<uint32_t>(yyjson_get_uint(entry));
+  }
+  return Result<glm::uvec3, std::string>::makeResult(out);
+}
+
 [[nodiscard]] Result<glm::vec2, std::string>
 readVec2(yyjson_val *object, std::string_view key, std::string_view path,
          glm::vec2 defaultValue, bool required = false) {
@@ -327,7 +354,7 @@ parseSettings(yyjson_val *object, RenderSettings &settings) {
       std::string_view("ambientOcclusion"), std::string_view("shadow"),
       std::string_view("visibility"),       std::string_view("hdrPostProcess"),
       std::string_view("transmission"),     std::string_view("transparent"),
-      std::string_view("textureFiltering"),
+      std::string_view("textureFiltering"), std::string_view("ddgi"),
   };
   auto result = rejectUnknownKeys(object, keys, "settings");
   if (result.hasError()) {
@@ -918,6 +945,130 @@ parseSettings(yyjson_val *object, RenderSettings &settings) {
     }
     settings.textureFiltering.anisotropy =
         static_cast<uint8_t>(std::min<uint32_t>(anisotropy.value(), 255u));
+  }
+
+  if (yyjson_val *ddgi = optionalObject(object, "ddgi")) {
+    static constexpr std::array ddgiKeys{
+        std::string_view("enabled"),
+        std::string_view("preset"),
+        std::string_view("raysPerProbe"),
+        std::string_view("maxProbeUpdatesPerFrame"),
+        std::string_view("maxRayQueriesPerFrame"),
+        std::string_view("maxLocalLightsPerHit"),
+        std::string_view("maxCandidateIntersectionsPerRay"),
+        std::string_view("irradianceHysteresis"),
+        std::string_view("distanceHysteresis"),
+        std::string_view("changeIrradianceHysteresisScale"),
+        std::string_view("changeDistanceHysteresisScale"),
+        std::string_view("selfShadowBias"),
+        std::string_view("multiBounceLuminanceClamp"),
+        std::string_view("relocation"),
+        std::string_view("classification"),
+        std::string_view("multiBounce"),
+        std::string_view("freezeUpdates"),
+        std::string_view("showVolumes"),
+        std::string_view("showProbes"),
+        std::string_view("showSelectedProbeRays"),
+        std::string_view("debugView")};
+    result = rejectUnknownKeys(ddgi, ddgiKeys, "settings.ddgi");
+    if (result.hasError()) {
+      return result;
+    }
+    auto boolean =
+        readBool(ddgi, "enabled", "settings.ddgi", settings.ddgi.enabled);
+    if (boolean.hasError()) {
+      return Result<bool, std::string>::makeError(boolean.error());
+    }
+    settings.ddgi.enabled = boolean.value();
+    result =
+        readEnumField(ddgi, "preset", "settings.ddgi", settings.ddgi.preset,
+                      {{"Low", DDGIQualityPreset::Low},
+                       {"Balanced", DDGIQualityPreset::Balanced},
+                       {"High", DDGIQualityPreset::High},
+                       {"Custom", DDGIQualityPreset::Custom}});
+    if (result.hasError()) {
+      return result;
+    }
+    auto readCount = [&](std::string_view key,
+                         uint32_t &out) -> Result<bool, std::string> {
+      auto value = readU32(ddgi, key, "settings.ddgi", out);
+      if (value.hasError()) {
+        return Result<bool, std::string>::makeError(value.error());
+      }
+      out = value.value();
+      return Result<bool, std::string>::makeResult(true);
+    };
+    for (const auto [key, output] :
+         {std::pair<std::string_view, uint32_t *>{"raysPerProbe",
+                                                  &settings.ddgi.raysPerProbe},
+          {"maxProbeUpdatesPerFrame", &settings.ddgi.maxProbeUpdatesPerFrame},
+          {"maxRayQueriesPerFrame", &settings.ddgi.maxRayQueriesPerFrame},
+          {"maxLocalLightsPerHit", &settings.ddgi.maxLocalLightsPerHit},
+          {"maxCandidateIntersectionsPerRay",
+           &settings.ddgi.maxCandidateIntersectionsPerRay}}) {
+      auto parsed = readCount(key, *output);
+      if (parsed.hasError()) {
+        return parsed;
+      }
+    }
+    auto readFloat = [&](std::string_view key,
+                         float &out) -> Result<bool, std::string> {
+      auto value = readDouble(ddgi, key, "settings.ddgi", out);
+      if (value.hasError()) {
+        return Result<bool, std::string>::makeError(value.error());
+      }
+      out = static_cast<float>(value.value());
+      return Result<bool, std::string>::makeResult(true);
+    };
+    for (const auto [key, output] :
+         {std::pair<std::string_view, float *>{
+              "irradianceHysteresis", &settings.ddgi.irradianceHysteresis},
+          {"distanceHysteresis", &settings.ddgi.distanceHysteresis},
+          {"changeIrradianceHysteresisScale",
+           &settings.ddgi.changeIrradianceHysteresisScale},
+          {"changeDistanceHysteresisScale",
+           &settings.ddgi.changeDistanceHysteresisScale},
+          {"selfShadowBias", &settings.ddgi.selfShadowBias},
+          {"multiBounceLuminanceClamp",
+           &settings.ddgi.multiBounceLuminanceClamp}}) {
+      auto parsed = readFloat(key, *output);
+      if (parsed.hasError()) {
+        return parsed;
+      }
+    }
+    for (const auto [key, output] :
+         {std::pair<std::string_view, bool *>{"relocation",
+                                              &settings.ddgi.relocation},
+          {"classification", &settings.ddgi.classification},
+          {"multiBounce", &settings.ddgi.multiBounce},
+          {"freezeUpdates", &settings.ddgi.freezeUpdates},
+          {"showVolumes", &settings.ddgi.showVolumes},
+          {"showProbes", &settings.ddgi.showProbes},
+          {"showSelectedProbeRays", &settings.ddgi.showSelectedProbeRays}}) {
+      auto parsed = readBool(ddgi, key, "settings.ddgi", *output);
+      if (parsed.hasError()) {
+        return Result<bool, std::string>::makeError(parsed.error());
+      }
+      *output = parsed.value();
+    }
+    result = readEnumField(
+        ddgi, "debugView", "settings.ddgi", settings.ddgi.debugView,
+        {{"None", DDGIDebugView::None},
+         {"DiffuseIndirect", DDGIDebugView::DiffuseIndirect},
+         {"VolumeId", DDGIDebugView::VolumeId},
+         {"ProbeWeights", DDGIDebugView::ProbeWeights},
+         {"Confidence", DDGIDebugView::Confidence},
+         {"Visibility", DDGIDebugView::Visibility},
+         {"Irradiance", DDGIDebugView::Irradiance},
+         {"DistanceMean", DDGIDebugView::DistanceMean},
+         {"DistanceVariance", DDGIDebugView::DistanceVariance},
+         {"Classification", DDGIDebugView::Classification},
+         {"RelocationOffset", DDGIDebugView::RelocationOffset},
+         {"UpdateAge", DDGIDebugView::UpdateAge},
+         {"LeakRisk", DDGIDebugView::LeakRisk}});
+    if (result.hasError()) {
+      return result;
+    }
   }
 
   sanitizeAutotestRenderSettings(settings);
@@ -2341,7 +2492,10 @@ parseTimeline(yyjson_val *root, const AutotestCameraConfig &baseCamera,
       static constexpr std::array eventKeys{
           std::string_view("frame"),       std::string_view("type"),
           std::string_view("eventReason"), std::string_view("camera"),
-          std::string_view("settings"),    std::string_view("preserveHistory")};
+          std::string_view("settings"),    std::string_view("preserveHistory"),
+          std::string_view("target"),      std::string_view("translation"),
+          std::string_view("intensity"),   std::string_view("volumeIndex"),
+          std::string_view("probeCounts")};
       result = rejectUnknownKeys(eventValue, eventKeys, "timeline.events[]");
       if (result.hasError()) {
         return Result<AutotestTimeline, std::string>::makeError(result.error());
@@ -2373,6 +2527,12 @@ parseTimeline(yyjson_val *root, const AutotestCameraConfig &baseCamera,
         return Result<AutotestTimeline, std::string>::makeError(text.error());
       }
       event.eventReason = std::move(text.value());
+      text = readString(eventValue, "target", "timeline.events[]", false,
+                        event.target);
+      if (text.hasError()) {
+        return Result<AutotestTimeline, std::string>::makeError(text.error());
+      }
+      event.target = std::move(text.value());
       auto boolean = readBool(eventValue, "preserveHistory",
                               "timeline.events[]", event.preserveHistory);
       if (boolean.hasError()) {
@@ -2380,6 +2540,30 @@ parseTimeline(yyjson_val *root, const AutotestCameraConfig &baseCamera,
             boolean.error());
       }
       event.preserveHistory = boolean.value();
+      auto vec = readVec3(eventValue, "translation", "timeline.events[]",
+                          event.translation);
+      if (vec.hasError()) {
+        return Result<AutotestTimeline, std::string>::makeError(vec.error());
+      }
+      event.translation = vec.value();
+      auto counts = readUVec3(eventValue, "probeCounts", "timeline.events[]",
+                              event.probeCounts);
+      if (counts.hasError()) {
+        return Result<AutotestTimeline, std::string>::makeError(counts.error());
+      }
+      event.probeCounts = counts.value();
+      auto real = readDouble(eventValue, "intensity", "timeline.events[]",
+                             event.intensity);
+      if (real.hasError()) {
+        return Result<AutotestTimeline, std::string>::makeError(real.error());
+      }
+      event.intensity = static_cast<float>(real.value());
+      u32 = readU32(eventValue, "volumeIndex", "timeline.events[]",
+                    event.volumeIndex);
+      if (u32.hasError()) {
+        return Result<AutotestTimeline, std::string>::makeError(u32.error());
+      }
+      event.volumeIndex = u32.value();
       event.camera = baseCamera;
       if (yyjson_val *camera = optionalObject(eventValue, "camera")) {
         auto parsed =
@@ -2405,8 +2589,27 @@ parseTimeline(yyjson_val *root, const AutotestCameraConfig &baseCamera,
         }
         currentSettings = event.settings;
       }
+      const bool sceneEvent = event.type == "setDirectionalLightIntensity" ||
+                              event.type == "setNodeTranslation" ||
+                              event.type == "setDDGIVolumeProbeCounts";
+      if (event.type == "setDirectionalLightIntensity" &&
+          (!std::isfinite(event.intensity) || event.intensity < 0.0f)) {
+        return Result<AutotestTimeline, std::string>::makeError(
+            "setDirectionalLightIntensity requires a finite non-negative "
+            "intensity");
+      }
+      if (event.type == "setNodeTranslation" && event.target.empty()) {
+        return Result<AutotestTimeline, std::string>::makeError(
+            "setNodeTranslation requires target");
+      }
+      if (event.type == "setDDGIVolumeProbeCounts" &&
+          (event.probeCounts.x == 0u || event.probeCounts.y == 0u ||
+           event.probeCounts.z == 0u)) {
+        return Result<AutotestTimeline, std::string>::makeError(
+            "setDDGIVolumeProbeCounts requires non-zero probeCounts");
+      }
       if (event.type != "resetTemporalHistory" && event.type != "setCamera" &&
-          event.type != "setSettings") {
+          event.type != "setSettings" && !sceneEvent) {
         return Result<AutotestTimeline, std::string>::makeError(
             "unsupported timeline event type '" + event.type + "'");
       }
@@ -2884,7 +3087,10 @@ Result<bool, std::string> validateAutotestCase(const AutotestCase &testCase) {
           "timeline event frame is outside endFrame");
     }
     if (event.type != "resetTemporalHistory" && event.type != "setCamera" &&
-        event.type != "setSettings") {
+        event.type != "setSettings" &&
+        event.type != "setDirectionalLightIntensity" &&
+        event.type != "setNodeTranslation" &&
+        event.type != "setDDGIVolumeProbeCounts") {
       return Result<bool, std::string>::makeError(
           "unsupported timeline event type '" + event.type + "'");
     }
@@ -2934,6 +3140,7 @@ loadAutotestCaseManifest(const std::filesystem::path &path) {
       std::string_view("settings"),
       std::string_view("requirements"),
       std::string_view("timeline"),
+      std::string_view("ddgiProbeInspection"),
       std::string_view("checkpoints"),
       std::string_view("metricWindows"),
   };
@@ -3015,6 +3222,46 @@ loadAutotestCaseManifest(const std::filesystem::path &path) {
     return Result<AutotestCase, std::string>::makeError(u32.error());
   }
   out.endFrame = u32.value();
+  if (yyjson_val *inspection = optionalObject(root, "ddgiProbeInspection")) {
+    if (!yyjson_is_obj(inspection)) {
+      return Result<AutotestCase, std::string>::makeError(
+          "ddgiProbeInspection must be an object");
+    }
+    static constexpr std::array keys{
+        std::string_view("frame"), std::string_view("volumeIndex"),
+        std::string_view("probeId"), std::string_view("rayCount")};
+    auto parsed = rejectUnknownKeys(inspection, keys, "ddgiProbeInspection");
+    if (parsed.hasError()) {
+      return Result<AutotestCase, std::string>::makeError(parsed.error());
+    }
+    AutotestDDGIProbeInspection request{};
+    u32 = readU32(inspection, "frame", "ddgiProbeInspection", 0u);
+    if (u32.hasError()) {
+      return Result<AutotestCase, std::string>::makeError(u32.error());
+    }
+    request.frame = u32.value();
+    u32 = readU32(inspection, "volumeIndex", "ddgiProbeInspection", 0u);
+    if (u32.hasError()) {
+      return Result<AutotestCase, std::string>::makeError(u32.error());
+    }
+    request.volumeIndex = u32.value();
+    u32 = readU32(inspection, "probeId", "ddgiProbeInspection", 0u);
+    if (u32.hasError()) {
+      return Result<AutotestCase, std::string>::makeError(u32.error());
+    }
+    request.probeId = u32.value();
+    u32 = readU32(inspection, "rayCount", "ddgiProbeInspection", 128u);
+    if (u32.hasError()) {
+      return Result<AutotestCase, std::string>::makeError(u32.error());
+    }
+    request.rayCount = u32.value();
+    if (request.frame > out.endFrame || request.rayCount == 0u ||
+        request.rayCount > kDDGIMaxDiagnosticRays) {
+      return Result<AutotestCase, std::string>::makeError(
+          "ddgiProbeInspection frame/rayCount is out of range");
+    }
+    out.ddgiProbeInspection = request;
+  }
   auto boolean = readBool(root, "authoritative", "$", out.authoritative);
   if (boolean.hasError()) {
     return Result<AutotestCase, std::string>::makeError(boolean.error());
@@ -3075,7 +3322,9 @@ loadAutotestCaseManifest(const std::filesystem::path &path) {
   if (yyjson_val *requirements = optionalObject(root, "requirements")) {
     static constexpr std::array keys{std::string_view("assets"),
                                      std::string_view("backends"),
-                                     std::string_view("allowVisibleWindow")};
+                                     std::string_view("allowVisibleWindow"),
+                                     std::string_view("accelerationStructure"),
+                                     std::string_view("rayQuery")};
     auto parsed = rejectUnknownKeys(requirements, keys, "requirements");
     if (parsed.hasError()) {
       return Result<AutotestCase, std::string>::makeError(parsed.error());
@@ -3096,6 +3345,18 @@ loadAutotestCaseManifest(const std::filesystem::path &path) {
       return Result<AutotestCase, std::string>::makeError(boolean.error());
     }
     out.requirements.allowVisibleWindow = boolean.value();
+    boolean = readBool(requirements, "accelerationStructure", "requirements",
+                       out.requirements.accelerationStructure);
+    if (boolean.hasError()) {
+      return Result<AutotestCase, std::string>::makeError(boolean.error());
+    }
+    out.requirements.accelerationStructure = boolean.value();
+    boolean = readBool(requirements, "rayQuery", "requirements",
+                       out.requirements.rayQuery);
+    if (boolean.hasError()) {
+      return Result<AutotestCase, std::string>::makeError(boolean.error());
+    }
+    out.requirements.rayQuery = boolean.value();
   }
 
   auto timeline = parseTimeline(root, out.camera, out.settings, out.endFrame);

@@ -1,0 +1,72 @@
+{
+  "schemaVersion": 1,
+  "id": "correctness.procedural.ddgi_probe_states",
+  "suite": "correctness",
+  "description": "Runs five submitted static relocation/classification iterations and verifies committed probe-state readback",
+  "scene": {
+    "kind": "procedural",
+    "generator": "nuri.procedural.ddgi_probe_states.v1",
+    "seed": 1,
+    "contentHash": "nuri.procedural.ddgi_probe_states.v1:1"
+  },
+  "backend": "default",
+  "resolution": [640, 360],
+  "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 4,
+  "endFrame": 8,
+  "authoritative": false,
+  "presentMode": "immediate",
+  "windowMode": "visible",
+  "renderGraph": {
+    "workerCount": 1,
+    "parallelCompile": false,
+    "parallelRecording": false
+  },
+  "camera": {
+    "position": [0.0, 0.75, 4.2],
+    "target": [0.0, 0.25, 0.0],
+    "verticalFovDegrees": 60.0,
+    "nearPlane": 0.05,
+    "farPlane": 100.0
+  },
+  "settings": {
+    "ddgi": {
+      "enabled": true,
+      "preset": "Low",
+      "raysPerProbe": 64,
+      "maxProbeUpdatesPerFrame": 144,
+      "maxRayQueriesPerFrame": 18432,
+      "relocation": true,
+      "classification": true,
+      "showProbes": true,
+      "debugView": "RelocationOffset"
+    },
+    "opaque": {"enableInstanceAnimation": false},
+    "antiAliasing": {"mode": "None"},
+    "ambientOcclusion": {"mode": "Disabled"},
+    "shadow": {"enabled": true, "qualityPreset": "Low"}
+  },
+  "checkpoints": [
+    {
+      "id": "probe_states_committed",
+      "frame": 8,
+      "captures": [
+        {"target": "frame_color_hdr", "profile": "hdr_color", "required": true, "compare": false}
+      ],
+      "assertions": [
+        {"id": "state_readback_ready", "metric": "renderer.ddgi.probe_state_readback_available", "equals": 1},
+        {"id": "five_iterations_complete", "metric": "renderer.ddgi.uninitialized_probes", "equals": 0},
+        {"id": "inside_or_near_surface_probes_relocated", "metric": "renderer.ddgi.relocated_probes", "greaterOrEqual": 1},
+        {"id": "relocation_is_nonzero", "metric": "renderer.ddgi.max_relocation", "greaterOrEqual": 0.00001},
+        {"id": "ddgi_no_fallback", "metric": "renderer.ddgi.fallback_reason", "equals": 0}
+      ]
+    }
+  ],
+  "requirements": {
+    "assets": ["modelsRoot:common/flat_plane.obj"],
+    "backends": [],
+    "allowVisibleWindow": true,
+    "accelerationStructure": true,
+    "rayQuery": true
+  }
+}

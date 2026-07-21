@@ -275,6 +275,42 @@ nuri_add_gtest_suite(
 )
 
 nuri_add_gtest_suite(
+  nuri_ddgi_atlas_tests
+  src/ddgi_atlas_tests.cpp
+  "ddgi_atlas::"
+)
+
+nuri_add_gtest_suite(
+  nuri_ddgi_scheduler_tests
+  src/ddgi_scheduler_tests.cpp
+  "ddgi_scheduler::"
+)
+
+nuri_add_gtest_suite(
+  nuri_ddgi_volume_store_tests
+  src/ddgi_volume_store_tests.cpp
+  "ddgi_volume_store::"
+)
+
+nuri_add_gtest_suite(
+  nuri_ddgi_settings_tests
+  src/ddgi_settings_tests.cpp
+  "ddgi_settings::"
+)
+
+nuri_add_gtest_suite(
+  nuri_acceleration_structure_contract_tests
+  src/acceleration_structure_contract_tests.cpp
+  "acceleration_structure::"
+)
+
+nuri_add_gtest_suite(
+  nuri_render_graph_acceleration_structure_tests
+  src/render_graph_acceleration_structure_tests.cpp
+  "render_graph_acceleration_structure::"
+)
+
+nuri_add_gtest_suite(
   nuri_slot_pool_tests
   src/slot_pool_tests.cpp
   "slot_pool::"

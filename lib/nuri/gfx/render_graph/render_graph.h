@@ -21,11 +21,14 @@ template <typename Tag> struct RenderGraphId {
 struct RenderGraphPassTag;
 struct RenderGraphTextureTag;
 struct RenderGraphBufferTag;
+struct RenderGraphAccelerationStructureTag;
 struct PersistentBufferTag;
 struct PersistentTextureTag;
 using RenderGraphPassId = RenderGraphId<RenderGraphPassTag>;
 using RenderGraphTextureId = RenderGraphId<RenderGraphTextureTag>;
 using RenderGraphBufferId = RenderGraphId<RenderGraphBufferTag>;
+using RenderGraphAccelerationStructureId =
+    RenderGraphId<RenderGraphAccelerationStructureTag>;
 using PersistentBufferId = RenderGraphId<PersistentBufferTag>;
 using PersistentTextureId = RenderGraphId<PersistentTextureTag>;
 template <typename Tag>
@@ -80,6 +83,29 @@ struct NURI_API RenderGraphGraphicsPassDesc {
   bool markImplicitOutputSideEffect = true;
   bool borrowPayload = false;
 };
+enum class RenderGraphAccelerationStructureAccess : uint8_t {
+  BuildRead,
+  BuildWrite,
+  RayQueryRead,
+};
+struct NURI_API RenderGraphBufferUse {
+  RenderGraphBufferId buffer{};
+  RenderGraphAccessMode access = RenderGraphAccessMode::Read;
+};
+struct NURI_API RenderGraphAccelerationStructureUse {
+  RenderGraphAccelerationStructureId accelerationStructure{};
+  RenderGraphAccelerationStructureAccess access =
+      RenderGraphAccelerationStructureAccess::BuildRead;
+};
+struct NURI_API RenderGraphAccelerationStructurePassDesc {
+  std::span<const AccelerationStructureBuildItem> builds{};
+  std::span<const RenderGraphBufferUse> buffers{};
+  std::span<const RenderGraphAccelerationStructureUse> accelerationStructures{};
+  GpuTimingScope gpuTimingScope = GpuTimingScope::None;
+  std::string_view debugLabel{};
+  uint32_t debugColor = 0xffffffffu;
+  bool markImplicitOutputSideEffect = true;
+};
 struct NURI_API RenderGraphTextureCopyItem {
   RenderGraphTextureId sourceTexture{};
   RenderGraphTextureId destinationTexture{};
@@ -111,7 +137,11 @@ struct NURI_API RenderGraphPassExecutionTiming {
 struct NURI_API RecordedCommandBufferMeta {
   uint32_t firstOrderedPassIndex = UINT32_MAX, passCount = 0;
 };
-enum class RenderGraphBarrierResourceKind : uint8_t { Texture, Buffer };
+enum class RenderGraphBarrierResourceKind : uint8_t {
+  Texture,
+  Buffer,
+  AccelerationStructure,
+};
 using RenderGraphResourceState = GraphicsBarrierState;
 struct NURI_API RenderGraphBarrierRecord {
   RenderGraphBarrierResourceKind resourceKind =
@@ -177,6 +207,7 @@ struct NURI_API RenderGraphCompileResult {
   struct ResourceStats {
     uint32_t importedTextures = 0, transientTextures = 0;
     uint32_t importedBuffers = 0, transientBuffers = 0;
+    uint32_t importedAccelerationStructures = 0;
   };
   struct TransientLifetime {
     uint32_t resourceIndex = UINT32_MAX, firstExecutionIndex = UINT32_MAX;
@@ -256,6 +287,8 @@ struct NURI_API RenderGraphCompileResult {
   ResourceStats resourceStats{};
   std::pmr::vector<TextureHandle> textureHandlesByResource;
   std::pmr::vector<BufferHandle> bufferHandlesByResource;
+  std::pmr::vector<AccelerationStructureHandle>
+      accelerationStructureHandlesByResource;
   std::pmr::vector<RenderPass> orderedPasses;
   std::pmr::vector<uint32_t> orderedPassIndices;
   std::pmr::vector<RecordedGraphicsPassMeta> recordedGraphicsPasses;
@@ -312,6 +345,7 @@ struct NURI_API RenderGraphCompileResult {
       std::pmr::memory_resource *memory = std::pmr::get_default_resource())
       : textureHandlesByResource(ensureMemory(memory)),
         bufferHandlesByResource(ensureMemory(memory)),
+        accelerationStructureHandlesByResource(ensureMemory(memory)),
         orderedPasses(ensureMemory(memory)),
         orderedPassIndices(ensureMemory(memory)),
         recordedGraphicsPasses(ensureMemory(memory)),
@@ -370,6 +404,9 @@ public:
   importTexture(TextureHandle texture, std::string_view debugName = {});
   [[nodiscard]] Result<RenderGraphBufferId, std::string>
   importBuffer(BufferHandle buffer, std::string_view debugName = {});
+  [[nodiscard]] Result<RenderGraphAccelerationStructureId, std::string>
+  importAccelerationStructure(AccelerationStructureHandle accelerationStructure,
+                              std::string_view debugName = {});
   [[nodiscard]] Result<RenderGraphTextureId, std::string>
   createTransientTexture(const TextureDesc &desc,
                          std::string_view debugName = {});
@@ -382,6 +419,10 @@ public:
   [[nodiscard]] Result<bool, std::string>
   addBufferAccess(RenderGraphPassId pass, RenderGraphBufferId buffer,
                   RenderGraphAccessMode mode);
+  [[nodiscard]] Result<bool, std::string> addAccelerationStructureAccess(
+      RenderGraphPassId pass,
+      RenderGraphAccelerationStructureId accelerationStructure,
+      RenderGraphAccelerationStructureAccess access);
   [[nodiscard]] Result<bool, std::string>
   addTextureRead(RenderGraphPassId pass, RenderGraphTextureId texture);
   [[nodiscard]] Result<bool, std::string>
@@ -394,6 +435,9 @@ public:
   addGraphicsPass(const RenderGraphGraphicsPassDesc &desc);
   [[nodiscard]] Result<RenderGraphPassId, std::string>
   addTextureCopyPass(const RenderGraphTextureCopyPassDesc &desc);
+  [[nodiscard]] Result<RenderGraphPassId, std::string>
+  addAccelerationStructurePass(
+      const RenderGraphAccelerationStructurePassDesc &desc);
   [[nodiscard]] Result<bool, std::string>
   bindPassColorTexture(RenderGraphPassId pass, RenderGraphTextureId texture);
   [[nodiscard]] Result<bool, std::string>
@@ -440,6 +484,7 @@ public:
     size_t passCount = 0;
     size_t totalTextureCount = 0;
     size_t totalBufferCount = 0;
+    size_t totalAccelerationStructureCount = 0;
     size_t edgeCount = 0;
     size_t passAccessCount = 0;
     size_t frameOutputCount = 0;
@@ -467,12 +512,17 @@ private:
   struct DependencyEdge {
     uint32_t before = UINT32_MAX, after = UINT32_MAX;
   };
-  enum class AccessResourceKind : uint8_t { Texture, Buffer };
+  enum class AccessResourceKind : uint8_t {
+    Texture,
+    Buffer,
+    AccelerationStructure,
+  };
   struct PassResourceAccess {
     uint32_t passIndex = UINT32_MAX;
     AccessResourceKind resourceKind = AccessResourceKind::Texture;
     uint32_t resourceIndex = UINT32_MAX;
     RenderGraphAccessMode mode = RenderGraphAccessMode::None;
+    RenderGraphResourceState requestedState = RenderGraphResourceState::Unknown;
     bool inferred = false;
   };
   struct SideEffectPassMark {
@@ -497,6 +547,13 @@ private:
         std::pmr::memory_resource *memory = std::pmr::get_default_resource())
         : debugName(memory) {}
   };
+  struct AccelerationStructureResource {
+    AccelerationStructureHandle importedHandle{};
+    std::pmr::string debugName;
+    explicit AccelerationStructureResource(
+        std::pmr::memory_resource *memory = std::pmr::get_default_resource())
+        : debugName(memory) {}
+  };
   struct OwnedPassPayload {
     std::pmr::string debugLabel;
     std::pmr::vector<ComputeDispatchItem> preDispatches;
@@ -515,6 +572,13 @@ private:
     std::pmr::vector<std::pmr::vector<std::byte>> drawPushConstants;
     std::pmr::vector<MeshDispatchItem> meshDispatches;
     std::pmr::vector<TextureCopyItem> textureCopies;
+    std::pmr::vector<AccelerationStructureBuildItem>
+        accelerationStructureBuilds;
+    std::pmr::vector<
+        std::pmr::vector<AccelerationStructureTriangleGeometryDesc>>
+        accelerationStructureGeometries;
+    std::pmr::vector<std::pmr::vector<AccelerationStructureInstanceDesc>>
+        accelerationStructureInstances;
     std::pmr::vector<std::pmr::string> meshDispatchDebugLabels;
     std::pmr::vector<std::pmr::vector<std::byte>> meshDispatchPushConstants;
     std::pmr::vector<std::pmr::vector<BufferHandle>>
@@ -530,8 +594,10 @@ private:
           preDispatchDependencyTextures(memory), dependencyBuffers(memory),
           dependencyTextures(memory), draws(memory), drawDebugLabels(memory),
           drawPushConstants(memory), meshDispatches(memory),
-          textureCopies(memory), meshDispatchDebugLabels(memory),
-          meshDispatchPushConstants(memory),
+          textureCopies(memory), accelerationStructureBuilds(memory),
+          accelerationStructureGeometries(memory),
+          accelerationStructureInstances(memory),
+          meshDispatchDebugLabels(memory), meshDispatchPushConstants(memory),
           meshDispatchDependencyBuffers(memory),
           meshDispatchDependencyTextures(memory) {}
   };
@@ -574,12 +640,23 @@ private:
   [[nodiscard]] bool isValidBufferIndex(uint32_t bufferIndex) const {
     return bufferIndex < buffers_.size();
   }
+  [[nodiscard]] bool
+  isValidAccelerationStructureIndex(uint32_t accelerationStructureIndex) const {
+    return accelerationStructureIndex < accelerationStructures_.size();
+  }
   [[nodiscard]] Result<bool, std::string>
   addTextureAccessInternal(RenderGraphPassId pass, RenderGraphTextureId texture,
                            RenderGraphAccessMode mode, bool inferred);
   [[nodiscard]] Result<bool, std::string>
   addBufferAccessInternal(RenderGraphPassId pass, RenderGraphBufferId buffer,
-                          RenderGraphAccessMode mode, bool inferred);
+                          RenderGraphAccessMode mode, bool inferred,
+                          RenderGraphResourceState requestedState =
+                              RenderGraphResourceState::Unknown);
+  [[nodiscard]] Result<bool, std::string>
+  addAccelerationStructureAccessInternal(
+      RenderGraphPassId pass,
+      RenderGraphAccelerationStructureId accelerationStructure,
+      RenderGraphAccelerationStructureAccess access, bool inferred);
   [[nodiscard]] Result<bool, std::string>
   markPassSideEffectInternal(RenderGraphPassId pass, bool inferred);
   [[nodiscard]] OwnedPassPayload
@@ -628,6 +705,7 @@ private:
   uint64_t frameIndex_ = 0;
   std::pmr::vector<TextureResource> textures_;
   std::pmr::vector<BufferResource> buffers_;
+  std::pmr::vector<AccelerationStructureResource> accelerationStructures_;
   std::pmr::deque<OwnedPassPayload> ownedPassPayloads_;
   std::pmr::vector<RenderPass> passes_;
   std::pmr::vector<std::pmr::string> passDebugNames_;
@@ -641,10 +719,15 @@ private:
   std::pmr::vector<TextureCopyBindings> textureCopyBindings_;
   PmrHashMap<uint64_t, uint32_t> importedTextureIndicesByHandle_;
   PmrHashMap<uint64_t, uint32_t> importedBufferIndicesByHandle_;
+  PmrHashMap<uint64_t, uint32_t> importedAccelerationStructureIndicesByHandle_;
   PmrHashMap<uint64_t, uint32_t> explicitTextureAccessIndicesByPassResource_;
   PmrHashMap<uint64_t, uint32_t> inferredTextureAccessIndicesByPassResource_;
   PmrHashMap<uint64_t, uint32_t> explicitBufferAccessIndicesByPassResource_;
   PmrHashMap<uint64_t, uint32_t> inferredBufferAccessIndicesByPassResource_;
+  PmrHashMap<uint64_t, uint32_t>
+      explicitAccelerationStructureAccessIndicesByPassResource_;
+  PmrHashMap<uint64_t, uint32_t>
+      inferredAccelerationStructureAccessIndicesByPassResource_;
   PmrHashSet<uint64_t> dependencyEdgeKeys_;
   std::pmr::vector<DependencyEdge> dependencies_;
   std::pmr::vector<PassResourceAccess> passResourceAccesses_;

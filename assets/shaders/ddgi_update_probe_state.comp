@@ -1,0 +1,154 @@
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+#define NURI_CUSTOM_PUSH_CONSTANTS 1
+#include "common.sp"
+#include "ddgi_common.sp"
+
+struct DDGIProbeUpdateEntryGpu {
+  uint volumeSlot;
+  uint probeId;
+  uint rayBase;
+  uint rayCount;
+};
+struct DDGIRayResultGpuData {
+  vec4 radianceAndDistance;
+  uvec4 metadata;
+};
+layout(std430, buffer_reference) readonly buffer DDGIProbeUpdateBuffer {
+  DDGIProbeUpdateEntryGpu values[];
+};
+layout(std430, buffer_reference) readonly buffer DDGIRayResultBuffer {
+  DDGIRayResultGpuData values[];
+};
+layout(std430, buffer_reference) buffer DDGIProbeStateBufferRw {
+  DDGIProbeStateGpuData values[];
+};
+layout(push_constant) uniform PushConstants {
+  DDGIProbeUpdateBuffer updates;
+  DDGIRayResultBuffer results;
+  DDGIFrameBuffer frame;
+  DDGIProbeStateBufferRw states0;
+  DDGIProbeStateBufferRw states1;
+  DDGIProbeStateBufferRw states2;
+  DDGIProbeStateBufferRw states3;
+  uint updateCount;
+  uint submittedSequence;
+  uint clearMode;
+  uint raysPerProbe;
+  uint frameSeed;
+  uint relocationEnabled;
+  uint classificationEnabled;
+  uint reserved;
+}
+pc;
+
+DDGIProbeStateGpuData loadState(uint volumeSlot, uint probeId) {
+  if (volumeSlot == 0u) return pc.states0.values[probeId];
+  if (volumeSlot == 1u) return pc.states1.values[probeId];
+  if (volumeSlot == 2u) return pc.states2.values[probeId];
+  return pc.states3.values[probeId];
+}
+
+void storeState(uint volumeSlot, uint probeId,
+                DDGIProbeStateGpuData state) {
+  if (volumeSlot == 0u) pc.states0.values[probeId] = state;
+  else if (volumeSlot == 1u) pc.states1.values[probeId] = state;
+  else if (volumeSlot == 2u) pc.states2.values[probeId] = state;
+  else pc.states3.values[probeId] = state;
+}
+
+void main() {
+  const uint index = gl_GlobalInvocationID.x;
+  if (index >= pc.updateCount) return;
+  const DDGIProbeUpdateEntryGpu update = pc.updates.values[index];
+  DDGIProbeStateGpuData state = loadState(update.volumeSlot, update.probeId);
+  if (pc.clearMode != 0u) {
+    state.relocation = vec4(0.0);
+    const uint resetState = pc.classificationEnabled != 0u
+        ? kDDGIProbeStateUninitialized
+        : kDDGIProbeStateNewlyVigilant;
+    state.stateAgeFlags = uvec4(resetState, 0u, 0u, 0u);
+    storeState(update.volumeSlot, update.probeId, state);
+    return;
+  }
+
+  state.stateAgeFlags.y = pc.submittedSequence;
+  if (state.stateAgeFlags.x == kDDGIProbeStateNewlyAwake) {
+    state.stateAgeFlags.x = kDDGIProbeStateAwake;
+  } else if (state.stateAgeFlags.x == kDDGIProbeStateNewlyVigilant) {
+    state.stateAgeFlags.x = kDDGIProbeStateVigilant;
+  }
+  if (state.stateAgeFlags.x != kDDGIProbeStateUninitialized) {
+    if (pc.classificationEnabled == 0u &&
+        state.stateAgeFlags.x != kDDGIProbeStateOff) {
+      state.stateAgeFlags.x = kDDGIProbeStateVigilant;
+    }
+    storeState(update.volumeSlot, update.probeId, state);
+    return;
+  }
+
+  DDGIVolumeGpuData volume = pc.frame.volumes[update.volumeSlot];
+  const vec3 spacing = volume.probeSpacingAndBias.xyz;
+  const float minSpacing = min(min(spacing.x, spacing.y), spacing.z);
+  uint staticBackfaces = 0u;
+  float closestBackface = 3.402823466e+38;
+  float closestFront = 3.402823466e+38;
+  vec3 closestBackDirection = vec3(0.0);
+  vec3 closestFrontDirection = vec3(0.0);
+  for (uint ray = 0u; ray < update.rayCount; ++ray) {
+    const DDGIRayResultGpuData result =
+        pc.results.values[update.rayBase + ray];
+    const bool staticGeometry = (result.metadata.w & 1u) == 0u;
+    if (!staticGeometry) continue;
+    const vec3 worldDirection =
+        ddgiRayDirection(ray, update.rayCount, pc.frameSeed);
+    const vec3 localDirection = normalize(
+        mat3(volume.localFromWorld) * worldDirection);
+    if (result.metadata.x == 2u) {
+      ++staticBackfaces;
+      const float distance = abs(result.radianceAndDistance.w);
+      if (distance < closestBackface) {
+        closestBackface = distance;
+        closestBackDirection = localDirection;
+      }
+    } else if (result.metadata.x == 1u) {
+      const float distance = result.radianceAndDistance.w;
+      if (distance < closestFront) {
+        closestFront = distance;
+        closestFrontDirection = localDirection;
+      }
+    }
+  }
+
+  const bool contained = staticBackfaces * 4u > update.rayCount;
+  const vec3 previousOffset = state.relocation.xyz;
+  vec3 offset = previousOffset;
+  if (pc.relocationEnabled != 0u) {
+    if (contained && closestBackface < 3.0e+38) {
+      offset += closestBackDirection *
+                (closestBackface + 0.05 * minSpacing);
+    } else if (closestFront < minSpacing) {
+      offset -= closestFrontDirection *
+                (0.25 * (minSpacing - closestFront));
+    }
+    const vec3 componentLimit = 0.499 * spacing;
+    offset = clamp(offset, -componentLimit, componentLimit);
+    const float lengthLimit = 0.499 * minSpacing;
+    const float offsetLength = length(offset);
+    if (offsetLength > lengthLimit) {
+      offset *= lengthLimit / offsetLength;
+    }
+    state.relocation.xyz = offset;
+  }
+  const uint iteration = min(state.stateAgeFlags.z + 1u, 5u);
+  state.stateAgeFlags.z = iteration;
+  if (pc.classificationEnabled == 0u) {
+    state.stateAgeFlags.x = kDDGIProbeStateVigilant;
+  } else if (iteration >= 5u) {
+    const bool relocationStalled =
+        length(offset - previousOffset) <= 1.0e-5 * minSpacing;
+    state.stateAgeFlags.x = contained && relocationStalled
+                                ? kDDGIProbeStateOff
+                                : kDDGIProbeStateNewlyVigilant;
+  }
+  storeState(update.volumeSlot, update.probeId, state);
+}

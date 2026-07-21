@@ -100,10 +100,36 @@ computePassPayloadLayoutHash(const std::pmr::vector<RenderPass> &passes,
             : quantizeToNextPow2(static_cast<uint64_t>(pass.draws.size())));
     mix(static_cast<uint64_t>(pass.meshDispatches.size()));
     mix(static_cast<uint64_t>(pass.textureCopies.size()));
+    mix(quantizeToNextPow2(
+        static_cast<uint64_t>(pass.accelerationStructureBuilds.size())));
+    for (const AccelerationStructureBuildItem &build :
+         pass.accelerationStructureBuilds) {
+      mix(static_cast<uint64_t>(build.command.index()));
+      std::visit(
+          [&mix](const auto &command) {
+            using Command = std::decay_t<decltype(command)>;
+            if constexpr (std::is_same_v<Command, BuildBlasItem> ||
+                          std::is_same_v<Command, UpdateBlasItem>) {
+              mix(static_cast<uint64_t>(command.geometries.size()));
+              for (const auto &geometry : command.geometries) {
+                mix(static_cast<uint64_t>(geometry.vertexFormat));
+                mix(static_cast<uint64_t>(geometry.indexFormat));
+                mix(geometry.vertexStrideBytes);
+                mix(static_cast<uint64_t>(geometry.flags));
+                mix(nuri::isValid(geometry.transformBuffer) ? 1u : 0u);
+              }
+            } else {
+              mix(quantizeToNextPow2(
+                  static_cast<uint64_t>(command.instances.size())));
+            }
+          },
+          build.command);
+    }
     mix(pass.externalTemporalDispatch.provider != nullptr ? 1u : 0u);
     for (const ComputeDispatchItem &dispatch : pass.preDispatches) {
       mix(static_cast<uint64_t>(dispatch.dependencyBuffers.size()));
       mix(static_cast<uint64_t>(dispatch.dependencyTextures.size()));
+      mix(nuri::isValid(dispatch.rayQueryBinding) ? 1u : 0u);
     }
     for (const MeshDispatchItem &dispatch : pass.meshDispatches) {
       mix(static_cast<uint64_t>(dispatch.command));
@@ -368,8 +394,9 @@ std::string_view toString(RenderGraphExecutionFailureStage stage) noexcept {
 
 RenderGraphBuilder::RenderGraphBuilder(std::pmr::memory_resource *memory)
     : memory_(memory != nullptr ? memory : std::pmr::get_default_resource()),
-      textures_(memory_), buffers_(memory_), ownedPassPayloads_(memory_),
-      passes_(memory_), passDebugNames_(memory_), passBindings_(memory_),
+      textures_(memory_), buffers_(memory_), accelerationStructures_(memory_),
+      ownedPassPayloads_(memory_), passes_(memory_), passDebugNames_(memory_),
+      passBindings_(memory_),
       passDependencyBufferBindingResourceIndices_(memory_),
       passDependencyTextureBindingResourceIndices_(memory_),
       preDispatchDependencyBindings_(memory_),
@@ -377,10 +404,13 @@ RenderGraphBuilder::RenderGraphBuilder(std::pmr::memory_resource *memory)
       drawBindings_(memory_), meshDispatchBindings_(memory_),
       textureCopyBindings_(memory_), importedTextureIndicesByHandle_(memory_),
       importedBufferIndicesByHandle_(memory_),
+      importedAccelerationStructureIndicesByHandle_(memory_),
       explicitTextureAccessIndicesByPassResource_(memory_),
       inferredTextureAccessIndicesByPassResource_(memory_),
       explicitBufferAccessIndicesByPassResource_(memory_),
       inferredBufferAccessIndicesByPassResource_(memory_),
+      explicitAccelerationStructureAccessIndicesByPassResource_(memory_),
+      inferredAccelerationStructureAccessIndicesByPassResource_(memory_),
       dependencyEdgeKeys_(memory_), dependencies_(memory_),
       passResourceAccesses_(memory_), frameOutputTextureSet_(memory_),
       frameOutputTextureIndices_(memory_),
@@ -390,6 +420,7 @@ void RenderGraphBuilder::beginFrame(uint64_t frameIndex) {
   frameIndex_ = frameIndex;
   textures_.clear();
   buffers_.clear();
+  accelerationStructures_.clear();
   ownedPassPayloads_.clear();
   passes_.clear();
   passDebugNames_.clear();
@@ -403,10 +434,13 @@ void RenderGraphBuilder::beginFrame(uint64_t frameIndex) {
   textureCopyBindings_.clear();
   importedTextureIndicesByHandle_.clear();
   importedBufferIndicesByHandle_.clear();
+  importedAccelerationStructureIndicesByHandle_.clear();
   explicitTextureAccessIndicesByPassResource_.clear();
   inferredTextureAccessIndicesByPassResource_.clear();
   explicitBufferAccessIndicesByPassResource_.clear();
   inferredBufferAccessIndicesByPassResource_.clear();
+  explicitAccelerationStructureAccessIndicesByPassResource_.clear();
+  inferredAccelerationStructureAccessIndicesByPassResource_.clear();
   dependencyEdgeKeys_.clear();
   dependencies_.clear();
   passResourceAccesses_.clear();
@@ -566,6 +600,8 @@ RenderGraphBuilder::computeGraphFingerprint() const noexcept {
   for (const BufferResource &buffer : buffers_) {
     mixStructure(buffer.imported ? 1u : 0u);
   }
+  mixStructure(0x616363656c737472ull);
+  mixStructure(static_cast<uint64_t>(accelerationStructures_.size()));
   mixStructure(static_cast<uint64_t>(passes_.size()));
   for (const RenderPass &pass : passes_) {
     mixStructure(static_cast<uint64_t>(pass.executionMode));
@@ -583,6 +619,7 @@ RenderGraphBuilder::computeGraphFingerprint() const noexcept {
     mixStructure(static_cast<uint64_t>(access.resourceKind));
     mixStructure(access.resourceIndex);
     mixStructure(static_cast<uint64_t>(access.mode));
+    mixStructure(static_cast<uint64_t>(access.requestedState));
     mixStructure(access.inferred ? 1u : 0u);
   }
   mixU32Range(frameOutputTextureIndices_);
@@ -640,6 +677,7 @@ RenderGraphBuilder::computeGraphFingerprint() const noexcept {
       .passCount = passes_.size(),
       .totalTextureCount = textures_.size(),
       .totalBufferCount = buffers_.size(),
+      .totalAccelerationStructureCount = accelerationStructures_.size(),
       .edgeCount = dependencies_.size(),
       .passAccessCount = passResourceAccesses_.size(),
       .frameOutputCount = frameOutputTextureIndices_.size(),
@@ -666,6 +704,12 @@ void RenderGraphBuilder::refreshHandlesInCompileResult(
     if (buffers_[i].imported) {
       result.bufferHandlesByResource[i] = buffers_[i].importedHandle;
     }
+  }
+  for (size_t i = 0; i < accelerationStructures_.size() &&
+                     i < result.accelerationStructureHandlesByResource.size();
+       ++i) {
+    result.accelerationStructureHandlesByResource[i] =
+        accelerationStructures_[i].importedHandle;
   }
   for (size_t i = 0;
        i < result.resolvedDependencyBufferResourceIndices.size() &&
@@ -739,6 +783,8 @@ void RenderGraphBuilder::refreshHandlesInCompileResult(
     refreshedPass.drawBuffersPreResolved = sourcePass.drawBuffersPreResolved;
     refreshedPass.debugLabel = sourcePass.debugLabel;
     refreshedPass.debugColor = sourcePass.debugColor;
+    refreshedPass.accelerationStructureBuilds =
+        sourcePass.accelerationStructureBuilds;
     const auto dependencyRange = result.dependencyBufferRangesByPass[i];
     if (dependencyRange.count > 0u &&
         dependencyRange.offset <= result.resolvedDependencyBuffers.size() &&
@@ -938,6 +984,40 @@ RenderGraphBuilder::importBuffer(BufferHandle buffer,
       RenderGraphBufferId{.value = bufferIndex});
 }
 
+Result<RenderGraphAccelerationStructureId, std::string>
+RenderGraphBuilder::importAccelerationStructure(
+    AccelerationStructureHandle accelerationStructure,
+    std::string_view debugName) {
+  if (!nuri::isValid(accelerationStructure)) {
+    return Result<RenderGraphAccelerationStructureId, std::string>::makeError(
+        "RenderGraphBuilder::importAccelerationStructure: handle is invalid");
+  }
+  const uint64_t key = foldHandleKey(accelerationStructure.index,
+                                     accelerationStructure.generation);
+  if (const auto existing =
+          importedAccelerationStructureIndicesByHandle_.find(key);
+      existing != importedAccelerationStructureIndicesByHandle_.end()) {
+    return Result<RenderGraphAccelerationStructureId, std::string>::makeResult(
+        RenderGraphAccelerationStructureId{.value = existing->second});
+  }
+  if (accelerationStructures_.size() >= UINT32_MAX) {
+    return Result<RenderGraphAccelerationStructureId, std::string>::makeError(
+        "RenderGraphBuilder::importAccelerationStructure: resource count "
+        "exceeds uint32_t");
+  }
+  const uint32_t resourceIndex =
+      static_cast<uint32_t>(accelerationStructures_.size());
+  AccelerationStructureResource resource(memory_);
+  resource.importedHandle = accelerationStructure;
+  const std::string_view name =
+      resolveResourceDebugName(debugName, "imported_acceleration_structure");
+  resource.debugName.assign(name.data(), name.size());
+  accelerationStructures_.push_back(std::move(resource));
+  importedAccelerationStructureIndicesByHandle_.emplace(key, resourceIndex);
+  return Result<RenderGraphAccelerationStructureId, std::string>::makeResult(
+      RenderGraphAccelerationStructureId{.value = resourceIndex});
+}
+
 Result<RenderGraphTextureId, std::string>
 RenderGraphBuilder::createTransientTexture(const TextureDesc &desc,
                                            std::string_view debugName) {
@@ -1046,7 +1126,8 @@ RenderGraphBuilder::addTextureAccess(RenderGraphPassId pass,
 
 Result<bool, std::string> RenderGraphBuilder::addBufferAccessInternal(
     RenderGraphPassId pass, RenderGraphBufferId buffer,
-    RenderGraphAccessMode mode, bool inferred) {
+    RenderGraphAccessMode mode, bool inferred,
+    RenderGraphResourceState requestedState) {
   if (!isValid(pass) || !isValid(buffer)) {
     return Result<bool, std::string>::makeError(
         "RenderGraphBuilder::addBufferAccessInternal: id is invalid");
@@ -1067,7 +1148,17 @@ Result<bool, std::string> RenderGraphBuilder::addBufferAccessInternal(
   if (const auto existing = indexByKey.find(key);
       existing != indexByKey.end()) {
     PassResourceAccess &merged = passResourceAccesses_[existing->second];
+    if (merged.requestedState != RenderGraphResourceState::Unknown &&
+        requestedState != RenderGraphResourceState::Unknown &&
+        merged.requestedState != requestedState) {
+      return Result<bool, std::string>::makeError(
+          "RenderGraphBuilder::addBufferAccessInternal: contradictory "
+          "resource states");
+    }
     merged.mode = merged.mode | mode;
+    if (merged.requestedState == RenderGraphResourceState::Unknown) {
+      merged.requestedState = requestedState;
+    }
     return Result<bool, std::string>::makeResult(true);
   }
   const uint32_t accessIndex =
@@ -1082,6 +1173,7 @@ Result<bool, std::string> RenderGraphBuilder::addBufferAccessInternal(
       .resourceKind = AccessResourceKind::Buffer,
       .resourceIndex = buffer.value,
       .mode = mode,
+      .requestedState = requestedState,
       .inferred = inferred,
   });
   indexByKey.emplace(key, accessIndex);
@@ -1093,6 +1185,80 @@ RenderGraphBuilder::addBufferAccess(RenderGraphPassId pass,
                                     RenderGraphBufferId buffer,
                                     RenderGraphAccessMode mode) {
   return addBufferAccessInternal(pass, buffer, mode, false);
+}
+
+Result<bool, std::string>
+RenderGraphBuilder::addAccelerationStructureAccessInternal(
+    RenderGraphPassId pass,
+    RenderGraphAccelerationStructureId accelerationStructure,
+    RenderGraphAccelerationStructureAccess access, bool inferred) {
+  if (!isValid(pass) || !isValid(accelerationStructure)) {
+    return Result<bool, std::string>::makeError(
+        "RenderGraphBuilder::addAccelerationStructureAccessInternal: id is "
+        "invalid");
+  }
+  if (!isValidPassIndex(pass.value) ||
+      !isValidAccelerationStructureIndex(accelerationStructure.value)) {
+    return Result<bool, std::string>::makeError(
+        "RenderGraphBuilder::addAccelerationStructureAccessInternal: id is "
+        "out of range");
+  }
+  const RenderGraphAccessMode mode =
+      access == RenderGraphAccelerationStructureAccess::BuildWrite
+          ? RenderGraphAccessMode::Write
+          : RenderGraphAccessMode::Read;
+  const RenderGraphResourceState state = [&]() {
+    switch (access) {
+    case RenderGraphAccelerationStructureAccess::BuildRead:
+      return RenderGraphResourceState::AccelerationStructureBuildRead;
+    case RenderGraphAccelerationStructureAccess::BuildWrite:
+      return RenderGraphResourceState::AccelerationStructureBuildWrite;
+    case RenderGraphAccelerationStructureAccess::RayQueryRead:
+      return RenderGraphResourceState::RayQueryRead;
+    }
+    return RenderGraphResourceState::Unknown;
+  }();
+  const uint64_t key =
+      foldPassResourceKey(pass.value, accelerationStructure.value);
+  auto &indexByKey =
+      inferred ? inferredAccelerationStructureAccessIndicesByPassResource_
+               : explicitAccelerationStructureAccessIndicesByPassResource_;
+  if (const auto existing = indexByKey.find(key);
+      existing != indexByKey.end()) {
+    PassResourceAccess &merged = passResourceAccesses_[existing->second];
+    if (merged.requestedState != state) {
+      return Result<bool, std::string>::makeError(
+          "RenderGraphBuilder::addAccelerationStructureAccessInternal: "
+          "contradictory access for the same pass and resource");
+    }
+    merged.mode = merged.mode | mode;
+    return Result<bool, std::string>::makeResult(true);
+  }
+  if (passResourceAccesses_.size() >= UINT32_MAX) {
+    return Result<bool, std::string>::makeError(
+        "RenderGraphBuilder::addAccelerationStructureAccessInternal: access "
+        "count exceeds uint32_t");
+  }
+  const uint32_t accessIndex =
+      static_cast<uint32_t>(passResourceAccesses_.size());
+  passResourceAccesses_.push_back(PassResourceAccess{
+      .passIndex = pass.value,
+      .resourceKind = AccessResourceKind::AccelerationStructure,
+      .resourceIndex = accelerationStructure.value,
+      .mode = mode,
+      .requestedState = state,
+      .inferred = inferred,
+  });
+  indexByKey.emplace(key, accessIndex);
+  return Result<bool, std::string>::makeResult(true);
+}
+
+Result<bool, std::string> RenderGraphBuilder::addAccelerationStructureAccess(
+    RenderGraphPassId pass,
+    RenderGraphAccelerationStructureId accelerationStructure,
+    RenderGraphAccelerationStructureAccess access) {
+  return addAccelerationStructureAccessInternal(pass, accelerationStructure,
+                                                access, false);
 }
 
 Result<bool, std::string>
@@ -1647,6 +1813,229 @@ RenderGraphBuilder::addGraphicsPass(const RenderGraphGraphicsPassDesc &desc) {
   return Result<RenderGraphPassId, std::string>::makeResult(passId);
 }
 
+Result<RenderGraphPassId, std::string>
+RenderGraphBuilder::addAccelerationStructurePass(
+    const RenderGraphAccelerationStructurePassDesc &desc) {
+  if (desc.builds.empty()) {
+    return Result<RenderGraphPassId, std::string>::makeError(
+        "RenderGraphBuilder::addAccelerationStructurePass: build list is "
+        "empty");
+  }
+  const auto declaredBufferAccess = [&](BufferHandle handle) {
+    for (const RenderGraphBufferUse use : desc.buffers) {
+      if (isValid(use.buffer) && isValidBufferIndex(use.buffer.value) &&
+          buffers_[use.buffer.value].imported &&
+          buffers_[use.buffer.value].importedHandle == handle) {
+        return use.access;
+      }
+    }
+    return RenderGraphAccessMode::None;
+  };
+  const auto hasDeclaredAccelerationStructureAccess =
+      [&](AccelerationStructureHandle handle,
+          RenderGraphAccelerationStructureAccess expected) {
+        for (const RenderGraphAccelerationStructureUse use :
+             desc.accelerationStructures) {
+          if (use.access == expected && isValid(use.accelerationStructure) &&
+              isValidAccelerationStructureIndex(
+                  use.accelerationStructure.value) &&
+              accelerationStructures_[use.accelerationStructure.value]
+                      .importedHandle == handle) {
+            return true;
+          }
+        }
+        return false;
+      };
+  for (const RenderGraphBufferUse use : desc.buffers) {
+    if (!isValid(use.buffer) || !isValidBufferIndex(use.buffer.value)) {
+      return Result<RenderGraphPassId, std::string>::makeError(
+          "RenderGraphBuilder::addAccelerationStructurePass: buffer use is "
+          "invalid");
+    }
+    if (use.access != RenderGraphAccessMode::Read) {
+      return Result<RenderGraphPassId, std::string>::makeError(
+          "RenderGraphBuilder::addAccelerationStructurePass: build-input "
+          "buffers must declare read-only access");
+    }
+  }
+  for (const RenderGraphAccelerationStructureUse use :
+       desc.accelerationStructures) {
+    if (!isValid(use.accelerationStructure) ||
+        !isValidAccelerationStructureIndex(use.accelerationStructure.value)) {
+      return Result<RenderGraphPassId, std::string>::makeError(
+          "RenderGraphBuilder::addAccelerationStructurePass: acceleration "
+          "structure use is invalid");
+    }
+    if (use.access == RenderGraphAccelerationStructureAccess::RayQueryRead) {
+      return Result<RenderGraphPassId, std::string>::makeError(
+          "RenderGraphBuilder::addAccelerationStructurePass: ray-query read "
+          "is not legal in a build pass");
+    }
+  }
+  std::string dependencyError;
+  for (const AccelerationStructureBuildItem &build : desc.builds) {
+    std::visit(
+        [&](const auto &command) {
+          if (!dependencyError.empty()) {
+            return;
+          }
+          if (!hasDeclaredAccelerationStructureAccess(
+                  command.destination,
+                  RenderGraphAccelerationStructureAccess::BuildWrite)) {
+            dependencyError =
+                "destination is missing an AS BuildWrite declaration";
+            return;
+          }
+          using Command = std::decay_t<decltype(command)>;
+          if constexpr (std::is_same_v<Command, BuildBlasItem> ||
+                        std::is_same_v<Command, UpdateBlasItem>) {
+            if (command.geometries.empty()) {
+              dependencyError = "BLAS geometry list is empty";
+              return;
+            }
+            for (const auto &geometry : command.geometries) {
+              const std::array requiredBuffers{
+                  geometry.vertexBuffer,
+                  geometry.indexBuffer,
+                  geometry.transformBuffer,
+              };
+              for (const BufferHandle buffer : requiredBuffers) {
+                if (!nuri::isValid(buffer)) {
+                  continue;
+                }
+                if (declaredBufferAccess(buffer) !=
+                    RenderGraphAccessMode::Read) {
+                  dependencyError =
+                      "BLAS input is missing a read-only buffer declaration";
+                  return;
+                }
+              }
+            }
+          } else {
+            if (command.instances.empty()) {
+              dependencyError = "TLAS instance list is empty";
+              return;
+            }
+            for (const auto &instance : command.instances) {
+              if (!hasDeclaredAccelerationStructureAccess(
+                      instance.bottomLevel,
+                      RenderGraphAccelerationStructureAccess::BuildRead)) {
+                dependencyError =
+                    "TLAS instance BLAS is missing an AS BuildRead declaration";
+                return;
+              }
+            }
+          }
+        },
+        build.command);
+    if (!dependencyError.empty()) {
+      return Result<RenderGraphPassId, std::string>::makeError(
+          "RenderGraphBuilder::addAccelerationStructurePass: " +
+          dependencyError);
+    }
+  }
+
+  OwnedPassPayload ownedPayload(memory_);
+  ownedPayload.debugLabel.assign(desc.debugLabel.data(),
+                                 desc.debugLabel.size());
+  ownedPayload.accelerationStructureBuilds.reserve(desc.builds.size());
+  ownedPayload.accelerationStructureGeometries.reserve(desc.builds.size());
+  ownedPayload.accelerationStructureInstances.reserve(desc.builds.size());
+  for (const AccelerationStructureBuildItem &source : desc.builds) {
+    ownedPayload.accelerationStructureGeometries.push_back(
+        std::pmr::vector<AccelerationStructureTriangleGeometryDesc>(memory_));
+    ownedPayload.accelerationStructureInstances.push_back(
+        std::pmr::vector<AccelerationStructureInstanceDesc>(memory_));
+    auto &geometries = ownedPayload.accelerationStructureGeometries.back();
+    auto &instances = ownedPayload.accelerationStructureInstances.back();
+    std::visit(
+        [&](const auto &command) {
+          using Command = std::decay_t<decltype(command)>;
+          if constexpr (std::is_same_v<Command, BuildBlasItem>) {
+            geometries.assign(command.geometries.begin(),
+                              command.geometries.end());
+            ownedPayload.accelerationStructureBuilds.push_back(
+                AccelerationStructureBuildItem{
+                    .command = BuildBlasItem{
+                        .destination = command.destination,
+                        .geometries = geometries,
+                    }});
+          } else if constexpr (std::is_same_v<Command, UpdateBlasItem>) {
+            geometries.assign(command.geometries.begin(),
+                              command.geometries.end());
+            ownedPayload.accelerationStructureBuilds.push_back(
+                AccelerationStructureBuildItem{
+                    .command = UpdateBlasItem{
+                        .destination = command.destination,
+                        .geometries = geometries,
+                    }});
+          } else if constexpr (std::is_same_v<Command, BuildTlasItem>) {
+            instances.assign(command.instances.begin(),
+                             command.instances.end());
+            ownedPayload.accelerationStructureBuilds.push_back(
+                AccelerationStructureBuildItem{
+                    .command = BuildTlasItem{
+                        .destination = command.destination,
+                        .instances = instances,
+                    }});
+          } else {
+            instances.assign(command.instances.begin(),
+                             command.instances.end());
+            ownedPayload.accelerationStructureBuilds.push_back(
+                AccelerationStructureBuildItem{
+                    .command = UpdateTlasItem{
+                        .destination = command.destination,
+                        .instances = instances,
+                    }});
+          }
+        },
+        source.command);
+  }
+  allPassesBorrowPayload_ = false;
+  ownedPassPayloads_.push_back(std::move(ownedPayload));
+  OwnedPassPayload &storedPayload = ownedPassPayloads_.back();
+  RenderPass pass{};
+  pass.executionMode = RenderPassExecutionMode::AccelerationStructureBuild;
+  pass.hasColorAttachment = false;
+  pass.payloadBorrowed = false;
+  pass.accelerationStructureBuilds = storedPayload.accelerationStructureBuilds;
+  pass.gpuTimingScope = desc.gpuTimingScope;
+  pass.debugLabel = std::string_view(storedPayload.debugLabel.data(),
+                                     storedPayload.debugLabel.size());
+  pass.debugColor = desc.debugColor;
+  auto addResult = addPassRecord(pass, desc.debugLabel);
+  if (addResult.hasError()) {
+    return Result<RenderGraphPassId, std::string>::makeError(addResult.error());
+  }
+  const RenderGraphPassId passId = addResult.value();
+  for (const RenderGraphBufferUse use : desc.buffers) {
+    auto accessResult = addBufferAccessInternal(
+        passId, use.buffer, use.access, false,
+        RenderGraphResourceState::AccelerationStructureBuildInput);
+    if (accessResult.hasError()) {
+      return Result<RenderGraphPassId, std::string>::makeError(
+          accessResult.error());
+    }
+  }
+  for (const RenderGraphAccelerationStructureUse use :
+       desc.accelerationStructures) {
+    auto accessResult = addAccelerationStructureAccess(
+        passId, use.accelerationStructure, use.access);
+    if (accessResult.hasError()) {
+      return Result<RenderGraphPassId, std::string>::makeError(
+          accessResult.error());
+    }
+  }
+  if (desc.markImplicitOutputSideEffect) {
+    auto sideEffectResult = markPassSideEffect(passId);
+    if (sideEffectResult.hasError()) {
+      return Result<RenderGraphPassId, std::string>::makeError(
+          sideEffectResult.error());
+    }
+  }
+  return Result<RenderGraphPassId, std::string>::makeResult(passId);
+}
+
 Result<RenderGraphPassId, std::string> RenderGraphBuilder::addTextureCopyPass(
     const RenderGraphTextureCopyPassDesc &desc) {
   if (desc.copies.empty()) {
@@ -2087,6 +2476,13 @@ void RenderGraphBuilder::compileStageC0BuildResourceTables(
       ++compiled.resourceStats.transientBuffers;
     }
   }
+  compiled.accelerationStructureHandlesByResource.resize(
+      accelerationStructures_.size());
+  for (uint32_t i = 0; i < accelerationStructures_.size(); ++i) {
+    compiled.accelerationStructureHandlesByResource[i] =
+        accelerationStructures_[i].importedHandle;
+    ++compiled.resourceStats.importedAccelerationStructures;
+  }
   work.passCount = static_cast<uint32_t>(passes_.size());
   work.activePassCount = work.passCount;
   compiled.declaredPassCount = work.passCount;
@@ -2125,12 +2521,18 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC1C2BuildTopology(
       }
       RenderGraphAccessMode explicitMode = RenderGraphAccessMode::None;
       RenderGraphAccessMode inferredMode = RenderGraphAccessMode::None;
+      RenderGraphResourceState explicitState =
+          RenderGraphResourceState::Unknown;
+      RenderGraphResourceState inferredState =
+          RenderGraphResourceState::Unknown;
       for (size_t i = groupBegin; i < groupEnd; ++i) {
         if (work.compiledAccesses[i].inferred) {
           inferredMode = inferredMode | work.compiledAccesses[i].mode;
+          inferredState = work.compiledAccesses[i].requestedState;
           continue;
         }
         explicitMode = explicitMode | work.compiledAccesses[i].mode;
+        explicitState = work.compiledAccesses[i].requestedState;
       }
       const bool hasExplicit =
           hasAccessFlag(explicitMode, RenderGraphAccessMode::Read) ||
@@ -2144,6 +2546,7 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC1C2BuildTopology(
             .resourceKind = work.compiledAccesses[groupBegin].resourceKind,
             .resourceIndex = work.compiledAccesses[groupBegin].resourceIndex,
             .mode = selectedMode,
+            .requestedState = hasExplicit ? explicitState : inferredState,
             .inferred = !hasExplicit,
         };
       }
@@ -2299,6 +2702,7 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC1C2BuildTopology(
   };
   addResourceHazards(AccessResourceKind::Texture);
   addResourceHazards(AccessResourceKind::Buffer);
+  addResourceHazards(AccessResourceKind::AccelerationStructure);
   work.activePassMask.resize(work.passCount, 1u);
   if (!frameOutputTextureIndices_.empty() || !sideEffectPassMarks_.empty()) {
     std::fill(work.activePassMask.begin(), work.activePassMask.end(), 0u);
@@ -3304,6 +3708,9 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC4PlanBarriers(
               return lhs.passIndex < rhs.passIndex;
             });
   const auto resolveResourceState = [&](const PassResourceAccess &access) {
+    if (access.requestedState != RenderGraphResourceState::Unknown) {
+      return access.requestedState;
+    }
     const bool hasWrite =
         hasAccessFlag(access.mode, RenderGraphAccessMode::Write);
     if (access.resourceKind == AccessResourceKind::Texture &&
@@ -3356,9 +3763,18 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC4PlanBarriers(
     if (needsBarrier) {
       const uint32_t orderedPassIndex = executionRankByPass[access.passIndex];
       stagedBarrierRecords.push_back(RenderGraphBarrierRecord{
-          .resourceKind = access.resourceKind == AccessResourceKind::Texture
-                              ? RenderGraphBarrierResourceKind::Texture
-                              : RenderGraphBarrierResourceKind::Buffer,
+          .resourceKind =
+              [&]() {
+                switch (access.resourceKind) {
+                case AccessResourceKind::Texture:
+                  return RenderGraphBarrierResourceKind::Texture;
+                case AccessResourceKind::Buffer:
+                  return RenderGraphBarrierResourceKind::Buffer;
+                case AccessResourceKind::AccelerationStructure:
+                  return RenderGraphBarrierResourceKind::AccelerationStructure;
+                }
+                return RenderGraphBarrierResourceKind::Texture;
+              }(),
           .resourceIndex = access.resourceIndex,
           .beforeAccess = previousAccess,
           .afterAccess = access.mode,
@@ -4279,7 +4695,8 @@ RenderGraphExecutor::executeInternal(RenderGraphRuntime *runtime,
         executableBarrierRecords.push_back(GraphicsBarrierRecord::ForTexture(
             texture, barrier.beforeAccess, barrier.afterAccess,
             barrier.beforeState, barrier.afterState));
-      } else {
+      } else if (barrier.resourceKind ==
+                 RenderGraphBarrierResourceKind::Buffer) {
         BufferHandle buffer =
             compiled.bufferHandlesByResource[barrier.resourceIndex];
         if (!nuri::isValid(buffer)) {
@@ -4290,6 +4707,14 @@ RenderGraphExecutor::executeInternal(RenderGraphRuntime *runtime,
         executableBarrierRecords.push_back(GraphicsBarrierRecord::ForBuffer(
             buffer, barrier.beforeAccess, barrier.afterAccess,
             barrier.beforeState, barrier.afterState));
+      } else {
+        const AccelerationStructureHandle accelerationStructure =
+            compiled
+                .accelerationStructureHandlesByResource[barrier.resourceIndex];
+        executableBarrierRecords.push_back(
+            GraphicsBarrierRecord::ForAccelerationStructure(
+                accelerationStructure, barrier.beforeAccess,
+                barrier.afterAccess, barrier.beforeState, barrier.afterState));
       }
     }
     NURI_PROFILER_ZONE_END();

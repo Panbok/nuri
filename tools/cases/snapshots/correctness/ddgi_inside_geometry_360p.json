@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "id": "correctness.procedural.ddgi_inside_geometry_360p",
+  "suite": "correctness",
+  "description": "Probe-grid intersection with static geometry and relocation-offset debug",
+  "scene": {"kind": "procedural", "generator": "nuri.procedural.ddgi_inside_geometry.v1", "seed": 1, "contentHash": "nuri.procedural.ddgi_inside_geometry.v1:1"},
+  "backend": "default", "resolution": [640, 360], "fixedDeltaSeconds": 0.016666667, "warmupFrames": 12, "captureFrame": 20, "authoritative": false, "presentMode": "immediate", "windowMode": "visible",
+  "renderGraph": {"workerCount": 1, "parallelCompile": false, "parallelRecording": false},
+  "camera": {"position": [0.0, 0.75, 4.2], "direction": [0.0, -0.1, -1.0], "verticalFovDegrees": 60.0, "nearPlane": 0.05, "farPlane": 100.0},
+  "settings": {"ddgi": {"enabled": true, "preset": "Low", "raysPerProbe": 64, "maxProbeUpdatesPerFrame": 144, "maxRayQueriesPerFrame": 18432, "debugView": "RelocationOffset"}, "opaque": {"enableInstanceAnimation": false}, "antiAliasing": {"mode": "None"}, "ambientOcclusion": {"mode": "Disabled"}, "shadow": {"enabled": false}, "hdrPostProcess": {"bloomEnabled": false, "adaptationEnabled": false}},
+  "requirements": {"assets": ["modelsRoot:common/flat_plane.obj"], "backends": [], "allowVisibleWindow": true, "accelerationStructure": true, "rayQuery": true},
+  "captures": [{"target": "final_color", "profile": "ldr_color", "required": true}, {"target": "ddgi_debug_preview", "profile": "debug_preview", "required": true}, {"target": "ddgi_volume0_irradiance_atlas", "profile": "hdr_color", "required": true}, {"target": "ddgi_volume0_distance_atlas", "profile": "scalar", "required": true}]
+}

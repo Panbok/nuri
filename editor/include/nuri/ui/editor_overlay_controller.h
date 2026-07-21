@@ -49,6 +49,8 @@ public:
   [[nodiscard]] std::optional<std::string> takeSceneSelectionRequest();
   [[nodiscard]] bool takeSceneCancelRequest();
   [[nodiscard]] std::optional<RenderSettings> takeRenderSettingsUpdate();
+  [[nodiscard]] std::optional<DDGIProbeInspectRequest>
+  takeDDGIProbeInspectRequest();
 
   bool onInput(const InputEvent &event);
   void onUpdate(double deltaTime);

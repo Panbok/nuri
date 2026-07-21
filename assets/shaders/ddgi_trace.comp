@@ -1,0 +1,353 @@
+// NURI_SHADER_FEATURE_RAY_QUERY
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+#define NURI_CUSTOM_PUSH_CONSTANTS 1
+#include "common.sp"
+#include "ddgi_common.sp"
+#include "rt_material.sp"
+
+struct DDGIProbeUpdateEntryGpu {
+  uint volumeSlot;
+  uint probeId;
+  uint rayBase;
+  uint rayCount;
+};
+struct DDGIRayResultGpuData {
+  vec4 radianceAndDistance;
+  uvec4 metadata;
+};
+layout(std430, buffer_reference) readonly buffer DDGIProbeUpdateBuffer {
+  DDGIProbeUpdateEntryGpu values[];
+};
+layout(std430, buffer_reference) buffer DDGIRayResultBuffer {
+  DDGIRayResultGpuData values[];
+};
+struct DDGITraceCountersGpuData {
+  uint primaryCandidateIntersections;
+  uint secondaryQueries;
+  uint secondaryCandidateIntersections;
+  uint alphaCandidateRejections;
+  uint backfaceCandidateRejections;
+  uint candidateOverflows;
+  uint localLightTruncations;
+  uint reserved;
+};
+layout(std430, buffer_reference) buffer DDGITraceInputBuffer {
+  DDGITraceCountersGpuData counters;
+  LocalLightGpuData lights[];
+};
+
+layout(push_constant) uniform PushConstants {
+  DDGIFrameBuffer frame;
+  DDGIProbeUpdateBuffer updates;
+  DDGIRayResultBuffer results;
+  RtInstanceBuffer instances;
+  RtGeometryBuffer geometries;
+  MaterialHeaderBuffer materials;
+  vec4 directionalDirectionIlluminance;
+  vec4 directionalColor;
+  DDGITraceInputBuffer traceInputs;
+  uint rayCount;
+  uint raysPerProbe;
+  uint skyTextureId;
+  uint skySamplerId;
+  uint maxCandidates;
+  uint frameSeed;
+  uint materialSamplerId;
+  uint directionalLightCount;
+  uint localLightCount;
+  uint maxLocalLights;
+}
+pc;
+
+bool ddgiDirectionalVisible(vec3 origin, vec3 direction, float maximumDistance) {
+  atomicAdd(pc.traceInputs.counters.secondaryQueries, 1u);
+  rayQueryEXT shadowQuery;
+  rayQueryInitializeEXT(shadowQuery, kSceneTlas, gl_RayFlagsTerminateOnFirstHitEXT,
+                        0xff, origin, 0.001, direction, maximumDistance);
+  uint candidates = 0u;
+  bool overflow = false;
+  while (rayQueryProceedEXT(shadowQuery)) {
+    atomicAdd(pc.traceInputs.counters.secondaryCandidateIntersections, 1u);
+    if (++candidates > pc.maxCandidates) {
+      overflow = true;
+      atomicAdd(pc.traceInputs.counters.candidateOverflows, 1u);
+      break;
+    }
+    const uint instanceIndex =
+        rayQueryGetIntersectionInstanceCustomIndexEXT(shadowQuery, false);
+    const RtInstanceGpuData instance = pc.instances.values[instanceIndex];
+    const uint geometryIndex = instance.geometryRenderableFlags.x +
+        rayQueryGetIntersectionGeometryIndexEXT(shadowQuery, false);
+    RtGeometryGpuData geometry = pc.geometries.values[geometryIndex];
+    if ((geometry.flags &
+         (kRtGeometryAlphaBlended | kRtGeometryTransmission)) != 0u) {
+      continue;
+    }
+    const uint primitive =
+        rayQueryGetIntersectionPrimitiveIndexEXT(shadowQuery, false);
+    const vec2 bary =
+        rayQueryGetIntersectionBarycentricsEXT(shadowQuery, false);
+    const float candidateDistance =
+        rayQueryGetIntersectionTEXT(shadowQuery, false);
+    if (!rtAlphaPasses(geometry, instance, primitive, bary, pc.materials,
+                       pc.materialSamplerId, candidateDistance,
+                       pc.raysPerProbe)) {
+      atomicAdd(pc.traceInputs.counters.alphaCandidateRejections, 1u);
+      continue;
+    }
+    const bool front =
+        rayQueryGetIntersectionFrontFaceEXT(shadowQuery, false);
+    if (!front && (geometry.flags & kRtGeometryDoubleSided) == 0u) {
+      atomicAdd(pc.traceInputs.counters.backfaceCandidateRejections, 1u);
+      continue;
+    }
+    rayQueryConfirmIntersectionEXT(shadowQuery);
+  }
+  return !overflow &&
+         rayQueryGetIntersectionTypeEXT(shadowQuery, true) ==
+             gl_RayQueryCommittedIntersectionNoneEXT;
+}
+
+vec3 ddgiLocalLighting(vec3 hitPoint, vec3 normal, vec3 diffuseColor) {
+  const uint localLimit = min(pc.maxLocalLights & 0xffffu, 16u);
+  if (localLimit == 0u || pc.localLightCount == 0u) {
+    return vec3(0.0);
+  }
+  uint candidateIndices[16];
+  float candidateScores[16];
+  uint candidateCount = 0u;
+  uint eligibleCount = 0u;
+  for (uint lightIndex = 0u; lightIndex < pc.localLightCount; ++lightIndex) {
+    const LocalLightGpuData light = pc.traceInputs.lights[lightIndex];
+    if (!localLightEnabled(light)) {
+      continue;
+    }
+    const vec3 pointToLight = localLightPosition(light) - hitPoint;
+    const float distanceSq = dot(pointToLight, pointToLight);
+    if (distanceSq <= 1.0e-8) {
+      continue;
+    }
+    const vec3 lightDirection = pointToLight * inversesqrt(distanceSq);
+    const float ndotl = max(dot(normal, lightDirection), 0.0);
+    float attenuation =
+        punctualRangeAttenuation(distanceSq, localLightRange(light));
+    if (localLightType(light) == kLocalLightTypeSpot) {
+      attenuation *= spotAngularAttenuation(
+          localLightDirection(light), pointToLight, localLightInnerCos(light),
+          localLightOuterCos(light));
+    }
+    const vec3 lightColor = localLightColor(light);
+    const float score = max(max(lightColor.r, lightColor.g), lightColor.b) *
+                        localLightIntensity(light) * attenuation * ndotl;
+    if (score <= 0.0) {
+      continue;
+    }
+    ++eligibleCount;
+    if (candidateCount == localLimit &&
+        (score < candidateScores[localLimit - 1u] ||
+         (score == candidateScores[localLimit - 1u] &&
+          lightIndex > candidateIndices[localLimit - 1u]))) {
+      continue;
+    }
+    uint insert = min(candidateCount, localLimit - 1u);
+    while (insert > 0u &&
+           (score > candidateScores[insert - 1u] ||
+            (score == candidateScores[insert - 1u] &&
+             lightIndex < candidateIndices[insert - 1u]))) {
+      candidateScores[insert] = candidateScores[insert - 1u];
+      candidateIndices[insert] = candidateIndices[insert - 1u];
+      --insert;
+    }
+    candidateScores[insert] = score;
+    candidateIndices[insert] = lightIndex;
+    candidateCount = min(candidateCount + 1u, localLimit);
+  }
+  if (eligibleCount > localLimit) {
+    atomicAdd(pc.traceInputs.counters.localLightTruncations, 1u);
+  }
+  vec3 radiance = vec3(0.0);
+  for (uint candidate = 0u; candidate < candidateCount; ++candidate) {
+    const LocalLightGpuData light =
+        pc.traceInputs.lights[candidateIndices[candidate]];
+    const vec3 pointToLight = localLightPosition(light) - hitPoint;
+    const float distanceSq = dot(pointToLight, pointToLight);
+    const vec3 lightDirection = pointToLight * inversesqrt(distanceSq);
+    float attenuation =
+        punctualRangeAttenuation(distanceSq, localLightRange(light));
+    if (localLightType(light) == kLocalLightTypeSpot) {
+      attenuation *= spotAngularAttenuation(
+          localLightDirection(light), pointToLight, localLightInnerCos(light),
+          localLightOuterCos(light));
+    }
+    radiance += diffuseColor * localLightColor(light) *
+                localLightIntensity(light) * attenuation *
+                max(dot(normal, lightDirection), 0.0) / 3.14159265359;
+  }
+  return radiance;
+}
+
+void main() {
+  const uint rayIndex = gl_GlobalInvocationID.x;
+  if (rayIndex >= pc.rayCount) {
+    return;
+  }
+  const DDGIProbeUpdateEntryGpu update =
+      pc.updates.values[rayIndex / pc.raysPerProbe];
+  DDGIVolumeGpuData volume = pc.frame.volumes[update.volumeSlot];
+  const uvec3 counts = volume.probeCountsAndCount.xyz;
+  const uint xy = counts.x * counts.y;
+  const uvec3 physical = uvec3(update.probeId % counts.x,
+      (update.probeId % xy) / counts.x, update.probeId / xy);
+  const uvec3 logical = (physical + counts - volume.ringOriginAndFlags.xyz) % counts;
+  const vec3 localOrigin = ddgiNominalLocalPosition(volume, logical) +
+                           volume.probeStates.values[update.probeId].relocation.xyz;
+  const vec3 origin = (volume.worldFromLocal * vec4(localOrigin, 1.0)).xyz;
+  const vec3 direction = ddgiRayDirection(
+      rayIndex - update.rayBase, update.rayCount, pc.frameSeed);
+  rayQueryEXT query;
+  rayQueryInitializeEXT(query, kSceneTlas, gl_RayFlagsNoneEXT, 0xff, origin,
+                        ddgiProbeRayTMin(volume.probeSpacingAndBias.xyz),
+                        direction,
+                        volume.centerHalfExtentsAndMaxDistance.w);
+  uint candidates = 0u;
+  float containmentDistance = 0.0;
+  uint containmentFlags = 0u;
+  bool overflow = false;
+  while (rayQueryProceedEXT(query)) {
+    atomicAdd(pc.traceInputs.counters.primaryCandidateIntersections, 1u);
+    if (++candidates > pc.maxCandidates) {
+      overflow = true;
+      atomicAdd(pc.traceInputs.counters.candidateOverflows, 1u);
+      break;
+    }
+    const uint instanceIndex =
+        rayQueryGetIntersectionInstanceCustomIndexEXT(query, false);
+    const RtInstanceGpuData instance = pc.instances.values[instanceIndex];
+    const uint geometryIndex = instance.geometryRenderableFlags.x +
+        rayQueryGetIntersectionGeometryIndexEXT(query, false);
+    RtGeometryGpuData geometry = pc.geometries.values[geometryIndex];
+    if ((geometry.flags & (kRtGeometryAlphaBlended | kRtGeometryTransmission)) != 0u) {
+      continue;
+    }
+    const uint primitive = rayQueryGetIntersectionPrimitiveIndexEXT(query, false);
+    const vec2 bary = rayQueryGetIntersectionBarycentricsEXT(query, false);
+    const float candidateDistance = rayQueryGetIntersectionTEXT(query, false);
+    if (!rtAlphaPasses(geometry, instance, primitive, bary, pc.materials,
+                       pc.materialSamplerId, candidateDistance,
+                       pc.raysPerProbe)) {
+      atomicAdd(pc.traceInputs.counters.alphaCandidateRejections, 1u);
+      continue;
+    }
+    const bool front = rayQueryGetIntersectionFrontFaceEXT(query, false);
+    const bool classificationRay =
+        volume.probeStates.values[update.probeId].stateAgeFlags.x ==
+        kDDGIProbeStateUninitialized;
+    if (!front && classificationRay &&
+        instance.geometryRenderableFlags.w == 0u) {
+      const float distance = rayQueryGetIntersectionTEXT(query, false);
+      if (containmentDistance == 0.0 || distance < containmentDistance) {
+        containmentDistance = distance;
+        containmentFlags = 0u;
+      }
+      continue;
+    }
+    if (!front && (geometry.flags & kRtGeometryDoubleSided) == 0u) {
+      atomicAdd(pc.traceInputs.counters.backfaceCandidateRejections, 1u);
+      const float distance = rayQueryGetIntersectionTEXT(query, false);
+      if (containmentDistance == 0.0 || distance < containmentDistance) {
+        containmentDistance = distance;
+        containmentFlags = instance.geometryRenderableFlags.w;
+      }
+      continue;
+    }
+    rayQueryConfirmIntersectionEXT(query);
+  }
+  DDGIRayResultGpuData result;
+  result.radianceAndDistance = vec4(0.0, 0.0, 0.0, 0.0);
+  result.metadata = uvec4(0u, update.volumeSlot, update.probeId, 0u);
+  if (overflow) {
+    result.metadata.x = 3u;
+  } else if (rayQueryGetIntersectionTypeEXT(query, true) !=
+             gl_RayQueryCommittedIntersectionNoneEXT) {
+    const uint instanceIndex =
+        rayQueryGetIntersectionInstanceCustomIndexEXT(query, true);
+    const RtInstanceGpuData instance = pc.instances.values[instanceIndex];
+    const uint geometryIndex = instance.geometryRenderableFlags.x +
+        rayQueryGetIntersectionGeometryIndexEXT(query, true);
+    RtGeometryGpuData geometry = pc.geometries.values[geometryIndex];
+    const uint primitive = rayQueryGetIntersectionPrimitiveIndexEXT(query, true);
+    const vec2 bary = rayQueryGetIntersectionBarycentricsEXT(query, true);
+    const float hitDistance = rayQueryGetIntersectionTEXT(query, true);
+    vec3 normal = rtHitShadingNormal(
+        geometry, instance, primitive, bary,
+        pc.materials.materials[geometry.materialIndex], pc.materialSamplerId,
+        hitDistance, pc.raysPerProbe);
+    if (dot(normal, -direction) < 0.0) {
+      normal = -normal;
+    }
+    const MaterialHeaderGpuData material =
+        pc.materials.materials[geometry.materialIndex];
+    const vec4 baseColor = rtBaseColor(
+        geometry, instance, primitive, bary, material, pc.materialSamplerId,
+        hitDistance, pc.raysPerProbe);
+    const float metallic = rtMetallic(
+        geometry, instance, primitive, bary, material, pc.materialSamplerId,
+        hitDistance, pc.raysPerProbe);
+    vec3 radiance = rtEmissive(
+        geometry, instance, primitive, bary, material, pc.materialSamplerId,
+        hitDistance, pc.raysPerProbe);
+    if (pc.directionalLightCount > 0u) {
+      const vec3 lightDirection =
+          normalize(-pc.directionalDirectionIlluminance.xyz);
+      const float ndotl = max(dot(normal, lightDirection), 0.0);
+      if (ndotl > 0.0) {
+        const vec3 hitPoint = origin + direction * hitDistance;
+        const float minSpacing = min(min(volume.probeSpacingAndBias.x,
+                                         volume.probeSpacingAndBias.y),
+                                     volume.probeSpacingAndBias.z);
+        const vec3 shadowOrigin = hitPoint +
+            (0.2 * normal + 0.8 * -direction) *
+                (0.75 * minSpacing) * volume.probeSpacingAndBias.w;
+        if (ddgiDirectionalVisible(
+                shadowOrigin, lightDirection,
+                volume.centerHalfExtentsAndMaxDistance.w)) {
+          radiance += baseColor.rgb * (1.0 - metallic) *
+                      pc.directionalColor.rgb *
+                      pc.directionalDirectionIlluminance.w * ndotl /
+                      3.14159265359;
+        }
+      }
+    }
+    const vec3 hitPoint = origin + direction * hitDistance;
+    radiance += ddgiLocalLighting(hitPoint, normal,
+                                  baseColor.rgb * (1.0 - metallic));
+    if ((pc.maxLocalLights & 0x80000000u) != 0u) {
+      const DDGIQueryResult bounce =
+          queryDDGI(pc.frame, hitPoint, normal, -direction);
+      vec3 contribution = bounce.irradiance * baseColor.rgb *
+                          (1.0 - metallic) / 3.14159265359;
+      const float luminance =
+          dot(contribution, vec3(0.2126, 0.7152, 0.0722));
+      contribution *= min(1.0, pc.directionalColor.w /
+                                   max(luminance, 1.0e-6));
+      radiance += contribution;
+    }
+    result.radianceAndDistance = vec4(max(radiance, vec3(0.0)),
+                                       hitDistance);
+    result.metadata.x = 1u;
+    result.metadata.w = instance.geometryRenderableFlags.w;
+  } else if (containmentDistance > 0.0) {
+    result.radianceAndDistance.w = -containmentDistance;
+    result.metadata.x = 2u;
+    result.metadata.w = containmentFlags;
+  } else {
+    const vec3 sky = pc.skyTextureId != kInvalidTextureBindlessIndex
+        ? textureBindlessCubeLod(pc.skyTextureId, pc.skySamplerId,
+                                direction, 0.0).rgb
+        : vec3(0.0);
+    result.radianceAndDistance = vec4(sky, -1.0);
+    result.metadata.x = 0u;
+  }
+  pc.results.values[rayIndex] = result;
+}

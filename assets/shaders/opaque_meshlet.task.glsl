@@ -86,6 +86,9 @@ const uint kMeshletOcclusionMaxTexelSpan = 6u;
 const float kMeshletOcclusionTargetTexelSpan = 4.0;
 // Keep same-frame self-occlusion conservative under raster/depth quantization.
 const float kMeshletOcclusionDepthBias = 0.005;
+// Level zero reduces 2x2 source-depth pixels. Half a pyramid texel therefore
+// covers the one-source-pixel raster footprint needed at projected bounds.
+const float kMeshletCurrentFrameOcclusionPaddingTexels = 0.5;
 const uint kMeshletCounterFlagEnabled = 1u << 0u;
 
 vec2 clipNdcToDepthUv(vec2 ndc) {
@@ -155,6 +158,12 @@ bool meshletOcclusionCull(MeshletDescriptorGpuData meshlet, InstanceData inst,
   }
 
   const vec2 pyramidSize = vec2(pc.frameData.sceneDepthPyramidInfo.xy);
+  if (currentFrameDepth) {
+    const vec2 footprintPadding =
+        vec2(kMeshletCurrentFrameOcclusionPaddingTexels) / pyramidSize;
+    uvMin = max(uvMin - footprintPadding, vec2(0.0));
+    uvMax = min(uvMax + footprintPadding, vec2(1.0));
+  }
   const vec2 pixelSpan = max((uvMax - uvMin) * pyramidSize, vec2(1.0));
   const float maxPixelSpan = max(pixelSpan.x, pixelSpan.y);
   const uint level = uint(clamp(

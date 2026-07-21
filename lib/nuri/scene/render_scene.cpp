@@ -57,6 +57,7 @@ RenderScene::RenderScene(std::pmr::memory_resource *memory)
       renderableSkinPalettes_(std::pmr::new_delete_resource()),
       packedDirectionalLights_(memory_), packedLocalLights_(memory_),
       packedDirectionalLightIds_(memory_), packedLocalLightIds_(memory_),
+      ddgiVolumes_(memory_),
       id_(gNextRenderSceneId.fetch_add(1u, std::memory_order_relaxed)),
       topologyVersion_(0u), transformVersion_(0u), deformationVersion_(0u),
       lightTopologyVersion_(0u), lightTransformVersion_(0u) {}
@@ -277,6 +278,59 @@ bool RenderScene::commitPackedLights() {
   return true;
 }
 
+void RenderScene::rebuildDDGIVolumes() {
+  ddgiVolumes_.clear();
+  const auto &nodes = sceneGraph_.nodes_;
+  const auto &store = sceneGraph_.ddgiVolumes_;
+  ddgiVolumes_.reserve(store.slots.liveCount());
+  for (uint32_t index = 0u; index < store.slots.slotCount(); ++index) {
+    if (!store.slots.isLive(index)) {
+      continue;
+    }
+    const auto &record = store.records[index];
+    if (!record.enabled) {
+      continue;
+    }
+    const uint32_t nodeIndex = record.node;
+    ddgiVolumes_.push_back(RenderDDGIVolume{
+        .id = makeDDGIVolumeId(index, store.slots.generation(index)),
+        .node = makeNodeId(nodeIndex, nodes.slots.generation(nodeIndex)),
+        .name = std::string_view(record.name),
+        .probeCounts = record.probeCounts,
+        .probeSpacing = record.probeSpacing,
+        .blendDistance = record.blendDistance,
+        .maxRayDistance = record.maxRayDistance,
+        .priority = record.priority,
+        .mode = record.mode,
+        .worldFromLocal = nodes.worldFromRoot[nodeIndex],
+    });
+  }
+  std::sort(ddgiVolumes_.begin(), ddgiVolumes_.end(),
+            [](const RenderDDGIVolume &left, const RenderDDGIVolume &right) {
+              if (left.priority != right.priority) {
+                return left.priority > right.priority;
+              }
+              return left.id.value < right.id.value;
+            });
+}
+
+bool RenderScene::commitDDGIVolumes() {
+  const bool topologyChanged = sceneGraph_.ddgiVolumeTopologyDirty_;
+  const bool transformsChanged = sceneGraph_.ddgiVolumeTransformsDirty_;
+  const bool settingsChanged = sceneGraph_.ddgiVolumeSettingsDirty_;
+  if (!topologyChanged && !transformsChanged && !settingsChanged) {
+    return false;
+  }
+  rebuildDDGIVolumes();
+  ddgiVolumeTopologyVersion_ += topologyChanged ? 1u : 0u;
+  ddgiVolumeTransformVersion_ += transformsChanged ? 1u : 0u;
+  ddgiVolumeSettingsVersion_ += settingsChanged ? 1u : 0u;
+  sceneGraph_.ddgiVolumeTopologyDirty_ = false;
+  sceneGraph_.ddgiVolumeTransformsDirty_ = false;
+  sceneGraph_.ddgiVolumeSettingsDirty_ = false;
+  return true;
+}
+
 Result<bool, std::string> RenderScene::commit() {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
   if (incrementalCommit_ != nullptr) {
@@ -355,6 +409,7 @@ Result<bool, std::string> RenderScene::commit() {
     }
   }
   changed |= commitPackedLights();
+  changed |= commitDDGIVolumes();
   return Result<bool, std::string>::makeResult(changed);
 }
 
@@ -479,6 +534,7 @@ RenderScene::commitInactiveStep(uint32_t maxOperations) {
   sceneGraph_.renderableTransformsDirty_ = false;
   sceneGraph_.renderableDeformationsDirty_ = false;
   commitPackedLights();
+  commitDDGIVolumes();
   return Result<bool, std::string>::makeResult(true);
 }
 

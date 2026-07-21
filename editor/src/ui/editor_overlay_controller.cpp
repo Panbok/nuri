@@ -108,6 +108,11 @@ EditorOverlayController::takeRenderSettingsUpdate() {
   return std::exchange(pendingRenderSettingsUpdate_, std::nullopt);
 }
 
+std::optional<DDGIProbeInspectRequest>
+EditorOverlayController::takeDDGIProbeInspectRequest() {
+  return editor_ ? editor_->takeDDGIProbeInspectRequest() : std::nullopt;
+}
+
 bool EditorOverlayController::onInput(const InputEvent &event) {
   if (!editor_) {
     return false;
@@ -184,6 +189,7 @@ EditorOverlayController::buildOverlayPass(RenderFrameContext &frame,
       frame.sharedResources.shadowDebugFrameData,
       frame.sharedResources.shadowDebugPreviewTexture);
   editor_->setShadowInspectResult(frame.shadowInspectResult);
+  editor_->setDDGIProbeInspectResult(frame.ddgiProbeInspectResult);
   editor_->setFrameIndex(frame.frameIndex);
   editor_->setFrameMetrics(frame.metrics);
 

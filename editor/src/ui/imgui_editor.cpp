@@ -10,6 +10,7 @@
 #include "nuri/core/profiling.h"
 #include "nuri/core/runtime_config.h"
 #include "nuri/core/window.h"
+#include "nuri/gfx/ddgi/ddgi_atlas.h"
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/gfx/imgui_gpu_renderer.h"
 #include "nuri/gfx/pipeline/render_pipeline.h"
@@ -66,6 +67,7 @@ constexpr const char *kAnimationPlayerWindowName = "Animation Player";
 constexpr const char *kTextureFilteringWindowName = "Texture Filtering";
 constexpr const char *kAntiAliasingWindowName = "Anti-Aliasing";
 constexpr const char *kAmbientOcclusionWindowName = "Ambient Occlusion";
+constexpr const char *kGlobalIlluminationWindowName = "Global Illumination";
 constexpr const char *kHDRPostProcessWindowName = "HDR Postprocess";
 constexpr const char *kShadowsWindowName = "Shadows";
 constexpr const char *kCameraControllerWindowName = "Camera Controller";
@@ -86,6 +88,80 @@ constexpr std::array<const char *, 5> kTemporalAAQualityPresetLabels = {
     "Performance", "Balanced", "Quality", "Ultra", "Custom"};
 constexpr std::array<const char *, 2> kAmbientOcclusionModeLabels = {"Disabled",
                                                                      "GTAO"};
+constexpr std::array<const char *, 4> kDDGIQualityPresetLabels = {
+    "Low", "Balanced", "High", "Custom"};
+constexpr std::array<const char *, 13> kDDGIDebugViewLabels = {
+    "None",           "Diffuse Indirect",  "Volume ID",
+    "Probe Weights",  "Confidence",        "Visibility",
+    "Irradiance",     "Distance Mean",     "Distance Variance",
+    "Classification", "Relocation Offset", "Update Age",
+    "Leak Risk"};
+
+[[nodiscard]] std::string_view
+ddgiFallbackReasonLabel(DDGIFallbackReason reason) noexcept {
+  switch (reason) {
+  case DDGIFallbackReason::None:
+    return "ready";
+  case DDGIFallbackReason::Disabled:
+    return "disabled";
+  case DDGIFallbackReason::Unsupported:
+    return "ray query unsupported";
+  case DDGIFallbackReason::NoVolumes:
+    return "no authored volumes";
+  case DDGIFallbackReason::RayTracingSceneWarming:
+    return "ray-traced scene warming";
+  case DDGIFallbackReason::VolumeResourcesWarming:
+    return "volume resources warming";
+  case DDGIFallbackReason::ShaderUnavailable:
+    return "shader unavailable";
+  case DDGIFallbackReason::AllocationFailed:
+    return "allocation failed";
+  }
+  return "unknown";
+}
+
+[[nodiscard]] std::string_view
+ddgiVolumeFailureReasonLabel(DDGIVolumeFailureReason reason) noexcept {
+  switch (reason) {
+  case DDGIVolumeFailureReason::None:
+    return "none";
+  case DDGIVolumeFailureReason::AtlasPacking:
+    return "atlas exceeds device limits";
+  case DDGIVolumeFailureReason::InvalidLayout:
+    return "invalid layout";
+  case DDGIVolumeFailureReason::PersistentMemoryLimit:
+    return "persistent memory limit";
+  case DDGIVolumeFailureReason::PeakMemoryLimit:
+    return "active + pending peak memory limit";
+  case DDGIVolumeFailureReason::IrradianceAllocation:
+    return "irradiance allocation";
+  case DDGIVolumeFailureReason::DistanceAllocation:
+    return "distance allocation";
+  case DDGIVolumeFailureReason::ProbeStateAllocation:
+    return "probe-state allocation";
+  }
+  return "unknown";
+}
+
+[[nodiscard]] std::string_view ddgiProbeStateLabel(uint32_t state) noexcept {
+  switch (static_cast<DDGIProbeState>(state)) {
+  case DDGIProbeState::Uninitialized:
+    return "Uninitialized";
+  case DDGIProbeState::Off:
+    return "Off";
+  case DDGIProbeState::Sleeping:
+    return "Sleeping";
+  case DDGIProbeState::NewlyAwake:
+    return "Newly Awake";
+  case DDGIProbeState::Awake:
+    return "Awake";
+  case DDGIProbeState::NewlyVigilant:
+    return "Newly Vigilant";
+  case DDGIProbeState::Vigilant:
+    return "Vigilant";
+  }
+  return "Unknown";
+}
 
 [[nodiscard]] std::string_view
 presentModeLabel(SwapchainPresentMode mode) noexcept {
@@ -987,6 +1063,7 @@ struct RenderableInspectorState {
 struct HierarchyNodeStats {
   uint32_t renderableCount = 0u;
   uint32_t lightCount = 0u;
+  uint32_t ddgiVolumeCount = 0u;
 };
 
 struct HierarchyNodeTopology {
@@ -1097,6 +1174,17 @@ void applyNodeSelection(const RenderScene &scene, NodeId node,
   if (isValid(firstLight)) {
     selection.kind = SceneSelectionKind::Light;
     selection.lightId = firstLight;
+    return;
+  }
+  DDGIVolumeId firstVolume = kInvalidDDGIVolumeId;
+  scene.graph().forEachDDGIVolumeOnNode(node, [&](DDGIVolumeId volumeId) {
+    if (!isValid(firstVolume)) {
+      firstVolume = volumeId;
+    }
+  });
+  if (isValid(firstVolume)) {
+    selection.kind = SceneSelectionKind::DDGIVolume;
+    selection.ddgiVolumeId = firstVolume;
     return;
   }
   selection.kind = SceneSelectionKind::Node;
@@ -5601,6 +5689,14 @@ struct ImGuiEditor::Impl {
     bool enabled = false;
   };
 
+  enum class DeferredDDGIActionType : uint8_t { Create, Update, Remove };
+
+  struct DeferredDDGIAction {
+    DeferredDDGIActionType type = DeferredDDGIActionType::Create;
+    DDGIVolumeId id = kInvalidDDGIVolumeId;
+    DDGIVolumeDesc desc{};
+  };
+
   Impl(Window &windowIn, GPUDevice &gpuIn, const EditorServices &services)
       : window(windowIn), gpu(gpuIn), application(services.application),
         scene(services.scene), resources(services.resources),
@@ -5675,6 +5771,7 @@ struct ImGuiEditor::Impl {
     hierarchyStatsBuildCursor = 0u;
     cachedSelectedPathLeaf = kInvalidNodeId;
     cachedLightCount = 0u;
+    cachedDDGIVolumeCount = 0u;
     cachedRenderableCount = 0u;
     hierarchyNodeTopology.clear();
     hierarchyNodeStats.clear();
@@ -5687,6 +5784,9 @@ struct ImGuiEditor::Impl {
     hierarchySceneRootOpen = true;
     deferredAnimationActions.clear();
     shadowInspectResult.reset();
+    ddgiProbeInspectResult.reset();
+    pendingDDGIProbeInspectRequest.reset();
+    ddgiSelectedProbeId = 0u;
     if (selectionState != nullptr) {
       selectionState->clear();
     }
@@ -5753,11 +5853,66 @@ struct ImGuiEditor::Impl {
       }
     }
     deferredAnimationActions.clear();
+    deferredDDGIActions.clear();
+  }
+
+  void applyDeferredDDGIActions() {
+    if (scene == nullptr || deferredDDGIActions.empty()) {
+      deferredDDGIActions.clear();
+      return;
+    }
+    SceneGraph &graph = scene->graph();
+    for (const DeferredDDGIAction &action : deferredDDGIActions) {
+      if (action.type == DeferredDDGIActionType::Update) {
+        (void)graph.updateDDGIVolume(action.id, action.desc);
+        continue;
+      }
+      if (action.type == DeferredDDGIActionType::Remove) {
+        (void)graph.removeDDGIVolume(action.id);
+        if (selectionState != nullptr &&
+            selectionState->ddgiVolumeId == action.id) {
+          selectionState->clear();
+        }
+        continue;
+      }
+      glm::mat4 transform(1.0f);
+      if (cameraSystem != nullptr) {
+        if (const Camera *camera = cameraSystem->activeCamera();
+            camera != nullptr) {
+          transform =
+              glm::translate(glm::mat4(1.0f),
+                             camera->position() + camera->forward() * 6.0f) *
+              glm::mat4_cast(camera->orientation());
+        }
+      }
+      auto node =
+          graph.createNode(graph.rootNode(), action.desc.name, transform);
+      if (node.hasError()) {
+        NURI_LOG_WARNING("ImGuiEditor: failed to create DDGI volume node: %s",
+                         node.error().c_str());
+        continue;
+      }
+      auto volume = graph.addDDGIVolume(node.value(), action.desc);
+      if (volume.hasError()) {
+        (void)graph.destroyNodeSubtree(node.value());
+        NURI_LOG_WARNING("ImGuiEditor: failed to add DDGI volume: %s",
+                         volume.error().c_str());
+        continue;
+      }
+      if (selectionState != nullptr) {
+        selectionState->clear();
+        selectionState->kind = SceneSelectionKind::DDGIVolume;
+        selectionState->node = node.value();
+        selectionState->ddgiVolumeId = volume.value();
+      }
+    }
+    deferredDDGIActions.clear();
   }
 
   void applyDeferredUiActions() {
     applyDeferredFramePacingActions();
     applyDeferredAnimationActions();
+    applyDeferredDDGIActions();
   }
 
   void validateSelectionState() {
@@ -5790,6 +5945,16 @@ struct ImGuiEditor::Impl {
           lightNode != selectionState->node) {
         selectionState->kind = SceneSelectionKind::Node;
         selectionState->lightId = kInvalidLightId;
+      }
+    } else if (selectionState->kind == SceneSelectionKind::DDGIVolume) {
+      DDGIVolumeDesc volume{};
+      NodeId volumeNode = kInvalidNodeId;
+      if (!scene->graph().getDDGIVolume(selectionState->ddgiVolumeId, volume) ||
+          !scene->graph().getDDGIVolumeNode(selectionState->ddgiVolumeId,
+                                            volumeNode) ||
+          volumeNode != selectionState->node) {
+        selectionState->kind = SceneSelectionKind::Node;
+        selectionState->ddgiVolumeId = kInvalidDDGIVolumeId;
       }
     }
   }
@@ -5846,6 +6011,13 @@ struct ImGuiEditor::Impl {
       NodeId node = kInvalidNodeId;
       if (scene->graph().getLightNode(lightId, node) && isValid(node)) {
         ++currentLightCount;
+      }
+    });
+    uint32_t currentDDGIVolumeCount = 0u;
+    scene->graph().forEachDDGIVolumeId([&](DDGIVolumeId volumeId) {
+      NodeId node = kInvalidNodeId;
+      if (scene->graph().getDDGIVolumeNode(volumeId, node) && isValid(node)) {
+        ++currentDDGIVolumeCount;
       }
     });
 
@@ -5925,7 +6097,8 @@ struct ImGuiEditor::Impl {
     }
     if (!hierarchyStatsCacheValid ||
         currentRenderableCount != cachedRenderableCount ||
-        currentLightCount != cachedLightCount) {
+        currentLightCount != cachedLightCount ||
+        currentDDGIVolumeCount != cachedDDGIVolumeCount) {
       bool statsIncomplete = false;
       NURI_PROFILER_ZONE("ImGuiEditor::HierarchyWindow::BuildNodeStats",
                          NURI_PROFILER_COLOR_CMD_DRAW);
@@ -5963,9 +6136,21 @@ struct ImGuiEditor::Impl {
             ++hierarchyNodeStats[nodeSlot].lightCount;
           }
         });
+        scene->graph().forEachDDGIVolumeId([&](DDGIVolumeId volumeId) {
+          NodeId node = kInvalidNodeId;
+          if (scene->graph().getDDGIVolumeNode(volumeId, node) &&
+              isValid(node)) {
+            const size_t nodeSlot = hierarchyNodeSlot(node);
+            if (nodeSlot >= hierarchyNodeStats.size()) {
+              hierarchyNodeStats.resize(nodeSlot + 1u);
+            }
+            ++hierarchyNodeStats[nodeSlot].ddgiVolumeCount;
+          }
+        });
 
         cachedRenderableCount = currentRenderableCount;
         cachedLightCount = currentLightCount;
+        cachedDDGIVolumeCount = currentDDGIVolumeCount;
         hierarchyStatsCacheValid = true;
         hierarchyStatsBuilding = false;
       }
@@ -6074,7 +6259,7 @@ struct ImGuiEditor::Impl {
     return key;
   }
 
-  void drawNodeTransformEditor(NodeId node) {
+  void drawNodeTransformEditor(NodeId node, bool allowScale = true) {
     if (scene == nullptr || !isValid(node)) {
       ImGui::TextUnformatted("No node selected.");
       return;
@@ -6098,7 +6283,14 @@ struct ImGuiEditor::Impl {
     bool changed = false;
     changed |= ImGui::InputFloat3("Translation", translation, "%.3f");
     changed |= ImGui::InputFloat3("Rotation", rotation, "%.3f");
-    changed |= ImGui::InputFloat3("Scale", scale, "%.3f");
+    if (allowScale) {
+      changed |= ImGui::InputFloat3("Scale", scale, "%.3f");
+    } else {
+      ImGui::TextUnformatted("Scale: fixed at 1 for DDGI volumes");
+      scale[0] = 1.0f;
+      scale[1] = 1.0f;
+      scale[2] = 1.0f;
+    }
     if (changed) {
       glm::mat4 recomposed(1.0f);
       ImGuizmo::RecomposeMatrixFromComponents(translation, rotation, scale,
@@ -6326,6 +6518,93 @@ struct ImGuiEditor::Impl {
     drawLightEditor(scene->graph(), lightId, light, lightEditorDraft);
   }
 
+  void drawDDGIVolumeInspector(DDGIVolumeId volumeId) {
+    if (scene == nullptr) {
+      return;
+    }
+    DDGIVolumeDesc volume{};
+    if (!scene->graph().getDDGIVolume(volumeId, volume)) {
+      ImGui::TextUnformatted("Selected DDGI volume is no longer valid.");
+      return;
+    }
+    ImGui::SeparatorText("Diffuse GI Volume");
+    bool changed = false;
+    std::array<char, 128> name{};
+    std::snprintf(name.data(), name.size(), "%s", volume.name.c_str());
+    if (ImGui::InputText("Name", name.data(), name.size())) {
+      volume.name = name.data();
+      changed = true;
+    }
+    changed |= ImGui::Checkbox("Enabled", &volume.enabled);
+    int mode = static_cast<int>(volume.mode);
+    constexpr std::array modes{"Authored", "Camera Tracked"};
+    if (ImGui::Combo("Mode", &mode, modes.data(),
+                     static_cast<int>(modes.size()))) {
+      volume.mode = static_cast<DDGIVolumeMode>(mode);
+      changed = true;
+    }
+    changed |= ImGui::InputInt("Priority", &volume.priority);
+    std::array<int, 3> counts{static_cast<int>(volume.probeCounts.x),
+                              static_cast<int>(volume.probeCounts.y),
+                              static_cast<int>(volume.probeCounts.z)};
+    if (ImGui::InputInt3("Probe Counts", counts.data())) {
+      volume.probeCounts =
+          glm::uvec3(static_cast<uint32_t>(std::clamp(counts[0], 2, 64)),
+                     static_cast<uint32_t>(std::clamp(counts[1], 2, 64)),
+                     static_cast<uint32_t>(std::clamp(counts[2], 2, 64)));
+      changed = true;
+    }
+    changed |= ImGui::InputFloat3("Probe Spacing",
+                                  glm::value_ptr(volume.probeSpacing), "%.3f");
+    changed |= ImGui::InputFloat("Blend Distance", &volume.blendDistance, 0.1f,
+                                 1.0f, "%.3f");
+    changed |= ImGui::InputFloat("Maximum Ray Distance", &volume.maxRayDistance,
+                                 0.5f, 5.0f, "%.3f");
+    const uint32_t probeCount = ddgiProbeCount(volume.probeCounts);
+    const glm::vec3 halfExtents =
+        0.5f * glm::vec3(volume.probeCounts - glm::uvec3(1u)) *
+        volume.probeSpacing;
+    ImGui::Text("Probe centers: %u", probeCount);
+    ImGui::Text("Half extents: %.2f, %.2f, %.2f", halfExtents.x, halfExtents.y,
+                halfExtents.z);
+    const uint32_t textureLimit =
+        std::max(gpu.getDeviceCaps().maxTextureDimension2D, 1u);
+    auto irradiance = packDDGIAtlas(probeCount, kDDGIIrradianceTileExtent,
+                                    glm::uvec2(textureLimit));
+    auto distance = packDDGIAtlas(probeCount, kDDGIDistanceTileExtent,
+                                  glm::uvec2(textureLimit));
+    if (!irradiance.hasError() && !distance.hasError()) {
+      auto memory =
+          estimateDDGIMemory(probeCount, irradiance.value(), distance.value());
+      if (!memory.hasError()) {
+        ImGui::Text("Persistent memory: %.2f MiB",
+                    static_cast<double>(memory.value().persistentBytes) /
+                        (1024.0 * 1024.0));
+      }
+    }
+    const DDGIVolumeValidationError validation = validateDDGIVolumeDesc(volume);
+    if (validation.reason != DDGIVolumeValidationReason::None) {
+      ImGui::TextColored(ImVec4(1.0f, 0.65f, 0.25f, 1.0f),
+                         "Descriptor is outside supported limits (%u)",
+                         static_cast<uint32_t>(validation.reason));
+    }
+    if (changed) {
+      deferredDDGIActions.push_back(DeferredDDGIAction{
+          .type = DeferredDDGIActionType::Update,
+          .id = volumeId,
+          .desc = std::move(volume),
+      });
+    }
+    if (ImGui::Button("Reset DDGI History")) {
+      ++renderSettings.ddgi.requestedEpochs.resetHistory;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Remove DDGI Volume")) {
+      deferredDDGIActions.push_back(DeferredDDGIAction{
+          .type = DeferredDDGIActionType::Remove, .id = volumeId});
+    }
+  }
+
   void drawInspectorWindow() {
     if (!ImGui::Begin(kInspectorWindowName, &showInspectorWindow)) {
       inspectorWindowVisible = true;
@@ -6345,7 +6624,9 @@ struct ImGuiEditor::Impl {
     ImGui::TextUnformatted(
         nodeDisplayName(scene->graph(), selectionState->node).c_str());
     ImGui::Separator();
-    drawNodeTransformEditor(selectionState->node);
+    drawNodeTransformEditor(selectionState->node,
+                            selectionState->kind !=
+                                SceneSelectionKind::DDGIVolume);
 
     if (selectionState->kind == SceneSelectionKind::NodeRenderable) {
       if (const Renderable *renderable =
@@ -6356,6 +6637,8 @@ struct ImGuiEditor::Impl {
       }
     } else if (selectionState->kind == SceneSelectionKind::Light) {
       drawLightInspector(selectionState->lightId);
+    } else if (selectionState->kind == SceneSelectionKind::DDGIVolume) {
+      drawDDGIVolumeInspector(selectionState->ddgiVolumeId);
     } else {
       uint32_t renderableCount = 0u;
       scene->graph().forEachRenderableOnNode(
@@ -6366,6 +6649,10 @@ struct ImGuiEditor::Impl {
       ImGui::SeparatorText("Components");
       ImGui::Text("Renderables: %u", renderableCount);
       ImGui::Text("Lights: %u", lightCount);
+      uint32_t ddgiVolumeCount = 0u;
+      scene->graph().forEachDDGIVolumeOnNode(
+          selectionState->node, [&](DDGIVolumeId) { ++ddgiVolumeCount; });
+      ImGui::Text("DDGI Volumes: %u", ddgiVolumeCount);
     }
 
     ImGui::End();
@@ -6640,7 +6927,8 @@ struct ImGuiEditor::Impl {
       }
       std::string label = topology.labelName +
                           "  R:" + std::to_string(stats.renderableCount) +
-                          "  L:" + std::to_string(stats.lightCount);
+                          "  L:" + std::to_string(stats.lightCount) +
+                          "  GI:" + std::to_string(stats.ddgiVolumeCount);
       ImGui::SetNextItemOpen(isOpen, ImGuiCond_Always);
       ImGui::PushID(static_cast<int>(row.node.value));
       const bool open = ImGui::TreeNodeEx("node", flags, "%s", label.c_str());
@@ -6863,6 +7151,241 @@ struct ImGuiEditor::Impl {
     ImGui::End();
   }
 
+  void queueCreateDDGIVolume() {
+    DDGIVolumeDesc desc{};
+    desc.name = "DDGI Volume";
+    deferredDDGIActions.push_back(DeferredDDGIAction{
+        .type = DeferredDDGIActionType::Create,
+        .desc = std::move(desc),
+    });
+    showGlobalIlluminationWindow = true;
+  }
+
+  void drawGlobalIlluminationWindow() {
+    if (!ImGui::Begin(kGlobalIlluminationWindowName,
+                      &showGlobalIlluminationWindow)) {
+      ImGui::End();
+      return;
+    }
+    auto &settings = renderSettings.ddgi;
+    const RayTracingCapabilities &caps = gpu.getDeviceCaps().rayTracing;
+    const bool supported =
+        caps.accelerationStructure && caps.rayQuery && caps.bufferDeviceAddress;
+    ImGui::Text("Ray query: %s", supported ? "supported" : "unsupported");
+    if (!supported) {
+      ImGui::TextWrapped(
+          "Diffuse GI remains on sky fallback because the complete Vulkan "
+          "acceleration-structure/ray-query feature set is unavailable.");
+      ImGui::BeginDisabled();
+    }
+    ImGui::Checkbox("Enable Diffuse GI", &settings.enabled);
+    int preset = static_cast<int>(settings.preset);
+    if (ImGui::Combo("Quality", &preset, kDDGIQualityPresetLabels.data(),
+                     static_cast<int>(kDDGIQualityPresetLabels.size()))) {
+      settings.preset = static_cast<DDGIQualityPreset>(preset);
+      applyDDGIQualityPreset(settings, settings.preset);
+    }
+    bool customChanged = false;
+    customChanged |= ImGui::InputScalar("Rays / Probe", ImGuiDataType_U32,
+                                        &settings.raysPerProbe);
+    customChanged |=
+        ImGui::InputScalar("Probe Updates / Frame", ImGuiDataType_U32,
+                           &settings.maxProbeUpdatesPerFrame);
+    customChanged |=
+        ImGui::InputScalar("Ray Queries / Frame", ImGuiDataType_U32,
+                           &settings.maxRayQueriesPerFrame);
+    customChanged |= ImGui::SliderFloat("Irradiance Hysteresis",
+                                        &settings.irradianceHysteresis, 0.0f,
+                                        0.9999f, "%.4f");
+    customChanged |=
+        ImGui::SliderFloat("Distance Hysteresis", &settings.distanceHysteresis,
+                           0.0f, 0.9999f, "%.4f");
+    customChanged |= ImGui::SliderFloat(
+        "Spacing Bias", &settings.selfShadowBias, 0.0f, 4.0f, "%.3f");
+    ImGui::Checkbox("Relocation", &settings.relocation);
+    ImGui::Checkbox("Classification", &settings.classification);
+    ImGui::Checkbox("Multi-bounce", &settings.multiBounce);
+    ImGui::SliderFloat("Multi-bounce Luminance Clamp",
+                       &settings.multiBounceLuminanceClamp, 0.0f, 256.0f,
+                       "%.1f");
+    ImGui::Checkbox("Freeze Updates", &settings.freezeUpdates);
+    ImGui::Checkbox("Show Volume Bounds", &settings.showVolumes);
+    ImGui::Checkbox("Show Probe Billboards", &settings.showProbes);
+    ImGui::Checkbox("Show Selected Probe Rays",
+                    &settings.showSelectedProbeRays);
+    int debugView = static_cast<int>(settings.debugView);
+    if (ImGui::Combo("Surface Debug", &debugView, kDDGIDebugViewLabels.data(),
+                     static_cast<int>(kDDGIDebugViewLabels.size()))) {
+      settings.debugView = static_cast<DDGIDebugView>(debugView);
+    }
+    if (customChanged) {
+      settings.preset = DDGIQualityPreset::Custom;
+    }
+    sanitizeDDGISettings(settings);
+    if (ImGui::Button("Reset History")) {
+      ++settings.requestedEpochs.resetHistory;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Force Full Update")) {
+      ++settings.requestedEpochs.forceFullUpdate;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Rebuild RT Scene")) {
+      ++settings.requestedEpochs.rebuildRayTracingScene;
+    }
+    if (ImGui::Button("Create DDGI Volume")) {
+      queueCreateDDGIVolume();
+    }
+    if (!supported) {
+      ImGui::EndDisabled();
+    }
+
+    ImGui::SeparatorText("Runtime Status");
+    const DDGIFrameMetrics &ddgi = frameMetrics.ddgi;
+    const RayTracingSceneFrameMetrics &rt = frameMetrics.rayTracingScene;
+    const std::string_view reason =
+        ddgiFallbackReasonLabel(ddgi.fallbackReason);
+    ImGui::Text("State: %.*s", static_cast<int>(reason.size()), reason.data());
+    ImGui::Text("Volumes: %u active / %u ready", ddgi.activeVolumes,
+                ddgi.readyVolumes);
+    if (ddgi.failedVolumes != 0u) {
+      const std::string_view failure =
+          ddgiVolumeFailureReasonLabel(ddgi.volumeFailureReason);
+      ImGui::TextColored(ImVec4(0.95f, 0.48f, 0.28f, 1.0f),
+                         "Volumes disabled: %u (%.*s)", ddgi.failedVolumes,
+                         static_cast<int>(failure.size()), failure.data());
+    }
+    ImGui::Text("Probes: %u total / %u updated", ddgi.totalProbes,
+                ddgi.updatedProbes);
+    if (ddgi.invalidatedProbes != 0u) {
+      ImGui::Text("Scroll invalidations: %u probes", ddgi.invalidatedProbes);
+    }
+    ImGui::Text("Queries: %u primary, %u secondary, %u reserved unused",
+                ddgi.primaryQueries, ddgi.secondaryQueries,
+                ddgi.secondaryQueriesUnused);
+    ImGui::Text("Candidates: %u primary + %u secondary; reject alpha %u, "
+                "backface %u; overflow %u; local-light truncation %u",
+                ddgi.primaryCandidateIntersections,
+                ddgi.secondaryCandidateIntersections,
+                ddgi.alphaCandidateRejections, ddgi.backfaceCandidateRejections,
+                ddgi.candidateOverflows, ddgi.localLightTruncations);
+    ImGui::Text("History: %s (submission %llu)",
+                ddgi.historyReady != 0u ? "ready" : "warming",
+                static_cast<unsigned long long>(ddgi.submittedSequence));
+    if (ddgi.irradianceResponseRemaining != 0u ||
+        ddgi.distanceResponseRemaining != 0u) {
+      ImGui::Text("Fast response: irradiance %u / distance %u submissions",
+                  ddgi.irradianceResponseRemaining,
+                  ddgi.distanceResponseRemaining);
+    }
+    ImGui::Text("DDGI memory: %.2f MiB persistent + %.2f MiB frame batch",
+                static_cast<double>(ddgi.persistentBytes) / (1024.0 * 1024.0),
+                static_cast<double>(ddgi.frameBatchBytes) / (1024.0 * 1024.0));
+    ImGui::Text("RT: %s, %u BLAS builds, %u static + %u dynamic instances, "
+                "%u geometries",
+                rt.readiness == RayTracingSceneReadiness::Ready ? "ready"
+                                                                : "warming",
+                rt.blasBuilds, rt.staticInstances, rt.dynamicInstances,
+                rt.geometryRecords);
+    if (rt.dynamicBlasUpdates != 0u) {
+      ImGui::Text("Dynamic RT: %u vertex dispatches, %u BLAS updates",
+                  rt.dynamicVertexDispatches, rt.dynamicBlasUpdates);
+    }
+    if (ddgi.skyFallbackActive != 0u) {
+      ImGui::TextColored(ImVec4(0.85f, 0.75f, 0.3f, 1.0f),
+                         "Sky fallback active");
+    }
+
+    ImGui::SeparatorText("Selected Probe Inspection");
+    const DDGIVolumeId selectedVolume =
+        selectionState != nullptr &&
+                selectionState->kind == SceneSelectionKind::DDGIVolume
+            ? selectionState->ddgiVolumeId
+            : kInvalidDDGIVolumeId;
+    DDGIVolumeDesc selectedVolumeDesc{};
+    const bool hasSelectedVolume =
+        scene != nullptr && isValid(selectedVolume) &&
+        scene->graph().getDDGIVolume(selectedVolume, selectedVolumeDesc);
+    const uint32_t selectedProbeCount =
+        hasSelectedVolume ? ddgiProbeCount(selectedVolumeDesc.probeCounts) : 0u;
+    if (!hasSelectedVolume) {
+      ImGui::TextDisabled(
+          "Select a DDGI volume in the hierarchy to inspect a probe.");
+    }
+    ImGui::BeginDisabled(!hasSelectedVolume || selectedProbeCount == 0u ||
+                         !supported || !settings.enabled);
+    if (selectedProbeCount != 0u) {
+      ddgiSelectedProbeId =
+          std::min(ddgiSelectedProbeId, selectedProbeCount - 1u);
+    }
+    ImGui::InputScalar("Probe ID", ImGuiDataType_U32, &ddgiSelectedProbeId);
+    ImGui::SliderScalar("Inspection Rays", ImGuiDataType_U32,
+                        &ddgiInspectRayCount, &kDDGIInspectRayMinimum,
+                        &kDDGIInspectRayMaximum, "%u");
+    ddgiInspectRayCount = std::clamp(
+        ddgiInspectRayCount, kDDGIInspectRayMinimum, kDDGIInspectRayMaximum);
+    if (selectedProbeCount != 0u) {
+      ddgiSelectedProbeId =
+          std::min(ddgiSelectedProbeId, selectedProbeCount - 1u);
+    }
+    if (ImGui::Button("Inspect Selected Probe")) {
+      pendingDDGIProbeInspectRequest = DDGIProbeInspectRequest{
+          .requestId = ++ddgiProbeInspectRequestId,
+          .volume = selectedVolume,
+          .probeId = ddgiSelectedProbeId,
+          .rayCount = ddgiInspectRayCount,
+      };
+    }
+    ImGui::EndDisabled();
+    if (pendingDDGIProbeInspectRequest.has_value()) {
+      ImGui::SameLine();
+      ImGui::TextDisabled("request %llu pending",
+                          static_cast<unsigned long long>(
+                              pendingDDGIProbeInspectRequest->requestId));
+    }
+    if (ddgiProbeInspectResult.has_value() &&
+        (!hasSelectedVolume ||
+         ddgiProbeInspectResult->volume == selectedVolume)) {
+      const DDGIProbeInspectResult &inspect = *ddgiProbeInspectResult;
+      if (!inspect.valid) {
+        ImGui::TextColored(ImVec4(0.95f, 0.48f, 0.28f, 1.0f),
+                           "Inspection request %llu is stale or invalid.",
+                           static_cast<unsigned long long>(inspect.requestId));
+      } else {
+        const std::string_view state = ddgiProbeStateLabel(inspect.probeState);
+        ImGui::Text(
+            "Probe %u: %.*s, age %u, submission %llu", inspect.probeId,
+            static_cast<int>(state.size()), state.data(), inspect.updateAge,
+            static_cast<unsigned long long>(inspect.submissionSequence));
+        ImGui::Text(
+            "Volume slot %u, grid (%u, %u, %u), atlas I(%u, %u) D(%u, %u)",
+            inspect.volumeSlot, inspect.volumeCoordinate.x,
+            inspect.volumeCoordinate.y, inspect.volumeCoordinate.z,
+            inspect.irradianceAtlasCoordinate.x,
+            inspect.irradianceAtlasCoordinate.y,
+            inspect.distanceAtlasCoordinate.x,
+            inspect.distanceAtlasCoordinate.y);
+        ImGui::Text("Rays: %u (%u hit / %u miss), alpha reject %u, "
+                    "backface reject %u, overflow %u + %u diagnostic",
+                    inspect.rayCount, inspect.hitCount, inspect.missCount,
+                    inspect.rejectedAlphaCount, inspect.rejectedBackfaceCount,
+                    inspect.candidateOverflowCount,
+                    inspect.diagnosticEventOverflowCount);
+        ImGui::Text("Nominal: %.3f, %.3f, %.3f", inspect.nominalWorldPosition.x,
+                    inspect.nominalWorldPosition.y,
+                    inspect.nominalWorldPosition.z);
+        ImGui::Text(
+            "Relocated: %.3f, %.3f, %.3f", inspect.relocatedWorldPosition.x,
+            inspect.relocatedWorldPosition.y, inspect.relocatedWorldPosition.z);
+        ImGui::Text("Irradiance: %.4f, %.4f, %.4f", inspect.irradiance.x,
+                    inspect.irradiance.y, inspect.irradiance.z);
+        ImGui::Text("Distance moments: %.4f, %.4f", inspect.distanceMoments.x,
+                    inspect.distanceMoments.y);
+      }
+    }
+    ImGui::End();
+  }
+
   void drawMainMenuBar() {
     if (!ImGui::BeginMainMenuBar()) {
       return;
@@ -6883,6 +7406,8 @@ struct ImGuiEditor::Impl {
       ImGui::MenuItem("Anti-Aliasing", nullptr, &showAntiAliasingWindow);
       ImGui::MenuItem("Ambient Occlusion", nullptr,
                       &showAmbientOcclusionWindow);
+      ImGui::MenuItem("Global Illumination", nullptr,
+                      &showGlobalIlluminationWindow);
       ImGui::MenuItem("HDR Postprocess", nullptr, &showHDRPostProcessWindow);
       if (ImGui::BeginMenu("Texture Filtering")) {
         auto &settings = renderSettings.textureFiltering;
@@ -6904,6 +7429,13 @@ struct ImGuiEditor::Impl {
         ImGui::MenuItem("Settings Window", nullptr,
                         &showTextureFilteringWindow);
         ImGui::EndMenu();
+      }
+      ImGui::EndMenu();
+    }
+
+    if (ImGui::BeginMenu("Create")) {
+      if (ImGui::MenuItem("DDGI Volume")) {
+        queueCreateDDGIVolume();
       }
       ImGui::EndMenu();
     }
@@ -7222,6 +7754,12 @@ struct ImGuiEditor::Impl {
                                  frameMetrics);
       NURI_PROFILER_ZONE_END();
     }
+    if (showGlobalIlluminationWindow) {
+      NURI_PROFILER_ZONE("ImGuiEditor::DrawGlobalIlluminationWindow",
+                         NURI_PROFILER_COLOR_CMD_DRAW);
+      drawGlobalIlluminationWindow();
+      NURI_PROFILER_ZONE_END();
+    }
     if (showHDRPostProcessWindow) {
       NURI_PROFILER_ZONE("ImGuiEditor::DrawHDRPostProcessWindow",
                          NURI_PROFILER_COLOR_CMD_DRAW);
@@ -7388,6 +7926,7 @@ struct ImGuiEditor::Impl {
   bool showTextureFilteringWindow = false;
   bool showAntiAliasingWindow = false;
   bool showAmbientOcclusionWindow = false;
+  bool showGlobalIlluminationWindow = false;
   bool showHDRPostProcessWindow = false;
   bool showShadowsWindow = false;
   bool showRenderGraphTelemetryWindow = false;
@@ -7430,6 +7969,7 @@ struct ImGuiEditor::Impl {
   bool hierarchyTopologyCacheValid = false;
   uint32_t cachedRenderableCount = 0u;
   uint32_t cachedLightCount = 0u;
+  uint32_t cachedDDGIVolumeCount = 0u;
   uint64_t cachedHierarchyTopologyVersion =
       std::numeric_limits<uint64_t>::max();
   NodeId cachedSelectedPathLeaf = kInvalidNodeId;
@@ -7452,6 +7992,14 @@ struct ImGuiEditor::Impl {
   int hierarchySelectedRowIndex = -1;
   bool hierarchySceneRootOpen = true;
   std::vector<DeferredAnimationAction> deferredAnimationActions{};
+  std::vector<DeferredDDGIAction> deferredDDGIActions{};
+  std::optional<DDGIProbeInspectRequest> pendingDDGIProbeInspectRequest{};
+  std::optional<DDGIProbeInspectResult> ddgiProbeInspectResult{};
+  uint64_t ddgiProbeInspectRequestId = 0u;
+  uint32_t ddgiSelectedProbeId = 0u;
+  uint32_t ddgiInspectRayCount = 128u;
+  static constexpr uint32_t kDDGIInspectRayMinimum = 1u;
+  static constexpr uint32_t kDDGIInspectRayMaximum = kDDGIMaxDiagnosticRays;
   std::optional<SwapchainPresentMode> pendingPresentMode{};
   std::optional<uint32_t> pendingFrameRateLimit{};
   int frameRateLimitFps = 60;
@@ -7586,6 +8134,13 @@ void ImGuiEditor::setShadowInspectResult(
   }
 }
 
+void ImGuiEditor::setDDGIProbeInspectResult(
+    const std::optional<DDGIProbeInspectResult> &inspectResult) {
+  if (impl_ && inspectResult.has_value()) {
+    impl_->ddgiProbeInspectResult = inspectResult;
+  }
+}
+
 void ImGuiEditor::syncCameraControllerWidgetStateFromCamera(
     const Camera &camera) {
   if (!impl_) {
@@ -7633,6 +8188,13 @@ bool ImGuiEditor::takeSceneCancelRequest() {
          std::exchange(impl_->sceneSelectionState.pendingCancelRequest, false);
 }
 
+std::optional<DDGIProbeInspectRequest>
+ImGuiEditor::takeDDGIProbeInspectRequest() {
+  return impl_ ? std::exchange(impl_->pendingDDGIProbeInspectRequest,
+                               std::nullopt)
+               : std::nullopt;
+}
+
 bool *ImGuiEditor::gizmoControlsWindowOpenState() {
   return impl_ ? &impl_->showGizmoControlsWindow : nullptr;
 }
@@ -7666,6 +8228,7 @@ RenderSettings ImGuiEditor::renderSettings() const {
   sanitizeAmbientOcclusionSettings(settings.ambientOcclusion, settings.opaque,
                                    settings.antiAliasing);
   sanitizeShadowSettings(settings.shadow);
+  sanitizeDDGISettings(settings.ddgi);
   return settings;
 }
 

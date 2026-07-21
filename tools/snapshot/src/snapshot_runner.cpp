@@ -5,9 +5,12 @@
 #include "nuri/core/window.h"
 #include "nuri/gfx/frame/temporal_frame_service.h"
 #include "nuri/gfx/gpu_device.h"
+#include "nuri/gfx/owned_gpu_resource.h"
 #include "nuri/gfx/pipeline/default_render_pipeline.h"
 #include "nuri/gfx/pipeline/render_pipeline.h"
 #include "nuri/gfx/renderer.h"
+#include "nuri/gfx/renderers/detail/instance_data.h"
+#include "nuri/gfx/sim/animation_scene_frame_data.h"
 #include "nuri/resources/gpu/resource_manager.h"
 #include "nuri/resources/scene_importer.h"
 #include "nuri/scene/camera.h"
@@ -48,6 +51,115 @@
 
 namespace nuri::tools::snapshot {
 namespace {
+
+struct SnapshotAnimationFixture {
+  OwnedBufferHandle instanceMatrices{};
+  std::vector<InstanceData> instances{};
+  std::vector<AnimatedRenderableGeometryOverride> geometryOverrides{};
+  std::vector<uint32_t> animatedRenderableIndices{};
+  std::optional<AnimationSceneFrameData> frameData{};
+
+  [[nodiscard]] Result<bool, std::string>
+  publish(RenderScene &scene, GPUDevice &gpu, uint64_t frameIndex) {
+    const std::span<const Renderable> renderables = scene.renderables();
+    instances.clear();
+    geometryOverrides.assign(renderables.size(), {});
+    animatedRenderableIndices.clear();
+    instances.reserve(renderables.size());
+    for (uint32_t index = 0u; index < static_cast<uint32_t>(renderables.size());
+         ++index) {
+      const Renderable &renderable = renderables[index];
+      instances.push_back(makeInstanceData(renderable.modelMatrix));
+      std::string_view name;
+      if (scene.graph().getNodeName(renderable.node, name) &&
+          name == "ShadowBlueCaster") {
+        animatedRenderableIndices.push_back(index);
+      }
+    }
+    if (instances.empty() || animatedRenderableIndices.empty()) {
+      return Result<bool, std::string>::makeError(
+          "DDGI dynamic snapshot fixture is incomplete");
+    }
+    const size_t bytes = instances.size() * sizeof(InstanceData);
+    if (!instanceMatrices.valid()) {
+      auto buffer = gpu.createBuffer(BufferDesc{.usage = BufferUsage::Storage,
+                                                .storage = Storage::Device,
+                                                .size = bytes},
+                                     "snapshot_ddgi_animation_instances");
+      if (buffer.hasError()) {
+        return Result<bool, std::string>::makeError(buffer.error());
+      }
+      instanceMatrices.reset(gpu, buffer.value());
+    }
+    auto upload = gpu.updateBuffer(instanceMatrices.get(),
+                                   std::as_bytes(std::span(instances)));
+    if (upload.hasError()) {
+      return upload;
+    }
+    const uint64_t address = gpu.getBufferDeviceAddress(instanceMatrices.get());
+    if (address == 0u) {
+      return Result<bool, std::string>::makeError(
+          "DDGI dynamic snapshot instance buffer has no device address");
+    }
+    frameData = AnimationSceneFrameData{
+        .instanceMatricesBuffer = instanceMatrices.get(),
+        .instanceMatricesAddress = address,
+        .previousInstanceMatricesBuffer = instanceMatrices.get(),
+        .previousInstanceMatricesAddress = address,
+        .geometryOverridesByRenderable = geometryOverrides,
+        .previousGeometryOverridesByRenderable = geometryOverrides,
+        .animatedRenderableIndices = animatedRenderableIndices,
+        .scene = &scene,
+        .sceneTopologyVersion = scene.topologyVersion(),
+        .renderableCount = renderables.size(),
+        .version = frameIndex < 8u ? 1u : 2u,
+    };
+    return Result<bool, std::string>::makeResult(true);
+  }
+};
+
+class SnapshotAnimationFrameProvider final {
+public:
+  explicit SnapshotAnimationFrameProvider(
+      const SnapshotAnimationFixture &fixture) noexcept
+      : fixture_(&fixture) {}
+
+  [[nodiscard]] Result<bool, std::string> prepare(FrameBuildContext &ctx) {
+    if (fixture_ != nullptr && fixture_->frameData.has_value()) {
+      ctx.shared.animationSceneGpuData = *fixture_->frameData;
+    }
+    return Result<bool, std::string>::makeResult(true);
+  }
+
+private:
+  const SnapshotAnimationFixture *fixture_ = nullptr;
+};
+
+[[nodiscard]] std::optional<NodeId>
+findSnapshotNodeByName(const SceneGraph &graph, std::string_view name) {
+  std::vector<NodeId> pending{graph.rootNode()};
+  while (!pending.empty()) {
+    const NodeId node = pending.back();
+    pending.pop_back();
+    std::string_view candidate;
+    if (graph.getNodeName(node, candidate) && candidate == name) {
+      return node;
+    }
+    NodeId child{};
+    if (!graph.getNodeFirstChild(node, child)) {
+      continue;
+    }
+    for (;;) {
+      pending.push_back(child);
+      NodeId sibling{};
+      if (!graph.getNodeNextSibling(child, sibling)) {
+        break;
+      }
+      child = sibling;
+    }
+  }
+  return std::nullopt;
+}
 
 [[nodiscard]] std::optional<std::string>
 snapshotEnvironmentFingerprint(const SnapshotEnvironment &environment) {
@@ -635,7 +747,11 @@ populateReactiveMaskScene(const SnapshotCase &snapshotCase, Renderer &renderer,
 [[nodiscard]] Result<bool, std::string>
 populateShadowPlanesScene(const SnapshotCase &snapshotCase, Renderer &renderer,
                           RenderScene &scene) {
-  if (snapshotCase.scene.generator != "nuri.procedural.shadow_planes.v1") {
+  const bool ddgiScene =
+      snapshotCase.scene.generator.starts_with("nuri.procedural.ddgi_") &&
+      snapshotCase.scene.generator.ends_with(".v1");
+  if (snapshotCase.scene.generator != "nuri.procedural.shadow_planes.v1" &&
+      !ddgiScene) {
     return Result<bool, std::string>::makeResult(true);
   }
 
@@ -652,8 +768,10 @@ populateShadowPlanesScene(const SnapshotCase &snapshotCase, Renderer &renderer,
   }
 
   auto acquireMaterial =
-      [&](std::string_view name,
-          const glm::vec4 &color) -> Result<MaterialRef, std::string> {
+      [&](std::string_view name, const glm::vec4 &color,
+          bool doubleSided = true,
+          MaterialAlphaMode alphaMode =
+              MaterialAlphaMode::Opaque) -> Result<MaterialRef, std::string> {
     MaterialRequest request{};
     request.debugName = std::string(name);
     request.desc.baseColorFactor = color;
@@ -661,7 +779,9 @@ populateShadowPlanesScene(const SnapshotCase &snapshotCase, Renderer &renderer,
     request.desc.emissiveStrength = 1.1f;
     request.desc.metallicFactor = 0.0f;
     request.desc.roughnessFactor = 0.72f;
-    request.desc.doubleSided = true;
+    request.desc.doubleSided = doubleSided;
+    request.desc.alphaMode = alphaMode;
+    request.desc.alphaCutoff = 0.5f;
     return renderer.resources().acquireMaterial(request);
   };
 
@@ -670,13 +790,19 @@ populateShadowPlanesScene(const SnapshotCase &snapshotCase, Renderer &renderer,
   if (floorMaterial.hasError()) {
     return Result<bool, std::string>::makeError(floorMaterial.error());
   }
-  auto wallMaterial = acquireMaterial("snapshot_shadow_wall",
-                                      glm::vec4(0.58f, 0.68f, 0.78f, 1.0f));
+  const bool alphaParity = snapshotCase.scene.generator ==
+                           "nuri.procedural.ddgi_alpha_cutout_sided.v1";
+  auto wallMaterial =
+      acquireMaterial("snapshot_shadow_wall",
+                      glm::vec4(0.58f, 0.68f, 0.78f, 1.0f), !alphaParity);
   if (wallMaterial.hasError()) {
     return Result<bool, std::string>::makeError(wallMaterial.error());
   }
-  auto redMaterial = acquireMaterial("snapshot_shadow_red",
-                                     glm::vec4(0.86f, 0.18f, 0.12f, 1.0f));
+  auto redMaterial = acquireMaterial(
+      "snapshot_shadow_red",
+      alphaParity ? glm::vec4(0.86f, 0.18f, 0.12f, 0.2f)
+                  : glm::vec4(0.86f, 0.18f, 0.12f, 1.0f),
+      true, alphaParity ? MaterialAlphaMode::Mask : MaterialAlphaMode::Opaque);
   if (redMaterial.hasError()) {
     return Result<bool, std::string>::makeError(redMaterial.error());
   }
@@ -733,8 +859,71 @@ populateShadowPlanesScene(const SnapshotCase &snapshotCase, Renderer &renderer,
   if (result.hasError()) {
     return result;
   }
-  return addPlane("ShadowGreenCaster", upright, glm::vec3(1.16f, 0.06f, 0.35f),
-                  glm::vec3(0.82f, 1.34f, 1.0f), greenMaterial.value());
+  result =
+      addPlane("ShadowGreenCaster", upright, glm::vec3(1.16f, 0.06f, 0.35f),
+               glm::vec3(0.82f, 1.34f, 1.0f), greenMaterial.value());
+  if (result.hasError() || !ddgiScene) {
+    return result;
+  }
+  const glm::mat4 sideWall = glm::rotate(glm::mat4(1.0f), glm::radians(90.0f),
+                                         glm::vec3(0.0f, 0.0f, 1.0f));
+  if (snapshotCase.scene.generator == "nuri.procedural.ddgi_thin_wall.v1") {
+    result = addPlane("DDGI Thin Wall", sideWall, glm::vec3(0.05f, 0.05f, 0.1f),
+                      glm::vec3(1.7f, 1.0f, 1.35f), wallMaterial.value());
+    if (result.hasError()) {
+      return result;
+    }
+  }
+  if (snapshotCase.scene.generator ==
+      "nuri.procedural.ddgi_inside_geometry.v1") {
+    result = addPlane("DDGI Probe Intersector", sideWall,
+                      glm::vec3(0.425f, -0.425f, 0.425f),
+                      glm::vec3(0.7f, 1.0f, 0.7f), wallMaterial.value());
+    if (result.hasError()) {
+      return result;
+    }
+  }
+  glm::mat4 volumeTransform{1.0f};
+  if (snapshotCase.scene.generator ==
+      "nuri.procedural.ddgi_indoor_outdoor_boundary.v1") {
+    volumeTransform =
+        glm::translate(volumeTransform, glm::vec3(-1.4f, 0.0f, 0.0f));
+  }
+  auto volumeNode = scene.graph().createNode(
+      scene.graph().rootNode(), "DDGI Color Bleed Volume", volumeTransform);
+  if (volumeNode.hasError()) {
+    return Result<bool, std::string>::makeError(volumeNode.error());
+  }
+  auto volume = scene.graph().addDDGIVolume(
+      volumeNode.value(), DDGIVolumeDesc{.name = "DDGI Color Bleed Volume",
+                                         .probeCounts = {6u, 4u, 6u},
+                                         .probeSpacing = {0.85f, 0.85f, 0.85f},
+                                         .blendDistance = 0.85f,
+                                         .maxRayDistance = 12.0f});
+  if (volume.hasError()) {
+    return Result<bool, std::string>::makeError(volume.error());
+  }
+  if (snapshotCase.scene.generator ==
+      "nuri.procedural.ddgi_overlap_priority.v1") {
+    auto overlapNode = scene.graph().createNode(
+        scene.graph().rootNode(), "DDGI Priority Overlap Volume",
+        glm::translate(glm::mat4(1.0f), glm::vec3(0.35f, 0.0f, 0.0f)));
+    if (overlapNode.hasError()) {
+      return Result<bool, std::string>::makeError(overlapNode.error());
+    }
+    auto overlap = scene.graph().addDDGIVolume(
+        overlapNode.value(),
+        DDGIVolumeDesc{.name = "DDGI Priority Overlap Volume",
+                       .probeCounts = {5u, 4u, 5u},
+                       .probeSpacing = {0.85f, 0.85f, 0.85f},
+                       .blendDistance = 1.2f,
+                       .maxRayDistance = 12.0f,
+                       .priority = 10});
+    if (overlap.hasError()) {
+      return Result<bool, std::string>::makeError(overlap.error());
+    }
+  }
+  return Result<bool, std::string>::makeResult(true);
 }
 
 [[nodiscard]] Result<bool, std::string>
@@ -748,7 +937,9 @@ populateScene(const SnapshotCase &snapshotCase, Renderer &renderer,
                      .color = glm::vec3(1.0f),
                      .intensity = 4.0f,
                      .enabled = true};
-  if (snapshotCase.scene.generator == "nuri.procedural.shadow_planes.v1") {
+  if (snapshotCase.scene.generator == "nuri.procedural.shadow_planes.v1" ||
+      (snapshotCase.scene.generator.starts_with("nuri.procedural.ddgi_") &&
+       snapshotCase.scene.generator.ends_with(".v1"))) {
     keyLight.rotation =
         glm::quatLookAt(glm::normalize(glm::vec3(-0.45f, -0.78f, -0.44f)),
                         glm::vec3(0.0f, 1.0f, 0.0f));
@@ -1372,12 +1563,27 @@ SnapshotRunResult captureSnapshotCase(SnapshotCase snapshotCase,
     report.environment.gpuVendorId = adapter.vendorId;
     report.environment.gpuDeviceId = adapter.deviceId;
     report.environment.gpuDriverVersion = adapter.driverVersion;
+    const RayTracingCapabilities &rayTracingCaps =
+        gpu->getDeviceCaps().rayTracing;
+    if ((snapshotCase.requirements.accelerationStructure &&
+         !rayTracingCaps.accelerationStructure) ||
+        (snapshotCase.requirements.rayQuery && !rayTracingCaps.rayQuery)) {
+      result.exitCode = SnapshotExitCode::EnvironmentUnavailable;
+      result.message = "required ray-tracing capability is unavailable";
+      report.warnings.push_back(result.message);
+      writeReports(result, report, reportPath, htmlPath);
+      result.report = std::move(report);
+      return result;
+    }
 
     std::pmr::unsynchronized_pool_resource rendererMemory;
     std::pmr::unsynchronized_pool_resource pipelineMemory;
     std::pmr::unsynchronized_pool_resource sceneMemory;
     std::unique_ptr<Renderer> renderer = Renderer::create(*gpu, rendererMemory);
+    SnapshotAnimationFixture animationFixture{};
     RenderPipeline pipeline(&pipelineMemory);
+    pipeline.addProvider(
+        std::make_unique<SnapshotAnimationFrameProvider>(animationFixture));
     auto pipelineResult = registerDefaultRenderPipeline(
         pipeline, *gpu, config.shaders, &pipelineMemory);
     if (pipelineResult.hasError()) {
@@ -1420,9 +1626,54 @@ SnapshotRunResult captureSnapshotCase(SnapshotCase snapshotCase,
     const auto renderOneFrame =
         [&](bool captureFrame) -> Result<bool, std::string> {
       window->pollEvents();
+      if (snapshotCase.scene.generator ==
+              "nuri.procedural.ddgi_dynamic_settled.v1" &&
+          frameIndex == 8u) {
+        const std::optional<NodeId> node =
+            findSnapshotNodeByName(scene.graph(), "ShadowBlueCaster");
+        glm::mat4 transform{1.0f};
+        if (!node.has_value() ||
+            !scene.graph().getNodeLocalTransform(*node, transform)) {
+          return Result<bool, std::string>::makeError(
+              "DDGI dynamic snapshot target was not found");
+        }
+        transform[3] = glm::vec4(0.9f, 0.34f, 0.0f, 1.0f);
+        if (!scene.graph().setNodeLocalTransform(*node, transform)) {
+          return Result<bool, std::string>::makeError(
+              "DDGI dynamic snapshot target move failed");
+        }
+      }
+      if (snapshotCase.scene.generator ==
+              "nuri.procedural.ddgi_layout_replacement.v1" &&
+          frameIndex == 8u) {
+        DDGIVolumeId volumeId = kInvalidDDGIVolumeId;
+        scene.graph().forEachDDGIVolumeId([&](DDGIVolumeId id) {
+          if (!nuri::isValid(volumeId)) {
+            volumeId = id;
+          }
+        });
+        DDGIVolumeDesc desc{};
+        if (!nuri::isValid(volumeId) ||
+            !scene.graph().getDDGIVolume(volumeId, desc)) {
+          return Result<bool, std::string>::makeError(
+              "DDGI replacement snapshot volume was not found");
+        }
+        desc.probeCounts = {5u, 4u, 5u};
+        if (!scene.graph().updateDDGIVolume(volumeId, desc)) {
+          return Result<bool, std::string>::makeError(
+              "DDGI replacement snapshot descriptor was rejected");
+        }
+      }
       auto commitResult = scene.commit();
       if (commitResult.hasError()) {
         return Result<bool, std::string>::makeError(commitResult.error());
+      }
+      if (snapshotCase.scene.generator ==
+          "nuri.procedural.ddgi_dynamic_settled.v1") {
+        auto animation = animationFixture.publish(scene, *gpu, frameIndex);
+        if (animation.hasError()) {
+          return animation;
+        }
       }
       const Camera camera = makeSnapshotCamera(snapshotCase, frameIndex);
       buildFrameContext(frameContext, scene, *renderer, settings,
@@ -1467,6 +1718,99 @@ SnapshotRunResult captureSnapshotCase(SnapshotCase snapshotCase,
     gpu->waitIdle();
 
     report.rendererMetrics = frameContext.metrics;
+    const RayTracingSceneFrameMetrics &rt =
+        frameContext.metrics.rayTracingScene;
+    const DDGIFrameMetrics &ddgi = frameContext.metrics.ddgi;
+    for (const auto &[name, value] :
+         {std::pair<std::string_view, double>{
+              "renderer.ray_tracing.static_instances", rt.staticInstances},
+          {"renderer.ray_tracing.dynamic_instances", rt.dynamicInstances},
+          {"renderer.ray_tracing.static_blas_count", rt.staticBlasCount},
+          {"renderer.ray_tracing.dynamic_blas_count", rt.dynamicBlasCount},
+          {"renderer.ray_tracing.tlas_count", rt.tlasCount},
+          {"renderer.ray_tracing.geometry_records", rt.geometryRecords},
+          {"renderer.ray_tracing.triangles", static_cast<double>(rt.triangles)},
+          {"renderer.ray_tracing.queued_blas_builds", rt.queuedBlasBuilds},
+          {"renderer.ray_tracing.blas_builds", rt.blasBuilds},
+          {"renderer.ray_tracing.tlas_builds", rt.tlasBuilds},
+          {"renderer.ray_tracing.tlas_updates", rt.tlasUpdates},
+          {"renderer.ray_tracing.dynamic_blas_updates", rt.dynamicBlasUpdates},
+          {"renderer.ray_tracing.dynamic_vertex_dispatches",
+           rt.dynamicVertexDispatches},
+          {"renderer.ray_tracing.readiness", static_cast<double>(rt.readiness)},
+          {"renderer.ray_tracing.decoded_position_bytes",
+           static_cast<double>(rt.decodedPositionBytes)},
+          {"renderer.ray_tracing.table_bytes",
+           static_cast<double>(rt.tableBytes)},
+          {"renderer.ray_tracing.consumed_rebuild_epoch",
+           static_cast<double>(rt.consumedRebuildEpoch)},
+          {"renderer.ddgi.active_volumes", ddgi.activeVolumes},
+          {"renderer.ddgi.ready_volumes", ddgi.readyVolumes},
+          {"renderer.ddgi.total_probes", ddgi.totalProbes},
+          {"renderer.ddgi.uninitialized_probes", ddgi.uninitializedProbes},
+          {"renderer.ddgi.off_probes", ddgi.offProbes},
+          {"renderer.ddgi.sleeping_probes", ddgi.sleepingProbes},
+          {"renderer.ddgi.newly_awake_probes", ddgi.newlyAwakeProbes},
+          {"renderer.ddgi.awake_probes", ddgi.awakeProbes},
+          {"renderer.ddgi.newly_vigilant_probes", ddgi.newlyVigilantProbes},
+          {"renderer.ddgi.relocated_probes", ddgi.relocatedProbes},
+          {"renderer.ddgi.probe_state_readback_available",
+           ddgi.probeStateReadbackAvailable},
+          {"renderer.ddgi.max_relocation", ddgi.maxRelocation},
+          {"renderer.ddgi.updated_probes", ddgi.updatedProbes},
+          {"renderer.ddgi.primary_queries", ddgi.primaryQueries},
+          {"renderer.ddgi.secondary_queries_reserved",
+           ddgi.secondaryQueriesReserved},
+          {"renderer.ddgi.secondary_queries_unused",
+           ddgi.secondaryQueriesUnused},
+          {"renderer.ddgi.secondary_queries", ddgi.secondaryQueries},
+          {"renderer.ddgi.primary_candidate_intersections",
+           ddgi.primaryCandidateIntersections},
+          {"renderer.ddgi.secondary_candidate_intersections",
+           ddgi.secondaryCandidateIntersections},
+          {"renderer.ddgi.alpha_candidate_rejections",
+           ddgi.alphaCandidateRejections},
+          {"renderer.ddgi.backface_candidate_rejections",
+           ddgi.backfaceCandidateRejections},
+          {"renderer.ddgi.candidate_overflows", ddgi.candidateOverflows},
+          {"renderer.ddgi.local_light_truncations", ddgi.localLightTruncations},
+          {"renderer.ddgi.history_ready", ddgi.historyReady},
+          {"renderer.ddgi.irradiance_response_remaining",
+           ddgi.irradianceResponseRemaining},
+          {"renderer.ddgi.distance_response_remaining",
+           ddgi.distanceResponseRemaining},
+          {"renderer.ddgi.inspection_available", ddgi.inspectionAvailable},
+          {"renderer.ddgi.inspection_valid", ddgi.inspectionValid},
+          {"renderer.ddgi.inspection_ray_count", ddgi.inspectionRayCount},
+          {"renderer.ddgi.inspection_hit_count", ddgi.inspectionHitCount},
+          {"renderer.ddgi.inspection_miss_count", ddgi.inspectionMissCount},
+          {"renderer.ddgi.inspection_candidate_overflows",
+           ddgi.inspectionCandidateOverflows},
+          {"renderer.ddgi.inspection_event_overflows",
+           ddgi.inspectionEventOverflows},
+          {"renderer.ddgi.invalidated_probes", ddgi.invalidatedProbes},
+          {"renderer.ddgi.failed_volumes", ddgi.failedVolumes},
+          {"renderer.ddgi.volume_failure_reason",
+           static_cast<double>(ddgi.volumeFailureReason)},
+          {"renderer.ddgi.fallback_reason",
+           static_cast<double>(ddgi.fallbackReason)},
+          {"renderer.ddgi.persistent_bytes",
+           static_cast<double>(ddgi.persistentBytes)},
+          {"renderer.ddgi.frame_batch_bytes",
+           static_cast<double>(ddgi.frameBatchBytes)},
+          {"renderer.ddgi.submitted_sequence",
+           static_cast<double>(ddgi.submittedSequence)},
+          {"renderer.ddgi.layout_generation",
+           static_cast<double>(ddgi.layoutGeneration)},
+          {"renderer.ddgi.resource_generation",
+           static_cast<double>(ddgi.resourceGeneration)},
+          {"renderer.ddgi.device_epoch", static_cast<double>(ddgi.deviceEpoch)},
+          {"renderer.ddgi.consumed_reset_epoch",
+           static_cast<double>(ddgi.consumedResetEpoch)},
+          {"renderer.ddgi.consumed_force_update_epoch",
+           static_cast<double>(ddgi.consumedForceUpdateEpoch)}}) {
+      report.rendererMetricValues.emplace(name, value);
+    }
     auto captures = writeSnapshotCaptureArtifacts(
         *gpu, frameContext, snapshotCase.captures, caseDir, caseDir / "actual");
     if (captures.hasError()) {

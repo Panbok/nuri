@@ -6,9 +6,12 @@
 #include "nuri/core/window.h"
 #include "nuri/gfx/frame/temporal_frame_service.h"
 #include "nuri/gfx/gpu_device.h"
+#include "nuri/gfx/owned_gpu_resource.h"
 #include "nuri/gfx/pipeline/default_render_pipeline.h"
 #include "nuri/gfx/pipeline/render_pipeline.h"
 #include "nuri/gfx/renderer.h"
+#include "nuri/gfx/renderers/detail/instance_data.h"
+#include "nuri/gfx/sim/animation_scene_frame_data.h"
 #include "nuri/resources/gpu/resource_manager.h"
 #include "nuri/resources/scene_importer.h"
 #include "nuri/scene/camera.h"
@@ -29,6 +32,7 @@
 #include <array>
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <format>
@@ -45,6 +49,7 @@
 #include <string_view>
 #include <system_error>
 #include <thread>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -70,6 +75,123 @@ namespace nuri::tools::benchmark {
 namespace {
 
 constexpr double kBytesPerMiB = 1024.0 * 1024.0;
+
+struct BenchmarkAnimationFixture {
+  OwnedBufferHandle instanceMatrices{};
+  std::vector<InstanceData> instances{};
+  std::vector<AnimatedRenderableGeometryOverride> geometryOverrides{};
+  std::vector<uint32_t> animatedRenderableIndices{};
+  std::optional<AnimationSceneFrameData> frameData{};
+
+  [[nodiscard]] Result<bool, std::string>
+  publish(RenderScene &scene, GPUDevice &gpu, uint64_t frameIndex) {
+    const std::span<const Renderable> renderables = scene.renderables();
+    instances.clear();
+    geometryOverrides.assign(renderables.size(), {});
+    animatedRenderableIndices.clear();
+    instances.reserve(renderables.size());
+    for (uint32_t index = 0u; index < static_cast<uint32_t>(renderables.size());
+         ++index) {
+      const Renderable &renderable = renderables[index];
+      glm::mat4 modelMatrix = renderable.modelMatrix;
+      std::string_view name;
+      if (scene.graph().getNodeName(renderable.node, name) &&
+          name == "DDGI Benchmark Blue Caster") {
+        animatedRenderableIndices.push_back(index);
+        modelMatrix =
+            glm::translate(
+                glm::mat4(1.0f),
+                glm::vec3(0.35f *
+                              std::sin(static_cast<float>(frameIndex) * 0.15f),
+                          0.0f, 0.0f)) *
+            modelMatrix;
+      }
+      instances.push_back(makeInstanceData(modelMatrix));
+    }
+    if (instances.empty() || animatedRenderableIndices.empty()) {
+      return Result<bool, std::string>::makeError(
+          "DDGI deformation benchmark fixture is incomplete");
+    }
+    const size_t bytes = instances.size() * sizeof(InstanceData);
+    if (!instanceMatrices.valid()) {
+      auto buffer = gpu.createBuffer(BufferDesc{.usage = BufferUsage::Storage,
+                                                .storage = Storage::Device,
+                                                .size = bytes},
+                                     "benchmark_ddgi_animation_instances");
+      if (buffer.hasError()) {
+        return Result<bool, std::string>::makeError(buffer.error());
+      }
+      instanceMatrices.reset(gpu, buffer.value());
+    }
+    auto upload = gpu.updateBuffer(instanceMatrices.get(),
+                                   std::as_bytes(std::span(instances)));
+    if (upload.hasError()) {
+      return upload;
+    }
+    const uint64_t address = gpu.getBufferDeviceAddress(instanceMatrices.get());
+    if (address == 0u) {
+      return Result<bool, std::string>::makeError(
+          "DDGI deformation benchmark instance buffer has no device address");
+    }
+    frameData = AnimationSceneFrameData{
+        .instanceMatricesBuffer = instanceMatrices.get(),
+        .instanceMatricesAddress = address,
+        .previousInstanceMatricesBuffer = instanceMatrices.get(),
+        .previousInstanceMatricesAddress = address,
+        .geometryOverridesByRenderable = geometryOverrides,
+        .previousGeometryOverridesByRenderable = geometryOverrides,
+        .animatedRenderableIndices = animatedRenderableIndices,
+        .scene = &scene,
+        .sceneTopologyVersion = scene.topologyVersion(),
+        .renderableCount = renderables.size(),
+        .version = frameIndex + 1u,
+    };
+    return Result<bool, std::string>::makeResult(true);
+  }
+};
+
+class BenchmarkAnimationFrameProvider final {
+public:
+  explicit BenchmarkAnimationFrameProvider(
+      const BenchmarkAnimationFixture &fixture) noexcept
+      : fixture_(&fixture) {}
+
+  [[nodiscard]] Result<bool, std::string> prepare(FrameBuildContext &ctx) {
+    if (fixture_ != nullptr && fixture_->frameData.has_value()) {
+      ctx.shared.animationSceneGpuData = *fixture_->frameData;
+    }
+    return Result<bool, std::string>::makeResult(true);
+  }
+
+private:
+  const BenchmarkAnimationFixture *fixture_ = nullptr;
+};
+
+[[nodiscard]] std::optional<NodeId>
+findBenchmarkNodeByName(const SceneGraph &graph, std::string_view name) {
+  std::vector<NodeId> pending{graph.rootNode()};
+  while (!pending.empty()) {
+    const NodeId node = pending.back();
+    pending.pop_back();
+    std::string_view candidate;
+    if (graph.getNodeName(node, candidate) && candidate == name) {
+      return node;
+    }
+    NodeId child{};
+    if (!graph.getNodeFirstChild(node, child)) {
+      continue;
+    }
+    for (;;) {
+      pending.push_back(child);
+      NodeId sibling{};
+      if (!graph.getNodeNextSibling(child, sibling)) {
+        break;
+      }
+      child = sibling;
+    }
+  }
+  return std::nullopt;
+}
 
 using JsonMutDocPtr =
     std::unique_ptr<yyjson_mut_doc, decltype(&yyjson_mut_doc_free)>;
@@ -2560,6 +2682,140 @@ void addRendererFrameMetrics(BenchmarkFrameMeasurements &measurements,
   addIfNonzero(measurements, "renderer.transparent.pick_draws",
                metrics.transparent.pickDraws);
 
+  const RayTracingSceneFrameMetrics &rt = metrics.rayTracingScene;
+  addIfNonzero(measurements, "renderer.ray_tracing.static_instances",
+               rt.staticInstances);
+  addIfNonzero(measurements, "renderer.ray_tracing.dynamic_instances",
+               rt.dynamicInstances);
+  addIfNonzero(measurements, "renderer.ray_tracing.excluded_dynamic_instances",
+               rt.excludedDynamicInstances);
+  addIfNonzero(measurements, "renderer.ray_tracing.static_blas_count",
+               rt.staticBlasCount);
+  addIfNonzero(measurements, "renderer.ray_tracing.dynamic_blas_count",
+               rt.dynamicBlasCount);
+  addIfNonzero(measurements, "renderer.ray_tracing.tlas_count", rt.tlasCount);
+  addIfNonzero(measurements, "renderer.ray_tracing.unique_static_geometry",
+               rt.uniqueStaticGeometry);
+  addIfNonzero(measurements, "renderer.ray_tracing.geometry_records",
+               rt.geometryRecords);
+  addIfNonzero(measurements, "renderer.ray_tracing.triangles", rt.triangles);
+  addIfNonzero(measurements, "renderer.ray_tracing.queued_blas_builds",
+               rt.queuedBlasBuilds);
+  addIfNonzero(measurements, "renderer.ray_tracing.decoded_vertices",
+               rt.decodedVertices);
+  addIfNonzero(measurements, "renderer.ray_tracing.decode_dispatches",
+               rt.decodeDispatches);
+  addIfNonzero(measurements, "renderer.ray_tracing.blas_builds", rt.blasBuilds);
+  addIfNonzero(measurements, "renderer.ray_tracing.tlas_builds", rt.tlasBuilds);
+  addIfNonzero(measurements, "renderer.ray_tracing.tlas_updates",
+               rt.tlasUpdates);
+  addIfNonzero(measurements, "renderer.ray_tracing.dynamic_blas_updates",
+               rt.dynamicBlasUpdates);
+  addIfNonzero(measurements, "renderer.ray_tracing.dynamic_vertex_dispatches",
+               rt.dynamicVertexDispatches);
+  addIfNonzero(measurements, "renderer.ray_tracing.readiness",
+               static_cast<uint32_t>(rt.readiness));
+  addIfNonzero(measurements, "renderer.ray_tracing.consumed_rebuild_epoch",
+               rt.consumedRebuildEpoch);
+  addBytesAsMiB(measurements, "gpu.memory.ray_tracing.decoded_positions_mb",
+                rt.decodedPositionBytes);
+  addBytesAsMiB(measurements, "gpu.memory.ray_tracing.tables_mb",
+                rt.tableBytes);
+  const DDGIFrameMetrics &ddgi = metrics.ddgi;
+  addIfNonzero(measurements, "renderer.ddgi.active_volumes",
+               ddgi.activeVolumes);
+  addIfNonzero(measurements, "renderer.ddgi.ready_volumes", ddgi.readyVolumes);
+  addIfNonzero(measurements, "renderer.ddgi.total_probes", ddgi.totalProbes);
+  addIfNonzero(measurements, "renderer.ddgi.vigilant_probes",
+               ddgi.vigilantProbes);
+  addIfNonzero(measurements, "renderer.ddgi.uninitialized_probes",
+               ddgi.uninitializedProbes);
+  addIfNonzero(measurements, "renderer.ddgi.off_probes", ddgi.offProbes);
+  addIfNonzero(measurements, "renderer.ddgi.sleeping_probes",
+               ddgi.sleepingProbes);
+  addIfNonzero(measurements, "renderer.ddgi.newly_awake_probes",
+               ddgi.newlyAwakeProbes);
+  addIfNonzero(measurements, "renderer.ddgi.awake_probes", ddgi.awakeProbes);
+  addIfNonzero(measurements, "renderer.ddgi.newly_vigilant_probes",
+               ddgi.newlyVigilantProbes);
+  addIfNonzero(measurements, "renderer.ddgi.relocated_probes",
+               ddgi.relocatedProbes);
+  addIfNonzero(measurements, "renderer.ddgi.probe_state_readback_available",
+               ddgi.probeStateReadbackAvailable);
+  addIfNonzero(measurements, "renderer.ddgi.max_relocation",
+               ddgi.maxRelocation);
+  addIfNonzero(measurements, "renderer.ddgi.updated_probes",
+               ddgi.updatedProbes);
+  addIfNonzero(measurements, "renderer.ddgi.primary_queries",
+               ddgi.primaryQueries);
+  addIfNonzero(measurements, "renderer.ddgi.secondary_queries_reserved",
+               ddgi.secondaryQueriesReserved);
+  addIfNonzero(measurements, "renderer.ddgi.secondary_queries_unused",
+               ddgi.secondaryQueriesUnused);
+  addIfNonzero(measurements, "renderer.ddgi.secondary_queries",
+               ddgi.secondaryQueries);
+  addIfNonzero(measurements, "renderer.ddgi.primary_candidate_intersections",
+               ddgi.primaryCandidateIntersections);
+  addIfNonzero(measurements, "renderer.ddgi.secondary_candidate_intersections",
+               ddgi.secondaryCandidateIntersections);
+  addIfNonzero(measurements, "renderer.ddgi.alpha_candidate_rejections",
+               ddgi.alphaCandidateRejections);
+  addIfNonzero(measurements, "renderer.ddgi.backface_candidate_rejections",
+               ddgi.backfaceCandidateRejections);
+  addIfNonzero(measurements, "renderer.ddgi.candidate_overflows",
+               ddgi.candidateOverflows);
+  addIfNonzero(measurements, "renderer.ddgi.local_light_truncations",
+               ddgi.localLightTruncations);
+  addIfNonzero(measurements, "renderer.ddgi.ray_query_capacity",
+               ddgi.rayQueryCapacity);
+  addIfNonzero(measurements, "renderer.ddgi.probe_update_capacity",
+               ddgi.probeUpdateCapacity);
+  addIfNonzero(measurements, "renderer.ddgi.reset_count", ddgi.resetCount);
+  addIfNonzero(measurements, "renderer.ddgi.scroll_count", ddgi.scrollCount);
+  addIfNonzero(measurements, "renderer.ddgi.invalidated_probes",
+               ddgi.invalidatedProbes);
+  addIfNonzero(measurements, "renderer.ddgi.failed_volumes",
+               ddgi.failedVolumes);
+  addIfNonzero(measurements, "renderer.ddgi.volume_failure_reason",
+               static_cast<uint32_t>(ddgi.volumeFailureReason));
+  addIfNonzero(measurements, "renderer.ddgi.history_ready", ddgi.historyReady);
+  addIfNonzero(measurements, "renderer.ddgi.irradiance_response_remaining",
+               ddgi.irradianceResponseRemaining);
+  addIfNonzero(measurements, "renderer.ddgi.distance_response_remaining",
+               ddgi.distanceResponseRemaining);
+  addIfNonzero(measurements, "renderer.ddgi.inspection_available",
+               ddgi.inspectionAvailable);
+  addIfNonzero(measurements, "renderer.ddgi.inspection_valid",
+               ddgi.inspectionValid);
+  addIfNonzero(measurements, "renderer.ddgi.inspection_ray_count",
+               ddgi.inspectionRayCount);
+  addIfNonzero(measurements, "renderer.ddgi.inspection_hit_count",
+               ddgi.inspectionHitCount);
+  addIfNonzero(measurements, "renderer.ddgi.inspection_miss_count",
+               ddgi.inspectionMissCount);
+  addIfNonzero(measurements, "renderer.ddgi.inspection_candidate_overflows",
+               ddgi.inspectionCandidateOverflows);
+  addIfNonzero(measurements, "renderer.ddgi.inspection_event_overflows",
+               ddgi.inspectionEventOverflows);
+  addIfNonzero(measurements, "renderer.ddgi.sky_fallback_active",
+               ddgi.skyFallbackActive);
+  addIfNonzero(measurements, "renderer.ddgi.fallback_reason",
+               static_cast<uint32_t>(ddgi.fallbackReason));
+  addIfNonzero(measurements, "renderer.ddgi.submitted_sequence",
+               ddgi.submittedSequence);
+  addIfNonzero(measurements, "renderer.ddgi.layout_generation",
+               ddgi.layoutGeneration);
+  addIfNonzero(measurements, "renderer.ddgi.resource_generation",
+               ddgi.resourceGeneration);
+  addIfNonzero(measurements, "renderer.ddgi.device_epoch", ddgi.deviceEpoch);
+  addIfNonzero(measurements, "renderer.ddgi.consumed_reset_epoch",
+               ddgi.consumedResetEpoch);
+  addIfNonzero(measurements, "renderer.ddgi.consumed_force_update_epoch",
+               ddgi.consumedForceUpdateEpoch);
+  addBytesAsMiB(measurements, "gpu.memory.ddgi.persistent_mb",
+                ddgi.persistentBytes);
+  addBytesAsMiB(measurements, "gpu.memory.ddgi.frame_batch_mb",
+                ddgi.frameBatchBytes);
   const uint64_t estimatedFrameTextureBytes =
       shadow.cascadeTextureBytes + aa.motionVectorTotalBytes +
       aa.reactiveMaskTotalBytes + aa.motionClassTotalBytes +
@@ -2875,6 +3131,30 @@ void applyGpuTimingReport(BenchmarkReport &report,
   add(NURI_BENCHMARK_METRIC("gpu.scopes.gtao_temporal_ms"),
       GpuTimingScope::GTAOTemporal, timingReport.gtaoTemporalSourceFrameIndex,
       timingReport.gtaoTemporalTimeMs);
+  add(NURI_BENCHMARK_METRIC("gpu.scopes.ray_tracing_scene_ms"),
+      GpuTimingScope::RayTracingScene,
+      timingReport.rayTracingSceneSourceFrameIndex,
+      timingReport.rayTracingSceneTimeMs);
+  add(NURI_BENCHMARK_METRIC("gpu.scopes.ray_tracing_blas_ms"),
+      GpuTimingScope::RayTracingBLAS,
+      timingReport.rayTracingBlasSourceFrameIndex,
+      timingReport.rayTracingBlasTimeMs);
+  add(NURI_BENCHMARK_METRIC("gpu.scopes.ray_tracing_tlas_ms"),
+      GpuTimingScope::RayTracingTLAS,
+      timingReport.rayTracingTlasSourceFrameIndex,
+      timingReport.rayTracingTlasTimeMs);
+  add(NURI_BENCHMARK_METRIC("gpu.scopes.ddgi_ms"), GpuTimingScope::DDGI,
+      timingReport.ddgiSourceFrameIndex, timingReport.ddgiTimeMs);
+  add(NURI_BENCHMARK_METRIC("gpu.scopes.ddgi_trace_ms"),
+      GpuTimingScope::DDGITrace, timingReport.ddgiTraceSourceFrameIndex,
+      timingReport.ddgiTraceTimeMs);
+  add(NURI_BENCHMARK_METRIC("gpu.scopes.ddgi_update_ms"),
+      GpuTimingScope::DDGIUpdate, timingReport.ddgiUpdateSourceFrameIndex,
+      timingReport.ddgiUpdateTimeMs);
+  add(NURI_BENCHMARK_METRIC("gpu.scopes.ddgi_relocate_classify_ms"),
+      GpuTimingScope::DDGIRelocateClassify,
+      timingReport.ddgiRelocateClassifySourceFrameIndex,
+      timingReport.ddgiRelocateClassifyTimeMs);
   for (const auto &[sourceFrameIndex, sum] : scopeSumsByFrame) {
     const auto frameIt = frameByIndex.find(sourceFrameIndex);
     if (frameIt != frameByIndex.end()) {
@@ -2963,6 +3243,168 @@ populateScene(const BenchmarkCase &benchmarkCase, Renderer &renderer,
       return Result<bool, std::string>::makeError(requested.error());
     }
     sceneLoad = requested.value();
+  }
+
+  const bool ddgiMicro = benchmarkCase.scene.generator.starts_with(
+                             "nuri.procedural.ddgi_benchmark_") &&
+                         benchmarkCase.scene.generator.ends_with(".v1");
+  if (ddgiMicro) {
+    auto planePath =
+        resolveBenchmarkPath("modelsRoot", "common/flat_plane.obj");
+    if (planePath.hasError()) {
+      return Result<bool, std::string>::makeError(planePath.error());
+    }
+    auto model = renderer.resources().acquireModel(ModelRequest{
+        .path = planePath.value().string(),
+        .debugName = "benchmark_ddgi_flat_plane",
+    });
+    if (model.hasError()) {
+      return Result<bool, std::string>::makeError(model.error());
+    }
+    const bool alphaFoliage = benchmarkCase.scene.generator ==
+                              "nuri.procedural.ddgi_benchmark_alpha.v1";
+    const auto acquireMaterial =
+        [&](std::string_view name, const glm::vec4 &color,
+            MaterialAlphaMode alphaMode =
+                MaterialAlphaMode::Opaque) -> Result<MaterialRef, std::string> {
+      MaterialRequest request{};
+      request.debugName = std::string(name);
+      request.desc.baseColorFactor = color;
+      request.desc.emissiveFactor = glm::vec3(color) * 0.2f;
+      request.desc.emissiveStrength = 1.0f;
+      request.desc.metallicFactor = 0.0f;
+      request.desc.roughnessFactor = 0.75f;
+      request.desc.alphaMode = alphaMode;
+      request.desc.alphaCutoff = 0.5f;
+      request.desc.doubleSided = true;
+      return renderer.resources().acquireMaterial(request);
+    };
+    auto neutral = acquireMaterial("benchmark_ddgi_neutral",
+                                   glm::vec4(0.65f, 0.67f, 0.70f, 1.0f));
+    auto red = acquireMaterial(
+        "benchmark_ddgi_red",
+        alphaFoliage ? glm::vec4(0.82f, 0.16f, 0.10f, 0.2f)
+                     : glm::vec4(0.82f, 0.16f, 0.10f, 1.0f),
+        alphaFoliage ? MaterialAlphaMode::Mask : MaterialAlphaMode::Opaque);
+    auto blue = acquireMaterial("benchmark_ddgi_blue",
+                                glm::vec4(0.10f, 0.28f, 0.82f, 1.0f));
+    if (neutral.hasError() || red.hasError() || blue.hasError()) {
+      return Result<bool, std::string>::makeError(
+          "failed to create DDGI benchmark materials");
+    }
+    const glm::mat4 upright = glm::rotate(glm::mat4(1.0f), glm::radians(90.0f),
+                                          glm::vec3(1.0f, 0.0f, 0.0f));
+    const auto addPlane =
+        [&](std::string_view name, const glm::mat4 &orientation,
+            const glm::vec3 &translation, const glm::vec3 &scale,
+            MaterialRef material) -> Result<bool, std::string> {
+      const glm::mat4 transform = glm::translate(glm::mat4(1.0f), translation) *
+                                  orientation *
+                                  glm::scale(glm::mat4(1.0f), scale);
+      auto node =
+          scene.graph().createNode(scene.graph().rootNode(), name, transform);
+      if (node.hasError()) {
+        return Result<bool, std::string>::makeError(node.error());
+      }
+      auto renderable =
+          scene.graph().addRenderable(node.value(), model.value(), material);
+      return renderable.hasError()
+                 ? Result<bool, std::string>::makeError(renderable.error())
+                 : Result<bool, std::string>::makeResult(true);
+    };
+    for (const auto &[name, orientation, translation, scale, material] :
+         {std::tuple<std::string_view, glm::mat4, glm::vec3, glm::vec3,
+                     MaterialRef>{"DDGI Benchmark Floor", glm::mat4(1.0f),
+                                  glm::vec3(0.0f, -0.75f, 0.0f),
+                                  glm::vec3(5.0f, 1.0f, 4.0f), neutral.value()},
+          {"DDGI Benchmark Wall", upright, glm::vec3(0.0f, 0.65f, -1.4f),
+           glm::vec3(5.0f, 2.8f, 1.0f), neutral.value()},
+          {"DDGI Benchmark Red Caster", upright, glm::vec3(-0.9f, 0.2f, 0.1f),
+           glm::vec3(0.7f, 1.6f, 1.0f), red.value()},
+          {"DDGI Benchmark Blue Caster", upright, glm::vec3(0.4f, 0.3f, 0.0f),
+           glm::vec3(0.7f, 1.9f, 1.0f), blue.value()}}) {
+      auto added = addPlane(name, orientation, translation, scale, material);
+      if (added.hasError()) {
+        return added;
+      }
+    }
+    if (alphaFoliage) {
+      for (uint32_t index = 0u; index < 16u; ++index) {
+        const float x = -1.8f + 0.24f * static_cast<float>(index);
+        const float z = -0.9f + 0.1f * static_cast<float>(index % 5u);
+        auto added = addPlane("DDGI Benchmark Alpha Foliage", upright,
+                              glm::vec3(x, 0.15f, z),
+                              glm::vec3(0.35f, 1.5f, 1.0f), red.value());
+        if (added.hasError()) {
+          return added;
+        }
+      }
+    }
+    if (benchmarkCase.scene.generator ==
+        "nuri.procedural.ddgi_benchmark_lights.v1") {
+      for (uint32_t index = 0u; index < 16u; ++index) {
+        const float x = -2.0f + 0.27f * static_cast<float>(index);
+        auto light = scene.graph().addLight(
+            scene.graph().rootNode(),
+            LightDesc{.type = LightType::Point,
+                      .name = "benchmark_ddgi_local",
+                      .position = glm::vec3(x, 0.9f, -0.5f),
+                      .color = glm::vec3(1.0f, 0.65f, 0.35f),
+                      .intensity = 8.0f,
+                      .range = 5.0f,
+                      .enabled = true});
+        if (light.hasError()) {
+          return Result<bool, std::string>::makeError(light.error());
+        }
+      }
+    }
+    const uint32_t volumeCount =
+        benchmarkCase.scene.generator ==
+                "nuri.procedural.ddgi_benchmark_four_volume.v1"
+            ? 4u
+            : 1u;
+    for (uint32_t index = 0u; index < volumeCount; ++index) {
+      const glm::vec3 offset =
+          volumeCount == 1u ? glm::vec3(0.0f)
+                            : glm::vec3((index & 1u) != 0u ? 1.4f : -1.4f, 0.0f,
+                                        (index & 2u) != 0u ? 1.0f : -1.0f);
+      auto node = scene.graph().createNode(
+          scene.graph().rootNode(), "DDGI Benchmark Volume",
+          glm::translate(glm::mat4(1.0f), offset));
+      if (node.hasError()) {
+        return Result<bool, std::string>::makeError(node.error());
+      }
+      auto volume = scene.graph().addDDGIVolume(
+          node.value(),
+          DDGIVolumeDesc{.name = "DDGI Benchmark Volume",
+                         .probeCounts = volumeCount == 1u
+                                            ? glm::uvec3(12u, 6u, 12u)
+                                            : glm::uvec3(8u, 4u, 8u),
+                         .probeSpacing = {0.65f, 0.65f, 0.65f},
+                         .blendDistance = 0.65f,
+                         .maxRayDistance = 12.0f,
+                         .priority = static_cast<int32_t>(index)});
+      if (volume.hasError()) {
+        return Result<bool, std::string>::makeError(volume.error());
+      }
+    }
+  }
+
+  if (benchmarkCase.scene.generator == "nuri.ddgi.volume.v1") {
+    auto volumeNode = scene.graph().createNode(
+        scene.graph().rootNode(), "Benchmark DDGI Volume", glm::mat4(1.0f));
+    if (volumeNode.hasError()) {
+      return Result<bool, std::string>::makeError(volumeNode.error());
+    }
+    auto volume = scene.graph().addDDGIVolume(
+        volumeNode.value(), DDGIVolumeDesc{.name = "Benchmark DDGI Volume",
+                                           .probeCounts = {24u, 12u, 24u},
+                                           .probeSpacing = {4.0f, 4.0f, 4.0f},
+                                           .blendDistance = 8.0f,
+                                           .maxRayDistance = 120.0f});
+    if (volume.hasError()) {
+      return Result<bool, std::string>::makeError(volume.error());
+    }
   }
 
   auto syncResult = scene.graph().syncWorldTransforms();
@@ -4485,6 +4927,17 @@ BenchmarkRunResult runBenchmarkCase(BenchmarkCase benchmarkCase,
     report.environment.gpuVendorId = adapter.vendorId;
     report.environment.gpuDeviceId = adapter.deviceId;
     report.environment.gpuDriverVersion = adapter.driverVersion;
+    const RayTracingCapabilities &rayTracingCaps =
+        gpu->getDeviceCaps().rayTracing;
+    if ((benchmarkCase.requirements.accelerationStructure &&
+         !rayTracingCaps.accelerationStructure) ||
+        (benchmarkCase.requirements.rayQuery && !rayTracingCaps.rayQuery)) {
+      result.exitCode = BenchmarkExitCode::EnvironmentUnavailable;
+      result.message = "required ray-tracing capability is unavailable";
+      report.run.validForComparison = false;
+      report.warnings.push_back(result.message);
+      return finishDiagnosticsAndFinalize();
+    }
     std::string gpuRequirementMessage;
     auto gpuRequirements = checkBenchmarkGpuRequirements(
         benchmarkCase.requirements, gpu->getMultisampleCapabilities(),
@@ -4506,7 +4959,10 @@ BenchmarkRunResult runBenchmarkCase(BenchmarkCase benchmarkCase,
         &pipelineMemoryTracker);
     std::pmr::unsynchronized_pool_resource sceneMemory(&sceneMemoryTracker);
     std::unique_ptr<Renderer> renderer = Renderer::create(*gpu, rendererMemory);
+    BenchmarkAnimationFixture animationFixture{};
     RenderPipeline pipeline(&pipelineMemory);
+    pipeline.addProvider(
+        std::make_unique<BenchmarkAnimationFrameProvider>(animationFixture));
     auto pipelineResult = registerDefaultRenderPipeline(
         pipeline, *gpu, config.shaders, &pipelineMemory);
     if (pipelineResult.hasError()) {
@@ -4595,12 +5051,36 @@ BenchmarkRunResult runBenchmarkCase(BenchmarkCase benchmarkCase,
       frame.sampleIndex = sampleIndex;
       frame.measured = measured;
       const auto totalBegin = std::chrono::steady_clock::now();
+      if (benchmarkCase.scene.generator ==
+          "nuri.procedural.ddgi_benchmark_rigid.v1") {
+        const std::optional<NodeId> node = findBenchmarkNodeByName(
+            scene.graph(), "DDGI Benchmark Blue Caster");
+        glm::mat4 transform{1.0f};
+        if (!node.has_value() ||
+            !scene.graph().getNodeLocalTransform(*node, transform)) {
+          return Result<bool, std::string>::makeError(
+              "DDGI rigid benchmark target was not found");
+        }
+        transform[3].x =
+            0.4f + 0.35f * std::sin(static_cast<float>(frameIndex) * 0.15f);
+        if (!scene.graph().setNodeLocalTransform(*node, transform)) {
+          return Result<bool, std::string>::makeError(
+              "DDGI rigid benchmark target move failed");
+        }
+      }
       const auto commitBegin = std::chrono::steady_clock::now();
       auto commitResult = scene.commit();
       if (commitResult.hasError()) {
         return Result<bool, std::string>::makeError(commitResult.error());
       }
       const double sceneCommitMs = elapsedMs(commitBegin);
+      if (benchmarkCase.scene.generator ==
+          "nuri.procedural.ddgi_benchmark_deformation.v1") {
+        auto animation = animationFixture.publish(scene, *gpu, frameIndex);
+        if (animation.hasError()) {
+          return animation;
+        }
+      }
       buildFrameContext(
           frameContext, scene, *renderer, settings, temporalFrameService,
           camera, frameIndex, timeSeconds, benchmarkCase.fixedDeltaSeconds,

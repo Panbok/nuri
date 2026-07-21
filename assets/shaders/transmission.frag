@@ -337,6 +337,11 @@ void main() {
     out_FragColor = aoDebugColor;
     return;
   }
+  vec4 ddgiDebugColor;
+  if (tryDDGIDebugColor(sm, vtx.worldPos, ddgiDebugColor)) {
+    out_FragColor = ddgiDebugColor;
+    return;
+  }
 
   // Direct lighting ---------------------------------------------------
   // Keep transmission on the reduced direct-light model.
@@ -452,7 +457,7 @@ void main() {
   }
 
   // IBL ---------------------------------------------------------------
-  IblResult ibl = evaluateIbl(sm);
+  IblResult ibl = evaluateIbl(sm, vtx.worldPos);
 
   vec3 indirectTransmission = vec3(0.0);
   if (hasTransmission &&

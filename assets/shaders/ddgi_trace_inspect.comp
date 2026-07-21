@@ -1,0 +1,192 @@
+// NURI_SHADER_FEATURE_RAY_QUERY
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+#define NURI_CUSTOM_PUSH_CONSTANTS 1
+#include "common.sp"
+#include "ddgi_common.sp"
+#include "rt_material.sp"
+
+struct DDGIDiagnosticHeaderGpuData {
+  uvec4 requestAndSelection;
+  uvec4 counts0;
+  uvec4 counts1;
+  uvec4 identity0;
+  uvec4 identity1;
+  uvec4 identity2;
+  vec4 nominalWorldPosition;
+  vec4 relocatedWorldPosition;
+  vec4 irradianceDistanceMean;
+  vec4 distanceSecondReserved;
+};
+struct DDGIDiagnosticRayGpuData {
+  vec4 originAndDistance;
+  vec4 directionAndKind;
+};
+struct DDGIDiagnosticEventGpuData {
+  uvec4 metadata;
+  vec4 distanceBarycentrics;
+};
+layout(std430, buffer_reference) buffer DDGIDiagnosticHeaderBuffer {
+  DDGIDiagnosticHeaderGpuData value;
+};
+layout(std430, buffer_reference) buffer DDGIDiagnosticRayBuffer {
+  DDGIDiagnosticRayGpuData values[];
+};
+layout(std430, buffer_reference) buffer DDGIDiagnosticEventBuffer {
+  DDGIDiagnosticEventGpuData values[];
+};
+
+layout(push_constant) uniform PushConstants {
+  DDGIFrameBuffer frame;
+  DDGIDiagnosticHeaderBuffer header;
+  DDGIDiagnosticRayBuffer rays;
+  DDGIDiagnosticEventBuffer events;
+  RtInstanceBuffer instances;
+  RtGeometryBuffer geometries;
+  MaterialHeaderBuffer materials;
+  uvec2 requestId;
+  uvec2 sceneId;
+  uvec2 layoutGeneration;
+  uvec2 resourceGeneration;
+  uvec2 deviceEpoch;
+  uint volumeValue;
+  uint volumeSlot;
+  uint probeId;
+  uint rayCount;
+  uint maxCandidates;
+  uint frameSeed;
+  uint materialSamplerId;
+  uint submissionSequence;
+} pc;
+
+const uint kDiagnosticEventsPerRay = 9u;
+
+void writeCandidateEvent(uint ray, uint eventIndex, uint flags,
+                         uint instanceIndex, uint geometryIndex,
+                         uint primitive, float distance, vec2 barycentrics) {
+  if (eventIndex >= 8u) {
+    atomicAdd(pc.header.value.counts1.y, 1u);
+    return;
+  }
+  const uint eventOutput = ray * kDiagnosticEventsPerRay + eventIndex;
+  pc.events.values[eventOutput].metadata =
+      uvec4(flags, instanceIndex, geometryIndex, primitive);
+  pc.events.values[eventOutput].distanceBarycentrics =
+      vec4(distance, barycentrics, 0.0);
+}
+
+void main() {
+  const uint ray = gl_GlobalInvocationID.x;
+  if (ray >= pc.rayCount) return;
+  DDGIVolumeGpuData volume = pc.frame.volumes[pc.volumeSlot];
+  const uvec3 counts = volume.probeCountsAndCount.xyz;
+  const uint xy = counts.x * counts.y;
+  const uvec3 physical = uvec3(pc.probeId % counts.x,
+      (pc.probeId % xy) / counts.x, pc.probeId / xy);
+  const uvec3 logical =
+      (physical + counts - volume.ringOriginAndFlags.xyz) % counts;
+  const DDGIProbeStateGpuData state = volume.probeStates.values[pc.probeId];
+  const vec3 nominalLocal = ddgiNominalLocalPosition(volume, logical);
+  const vec3 relocatedLocal = nominalLocal + state.relocation.xyz;
+  const vec3 nominalWorld =
+      (volume.worldFromLocal * vec4(nominalLocal, 1.0)).xyz;
+  const vec3 origin =
+      (volume.worldFromLocal * vec4(relocatedLocal, 1.0)).xyz;
+  if (ray == 0u) {
+    pc.header.value.requestAndSelection =
+        uvec4(pc.requestId,
+              pc.volumeSlot, pc.probeId);
+    pc.header.value.counts1.z = state.stateAgeFlags.x;
+    pc.header.value.counts1.w = state.stateAgeFlags.y;
+    pc.header.value.identity0 =
+        uvec4(pc.sceneId,
+              pc.volumeValue, pc.rayCount);
+    pc.header.value.identity1 =
+        uvec4(pc.layoutGeneration, pc.resourceGeneration);
+    pc.header.value.identity2 =
+        uvec4(pc.deviceEpoch,
+              pc.submissionSequence, 0u);
+    pc.header.value.nominalWorldPosition = vec4(nominalWorld, 1.0);
+    pc.header.value.relocatedWorldPosition = vec4(origin, 1.0);
+    const vec3 sampleDirection = vec3(0.0, 1.0, 0.0);
+    const vec2 irradianceUv =
+        ddgiAtlasUv(volume.irradianceAtlas, pc.probeId, sampleDirection, 8.0);
+    const vec2 distanceUv =
+        ddgiAtlasUv(volume.distanceAtlas, pc.probeId, sampleDirection, 16.0);
+    const uint samplerId = pc.frame.activeCountDebugFlagsSampler.w;
+    const vec3 encoded = textureBindless2DLod(
+        volume.irradianceAtlas.x, samplerId, irradianceUv, 0.0).rgb;
+    const vec2 moments = textureBindless2DLod(
+        volume.distanceAtlas.x, samplerId, distanceUv, 0.0).rg;
+    pc.header.value.irradianceDistanceMean =
+        vec4(pow(max(encoded, vec3(0.0)), vec3(kDDGIIrradianceGamma)),
+             moments.x);
+    pc.header.value.distanceSecondReserved = vec4(moments.y, 0.0, 0.0, 0.0);
+  }
+
+  const vec3 direction = ddgiRayDirection(ray, pc.rayCount, pc.frameSeed);
+  rayQueryEXT query;
+  rayQueryInitializeEXT(query, kSceneTlas, gl_RayFlagsNoneEXT, 0xff, origin,
+                        ddgiProbeRayTMin(volume.probeSpacingAndBias.xyz),
+                        direction,
+                        volume.centerHalfExtentsAndMaxDistance.w);
+  uint candidates = 0u;
+  bool overflow = false;
+  while (rayQueryProceedEXT(query)) {
+    const uint instanceIndex =
+        rayQueryGetIntersectionInstanceCustomIndexEXT(query, false);
+    const RtInstanceGpuData instance = pc.instances.values[instanceIndex];
+    const uint geometryIndex = instance.geometryRenderableFlags.x +
+        rayQueryGetIntersectionGeometryIndexEXT(query, false);
+    RtGeometryGpuData geometry = pc.geometries.values[geometryIndex];
+    const uint primitive =
+        rayQueryGetIntersectionPrimitiveIndexEXT(query, false);
+    const vec2 barycentrics =
+        rayQueryGetIntersectionBarycentricsEXT(query, false);
+    const float distance = rayQueryGetIntersectionTEXT(query, false);
+    if (++candidates > pc.maxCandidates) {
+      overflow = true;
+      atomicAdd(pc.header.value.counts1.x, 1u);
+      break;
+    }
+    uint flags = rayQueryGetIntersectionFrontFaceEXT(query, false) ? 1u : 0u;
+    if ((geometry.flags & kRtGeometryDoubleSided) != 0u) flags |= 2u;
+    if ((geometry.flags & kRtGeometryAlphaMasked) != 0u) flags |= 4u;
+    writeCandidateEvent(ray, candidates - 1u, flags, instanceIndex,
+                        geometryIndex, primitive, distance, barycentrics);
+    if ((geometry.flags &
+         (kRtGeometryAlphaBlended | kRtGeometryTransmission)) != 0u ||
+        !rtAlphaPasses(geometry, instance, primitive, barycentrics,
+                       pc.materials, pc.materialSamplerId, distance,
+                       pc.rayCount)) {
+      atomicAdd(pc.header.value.counts0.z, 1u);
+      continue;
+    }
+    if ((flags & 1u) == 0u && (flags & 2u) == 0u) {
+      atomicAdd(pc.header.value.counts0.w, 1u);
+      continue;
+    }
+    rayQueryConfirmIntersectionEXT(query);
+  }
+
+  uint terminalKind = 0u;
+  float terminalDistance = volume.centerHalfExtentsAndMaxDistance.w;
+  if (overflow) {
+    terminalKind = 3u;
+  } else if (rayQueryGetIntersectionTypeEXT(query, true) !=
+             gl_RayQueryCommittedIntersectionNoneEXT) {
+    terminalKind = 1u;
+    terminalDistance = rayQueryGetIntersectionTEXT(query, true);
+    atomicAdd(pc.header.value.counts0.x, 1u);
+  } else {
+    atomicAdd(pc.header.value.counts0.y, 1u);
+  }
+  pc.rays.values[ray].originAndDistance = vec4(origin, terminalDistance);
+  pc.rays.values[ray].directionAndKind =
+      vec4(direction, uintBitsToFloat(terminalKind));
+  const uint terminal = ray * kDiagnosticEventsPerRay + 8u;
+  pc.events.values[terminal].metadata =
+      uvec4(0x80000000u | terminalKind, 0u, 0u, 0u);
+  pc.events.values[terminal].distanceBarycentrics =
+      vec4(terminalDistance, 0.0, 0.0, 0.0);
+}

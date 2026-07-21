@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "id": "correctness.procedural.ddgi_alpha_mask_double_sided",
+  "suite": "correctness",
+  "description": "Exercises alpha-mask rejection and single/double-sided ray-query material parity",
+  "scene": {"kind": "procedural", "generator": "nuri.procedural.ddgi_alpha_mask_double_sided.v1", "seed": 1, "contentHash": "nuri.procedural.ddgi_alpha_mask_double_sided.v1:1"},
+  "backend": "default",
+  "resolution": [640, 360],
+  "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 4,
+  "endFrame": 14,
+  "authoritative": false,
+  "presentMode": "immediate",
+  "windowMode": "visible",
+  "renderGraph": {"workerCount": 1, "parallelCompile": false, "parallelRecording": false},
+  "camera": {"position": [0.0, 0.75, 4.2], "target": [0.0, 0.25, 0.0], "verticalFovDegrees": 60.0, "nearPlane": 0.05, "farPlane": 100.0},
+  "settings": {
+    "ddgi": {"enabled": true, "preset": "Low", "raysPerProbe": 128, "maxProbeUpdatesPerFrame": 144, "maxRayQueriesPerFrame": 36864, "debugView": "Visibility"},
+    "opaque": {"enableInstanceAnimation": false},
+    "antiAliasing": {"mode": "None"},
+    "ambientOcclusion": {"mode": "Disabled"},
+    "shadow": {"enabled": true, "qualityPreset": "Low"}
+  },
+  "checkpoints": [
+    {
+      "id": "material_parity",
+      "frame": 12,
+      "captures": [{"target": "frame_color_hdr", "profile": "hdr_color", "required": true, "compare": false}],
+      "assertions": [
+        {"id": "alpha_candidates_rejected", "metric": "renderer.ddgi.alpha_candidate_rejections", "greaterOrEqual": 1},
+        {"id": "backfaces_rejected", "metric": "renderer.ddgi.backface_candidate_rejections", "greaterOrEqual": 1},
+        {"id": "candidate_budget_not_overflowed", "metric": "renderer.ddgi.candidate_overflows", "equals": 0},
+        {"id": "history_ready", "metric": "renderer.ddgi.history_ready", "equals": 1}
+      ]
+    }
+  ],
+  "requirements": {"assets": ["modelsRoot:common/flat_plane.obj"], "backends": [], "allowVisibleWindow": true, "accelerationStructure": true, "rayQuery": true}
+}

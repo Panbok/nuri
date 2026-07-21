@@ -396,6 +396,9 @@ TransparentRenderer::prepareTransparentPasses(RenderFrameContext &frame) {
   for (const TextureHandle handle : materialTextureAccessHandles_) {
     appendUniqueForwardHandle(passTextureReads_, handle);
   }
+  for (const TextureHandle handle : sceneGpu->indirectDependencyTextures) {
+    appendUniqueForwardHandle(passTextureReads_, handle);
+  }
   const uint32_t stableOrderBase = saturateToU32(sortableDraws_.size());
   for (const TransparentStageSortableDraw &source : contributorSortableDraws_) {
     sortableDraws_.push_back(source);
@@ -423,6 +426,9 @@ TransparentRenderer::prepareTransparentPasses(RenderFrameContext &frame) {
                             instanceMatricesBufferHandle);
   appendUniqueForwardHandle(passDependencyBuffers_,
                             instanceRemapRing_[frameSlot].buffer->handle());
+  for (const BufferHandle handle : sceneGpu->indirectDependencyBuffers) {
+    appendUniqueForwardHandle(passDependencyBuffers_, handle);
+  }
   if ((sceneGpu->shadowFlags & kShadowFrameFlagEnabled) != 0u) {
     const auto &shadowFrameGpuData = frame.sharedResources.shadowFrameGpuData;
     appendUniqueForwardHandle(passDependencyBuffers_,

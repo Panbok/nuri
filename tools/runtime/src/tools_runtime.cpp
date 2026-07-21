@@ -3,6 +3,7 @@
 #include "nuri/core/runtime_config.h"
 #include "nuri/core/window.h"
 #include "nuri/gfx/pipeline/default_render_pipeline.h"
+#include "nuri/gfx/sim/animation_scene_frame_data.h"
 #include "nuri/resources/gpu/resource_manager.h"
 #include "nuri/resources/scene_importer.h"
 
@@ -20,6 +21,23 @@
 
 namespace nuri::tools::runtime {
 namespace {
+
+class ToolAnimationFrameProvider final {
+public:
+  explicit ToolAnimationFrameProvider(
+      const std::optional<AnimationSceneFrameData> &frameData) noexcept
+      : frameData_(&frameData) {}
+
+  [[nodiscard]] Result<bool, std::string> prepare(FrameBuildContext &ctx) {
+    if (frameData_ != nullptr && frameData_->has_value()) {
+      ctx.shared.animationSceneGpuData = **frameData_;
+    }
+    return Result<bool, std::string>::makeResult(true);
+  }
+
+private:
+  const std::optional<AnimationSceneFrameData> *frameData_ = nullptr;
+};
 
 class ScopedEnvVar final {
 public:
@@ -475,7 +493,11 @@ populateOcclusionWallScene(const ToolRuntimeDesc &runtime, Renderer &renderer,
 [[nodiscard]] Result<bool, std::string>
 populateShadowPlanesScene(const ToolRuntimeDesc &runtime, Renderer &renderer,
                           RenderScene &scene) {
-  if (runtime.scene.generator != "nuri.procedural.shadow_planes.v1") {
+  const bool ddgiScene =
+      runtime.scene.generator.starts_with("nuri.procedural.ddgi_") &&
+      runtime.scene.generator.ends_with(".v1");
+  if (runtime.scene.generator != "nuri.procedural.shadow_planes.v1" &&
+      !ddgiScene) {
     return Result<bool, std::string>::makeResult(true);
   }
 
@@ -492,9 +514,10 @@ populateShadowPlanesScene(const ToolRuntimeDesc &runtime, Renderer &renderer,
     return Result<bool, std::string>::makeError(modelResult.error());
   }
 
-  auto acquireMaterial =
-      [&](std::string_view name,
-          const glm::vec4 &color) -> Result<MaterialRef, std::string> {
+  auto acquireMaterial = [&](std::string_view name, const glm::vec4 &color,
+                             bool doubleSided = true,
+                             bool alphaMasked =
+                                 false) -> Result<MaterialRef, std::string> {
     MaterialRequest request{};
     request.debugName = std::string(name);
     request.desc.baseColorFactor = color;
@@ -502,16 +525,26 @@ populateShadowPlanesScene(const ToolRuntimeDesc &runtime, Renderer &renderer,
     request.desc.emissiveStrength = 1.1f;
     request.desc.metallicFactor = 0.0f;
     request.desc.roughnessFactor = 0.72f;
-    request.desc.doubleSided = true;
+    request.desc.doubleSided = doubleSided;
+    request.desc.alphaMode =
+        alphaMasked ? MaterialAlphaMode::Mask : MaterialAlphaMode::Opaque;
+    request.desc.alphaCutoff = 0.5f;
     return renderer.resources().acquireMaterial(request);
   };
+
+  const bool alphaParityScene =
+      runtime.scene.generator ==
+      "nuri.procedural.ddgi_alpha_mask_double_sided.v1";
 
   auto floorMaterial = acquireMaterial("tool_shadow_floor",
                                        glm::vec4(0.72f, 0.70f, 0.64f, 1.0f));
   auto wallMaterial =
-      acquireMaterial("tool_shadow_wall", glm::vec4(0.58f, 0.68f, 0.78f, 1.0f));
-  auto redMaterial =
-      acquireMaterial("tool_shadow_red", glm::vec4(0.86f, 0.18f, 0.12f, 1.0f));
+      acquireMaterial("tool_shadow_wall", glm::vec4(0.58f, 0.68f, 0.78f, 1.0f),
+                      !alphaParityScene);
+  auto redMaterial = acquireMaterial(
+      "tool_shadow_red",
+      glm::vec4(0.86f, 0.18f, 0.12f, alphaParityScene ? 0.2f : 1.0f), true,
+      alphaParityScene);
   auto blueMaterial =
       acquireMaterial("tool_shadow_blue", glm::vec4(0.12f, 0.36f, 0.88f, 1.0f));
   auto greenMaterial = acquireMaterial("tool_shadow_green",
@@ -565,8 +598,109 @@ populateShadowPlanesScene(const ToolRuntimeDesc &runtime, Renderer &renderer,
   if (result.hasError()) {
     return result;
   }
-  return addPlane("ShadowGreenCaster", upright, glm::vec3(1.16f, 0.06f, 0.35f),
-                  glm::vec3(0.82f, 1.34f, 1.0f), greenMaterial.value());
+  result =
+      addPlane("ShadowGreenCaster", upright, glm::vec3(1.16f, 0.06f, 0.35f),
+               glm::vec3(0.82f, 1.34f, 1.0f), greenMaterial.value());
+  if (result.hasError() || !ddgiScene) {
+    return result;
+  }
+  auto volumeNode = scene.graph().createNode(
+      scene.graph().rootNode(), "DDGI Color Bleed Volume", glm::mat4(1.0f));
+  if (volumeNode.hasError()) {
+    return Result<bool, std::string>::makeError(volumeNode.error());
+  }
+  auto volume = scene.graph().addDDGIVolume(
+      volumeNode.value(),
+      DDGIVolumeDesc{
+          .name = "DDGI Color Bleed Volume",
+          .probeCounts = {6u, 4u, 6u},
+          .probeSpacing = {0.85f, 0.85f, 0.85f},
+          .blendDistance = 0.85f,
+          .maxRayDistance = 12.0f,
+          .mode = runtime.scene.generator ==
+                          "nuri.procedural.ddgi_camera_tracking_scroll.v1"
+                      ? DDGIVolumeMode::CameraTracked
+                      : DDGIVolumeMode::Authored});
+  if (volume.hasError()) {
+    return Result<bool, std::string>::makeError(volume.error());
+  }
+  if (runtime.scene.generator == "nuri.procedural.ddgi_failure_isolation.v1") {
+    for (uint32_t index = 0u; index < 2u; ++index) {
+      auto largeNode = scene.graph().createNode(
+          scene.graph().rootNode(), "DDGI Large Volume", glm::mat4(1.0f));
+      if (largeNode.hasError()) {
+        return Result<bool, std::string>::makeError(largeNode.error());
+      }
+      auto large = scene.graph().addDDGIVolume(
+          largeNode.value(),
+          DDGIVolumeDesc{.name = "DDGI Large Volume",
+                         .probeCounts = {64u, 16u, 64u},
+                         .probeSpacing = {0.1f, 0.1f, 0.1f},
+                         .blendDistance = 0.1f,
+                         .maxRayDistance = 12.0f,
+                         .priority = -static_cast<int32_t>(index + 1u)});
+      if (large.hasError()) {
+        return Result<bool, std::string>::makeError(large.error());
+      }
+    }
+  }
+  if (runtime.scene.generator ==
+      "nuri.procedural.ddgi_resource_replacement.v1") {
+    auto guardNode = scene.graph().createNode(
+        scene.graph().rootNode(), "DDGI Replacement Budget Guard",
+        glm::translate(glm::mat4(1.0f), glm::vec3(-8.0f, 0.0f, 0.0f)));
+    if (guardNode.hasError()) {
+      return Result<bool, std::string>::makeError(guardNode.error());
+    }
+    auto guard = scene.graph().addDDGIVolume(
+        guardNode.value(),
+        DDGIVolumeDesc{.name = "DDGI Replacement Budget Guard",
+                       .probeCounts = {64u, 16u, 64u},
+                       .probeSpacing = {0.1f, 0.1f, 0.1f},
+                       .blendDistance = 0.1f,
+                       .maxRayDistance = 12.0f,
+                       .priority = -10});
+    if (guard.hasError()) {
+      return Result<bool, std::string>::makeError(guard.error());
+    }
+    auto replacementNode = scene.graph().createNode(
+        scene.graph().rootNode(), "DDGI Replacement Target",
+        glm::translate(glm::mat4(1.0f), glm::vec3(8.0f, 0.0f, 0.0f)));
+    if (replacementNode.hasError()) {
+      return Result<bool, std::string>::makeError(replacementNode.error());
+    }
+    auto replacement = scene.graph().addDDGIVolume(
+        replacementNode.value(),
+        DDGIVolumeDesc{.name = "DDGI Replacement Target",
+                       .probeCounts = {5u, 4u, 5u},
+                       .probeSpacing = {0.85f, 0.85f, 0.85f},
+                       .blendDistance = 0.85f,
+                       .maxRayDistance = 12.0f,
+                       .priority = -5});
+    if (replacement.hasError()) {
+      return Result<bool, std::string>::makeError(replacement.error());
+    }
+  }
+  if (runtime.scene.generator == "nuri.procedural.ddgi_overlap_fallback.v1") {
+    auto overlapNode = scene.graph().createNode(
+        scene.graph().rootNode(), "DDGI Priority Overlap Volume",
+        glm::translate(glm::mat4(1.0f), glm::vec3(0.35f, 0.0f, 0.0f)));
+    if (overlapNode.hasError()) {
+      return Result<bool, std::string>::makeError(overlapNode.error());
+    }
+    auto overlap = scene.graph().addDDGIVolume(
+        overlapNode.value(),
+        DDGIVolumeDesc{.name = "DDGI Priority Overlap Volume",
+                       .probeCounts = {5u, 4u, 5u},
+                       .probeSpacing = {0.85f, 0.85f, 0.85f},
+                       .blendDistance = 1.2f,
+                       .maxRayDistance = 12.0f,
+                       .priority = 10});
+    if (overlap.hasError()) {
+      return Result<bool, std::string>::makeError(overlap.error());
+    }
+  }
+  return Result<bool, std::string>::makeResult(true);
 }
 
 [[nodiscard]] Result<bool, std::string>
@@ -581,7 +715,9 @@ populateToolScene(const ToolRuntimeDesc &runtime, Renderer &renderer,
                      .color = glm::vec3(1.0f),
                      .intensity = 4.0f,
                      .enabled = true};
-  if (runtime.scene.generator == "nuri.procedural.shadow_planes.v1") {
+  if (runtime.scene.generator == "nuri.procedural.shadow_planes.v1" ||
+      (runtime.scene.generator.starts_with("nuri.procedural.ddgi_") &&
+       runtime.scene.generator.ends_with(".v1"))) {
     keyLight.rotation =
         glm::quatLookAt(glm::normalize(glm::vec3(-0.45f, -0.78f, -0.44f)),
                         glm::vec3(0.0f, 1.0f, 0.0f));
@@ -686,6 +822,7 @@ struct ToolRendererRuntime::Impl {
   std::unique_ptr<Window> window{};
   std::unique_ptr<GPUDevice> gpu{};
   std::unique_ptr<Renderer> renderer{};
+  std::optional<AnimationSceneFrameData> externalAnimationSceneFrameData{};
   RenderPipeline pipeline;
   RenderScene scene;
   SceneLoadHandle sceneLoad{};
@@ -737,6 +874,10 @@ ToolRendererRuntime::pumpAssetLoads() {
 Result<bool, std::string> ToolRendererRuntime::commitScene() {
   return impl_->scene.commit();
 }
+void ToolRendererRuntime::setExternalAnimationSceneFrameData(
+    const AnimationSceneFrameData &frameData) noexcept {
+  impl_->externalAnimationSceneFrameData = frameData;
+}
 
 Result<std::unique_ptr<ToolRendererRuntime>, std::string>
 createToolRendererRuntime(const ToolRuntimeDesc &desc) {
@@ -766,6 +907,8 @@ createToolRendererRuntime(const ToolRuntimeDesc &desc) {
         "failed to create GPU device");
   }
   impl->renderer = Renderer::create(*impl->gpu, impl->rendererMemory);
+  impl->pipeline.addProvider(std::make_unique<ToolAnimationFrameProvider>(
+      impl->externalAnimationSceneFrameData));
   auto pipelineResult = registerDefaultRenderPipeline(
       impl->pipeline, *impl->gpu, config.shaders, &impl->pipelineMemory);
   if (pipelineResult.hasError()) {

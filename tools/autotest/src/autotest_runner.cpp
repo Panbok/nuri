@@ -16,6 +16,9 @@
 #include "nuri/tools/snapshot/snapshot_image.h"
 
 #include "nuri/core/profiling.h"
+#include "nuri/gfx/owned_gpu_resource.h"
+#include "nuri/gfx/renderers/detail/instance_data.h"
+#include "nuri/gfx/sim/animation_scene_frame_data.h"
 #include "nuri/resources/gpu/resource_manager.h"
 
 #include <algorithm>
@@ -54,6 +57,174 @@ struct ResolvedWindowMode {
   std::string value{};
   std::string source{};
 };
+
+struct AutotestAnimationFixture {
+  OwnedBufferHandle instanceMatrices{};
+  std::vector<InstanceData> instances{};
+  std::vector<AnimatedRenderableGeometryOverride> geometryOverrides{};
+  std::vector<uint32_t> animatedRenderableIndices{};
+
+  [[nodiscard]] Result<bool, std::string>
+  publish(nuri::tools::runtime::ToolRendererRuntime &runtime,
+          uint64_t frameIndex) {
+    const std::span<const Renderable> renderables =
+        runtime.scene().renderables();
+    if (renderables.empty()) {
+      return Result<bool, std::string>::makeError(
+          "dynamic DDGI fixture has no renderables");
+    }
+    instances.clear();
+    geometryOverrides.assign(renderables.size(), {});
+    animatedRenderableIndices.clear();
+    instances.reserve(renderables.size());
+    for (uint32_t index = 0u; index < static_cast<uint32_t>(renderables.size());
+         ++index) {
+      const Renderable &renderable = renderables[index];
+      instances.push_back(makeInstanceData(renderable.modelMatrix));
+      std::string_view name;
+      if (runtime.scene().graph().getNodeName(renderable.node, name) &&
+          name == "ShadowBlueCaster") {
+        animatedRenderableIndices.push_back(index);
+      }
+    }
+    if (animatedRenderableIndices.empty()) {
+      return Result<bool, std::string>::makeError(
+          "dynamic DDGI fixture could not find ShadowBlueCaster");
+    }
+    const size_t bytes = instances.size() * sizeof(InstanceData);
+    if (!instanceMatrices.valid()) {
+      auto buffer =
+          runtime.gpu().createBuffer(BufferDesc{.usage = BufferUsage::Storage,
+                                                .storage = Storage::Device,
+                                                .size = bytes},
+                                     "autotest_ddgi_animation_instances");
+      if (buffer.hasError()) {
+        return Result<bool, std::string>::makeError(buffer.error());
+      }
+      instanceMatrices.reset(runtime.gpu(), buffer.value());
+    }
+    auto upload = runtime.gpu().updateBuffer(
+        instanceMatrices.get(), std::as_bytes(std::span(instances)));
+    if (upload.hasError()) {
+      return upload;
+    }
+    const uint64_t address =
+        runtime.gpu().getBufferDeviceAddress(instanceMatrices.get());
+    if (address == 0u) {
+      return Result<bool, std::string>::makeError(
+          "dynamic DDGI fixture instance buffer has no device address");
+    }
+    runtime.setExternalAnimationSceneFrameData(AnimationSceneFrameData{
+        .instanceMatricesBuffer = instanceMatrices.get(),
+        .instanceMatricesAddress = address,
+        .previousInstanceMatricesBuffer = instanceMatrices.get(),
+        .previousInstanceMatricesAddress = address,
+        .geometryOverridesByRenderable = geometryOverrides,
+        .previousGeometryOverridesByRenderable = geometryOverrides,
+        .animatedRenderableIndices = animatedRenderableIndices,
+        .scene = &runtime.scene(),
+        .sceneTopologyVersion = runtime.scene().topologyVersion(),
+        .renderableCount = renderables.size(),
+        .version = frameIndex + 1u,
+    });
+    return Result<bool, std::string>::makeResult(true);
+  }
+};
+
+[[nodiscard]] std::optional<NodeId> findNodeByName(const SceneGraph &graph,
+                                                   std::string_view name) {
+  std::vector<NodeId> pending{graph.rootNode()};
+  while (!pending.empty()) {
+    const NodeId node = pending.back();
+    pending.pop_back();
+    std::string_view candidate;
+    if (graph.getNodeName(node, candidate) && candidate == name) {
+      return node;
+    }
+    NodeId child{};
+    if (!graph.getNodeFirstChild(node, child)) {
+      continue;
+    }
+    for (;;) {
+      pending.push_back(child);
+      NodeId sibling{};
+      if (!graph.getNodeNextSibling(child, sibling)) {
+        break;
+      }
+      child = sibling;
+    }
+  }
+  return std::nullopt;
+}
+
+[[nodiscard]] Result<bool, std::string>
+applySceneEvents(RenderScene &scene,
+                 std::span<const AutotestTimelineEvent *const> events) {
+  SceneGraph &graph = scene.graph();
+  for (const AutotestTimelineEvent *event : events) {
+    if (event == nullptr) {
+      continue;
+    }
+    if (event->type == "setDirectionalLightIntensity") {
+      LightId selected = kInvalidLightId;
+      graph.forEachLightId([&](LightId id) {
+        if (nuri::isValid(selected)) {
+          return;
+        }
+        LightDesc desc{};
+        if (graph.getLightDesc(id, desc) &&
+            desc.type == LightType::Directional) {
+          selected = id;
+        }
+      });
+      LightDesc desc{};
+      if (!nuri::isValid(selected) || !graph.getLightDesc(selected, desc)) {
+        return Result<bool, std::string>::makeError(
+            "setDirectionalLightIntensity found no directional light");
+      }
+      desc.intensity = event->intensity;
+      if (!graph.updateLight(selected, desc)) {
+        return Result<bool, std::string>::makeError(
+            "setDirectionalLightIntensity failed to update the light");
+      }
+      continue;
+    }
+    if (event->type == "setNodeTranslation") {
+      const std::optional<NodeId> node = findNodeByName(graph, event->target);
+      glm::mat4 transform{1.0f};
+      if (!node.has_value() || !graph.getNodeLocalTransform(*node, transform)) {
+        return Result<bool, std::string>::makeError(
+            "setNodeTranslation target was not found: " + event->target);
+      }
+      transform[3] = glm::vec4(event->translation, 1.0f);
+      if (!graph.setNodeLocalTransform(*node, transform)) {
+        return Result<bool, std::string>::makeError(
+            "setNodeTranslation failed for target: " + event->target);
+      }
+      continue;
+    }
+    if (event->type == "setDDGIVolumeProbeCounts") {
+      std::vector<DDGIVolumeId> volumes;
+      graph.forEachDDGIVolumeId(
+          [&](DDGIVolumeId id) { volumes.push_back(id); });
+      if (event->volumeIndex >= volumes.size()) {
+        return Result<bool, std::string>::makeError(
+            "setDDGIVolumeProbeCounts volumeIndex is out of range");
+      }
+      DDGIVolumeDesc desc{};
+      if (!graph.getDDGIVolume(volumes[event->volumeIndex], desc)) {
+        return Result<bool, std::string>::makeError(
+            "setDDGIVolumeProbeCounts failed to read the volume");
+      }
+      desc.probeCounts = event->probeCounts;
+      if (!graph.updateDDGIVolume(volumes[event->volumeIndex], desc)) {
+        return Result<bool, std::string>::makeError(
+            "setDDGIVolumeProbeCounts rejected the descriptor");
+      }
+    }
+  }
+  return Result<bool, std::string>::makeResult(true);
+}
 
 [[nodiscard]] Result<bool, std::string> waitForDeterministicToolAssets(
     nuri::tools::runtime::ToolRendererRuntime &runtime) {
@@ -1602,12 +1773,30 @@ AutotestRunResult runAutotestCase(AutotestCase testCase,
     }
     std::unique_ptr<nuri::tools::runtime::ToolRendererRuntime> runtime =
         std::move(runtimeResult.value());
+    const bool dynamicDDGIFixture =
+        testCase.scene.generator ==
+        "nuri.procedural.ddgi_dynamic_deformation.v1";
+    AutotestAnimationFixture animationFixture{};
     report.environment.swapchainImageCount = runtime->swapchainImageCount();
     const GPUAdapterInfo adapter = runtime->gpu().getAdapterInfo();
     report.environment.gpuDeviceName = adapter.name;
     report.environment.gpuVendorId = adapter.vendorId;
     report.environment.gpuDeviceId = adapter.deviceId;
     report.environment.gpuDriverVersion = adapter.driverVersion;
+    const RayTracingCapabilities &rayTracingCaps =
+        runtime->gpu().getDeviceCaps().rayTracing;
+    if ((testCase.requirements.accelerationStructure &&
+         !rayTracingCaps.accelerationStructure) ||
+        (testCase.requirements.rayQuery && !rayTracingCaps.rayQuery)) {
+      result.exitCode = AutotestExitCode::EnvironmentUnavailable;
+      result.message = "required ray-tracing capability is unavailable";
+      report.run.validForComparison = false;
+      report.warnings.push_back(result.message);
+      initializeDryRunCheckpoints(report);
+      writeReports(result, report, reportPath, htmlPath);
+      result.report = std::move(report);
+      return result;
+    }
     evaluateAutotestBaselineProfile(report);
     if (comparesBaseline && !report.baselineProfileCompatible) {
       result.exitCode = AutotestExitCode::InvalidInput;
@@ -1648,6 +1837,13 @@ AutotestRunResult runAutotestCase(AutotestCase testCase,
         drainStartedAt = std::chrono::steady_clock::now();
       }
       runtime->window().pollEvents();
+      auto sceneEvents = applySceneEvents(runtime->scene(), frame.sceneEvents);
+      if (sceneEvents.hasError()) {
+        result.exitCode = AutotestExitCode::RuntimeError;
+        result.message = sceneEvents.error();
+        report.errors.push_back(result.message);
+        break;
+      }
       auto commitResult = runtime->commitScene();
       if (commitResult.hasError()) {
         result.exitCode = AutotestExitCode::RuntimeError;
@@ -1673,9 +1869,41 @@ AutotestRunResult runAutotestCase(AutotestCase testCase,
               .height = testCase.resolution[1],
               .cameraCutRequested = frame.cameraCut,
           });
+      if (dynamicDDGIFixture) {
+        auto animation = animationFixture.publish(*runtime, frame.frame);
+        if (animation.hasError()) {
+          result.exitCode = AutotestExitCode::RuntimeError;
+          result.message = animation.error();
+          report.errors.push_back(result.message);
+          break;
+        }
+      }
       runtime->frameContext().captureRequests.clear();
       runtime->frameContext().opaquePickRequest.reset();
       runtime->frameContext().shadowInspectRequest.reset();
+      runtime->frameContext().ddgiProbeInspectRequest.reset();
+      runtime->frameContext().ddgiProbeInspectResult.reset();
+      if (testCase.ddgiProbeInspection.has_value() &&
+          testCase.ddgiProbeInspection->frame == frame.frame) {
+        const AutotestDDGIProbeInspection &inspection =
+            *testCase.ddgiProbeInspection;
+        const std::span<const RenderDDGIVolume> volumes =
+            runtime->scene().ddgiVolumes();
+        if (inspection.volumeIndex >= volumes.size()) {
+          result.exitCode = AutotestExitCode::RuntimeError;
+          result.message =
+              "ddgiProbeInspection volumeIndex is not active in the scene";
+          report.errors.push_back(result.message);
+          break;
+        }
+        runtime->frameContext().ddgiProbeInspectRequest =
+            DDGIProbeInspectRequest{
+                .requestId = static_cast<uint64_t>(frame.frame) + 1u,
+                .volume = volumes[inspection.volumeIndex].id,
+                .probeId = inspection.probeId,
+                .rayCount = inspection.rayCount,
+            };
+      }
       for (const AutotestCheckpoint *checkpoint : frame.checkpoints) {
         for (const AutotestCaptureTarget &capture : checkpoint->captures) {
           runtime->frameContext().captureRequests.request(capture.target);

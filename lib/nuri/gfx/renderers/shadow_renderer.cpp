@@ -450,14 +450,6 @@ void appendAnimatedGeometryDependencies(
     appendUniqueBufferDependency(dependencies, geometryOverride.vertexBuffer);
   }
 }
-[[nodiscard]] std::span<const ComputeDispatchItem>
-shadowCascadePreDispatches(const AnimationSceneFrameData *animationSceneData,
-                           uint32_t cascadeIndex) {
-  if (cascadeIndex != 0u || animationSceneData == nullptr) {
-    return {};
-  }
-  return animationSceneData->preDispatches;
-}
 struct StaticOnlyGuardBandTexels {
   float ortho = 0.0f;
   float depth = 0.0f;
@@ -1518,8 +1510,9 @@ void ShadowRenderer::rebuildSceneCache(const SceneDrawDatabase &database) {
     meshDrawTemplates_.push_back(draw);
     const uint32_t index =
         static_cast<uint32_t>(meshDrawTemplates_.size() - 1u);
-    (draw.dynamicCaster ? dynamicShadowTemplateIndices_
-                        : staticShadowTemplateIndices_)
+    (database.instances()[draw.instanceIndex].dynamicCaster
+         ? dynamicShadowTemplateIndices_
+         : staticShadowTemplateIndices_)
         .push_back(index);
     if (draw.alphaMasked) {
       appendUniqueTextureDependency(passTextureDependencies_,
@@ -4584,8 +4577,6 @@ ShadowRenderer::appendShadowDepthPasses(RenderFrameContext &frame,
       publishStaticOnlyCascadeState(cascadeIndex, shadowDepthTexture);
       continue;
     }
-    const std::span<const ComputeDispatchItem> preDispatches =
-        shadowCascadePreDispatches(animationSceneData, cascadeIndex);
     const auto &submittedDraws = cascadeIndirectDrawItems_[cascadeIndex];
     RenderGraphGraphicsPassDesc desc{
         .hasColorAttachment = false,
@@ -4597,7 +4588,6 @@ ShadowRenderer::appendShadowDepthPasses(RenderFrameContext &frame,
         .viewport = {.width = shadowViewportWidth,
                      .height = shadowViewportHeight,
                      .maxDepth = 1.0f},
-        .preDispatches = preDispatches,
         .dependencyBuffers = passDependencyBuffers_,
         .dependencyBufferAccessModes = passDependencyBufferAccessModes_,
         .dependencyTextures = passDependencyTextures_,

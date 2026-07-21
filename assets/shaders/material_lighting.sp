@@ -2,6 +2,8 @@
 // fragment shader passes. Include after common.sp, BRDF.sp, and
 // material_inputs.sp.
 
+#include "ddgi_common.sp"
+
 float applySpecularAARoughnessBias(float roughness, vec3 shadingNormal) {
   vec3 dndx = dFdx(shadingNormal);
   vec3 dndy = dFdy(shadingNormal);
@@ -884,7 +886,58 @@ DirectLightingResult evaluateDirectLighting(ShadedMaterial sm, vec3 worldPos) {
   return r;
 }
 
-IblResult evaluateIbl(ShadedMaterial sm) {
+vec3 ddgiDebugVolumeColor(uint index) {
+  const vec3 colors[4] = vec3[4](
+      vec3(0.95, 0.25, 0.15), vec3(0.15, 0.75, 1.0),
+      vec3(0.35, 1.0, 0.25), vec3(0.9, 0.3, 1.0));
+  return colors[int(min(index, 3u))];
+}
+
+bool tryDDGIDebugColor(ShadedMaterial sm, vec3 worldPos,
+                       out vec4 debugColor) {
+  const uint view = pc.frameData.ddgiDebugView;
+  if (view == 0u || pc.frameData.ddgiFlags == 0u) {
+    return false;
+  }
+  const DDGIQueryResult ddgi = queryDDGI(
+      DDGIFrameBuffer(pc.frameData.ddgiFrameBufferAddress), worldPos,
+      sm.ambientBentNormal, sm.v);
+  vec3 color = vec3(0.0);
+  if (view == 1u || view == 6u) {
+    color = ddgi.irradiance / (vec3(1.0) + ddgi.irradiance);
+  } else if (view == 2u) {
+    if (ddgi.firstVolume != 0xffffffffu) {
+      color += ddgiDebugVolumeColor(ddgi.firstVolume) * ddgi.firstWeight;
+    }
+    if (ddgi.secondVolume != 0xffffffffu) {
+      color += ddgiDebugVolumeColor(ddgi.secondVolume) * ddgi.secondWeight;
+    }
+  } else if (view == 3u) {
+    color = vec3(ddgi.firstWeight, ddgi.secondWeight, ddgi.skyWeight);
+  } else if (view == 4u) {
+    color = vec3(clamp(ddgi.historyConfidence, 0.0, 1.0));
+  } else if (view == 5u) {
+    color = vec3(clamp(ddgi.visibility, 0.0, 1.0));
+  } else if (view == 7u) {
+    color = vec3(clamp(ddgi.distanceMean, 0.0, 1.0));
+  } else if (view == 8u) {
+    color = vec3(clamp(ddgi.distanceVariance * 16.0, 0.0, 1.0));
+  } else if (view == 9u) {
+    color = vec3(clamp(ddgi.classification, 0.0, 1.0),
+                 1.0 - clamp(ddgi.classification, 0.0, 1.0), 0.1);
+  } else if (view == 10u) {
+    color = vec3(clamp(ddgi.relocation, 0.0, 1.0), 0.2, 0.0);
+  } else if (view == 11u) {
+    color = vec3(clamp(ddgi.updateAge, 0.0, 1.0));
+  } else {
+    const float leak = clamp(ddgi.leakRisk, 0.0, 1.0);
+    color = vec3(leak, 1.0 - leak, 0.0);
+  }
+  debugColor = vec4(color, 1.0);
+  return true;
+}
+
+IblResult evaluateIbl(ShadedMaterial sm, vec3 worldPos) {
   IblResult r;
   r.iblDiffuse = vec3(0.0);
   r.iblSpecular = vec3(0.0);
@@ -917,12 +970,23 @@ IblResult evaluateIbl(ShadedMaterial sm) {
         sm.sheenColor, sm.sheenWeight, sheenBrdfLutSample);
   }
 
-  if ((pc.frameData.flags & kFrameDataFlagHasIblDiffuse) != 0u &&
-      pc.frameData.irradianceTexId != kInvalidTextureBindlessIndex) {
-    vec3 irradiance =
-        textureBindlessCube(pc.frameData.irradianceTexId,
-                            pc.frameData.cubemapSamplerId,
-                            sm.ambientBentNormal).rgb;
+  const bool hasSkyDiffuse =
+      (pc.frameData.flags & kFrameDataFlagHasIblDiffuse) != 0u &&
+      pc.frameData.irradianceTexId != kInvalidTextureBindlessIndex;
+  const bool hasDDGI = pc.frameData.ddgiFlags != 0u;
+  if (hasSkyDiffuse || hasDDGI) {
+    const vec3 skyIrradiance = hasSkyDiffuse
+        ? textureBindlessCube(pc.frameData.irradianceTexId,
+                              pc.frameData.cubemapSamplerId,
+                              sm.ambientBentNormal).rgb
+        : vec3(0.0);
+    vec3 irradiance = skyIrradiance;
+    if (hasDDGI) {
+      const DDGIQueryResult ddgi = queryDDGI(
+          DDGIFrameBuffer(pc.frameData.ddgiFrameBufferAddress), worldPos,
+          sm.ambientBentNormal, sm.v);
+      irradiance = ddgi.irradiance + skyIrradiance * ddgi.skyWeight;
+    }
     if (!sm.iorCompatMode) {
       r.iblDiffuse = hasBrdfLut
                          ? computeIblDiffuse(sm.diffuseColor, sm.f0, sm.f90,

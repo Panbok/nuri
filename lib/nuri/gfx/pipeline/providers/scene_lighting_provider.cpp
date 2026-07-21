@@ -305,6 +305,9 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
     shadowFlags =
         kShadowFrameFlagEnabled | shadowDebugFrameFlags(shadowSettings.debug);
   }
+  const DDGIFrameGpuDataHandle *ddgiFrame =
+      ctx.shared.ddgiFrameGpuData.has_value() ? &*ctx.shared.ddgiFrameGpuData
+                                              : nullptr;
   const ForwardSceneFrameData frameData{
       .view = frame.camera.view,
       .proj = frame.camera.proj,
@@ -344,6 +347,12 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
       .shadowFlags = shadowFlags,
       .materialCoverageSamplerId = materialCoverageSamplerId,
       .materialDataSamplerId = materialDataSamplerId,
+      .ddgiFrameBufferAddress =
+          ddgiFrame != nullptr ? ddgiFrame->bufferAddress : 0u,
+      .ddgiFlags = ddgiFrame != nullptr ? ddgiFrame->flags : 0u,
+      .ddgiDebugView = ddgiFrame != nullptr
+                           ? static_cast<uint32_t>(ddgiFrame->debugView)
+                           : 0u,
       .previousViewProj = ctx.shared.sceneDepthPyramidSourceViewProj.value_or(
           frame.camera.currentUnjitteredViewProj),
       .sceneDepthPyramidInfo = sceneDepthPyramidInfo,
@@ -409,6 +418,12 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
       .directionalLightCount = directionalLightCount,
       .localLightCount = localLightCount,
       .shadowFlags = shadowFlags,
+      .indirectDependencyBuffers = ddgiFrame != nullptr
+                                       ? ddgiFrame->dependencyBuffers
+                                       : std::span<const BufferHandle>{},
+      .indirectDependencyTextures = ddgiFrame != nullptr
+                                        ? ddgiFrame->dependencyTextures
+                                        : std::span<const TextureHandle>{},
   };
   return Result<bool, std::string>::makeResult(true);
 }

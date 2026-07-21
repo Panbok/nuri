@@ -33,6 +33,9 @@ const glm::vec4 kVisibilityInsideColor(0.18f, 1.0f, 0.32f, 1.0f);
 const glm::vec4 kVisibilityIntersectingColor(1.0f, 0.78f, 0.16f, 1.0f);
 const glm::vec4 kVisibilityOutsideColor(1.0f, 0.18f, 0.12f, 1.0f);
 const glm::vec4 kVisibilityConservativeColor(0.88f, 0.42f, 1.0f, 1.0f);
+const glm::vec4 kDDGIVolumeColor(0.2f, 0.72f, 1.0f, 0.9f);
+const glm::vec4 kSelectedDDGIVolumeColor(1.0f, 0.5f, 0.12f, 1.0f);
+const glm::vec4 kDDGIGridColor(0.18f, 0.58f, 0.82f, 0.45f);
 [[nodiscard]] glm::vec3 safeNormalize(const glm::vec3 &value,
                                       const glm::vec3 &fallback) {
   const float length = glm::length(value);
@@ -421,6 +424,71 @@ bool drawShadowDebugOverlay(DebugDraw3D &debugDraw,
   }
   return hasLines;
 }
+
+bool drawDDGIVolumeOverlays(DebugDraw3D &debugDraw,
+                            const RenderFrameContext &frame,
+                            const glm::mat4 &view, float &sortDepth) {
+  if (frame.scene == nullptr) {
+    return false;
+  }
+  const RenderSettings::DDGISettings &settings =
+      renderSettingsOrDefault(frame).ddgi;
+  const DDGIVolumeId selected =
+      frame.sharedResources.selectedDDGIVolumeId.value_or(kInvalidDDGIVolumeId);
+  if (!settings.showVolumes && !isValid(selected)) {
+    return false;
+  }
+  bool drew = false;
+  for (const RenderDDGIVolume &volume : frame.scene->ddgiVolumes()) {
+    const bool isSelected = isValid(selected) && volume.id == selected;
+    if (!settings.showVolumes && !isSelected) {
+      continue;
+    }
+    const glm::vec3 extents =
+        0.5f * glm::vec3(volume.probeCounts - 1u) * volume.probeSpacing;
+    glm::vec3 trackedCenter(0.0f);
+    if (volume.mode == DDGIVolumeMode::CameraTracked) {
+      const glm::vec3 cameraLocal = glm::vec3(
+          glm::inverse(volume.worldFromLocal) * frame.camera.cameraPos);
+      trackedCenter =
+          glm::vec3(ddgiCameraCell(cameraLocal, volume.probeSpacing)) *
+          volume.probeSpacing;
+    }
+    const glm::mat4 transform =
+        volume.worldFromLocal * glm::translate(glm::mat4(1.0f), trackedCenter);
+    debugDraw.box(transform, extents,
+                  isSelected ? kSelectedDDGIVolumeColor : kDDGIVolumeColor);
+    const glm::vec3 center = glm::vec3(transform[3]);
+    sortDepth = std::max(sortDepth, -(view * glm::vec4(center, 1.0f)).z);
+    drew = true;
+    if (!isSelected) {
+      continue;
+    }
+    const glm::vec3 axisX = glm::normalize(glm::vec3(transform[0]));
+    const glm::vec3 axisY = glm::normalize(glm::vec3(transform[1]));
+    const glm::vec3 axisZ = glm::normalize(glm::vec3(transform[2]));
+    const float axisLength =
+        std::max(0.25f, std::min({volume.probeSpacing.x, volume.probeSpacing.y,
+                                  volume.probeSpacing.z}));
+    debugDraw.line(center, center + axisX * axisLength,
+                   glm::vec4(1.0f, 0.15f, 0.12f, 1.0f));
+    debugDraw.line(center, center + axisY * axisLength,
+                   glm::vec4(0.15f, 1.0f, 0.2f, 1.0f));
+    debugDraw.line(center, center + axisZ * axisLength,
+                   glm::vec4(0.2f, 0.45f, 1.0f, 1.0f));
+    const int gridX = static_cast<int>(std::min(volume.probeCounts.x, 16u));
+    const int gridY = static_cast<int>(std::min(volume.probeCounts.y, 16u));
+    const int gridZ = static_cast<int>(std::min(volume.probeCounts.z, 16u));
+    const glm::vec4 outline = kSelectedDDGIVolumeColor * 0.75f;
+    debugDraw.plane(center, axisX, axisZ, gridX, gridZ, 2.0f * extents.x,
+                    2.0f * extents.z, kDDGIGridColor, outline);
+    debugDraw.plane(center, axisX, axisY, gridX, gridY, 2.0f * extents.x,
+                    2.0f * extents.y, kDDGIGridColor, outline);
+    debugDraw.plane(center, axisZ, axisY, gridZ, gridY, 2.0f * extents.z,
+                    2.0f * extents.y, kDDGIGridColor, outline);
+  }
+  return drew;
+}
 } // namespace
 
 DebugRenderer::DebugRenderer(GPUDevice &gpu, DebugRendererConfig config,
@@ -437,13 +505,13 @@ Result<bool, std::string> DebugRenderer::createGridShaders() {
   if (nuri::isValid(gridVertexShader_) && nuri::isValid(gridFragmentShader_)) {
     return Result<bool, std::string>::makeResult(true);
   }
-  if (config_.vertex.empty() || config_.fragment.empty()) {
+  if (config_.grid.vertex.empty() || config_.grid.fragment.empty()) {
     return Result<bool, std::string>::makeError(
         "DebugRenderer::createGridShaders: vertex or fragment shader path is "
         "empty");
   }
   auto shader = Shader::create("debug_grid", gpu_);
-  const std::string vertexShaderPath = config_.vertex.string();
+  const std::string vertexShaderPath = config_.grid.vertex.string();
   auto vertexResult =
       shader->compileFromFile(vertexShaderPath, ShaderStage::Vertex);
   if (vertexResult.hasError()) {
@@ -451,7 +519,7 @@ Result<bool, std::string> DebugRenderer::createGridShaders() {
     gridFragmentShader_ = {};
     return Result<bool, std::string>::makeError(vertexResult.error());
   }
-  const std::string fragmentShaderPath = config_.fragment.string();
+  const std::string fragmentShaderPath = config_.grid.fragment.string();
   auto fragmentResult =
       shader->compileFromFile(fragmentShaderPath, ShaderStage::Fragment);
   if (fragmentResult.hasError()) {
@@ -502,6 +570,229 @@ DebugRenderer::ensureGridPipeline(Format colorFormat, Format depthFormat) {
 }
 
 Result<bool, std::string>
+DebugRenderer::ensureDDGIProbePipeline(Format colorFormat, Format depthFormat) {
+  if (!nuri::isValid(ddgiProbeVertexShader_) ||
+      !nuri::isValid(ddgiProbeFragmentShader_)) {
+    if (config_.ddgi.probeDebugVertex.empty() ||
+        config_.ddgi.probeDebugFragment.empty()) {
+      return Result<bool, std::string>::makeError(
+          "DebugRenderer: DDGI probe debug shader path is empty");
+    }
+    auto shader = Shader::create("ddgi_probe_debug", gpu_);
+    auto vertex = shader->compileFromFile(
+        config_.ddgi.probeDebugVertex.string(), ShaderStage::Vertex);
+    if (vertex.hasError()) {
+      return Result<bool, std::string>::makeError(vertex.error());
+    }
+    auto fragment = shader->compileFromFile(
+        config_.ddgi.probeDebugFragment.string(), ShaderStage::Fragment);
+    if (fragment.hasError()) {
+      return Result<bool, std::string>::makeError(fragment.error());
+    }
+    ddgiProbeVertexShader_ = vertex.value();
+    ddgiProbeFragmentShader_ = fragment.value();
+  }
+  if (ddgiProbePipeline_.valid() &&
+      ddgiProbePipelineColorFormat_ == colorFormat &&
+      ddgiProbePipelineDepthFormat_ == depthFormat) {
+    return Result<bool, std::string>::makeResult(true);
+  }
+  ddgiProbePipeline_.reset();
+  const RenderPipelineDesc desc{
+      .vertexInput = {},
+      .vertexShader = ddgiProbeVertexShader_,
+      .fragmentShader = ddgiProbeFragmentShader_,
+      .colorFormats = {colorFormat},
+      .depthFormat = depthFormat,
+      .cullMode = CullMode::None,
+      .polygonMode = PolygonMode::Fill,
+      .topology = Topology::Triangle,
+      .blendEnabled = true,
+      .rasterState = depthFormat != Format::Count
+                         ? makeRasterPipelineState(
+                               DepthState{.compareOp = CompareOp::LessEqual,
+                                          .isDepthWriteEnabled = false})
+                         : RasterPipelineState{},
+  };
+  auto pipeline = gpu_.createRenderPipeline(desc, "DDGI Probe Debug Pipeline");
+  if (pipeline.hasError()) {
+    return Result<bool, std::string>::makeError(pipeline.error());
+  }
+  ddgiProbePipeline_.reset(gpu_, pipeline.value());
+  ddgiProbePipelineColorFormat_ = colorFormat;
+  ddgiProbePipelineDepthFormat_ = depthFormat;
+  return Result<bool, std::string>::makeResult(true);
+}
+
+Result<bool, std::string>
+DebugRenderer::prepareDDGIProbeDraws(const RenderFrameContext &frame,
+                                     TextureHandle depthTexture) {
+  ddgiProbeDrawCount_ = 0u;
+  if (!renderSettingsOrDefault(frame).ddgi.showProbes ||
+      !frame.sharedResources.ddgiFrameGpuData.has_value()) {
+    return Result<bool, std::string>::makeResult(true);
+  }
+  const DDGIFrameGpuDataHandle &ddgi = *frame.sharedResources.ddgiFrameGpuData;
+  if (!nuri::isValid(ddgi.buffer) || ddgi.bufferAddress == 0u ||
+      ddgi.activeVolumeCount == 0u) {
+    return Result<bool, std::string>::makeResult(true);
+  }
+  const Format depthFormat = nuri::isValid(depthTexture)
+                                 ? gpu_.getTextureFormat(depthTexture)
+                                 : Format::Count;
+  const TextureHandle colorTexture = frame.sharedResources.frameColorTexture;
+  const Format colorFormat = nuri::isValid(colorTexture)
+                                 ? gpu_.getTextureFormat(colorTexture)
+                                 : gpu_.getSwapchainFormat();
+  auto pipeline = ensureDDGIProbePipeline(colorFormat, depthFormat);
+  if (pipeline.hasError()) {
+    return pipeline;
+  }
+  const glm::mat4 worldFromView = glm::inverse(frame.camera.view);
+  const glm::vec3 cameraRight = glm::normalize(glm::vec3(worldFromView[0]));
+  const glm::vec3 cameraUp = glm::normalize(glm::vec3(worldFromView[1]));
+  ddgiProbeDrawCount_ = std::min(ddgi.activeVolumeCount, kMaxDDGIVolumes);
+  for (uint32_t slot = 0u; slot < ddgiProbeDrawCount_; ++slot) {
+    const float size =
+        std::clamp(ddgi.minimumProbeSpacing[slot] * 0.075f, 0.025f, 1.0f);
+    ddgiProbePushConstants_[slot] = DDGIProbePushConstants{
+        .viewProjection = cameraCurrentUnjitteredViewProjection(frame.camera),
+        .cameraRightAndScale = glm::vec4(cameraRight, size),
+        .cameraUpAndDebugView =
+            glm::vec4(cameraUp, static_cast<float>(ddgi.debugView)),
+        .frameAddress = ddgi.bufferAddress,
+        .volumeSlot = slot,
+        .submittedSequence =
+            static_cast<uint32_t>(frame.metrics.ddgi.submittedSequence),
+    };
+    DrawItem &draw = ddgiProbeDrawItems_[slot];
+    draw = DrawItem{};
+    draw.pipeline = ddgiProbePipeline_.get();
+    draw.vertexCount = 6u;
+    draw.instanceCount = ddgi.probeCounts[slot];
+    draw.pushConstants = std::as_bytes(
+        std::span(&ddgiProbePushConstants_[slot], static_cast<size_t>(1u)));
+    draw.debugLabel = "DDGI Probe Debug Draw";
+    draw.debugColor = 0xff44ccffu;
+    if (nuri::isValid(depthTexture)) {
+      draw.useDepthState = true;
+      draw.depthState = {.compareOp = CompareOp::LessEqual,
+                         .isDepthWriteEnabled = false};
+    }
+  }
+  for (BufferHandle buffer : ddgi.dependencyBuffers) {
+    if (nuri::isValid(buffer) &&
+        std::ranges::find(transparentDependencyBuffers_, buffer) ==
+            transparentDependencyBuffers_.end()) {
+      transparentDependencyBuffers_.push_back(buffer);
+    }
+  }
+  return Result<bool, std::string>::makeResult(true);
+}
+
+Result<bool, std::string>
+DebugRenderer::ensureDDGIRayPipeline(Format colorFormat, Format depthFormat) {
+  if (!nuri::isValid(ddgiRayVertexShader_) ||
+      !nuri::isValid(ddgiRayFragmentShader_)) {
+    if (config_.ddgi.rayDebugVertex.empty() ||
+        config_.ddgi.rayDebugFragment.empty()) {
+      return Result<bool, std::string>::makeError(
+          "DebugRenderer: DDGI ray debug shader path is empty");
+    }
+    auto shader = Shader::create("ddgi_ray_debug", gpu_);
+    auto vertex = shader->compileFromFile(config_.ddgi.rayDebugVertex.string(),
+                                          ShaderStage::Vertex);
+    if (vertex.hasError()) {
+      return Result<bool, std::string>::makeError(vertex.error());
+    }
+    auto fragment = shader->compileFromFile(
+        config_.ddgi.rayDebugFragment.string(), ShaderStage::Fragment);
+    if (fragment.hasError()) {
+      return Result<bool, std::string>::makeError(fragment.error());
+    }
+    ddgiRayVertexShader_ = vertex.value();
+    ddgiRayFragmentShader_ = fragment.value();
+  }
+  if (ddgiRayPipeline_.valid() && ddgiRayPipelineColorFormat_ == colorFormat &&
+      ddgiRayPipelineDepthFormat_ == depthFormat) {
+    return Result<bool, std::string>::makeResult(true);
+  }
+  ddgiRayPipeline_.reset();
+  const RenderPipelineDesc desc{
+      .vertexInput = {},
+      .vertexShader = ddgiRayVertexShader_,
+      .fragmentShader = ddgiRayFragmentShader_,
+      .colorFormats = {colorFormat},
+      .depthFormat = depthFormat,
+      .cullMode = CullMode::None,
+      .polygonMode = PolygonMode::Fill,
+      .topology = Topology::Line,
+      .blendEnabled = true,
+      .rasterState = depthFormat != Format::Count
+                         ? makeRasterPipelineState(
+                               DepthState{.compareOp = CompareOp::LessEqual,
+                                          .isDepthWriteEnabled = false})
+                         : RasterPipelineState{},
+  };
+  auto pipeline = gpu_.createRenderPipeline(desc, "DDGI Ray Debug Pipeline");
+  if (pipeline.hasError()) {
+    return Result<bool, std::string>::makeError(pipeline.error());
+  }
+  ddgiRayPipeline_.reset(gpu_, pipeline.value());
+  ddgiRayPipelineColorFormat_ = colorFormat;
+  ddgiRayPipelineDepthFormat_ = depthFormat;
+  return Result<bool, std::string>::makeResult(true);
+}
+
+Result<bool, std::string>
+DebugRenderer::prepareDDGIRayDraw(const RenderFrameContext &frame,
+                                  TextureHandle depthTexture) {
+  ddgiRayDrawItem_ = {};
+  if (!renderSettingsOrDefault(frame).ddgi.showSelectedProbeRays ||
+      !frame.sharedResources.ddgiFrameGpuData.has_value()) {
+    return Result<bool, std::string>::makeResult(true);
+  }
+  const DDGIFrameGpuDataHandle &ddgi = *frame.sharedResources.ddgiFrameGpuData;
+  if (!nuri::isValid(ddgi.diagnosticBuffer) ||
+      ddgi.diagnosticRayAddress == 0u || ddgi.diagnosticRayCount == 0u) {
+    return Result<bool, std::string>::makeResult(true);
+  }
+  const Format depthFormat = nuri::isValid(depthTexture)
+                                 ? gpu_.getTextureFormat(depthTexture)
+                                 : Format::Count;
+  const TextureHandle colorTexture = frame.sharedResources.frameColorTexture;
+  const Format colorFormat = nuri::isValid(colorTexture)
+                                 ? gpu_.getTextureFormat(colorTexture)
+                                 : gpu_.getSwapchainFormat();
+  auto pipeline = ensureDDGIRayPipeline(colorFormat, depthFormat);
+  if (pipeline.hasError()) {
+    return pipeline;
+  }
+  ddgiRayPushConstants_ = DDGIRayPushConstants{
+      .viewProjection = cameraCurrentUnjitteredViewProjection(frame.camera),
+      .diagnosticAddress = ddgi.diagnosticRayAddress,
+      .rayCount = ddgi.diagnosticRayCount,
+  };
+  ddgiRayDrawItem_.pipeline = ddgiRayPipeline_.get();
+  ddgiRayDrawItem_.vertexCount = ddgi.diagnosticRayCount * 2u;
+  ddgiRayDrawItem_.instanceCount = 1u;
+  ddgiRayDrawItem_.pushConstants =
+      std::as_bytes(std::span(&ddgiRayPushConstants_, static_cast<size_t>(1u)));
+  ddgiRayDrawItem_.debugLabel = "DDGI Selected Probe Rays";
+  ddgiRayDrawItem_.debugColor = 0xffff55aau;
+  if (nuri::isValid(depthTexture)) {
+    ddgiRayDrawItem_.useDepthState = true;
+    ddgiRayDrawItem_.depthState = {.compareOp = CompareOp::LessEqual,
+                                   .isDepthWriteEnabled = false};
+  }
+  if (std::ranges::find(transparentDependencyBuffers_, ddgi.diagnosticBuffer) ==
+      transparentDependencyBuffers_.end()) {
+    transparentDependencyBuffers_.push_back(ddgi.diagnosticBuffer);
+  }
+  return Result<bool, std::string>::makeResult(true);
+}
+
+Result<bool, std::string>
 DebugRenderer::prepareGridDraw(const RenderFrameContext &frame,
                                TextureHandle depthTexture) {
   const bool hasDepth = nuri::isValid(depthTexture);
@@ -546,7 +837,10 @@ bool DebugRenderer::hasDebugWork(const RenderFrameContext &frame) const {
   const VisibilityDebugSettings &visibilityDebug = settings.visibility.debug;
   return debug.enabled || debug.modelBounds || debug.grid || debug.lightIcons ||
          visibilityDebug.showObjectBounds ||
-         visibilityDebug.showMeshletBounds || shadowOverlayEnabled(frame);
+         visibilityDebug.showMeshletBounds || shadowOverlayEnabled(frame) ||
+         settings.ddgi.showVolumes || settings.ddgi.showProbes ||
+         settings.ddgi.showSelectedProbeRays ||
+         frame.sharedResources.selectedDDGIVolumeId.has_value();
 }
 
 bool DebugRenderer::buildSceneDebugLines(const RenderFrameContext &frame,
@@ -652,6 +946,9 @@ bool DebugRenderer::buildSceneDebugLines(const RenderFrameContext &frame,
   if (drawShadowDebugOverlay(*debugDraw3D_, frame, view, outSortDepth)) {
     hasLines = true;
   }
+  if (drawDDGIVolumeOverlays(*debugDraw3D_, frame, view, outSortDepth)) {
+    hasLines = true;
+  }
   return hasLines;
 }
 
@@ -705,6 +1002,22 @@ Result<bool, std::string> DebugRenderer::buildTransparentStageContribution(
     }
     transparentFixedDraws_.push_back(gridDrawItem_);
   }
+  auto probeResult = prepareDDGIProbeDraws(frame, depthTexture);
+  if (probeResult.hasError()) {
+    return probeResult;
+  }
+  for (uint32_t slot = 0u; slot < ddgiProbeDrawCount_; ++slot) {
+    if (ddgiProbeDrawItems_[slot].instanceCount != 0u) {
+      transparentFixedDraws_.push_back(ddgiProbeDrawItems_[slot]);
+    }
+  }
+  auto rayResult = prepareDDGIRayDraw(frame, depthTexture);
+  if (rayResult.hasError()) {
+    return rayResult;
+  }
+  if (ddgiRayDrawItem_.vertexCount != 0u) {
+    transparentFixedDraws_.push_back(ddgiRayDrawItem_);
+  }
   out.sortableDraws = std::span<const TransparentStageSortableDraw>(
       transparentSortableDraws_.data(), transparentSortableDraws_.size());
   out.fixedDraws = std::span<const DrawItem>(transparentFixedDraws_.data(),
@@ -717,7 +1030,7 @@ Result<bool, std::string> DebugRenderer::buildTransparentStageContribution(
 }
 
 void registerDebugStages(RenderPipeline &pipeline, GPUDevice &gpu,
-                         RuntimeRasterShaderConfig config,
+                         DebugRendererConfig config,
                          std::pmr::memory_resource *memory) {
   pipeline.addComponent(
       std::make_unique<DebugRenderer>(gpu, std::move(config), memory),

@@ -1318,11 +1318,17 @@ Model::prepareGpu(GPUDevice &gpu, PreparedModelData data,
   const std::span<const std::byte> indexBytes{
       reinterpret_cast<const std::byte *>(impl->source.mesh.indices.data()),
       impl->source.mesh.indices.size() * sizeof(uint32_t)};
+  const BufferUsage accelerationStructureInput =
+      gpu.getDeviceCaps().rayTracing.accelerationStructure
+          ? BufferUsage::AccelerationStructureBuildInput
+          : BufferUsage::None;
   appendSlot(impl->buffers[PreparedGpuModelData::Impl::Vertex],
              impl->source.packedVertexBytes,
-             BufferUsage::Storage | BufferUsage::Vertex, "_vertices");
+             BufferUsage::Storage | BufferUsage::Vertex |
+                 accelerationStructureInput,
+             "_vertices");
   appendSlot(impl->buffers[PreparedGpuModelData::Impl::Index], indexBytes,
-             BufferUsage::Index, "_indices");
+             BufferUsage::Index | accelerationStructureInput, "_indices");
   appendSlot(impl->buffers[PreparedGpuModelData::Impl::VertexDecode],
              impl->source.staticDecode.bytes, BufferUsage::Storage,
              "_vertex_decode");

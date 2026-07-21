@@ -1,5 +1,6 @@
 #pragma once
 #include "nuri/gfx/frame/external_temporal_provider.h"
+#include "nuri/gfx/gpu_descriptors.h"
 #include "nuri/gfx/gpu_types.h"
 #include <array>
 #include <cstddef>
@@ -7,6 +8,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <variant>
 #include <vector>
 namespace nuri {
 
@@ -78,6 +80,7 @@ struct DispatchSize {
 
 struct ComputeDispatchItem {
   ComputePipelineHandle pipeline{};
+  RayQueryBindingHandle rayQueryBinding{};
   DispatchSize dispatch{};
   std::span<const std::byte> pushConstants{};
   std::span<const BufferHandle> dependencyBuffers{};
@@ -107,6 +110,13 @@ enum class GpuTimingScope : uint8_t {
   TemporalAACopyBack = 16,
   GTAOTemporal = 17,
   WholeFrame = 18,
+  RayTracingScene = 19,
+  RayTracingBLAS = 20,
+  RayTracingTLAS = 21,
+  DDGI = 22,
+  DDGITrace = 23,
+  DDGIUpdate = 24,
+  DDGIRelocateClassify = 25,
 };
 
 [[nodiscard]] constexpr uint32_t
@@ -129,6 +139,13 @@ gpuTimingParentScope(GpuTimingScope scope) noexcept {
     return GpuTimingScope::TemporalAAResolve;
   case GpuTimingScope::GTAOTemporal:
     return GpuTimingScope::GTAO;
+  case GpuTimingScope::RayTracingBLAS:
+  case GpuTimingScope::RayTracingTLAS:
+    return GpuTimingScope::RayTracingScene;
+  case GpuTimingScope::DDGITrace:
+  case GpuTimingScope::DDGIUpdate:
+  case GpuTimingScope::DDGIRelocateClassify:
+    return GpuTimingScope::DDGI;
   default:
     return GpuTimingScope::None;
   }
@@ -170,6 +187,20 @@ constexpr uint32_t kGpuTimingScopeGTAOTemporalBit =
     gpuTimingScopeToBit(GpuTimingScope::GTAOTemporal);
 constexpr uint32_t kGpuTimingScopeWholeFrameBit =
     gpuTimingScopeToBit(GpuTimingScope::WholeFrame);
+constexpr uint32_t kGpuTimingScopeRayTracingSceneBit =
+    gpuTimingScopeToBit(GpuTimingScope::RayTracingScene);
+constexpr uint32_t kGpuTimingScopeRayTracingBLASBit =
+    gpuTimingScopeToBit(GpuTimingScope::RayTracingBLAS);
+constexpr uint32_t kGpuTimingScopeRayTracingTLASBit =
+    gpuTimingScopeToBit(GpuTimingScope::RayTracingTLAS);
+constexpr uint32_t kGpuTimingScopeDDGIBit =
+    gpuTimingScopeToBit(GpuTimingScope::DDGI);
+constexpr uint32_t kGpuTimingScopeDDGITraceBit =
+    gpuTimingScopeToBit(GpuTimingScope::DDGITrace);
+constexpr uint32_t kGpuTimingScopeDDGIUpdateBit =
+    gpuTimingScopeToBit(GpuTimingScope::DDGIUpdate);
+constexpr uint32_t kGpuTimingScopeDDGIRelocateClassifyBit =
+    gpuTimingScopeToBit(GpuTimingScope::DDGIRelocateClassify);
 
 struct GpuTimingReport {
   uint64_t shadowSourceFrameIndex = std::numeric_limits<uint64_t>::max();
@@ -195,6 +226,17 @@ struct GpuTimingReport {
       std::numeric_limits<uint64_t>::max();
   uint64_t gtaoTemporalSourceFrameIndex = std::numeric_limits<uint64_t>::max();
   uint64_t wholeFrameSourceFrameIndex = std::numeric_limits<uint64_t>::max();
+  uint64_t rayTracingSceneSourceFrameIndex =
+      std::numeric_limits<uint64_t>::max();
+  uint64_t rayTracingBlasSourceFrameIndex =
+      std::numeric_limits<uint64_t>::max();
+  uint64_t rayTracingTlasSourceFrameIndex =
+      std::numeric_limits<uint64_t>::max();
+  uint64_t ddgiSourceFrameIndex = std::numeric_limits<uint64_t>::max();
+  uint64_t ddgiTraceSourceFrameIndex = std::numeric_limits<uint64_t>::max();
+  uint64_t ddgiUpdateSourceFrameIndex = std::numeric_limits<uint64_t>::max();
+  uint64_t ddgiRelocateClassifySourceFrameIndex =
+      std::numeric_limits<uint64_t>::max();
   float shadowTimeMs = 0.0f;
   float shadowDepthTimeMs = 0.0f;
   float shadowSdsmTimeMs = 0.0f;
@@ -213,6 +255,13 @@ struct GpuTimingReport {
   float temporalAACopyBackTimeMs = 0.0f;
   float gtaoTemporalTimeMs = 0.0f;
   float wholeFrameTimeMs = 0.0f;
+  float rayTracingSceneTimeMs = 0.0f;
+  float rayTracingBlasTimeMs = 0.0f;
+  float rayTracingTlasTimeMs = 0.0f;
+  float ddgiTimeMs = 0.0f;
+  float ddgiTraceTimeMs = 0.0f;
+  float ddgiUpdateTimeMs = 0.0f;
+  float ddgiRelocateClassifyTimeMs = 0.0f;
   uint32_t availableScopeMask = 0u;
   struct PassTiming {
     std::string debugName{};
@@ -304,6 +353,29 @@ inline constexpr auto kGpuTimingScopeDescs =
         {GpuTimingScope::WholeFrame, &GpuTimingReport::wholeFrameTimeMs,
          &GpuTimingReport::wholeFrameSourceFrameIndex,
          gpuTimingScopeToBit(GpuTimingScope::WholeFrame)},
+        {GpuTimingScope::RayTracingScene,
+         &GpuTimingReport::rayTracingSceneTimeMs,
+         &GpuTimingReport::rayTracingSceneSourceFrameIndex,
+         gpuTimingScopeToBit(GpuTimingScope::RayTracingScene)},
+        {GpuTimingScope::RayTracingBLAS, &GpuTimingReport::rayTracingBlasTimeMs,
+         &GpuTimingReport::rayTracingBlasSourceFrameIndex,
+         gpuTimingScopeToBit(GpuTimingScope::RayTracingBLAS)},
+        {GpuTimingScope::RayTracingTLAS, &GpuTimingReport::rayTracingTlasTimeMs,
+         &GpuTimingReport::rayTracingTlasSourceFrameIndex,
+         gpuTimingScopeToBit(GpuTimingScope::RayTracingTLAS)},
+        {GpuTimingScope::DDGI, &GpuTimingReport::ddgiTimeMs,
+         &GpuTimingReport::ddgiSourceFrameIndex,
+         gpuTimingScopeToBit(GpuTimingScope::DDGI)},
+        {GpuTimingScope::DDGITrace, &GpuTimingReport::ddgiTraceTimeMs,
+         &GpuTimingReport::ddgiTraceSourceFrameIndex,
+         gpuTimingScopeToBit(GpuTimingScope::DDGITrace)},
+        {GpuTimingScope::DDGIUpdate, &GpuTimingReport::ddgiUpdateTimeMs,
+         &GpuTimingReport::ddgiUpdateSourceFrameIndex,
+         gpuTimingScopeToBit(GpuTimingScope::DDGIUpdate)},
+        {GpuTimingScope::DDGIRelocateClassify,
+         &GpuTimingReport::ddgiRelocateClassifyTimeMs,
+         &GpuTimingReport::ddgiRelocateClassifySourceFrameIndex,
+         gpuTimingScopeToBit(GpuTimingScope::DDGIRelocateClassify)},
     });
 
 [[nodiscard]] constexpr const GpuTimingScopeMergeDesc *
@@ -345,6 +417,7 @@ inline void mergeGpuTimingReportScopes(GpuTimingReport &dst,
 enum class GraphicsBarrierResourceKind : uint8_t {
   Texture = 0,
   Buffer = 1,
+  AccelerationStructure = 2,
 };
 
 using GraphicsBarrierAccessMode = RenderGraphAccessMode;
@@ -361,12 +434,17 @@ enum class GraphicsBarrierState : uint8_t {
   Write = 2,
   Attachment = 3,
   Present = 4,
+  AccelerationStructureBuildRead = 5,
+  AccelerationStructureBuildWrite = 6,
+  RayQueryRead = 7,
+  AccelerationStructureBuildInput = 8,
 };
 
 union GraphicsBarrierResourceStorage {
   constexpr GraphicsBarrierResourceStorage() noexcept : texture{} {}
   TextureHandle texture;
   BufferHandle buffer;
+  AccelerationStructureHandle accelerationStructure;
 };
 
 struct GraphicsBarrierRecord {
@@ -411,6 +489,23 @@ struct GraphicsBarrierRecord {
     record.afterState = afterBarrierState;
     return record;
   }
+  [[nodiscard]] static constexpr GraphicsBarrierRecord ForAccelerationStructure(
+      AccelerationStructureHandle accelerationStructureHandle,
+      GraphicsBarrierAccessMode beforeAccessMode =
+          GraphicsBarrierAccessMode::None,
+      GraphicsBarrierAccessMode afterAccessMode =
+          GraphicsBarrierAccessMode::None,
+      GraphicsBarrierState beforeBarrierState = GraphicsBarrierState::Unknown,
+      GraphicsBarrierState afterBarrierState =
+          GraphicsBarrierState::Unknown) noexcept {
+    GraphicsBarrierRecord record{};
+    record.setAccelerationStructureHandle(accelerationStructureHandle);
+    record.beforeAccess = beforeAccessMode;
+    record.afterAccess = afterAccessMode;
+    record.beforeState = beforeBarrierState;
+    record.afterState = afterBarrierState;
+    return record;
+  }
   constexpr void setTextureHandle(TextureHandle textureHandle) noexcept {
     resourceKind = GraphicsBarrierResourceKind::Texture;
     resource.texture = textureHandle;
@@ -419,6 +514,11 @@ struct GraphicsBarrierRecord {
     resourceKind = GraphicsBarrierResourceKind::Buffer;
     resource.buffer = bufferHandle;
   }
+  constexpr void setAccelerationStructureHandle(
+      AccelerationStructureHandle accelerationStructureHandle) noexcept {
+    resourceKind = GraphicsBarrierResourceKind::AccelerationStructure;
+    resource.accelerationStructure = accelerationStructureHandle;
+  }
   [[nodiscard]] constexpr bool isTexture() const noexcept {
     return resourceKind == GraphicsBarrierResourceKind::Texture;
   }
@@ -426,7 +526,14 @@ struct GraphicsBarrierRecord {
     return isTexture() ? resource.texture : TextureHandle{};
   }
   [[nodiscard]] constexpr BufferHandle bufferHandle() const noexcept {
-    return isTexture() ? BufferHandle{} : resource.buffer;
+    return resourceKind == GraphicsBarrierResourceKind::Buffer ? resource.buffer
+                                                               : BufferHandle{};
+  }
+  [[nodiscard]] constexpr AccelerationStructureHandle
+  accelerationStructureHandle() const noexcept {
+    return resourceKind == GraphicsBarrierResourceKind::AccelerationStructure
+               ? resource.accelerationStructure
+               : AccelerationStructureHandle{};
   }
 };
 
@@ -518,11 +625,39 @@ struct TextureCopyItem {
   uint32_t destinationLayer = 0;
 };
 
+struct BuildBlasItem {
+  AccelerationStructureHandle destination{};
+  std::span<const AccelerationStructureTriangleGeometryDesc> geometries{};
+};
+
+struct UpdateBlasItem {
+  AccelerationStructureHandle destination{};
+  std::span<const AccelerationStructureTriangleGeometryDesc> geometries{};
+};
+
+struct BuildTlasItem {
+  AccelerationStructureHandle destination{};
+  std::span<const AccelerationStructureInstanceDesc> instances{};
+};
+
+struct UpdateTlasItem {
+  AccelerationStructureHandle destination{};
+  std::span<const AccelerationStructureInstanceDesc> instances{};
+};
+
+using AccelerationStructureBuildCommand =
+    std::variant<BuildBlasItem, UpdateBlasItem, BuildTlasItem, UpdateTlasItem>;
+
+struct AccelerationStructureBuildItem {
+  AccelerationStructureBuildCommand command{};
+};
+
 enum class RenderPassExecutionMode : uint8_t {
   Graphics = 0,
   ComputeOnly = 1,
   CopyOnly = 2,
   ExternalTemporal = 3,
+  AccelerationStructureBuild = 4,
 };
 
 struct RenderPass {
@@ -542,6 +677,7 @@ struct RenderPass {
   std::span<const DrawItem> draws{};
   std::span<const MeshDispatchItem> meshDispatches{};
   std::span<const TextureCopyItem> textureCopies{};
+  std::span<const AccelerationStructureBuildItem> accelerationStructureBuilds{};
   ExternalTemporalDispatchItem externalTemporalDispatch{};
   bool payloadBorrowed = false;
   bool drawBuffersPreResolved = false;

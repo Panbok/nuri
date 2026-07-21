@@ -21,7 +21,8 @@
 
 namespace nuri {
 class Window;
-}
+struct AnimationSceneFrameData;
+} // namespace nuri
 
 namespace nuri::tools::runtime {
 
@@ -136,6 +137,8 @@ public:
   [[nodiscard]] ToolAssetLoadStatus assetLoadStatus() const;
   [[nodiscard]] Result<AssetPublicationStats, std::string> pumpAssetLoads();
   [[nodiscard]] Result<bool, std::string> commitScene();
+  void setExternalAnimationSceneFrameData(
+      const AnimationSceneFrameData &frameData) noexcept;
 
 private:
   struct Impl;

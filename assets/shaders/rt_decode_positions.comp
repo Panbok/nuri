@@ -1,0 +1,31 @@
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+#define NURI_CUSTOM_PUSH_CONSTANTS 1
+#include "common.sp"
+
+layout(std430, buffer_reference) buffer RtDecodedPositionBuffer {
+  vec4 values[];
+};
+
+layout(push_constant) uniform PushConstants {
+  PackedVertexWordBuffer sourceVertices;
+  StaticVertexDecodeBuffer sourceDecode;
+  RtDecodedPositionBuffer destinationPositions;
+  uint vertexOffset;
+  uint vertexCount;
+  uint vertexDecodeIndex;
+  uint packedVertexFormat;
+}
+pc;
+
+void main() {
+  const uint localVertex = gl_GlobalInvocationID.x;
+  if (localVertex >= pc.vertexCount) {
+    return;
+  }
+  const uint vertex = pc.vertexOffset + localVertex;
+  const vec3 position = decodePackedPositionFrom(
+      pc.sourceVertices, pc.sourceDecode, pc.vertexDecodeIndex,
+      pc.packedVertexFormat, vertex);
+  pc.destinationPositions.values[vertex] = vec4(position, 0.0);
+}

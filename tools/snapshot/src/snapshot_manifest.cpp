@@ -288,7 +288,7 @@ parseSettings(yyjson_val *object, RenderSettings &settings) {
       std::string_view("ambientOcclusion"), std::string_view("shadow"),
       std::string_view("visibility"),       std::string_view("hdrPostProcess"),
       std::string_view("transmission"),     std::string_view("transparent"),
-      std::string_view("textureFiltering"),
+      std::string_view("textureFiltering"), std::string_view("ddgi"),
   };
   auto result = rejectUnknownKeys(object, keys, "settings");
   if (result.hasError()) {
@@ -435,6 +435,114 @@ parseSettings(yyjson_val *object, RenderSettings &settings) {
         return Result<bool, std::string>::makeError(
             "settings.opaque.forcedMeshLod must be an int32");
       }
+    }
+  }
+
+  if (yyjson_val *ddgi = optionalObject(object, "ddgi")) {
+    static constexpr std::array ddgiKeys{
+        std::string_view("enabled"),
+        std::string_view("preset"),
+        std::string_view("raysPerProbe"),
+        std::string_view("maxProbeUpdatesPerFrame"),
+        std::string_view("maxRayQueriesPerFrame"),
+        std::string_view("maxLocalLightsPerHit"),
+        std::string_view("maxCandidateIntersectionsPerRay"),
+        std::string_view("irradianceHysteresis"),
+        std::string_view("distanceHysteresis"),
+        std::string_view("changeIrradianceHysteresisScale"),
+        std::string_view("changeDistanceHysteresisScale"),
+        std::string_view("selfShadowBias"),
+        std::string_view("multiBounceLuminanceClamp"),
+        std::string_view("relocation"),
+        std::string_view("classification"),
+        std::string_view("multiBounce"),
+        std::string_view("freezeUpdates"),
+        std::string_view("showVolumes"),
+        std::string_view("showProbes"),
+        std::string_view("showSelectedProbeRays"),
+        std::string_view("debugView")};
+    result = rejectUnknownKeys(ddgi, ddgiKeys, "settings.ddgi");
+    if (result.hasError()) {
+      return result;
+    }
+    auto boolean =
+        readBool(ddgi, "enabled", "settings.ddgi", settings.ddgi.enabled);
+    if (boolean.hasError()) {
+      return Result<bool, std::string>::makeError(boolean.error());
+    }
+    settings.ddgi.enabled = boolean.value();
+    result =
+        readEnumField(ddgi, "preset", "settings.ddgi", settings.ddgi.preset,
+                      {{"Low", DDGIQualityPreset::Low},
+                       {"Balanced", DDGIQualityPreset::Balanced},
+                       {"High", DDGIQualityPreset::High},
+                       {"Custom", DDGIQualityPreset::Custom}});
+    if (result.hasError()) {
+      return result;
+    }
+    for (const auto [key, output] :
+         {std::pair<std::string_view, uint32_t *>{"raysPerProbe",
+                                                  &settings.ddgi.raysPerProbe},
+          {"maxProbeUpdatesPerFrame", &settings.ddgi.maxProbeUpdatesPerFrame},
+          {"maxRayQueriesPerFrame", &settings.ddgi.maxRayQueriesPerFrame},
+          {"maxLocalLightsPerHit", &settings.ddgi.maxLocalLightsPerHit},
+          {"maxCandidateIntersectionsPerRay",
+           &settings.ddgi.maxCandidateIntersectionsPerRay}}) {
+      auto value = readU32(ddgi, key, "settings.ddgi", *output);
+      if (value.hasError()) {
+        return Result<bool, std::string>::makeError(value.error());
+      }
+      *output = value.value();
+    }
+    for (const auto [key, output] :
+         {std::pair<std::string_view, float *>{
+              "irradianceHysteresis", &settings.ddgi.irradianceHysteresis},
+          {"distanceHysteresis", &settings.ddgi.distanceHysteresis},
+          {"changeIrradianceHysteresisScale",
+           &settings.ddgi.changeIrradianceHysteresisScale},
+          {"changeDistanceHysteresisScale",
+           &settings.ddgi.changeDistanceHysteresisScale},
+          {"selfShadowBias", &settings.ddgi.selfShadowBias},
+          {"multiBounceLuminanceClamp",
+           &settings.ddgi.multiBounceLuminanceClamp}}) {
+      auto value = readDouble(ddgi, key, "settings.ddgi", *output);
+      if (value.hasError()) {
+        return Result<bool, std::string>::makeError(value.error());
+      }
+      *output = static_cast<float>(value.value());
+    }
+    for (const auto [key, output] :
+         {std::pair<std::string_view, bool *>{"relocation",
+                                              &settings.ddgi.relocation},
+          {"classification", &settings.ddgi.classification},
+          {"multiBounce", &settings.ddgi.multiBounce},
+          {"freezeUpdates", &settings.ddgi.freezeUpdates},
+          {"showVolumes", &settings.ddgi.showVolumes},
+          {"showProbes", &settings.ddgi.showProbes},
+          {"showSelectedProbeRays", &settings.ddgi.showSelectedProbeRays}}) {
+      auto value = readBool(ddgi, key, "settings.ddgi", *output);
+      if (value.hasError()) {
+        return Result<bool, std::string>::makeError(value.error());
+      }
+      *output = value.value();
+    }
+    result = readEnumField(
+        ddgi, "debugView", "settings.ddgi", settings.ddgi.debugView,
+        {{"None", DDGIDebugView::None},
+         {"DiffuseIndirect", DDGIDebugView::DiffuseIndirect},
+         {"VolumeId", DDGIDebugView::VolumeId},
+         {"ProbeWeights", DDGIDebugView::ProbeWeights},
+         {"Confidence", DDGIDebugView::Confidence},
+         {"Visibility", DDGIDebugView::Visibility},
+         {"Irradiance", DDGIDebugView::Irradiance},
+         {"DistanceMean", DDGIDebugView::DistanceMean},
+         {"DistanceVariance", DDGIDebugView::DistanceVariance},
+         {"Classification", DDGIDebugView::Classification},
+         {"RelocationOffset", DDGIDebugView::RelocationOffset},
+         {"UpdateAge", DDGIDebugView::UpdateAge},
+         {"LeakRisk", DDGIDebugView::LeakRisk}});
+    if (result.hasError()) {
+      return result;
     }
   }
 
@@ -1416,7 +1524,9 @@ loadSnapshotCaseManifest(const std::filesystem::path &path) {
   if (yyjson_val *requirements = optionalObject(root, "requirements")) {
     static constexpr std::array keys{std::string_view("assets"),
                                      std::string_view("backends"),
-                                     std::string_view("allowVisibleWindow")};
+                                     std::string_view("allowVisibleWindow"),
+                                     std::string_view("accelerationStructure"),
+                                     std::string_view("rayQuery")};
     auto parsed = rejectUnknownKeys(requirements, keys, "requirements");
     if (parsed.hasError()) {
       return Result<SnapshotCase, std::string>::makeError(parsed.error());
@@ -1444,6 +1554,18 @@ loadSnapshotCaseManifest(const std::filesystem::path &path) {
       return Result<SnapshotCase, std::string>::makeError(boolean.error());
     }
     out.requirements.allowVisibleWindow = boolean.value();
+    boolean = readBool(requirements, "accelerationStructure", "requirements",
+                       out.requirements.accelerationStructure);
+    if (boolean.hasError()) {
+      return Result<SnapshotCase, std::string>::makeError(boolean.error());
+    }
+    out.requirements.accelerationStructure = boolean.value();
+    boolean = readBool(requirements, "rayQuery", "requirements",
+                       out.requirements.rayQuery);
+    if (boolean.hasError()) {
+      return Result<SnapshotCase, std::string>::makeError(boolean.error());
+    }
+    out.requirements.rayQuery = boolean.value();
   }
   auto captures = parseCaptures(root);
   if (captures.hasError()) {

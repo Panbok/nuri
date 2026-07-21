@@ -211,6 +211,13 @@ struct ImGuizmoController::Impl {
     } else {
       frame->sharedResources.selectedLightId.reset();
     }
+    if (selectionState->kind == SceneSelectionKind::DDGIVolume &&
+        isValid(selectionState->ddgiVolumeId)) {
+      frame->sharedResources.selectedDDGIVolumeId =
+          selectionState->ddgiVolumeId;
+    } else {
+      frame->sharedResources.selectedDDGIVolumeId.reset();
+    }
   }
 
   void drawUi(const GizmoUiDrawConfig &config) {
@@ -319,7 +326,8 @@ struct ImGuizmoController::Impl {
         ImGui::TextUnformatted("Gizmo");
 
         const bool scaleAllowed =
-            selectionState->kind != SceneSelectionKind::Light;
+            selectionState->kind != SceneSelectionKind::Light &&
+            selectionState->kind != SceneSelectionKind::DDGIVolume;
         if (ImGui::RadioButton("Translate",
                                gizmoOperation == ImGuizmo::TRANSLATE)) {
           gizmoOperation = ImGuizmo::TRANSLATE;
@@ -394,6 +402,11 @@ struct ImGuizmoController::Impl {
     } else if (selectionState->kind == SceneSelectionKind::Light &&
                hasSelectedLight) {
       selectedNode = selectedLightNode;
+    }
+
+    if (selectionState->kind == SceneSelectionKind::DDGIVolume &&
+        effectiveOperation == ImGuizmo::SCALE) {
+      effectiveOperation = ImGuizmo::TRANSLATE;
     }
 
     if (selectionState->kind == SceneSelectionKind::Light && hasSelectedLight) {
@@ -562,6 +575,7 @@ private:
     selectionState->renderableId = kInvalidRenderableId;
     selectionState->renderableIndex = 0u;
     selectionState->lightId = closestLight;
+    selectionState->ddgiVolumeId = kInvalidDDGIVolumeId;
     invalidateLightEditorDraft(lightEditorDraft);
     return true;
   }
@@ -591,6 +605,7 @@ private:
     selectionState->renderableId = renderable->id;
     selectionState->renderableIndex = pickResult.renderableIndex;
     selectionState->lightId = kInvalidLightId;
+    selectionState->ddgiVolumeId = kInvalidDDGIVolumeId;
     invalidateLightEditorDraft(lightEditorDraft);
   }
 
@@ -655,6 +670,7 @@ private:
     selectionState->renderableId = kInvalidRenderableId;
     selectionState->renderableIndex = 0u;
     selectionState->lightId = addResult.value();
+    selectionState->ddgiVolumeId = kInvalidDDGIVolumeId;
     invalidateLightEditorDraft(lightEditorDraft);
     NURI_LOG_INFO("ImGuizmoController::spawnLight: spawned %s light (slot=%u)",
                   lightTypeName(type), indexOf(selectionState->lightId));
@@ -676,6 +692,7 @@ private:
     selectionState->renderableId = kInvalidRenderableId;
     selectionState->renderableIndex = 0u;
     selectionState->lightId = kInvalidLightId;
+    selectionState->ddgiVolumeId = kInvalidDDGIVolumeId;
     invalidateLightEditorDraft(lightEditorDraft);
   }
 

@@ -223,6 +223,7 @@ private:
   [[nodiscard]] const Chunk *findChunk(const ChunkPool &pool,
                                        ChunkHandle handle) const;
   GPUDevice &gpu_;
+  bool accelerationStructureBuildInputEnabled_ = false;
   GeometryPoolConfig config_{};
   uint64_t currentFrameIndex_ = 0;
   uint64_t lastCompactionStartFrame_ = 0;

@@ -730,13 +730,117 @@ parseTextureFilteringSettings(yyjson_val *object, RenderSettings &settings,
 }
 
 [[nodiscard]] Result<bool, std::string>
+parseDDGISettings(yyjson_val *object, RenderSettings &settings,
+                  std::string_view path) {
+  static constexpr std::array keys{
+      std::string_view("enabled"),
+      std::string_view("preset"),
+      std::string_view("raysPerProbe"),
+      std::string_view("maxProbeUpdatesPerFrame"),
+      std::string_view("maxRayQueriesPerFrame"),
+      std::string_view("maxLocalLightsPerHit"),
+      std::string_view("maxCandidateIntersectionsPerRay"),
+      std::string_view("irradianceHysteresis"),
+      std::string_view("distanceHysteresis"),
+      std::string_view("changeIrradianceHysteresisScale"),
+      std::string_view("changeDistanceHysteresisScale"),
+      std::string_view("selfShadowBias"),
+      std::string_view("multiBounceLuminanceClamp"),
+      std::string_view("relocation"),
+      std::string_view("classification"),
+      std::string_view("multiBounce"),
+      std::string_view("freezeUpdates"),
+      std::string_view("showVolumes"),
+      std::string_view("showProbes"),
+      std::string_view("showSelectedProbeRays"),
+      std::string_view("debugView")};
+  auto result = rejectUnknownKeys(object, keys, path);
+  if (result.hasError()) {
+    return result;
+  }
+  auto enabled = readBool(object, "enabled", path, settings.ddgi.enabled);
+  if (enabled.hasError()) {
+    return Result<bool, std::string>::makeError(enabled.error());
+  }
+  settings.ddgi.enabled = enabled.value();
+  result = readEnumField(object, "preset", path, settings.ddgi.preset,
+                         {{"Low", DDGIQualityPreset::Low},
+                          {"Balanced", DDGIQualityPreset::Balanced},
+                          {"High", DDGIQualityPreset::High},
+                          {"Custom", DDGIQualityPreset::Custom}});
+  if (result.hasError()) {
+    return result;
+  }
+  for (const auto [key, output] :
+       {std::pair<std::string_view, uint32_t *>{"raysPerProbe",
+                                                &settings.ddgi.raysPerProbe},
+        {"maxProbeUpdatesPerFrame", &settings.ddgi.maxProbeUpdatesPerFrame},
+        {"maxRayQueriesPerFrame", &settings.ddgi.maxRayQueriesPerFrame},
+        {"maxLocalLightsPerHit", &settings.ddgi.maxLocalLightsPerHit},
+        {"maxCandidateIntersectionsPerRay",
+         &settings.ddgi.maxCandidateIntersectionsPerRay}}) {
+    auto value = readU32(object, key, path, *output);
+    if (value.hasError()) {
+      return Result<bool, std::string>::makeError(value.error());
+    }
+    *output = value.value();
+  }
+  for (const auto [key, output] :
+       {std::pair<std::string_view, float *>{
+            "irradianceHysteresis", &settings.ddgi.irradianceHysteresis},
+        {"distanceHysteresis", &settings.ddgi.distanceHysteresis},
+        {"changeIrradianceHysteresisScale",
+         &settings.ddgi.changeIrradianceHysteresisScale},
+        {"changeDistanceHysteresisScale",
+         &settings.ddgi.changeDistanceHysteresisScale},
+        {"selfShadowBias", &settings.ddgi.selfShadowBias},
+        {"multiBounceLuminanceClamp",
+         &settings.ddgi.multiBounceLuminanceClamp}}) {
+    auto value = readDouble(object, key, path, *output);
+    if (value.hasError()) {
+      return Result<bool, std::string>::makeError(value.error());
+    }
+    *output = static_cast<float>(value.value());
+  }
+  for (const auto [key, output] :
+       {std::pair<std::string_view, bool *>{"relocation",
+                                            &settings.ddgi.relocation},
+        {"classification", &settings.ddgi.classification},
+        {"multiBounce", &settings.ddgi.multiBounce},
+        {"freezeUpdates", &settings.ddgi.freezeUpdates},
+        {"showVolumes", &settings.ddgi.showVolumes},
+        {"showProbes", &settings.ddgi.showProbes},
+        {"showSelectedProbeRays", &settings.ddgi.showSelectedProbeRays}}) {
+    auto value = readBool(object, key, path, *output);
+    if (value.hasError()) {
+      return Result<bool, std::string>::makeError(value.error());
+    }
+    *output = value.value();
+  }
+  return readEnumField(object, "debugView", path, settings.ddgi.debugView,
+                       {{"None", DDGIDebugView::None},
+                        {"DiffuseIndirect", DDGIDebugView::DiffuseIndirect},
+                        {"VolumeId", DDGIDebugView::VolumeId},
+                        {"ProbeWeights", DDGIDebugView::ProbeWeights},
+                        {"Confidence", DDGIDebugView::Confidence},
+                        {"Visibility", DDGIDebugView::Visibility},
+                        {"Irradiance", DDGIDebugView::Irradiance},
+                        {"DistanceMean", DDGIDebugView::DistanceMean},
+                        {"DistanceVariance", DDGIDebugView::DistanceVariance},
+                        {"Classification", DDGIDebugView::Classification},
+                        {"RelocationOffset", DDGIDebugView::RelocationOffset},
+                        {"UpdateAge", DDGIDebugView::UpdateAge},
+                        {"LeakRisk", DDGIDebugView::LeakRisk}});
+}
+
+[[nodiscard]] Result<bool, std::string>
 parseSettings(yyjson_val *object, RenderSettings &settings) {
   static constexpr std::array keys{
       std::string_view("opaque"),           std::string_view("antiAliasing"),
       std::string_view("ambientOcclusion"), std::string_view("shadow"),
       std::string_view("visibility"),       std::string_view("hdrPostProcess"),
       std::string_view("transmission"),     std::string_view("transparent"),
-      std::string_view("textureFiltering"),
+      std::string_view("textureFiltering"), std::string_view("ddgi"),
   };
   auto keysResult = rejectUnknownKeys(object, keys, "settings");
   if (keysResult.hasError()) {
@@ -755,6 +859,7 @@ parseSettings(yyjson_val *object, RenderSettings &settings) {
       Parser{"visibility", parseVisibilitySettings},
       Parser{"hdrPostProcess", parseHdrSettings},
       Parser{"textureFiltering", parseTextureFilteringSettings},
+      Parser{"ddgi", parseDDGISettings},
   };
   for (const Parser &parser : parsers) {
     yyjson_val *sub = optionalObject(object, parser.key);
@@ -1487,9 +1592,12 @@ loadBenchmarkCaseManifest(const std::filesystem::path &path) {
 
   yyjson_val *requirements = optionalObject(root, "requirements");
   if (requirements != nullptr) {
-    static constexpr std::array keys{
-        std::string_view("assets"), std::string_view("backends"),
-        std::string_view("allowVisibleWindow"), std::string_view("msaa4x")};
+    static constexpr std::array keys{std::string_view("assets"),
+                                     std::string_view("backends"),
+                                     std::string_view("allowVisibleWindow"),
+                                     std::string_view("msaa4x"),
+                                     std::string_view("accelerationStructure"),
+                                     std::string_view("rayQuery")};
     auto parsed = rejectUnknownKeys(requirements, keys, "requirements");
     if (parsed.hasError()) {
       return Result<BenchmarkCase, std::string>::makeError(parsed.error());
@@ -1523,6 +1631,18 @@ loadBenchmarkCaseManifest(const std::filesystem::path &path) {
       return Result<BenchmarkCase, std::string>::makeError(boolean.error());
     }
     out.requirements.msaa4x = boolean.value();
+    boolean = readBool(requirements, "accelerationStructure", "requirements",
+                       out.requirements.accelerationStructure);
+    if (boolean.hasError()) {
+      return Result<BenchmarkCase, std::string>::makeError(boolean.error());
+    }
+    out.requirements.accelerationStructure = boolean.value();
+    boolean = readBool(requirements, "rayQuery", "requirements",
+                       out.requirements.rayQuery);
+    if (boolean.hasError()) {
+      return Result<BenchmarkCase, std::string>::makeError(boolean.error());
+    }
+    out.requirements.rayQuery = boolean.value();
   }
 
   yyjson_val *thresholds = optionalObject(root, "thresholds");

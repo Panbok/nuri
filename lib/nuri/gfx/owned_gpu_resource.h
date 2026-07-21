@@ -52,6 +52,8 @@ using OwnedBufferHandle =
     OwnedGpuResource<BufferHandle, &GPUDevice::destroyBuffer>;
 using OwnedTextureHandle =
     OwnedGpuResource<TextureHandle, &GPUDevice::destroyTexture>;
+using OwnedSamplerHandle =
+    OwnedGpuResource<SamplerHandle, &GPUDevice::destroySampler>;
 using OwnedShaderHandle =
     OwnedGpuResource<ShaderHandle, &GPUDevice::destroyShaderModule>;
 using OwnedRenderPipelineHandle =
@@ -60,5 +62,10 @@ using OwnedComputePipelineHandle =
     OwnedGpuResource<ComputePipelineHandle, &GPUDevice::destroyComputePipeline>;
 using OwnedMeshletPipelineHandle =
     OwnedGpuResource<MeshletPipelineHandle, &GPUDevice::destroyMeshletPipeline>;
+using OwnedAccelerationStructure =
+    OwnedGpuResource<AccelerationStructureHandle,
+                     &GPUDevice::destroyAccelerationStructure>;
+using OwnedRayQueryBinding =
+    OwnedGpuResource<RayQueryBindingHandle, &GPUDevice::destroyRayQueryBinding>;
 
 } // namespace nuri

@@ -54,6 +54,8 @@ struct SnapshotRequirements {
   std::vector<std::string> assets{};
   std::vector<std::string> backends{};
   bool allowVisibleWindow = true;
+  bool accelerationStructure = false;
+  bool rayQuery = false;
 };
 
 struct SnapshotCaptureTarget {

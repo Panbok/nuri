@@ -120,6 +120,41 @@ template <typename Record>
          record.outerConeAngle == desc.outerConeAngleRadians &&
          record.angularRadiusDegrees == desc.angularRadiusDegrees;
 }
+template <typename Record>
+void writeDDGIVolumeRecord(Record &record, const DDGIVolumeDesc &desc) {
+  record.name.assign(desc.name.data(), desc.name.size());
+  record.probeCounts = desc.probeCounts;
+  record.probeSpacing = desc.probeSpacing;
+  record.blendDistance = desc.blendDistance;
+  record.maxRayDistance = desc.maxRayDistance;
+  record.priority = desc.priority;
+  record.mode = desc.mode;
+  record.enabled = desc.enabled;
+}
+template <typename Record>
+[[nodiscard]] DDGIVolumeDesc makeDDGIVolumeDesc(const Record &record) {
+  return DDGIVolumeDesc{
+      .name = std::string(record.name),
+      .probeCounts = record.probeCounts,
+      .probeSpacing = record.probeSpacing,
+      .blendDistance = record.blendDistance,
+      .maxRayDistance = record.maxRayDistance,
+      .priority = record.priority,
+      .mode = record.mode,
+      .enabled = record.enabled,
+  };
+}
+template <typename Record>
+[[nodiscard]] bool ddgiVolumeRecordEqual(const Record &record,
+                                         const DDGIVolumeDesc &desc) {
+  return std::string_view(record.name) == std::string_view(desc.name) &&
+         record.probeCounts == desc.probeCounts &&
+         nuri::vec3ExactEqual(record.probeSpacing, desc.probeSpacing) &&
+         record.blendDistance == desc.blendDistance &&
+         record.maxRayDistance == desc.maxRayDistance &&
+         record.priority == desc.priority && record.mode == desc.mode &&
+         record.enabled == desc.enabled;
+}
 template <typename Pool, typename Values, typename Id, typename Value>
 [[nodiscard]] bool readSlotValue(const Pool &slots, const Values &values, Id id,
                                  Value &out) {
@@ -187,7 +222,8 @@ SceneGraph::SceneGraph(std::pmr::memory_resource *memory)
     : memory_(memory != nullptr ? memory : std::pmr::get_default_resource()),
       worldSyncRoots_(memory_), worldSyncStack_(memory_), dirtyRoots_(memory_),
       nodes_(memory_), renderableComponents_(memory_),
-      lights_{LightStore(memory_), LightStore(memory_), LightStore(memory_)} {
+      lights_{LightStore(memory_), LightStore(memory_), LightStore(memory_)},
+      ddgiVolumes_(memory_) {
   clear();
 }
 
@@ -200,11 +236,15 @@ void SceneGraph::clear() {
   for (auto &store : lights_) {
     store = LightStore(memory_);
   }
+  ddgiVolumes_ = DDGIVolumeStore(memory_);
   renderableTopologyDirty_ = true;
   renderableTransformsDirty_ = false;
   renderableDeformationsDirty_ = false;
   lightTopologyDirty_ = true;
   lightDataDirty_ = false;
+  ddgiVolumeTopologyDirty_ = true;
+  ddgiVolumeTransformsDirty_ = false;
+  ddgiVolumeSettingsDirty_ = false;
   topologyVersion_ = 0u;
   transformVersion_ = 0u;
   const auto rootResult = allocateNodeSlot();
@@ -219,7 +259,8 @@ SceneGraph::reserveCapacityStep(SceneGraphCapacityReservation &reservation,
                                 uint32_t maxOperations) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
   if (reservation.nodeCapacity > kResourceHandleIndexMask ||
-      reservation.renderableCapacity > kResourceHandleIndexMask) {
+      reservation.renderableCapacity > kResourceHandleIndexMask ||
+      reservation.ddgiVolumeCapacity > kResourceHandleIndexMask) {
     return Result<bool, std::string>::makeError(
         "SceneGraph::reserveCapacityStep: requested capacity exceeds handle "
         "index range");
@@ -227,6 +268,8 @@ SceneGraph::reserveCapacityStep(SceneGraphCapacityReservation &reservation,
   const uint32_t nodeCapacity = static_cast<uint32_t>(reservation.nodeCapacity);
   const uint32_t renderableCapacity =
       static_cast<uint32_t>(reservation.renderableCapacity);
+  const uint32_t ddgiVolumeCapacity =
+      static_cast<uint32_t>(reservation.ddgiVolumeCapacity);
   const uint32_t operationLimit = std::max(maxOperations, 1u);
   uint32_t operations = 0u;
   try {
@@ -241,7 +284,8 @@ SceneGraph::reserveCapacityStep(SceneGraphCapacityReservation &reservation,
                    nodes_.nextSibling, nodes_.prevSibling, nodes_.depth,
                    nodes_.localFromParent, nodes_.worldFromRoot, nodes_.dirty,
                    nodes_.dirtyRootQueued, nodes_.names, nodes_.renderableHead,
-                   nodes_.renderableTail);
+                   nodes_.renderableTail, nodes_.ddgiVolumeHead,
+                   nodes_.ddgiVolumeTail);
         for (size_t typeIndex = 0; typeIndex < kLightTypeCount; ++typeIndex) {
           reserveAll(nodeCapacity, nodes_.lightHead[typeIndex],
                      nodes_.lightTail[typeIndex]);
@@ -257,6 +301,10 @@ SceneGraph::reserveCapacityStep(SceneGraphCapacityReservation &reservation,
                    renderableComponents_.flatRenderableIndex,
                    renderableComponents_.nextOnNode,
                    renderableComponents_.prevOnNode);
+        break;
+      case 3u:
+        reserveAll(ddgiVolumeCapacity, ddgiVolumes_.slots,
+                   ddgiVolumes_.records);
         break;
       }
       ++reservation.stage;
@@ -287,6 +335,8 @@ Result<SlotReservation, std::string> SceneGraph::allocateNodeSlot() {
     nodes_.names.emplace_back();
     nodes_.renderableHead.push_back(kInvalidIndex);
     nodes_.renderableTail.push_back(kInvalidIndex);
+    nodes_.ddgiVolumeHead.push_back(kInvalidIndex);
+    nodes_.ddgiVolumeTail.push_back(kInvalidIndex);
     for (size_t typeIndex = 0; typeIndex < kLightTypeCount; ++typeIndex) {
       nodes_.lightHead[typeIndex].push_back(kInvalidIndex);
       nodes_.lightTail[typeIndex].push_back(kInvalidIndex);
@@ -328,6 +378,17 @@ SceneGraph::allocateLightSlot(LightType type) {
   return Result<SlotReservation, std::string>::makeResult(slot);
 }
 
+Result<SlotReservation, std::string> SceneGraph::allocateDDGIVolumeSlot() {
+  if (slotPoolExhausted(ddgiVolumes_.slots, kResourceHandleIndexMask)) {
+    return makePackedSlotOverflowError("SceneGraph::allocateDDGIVolumeSlot");
+  }
+  const SlotReservation slot = ddgiVolumes_.slots.acquire();
+  if (slot.appended) {
+    ddgiVolumes_.records.emplace_back(memory_);
+  }
+  return Result<SlotReservation, std::string>::makeResult(slot);
+}
+
 bool SceneGraph::nodeSlotValid(NodeId id) const noexcept {
   if (!isValid(id)) {
     return false;
@@ -348,6 +409,11 @@ bool SceneGraph::lightSlotValid(LightId id) const noexcept {
     return false;
   }
   return lights_[typeIndex].slots.isValid(indexOf(id), generationOf(id));
+}
+
+bool SceneGraph::ddgiVolumeSlotValid(DDGIVolumeId id) const noexcept {
+  return isValid(id) &&
+         ddgiVolumes_.slots.isValid(indexOf(id), generationOf(id));
 }
 
 void SceneGraph::attachNode(uint32_t childIndex, uint32_t parentIndex) {
@@ -413,6 +479,18 @@ void SceneGraph::noteTransformMutation() noexcept { ++transformVersion_; }
 void SceneGraph::markTransformDependentsDirty() noexcept {
   renderableTransformsDirty_ = true;
   lightDataDirty_ = true;
+}
+
+void SceneGraph::markDDGIVolumeTransformsDirty(uint32_t rootIndex) noexcept {
+  for (uint32_t index = 0u; index < ddgiVolumes_.slots.slotCount(); ++index) {
+    if (!ddgiVolumes_.slots.isLive(index)) {
+      continue;
+    }
+    if (isDescendantOf(ddgiVolumes_.records[index].node, rootIndex)) {
+      ddgiVolumeTransformsDirty_ = true;
+      return;
+    }
+  }
 }
 
 void SceneGraph::recycleRenderableSlot(uint32_t index) noexcept {
@@ -604,6 +682,15 @@ bool SceneGraph::destroyNodeSubtree(NodeId node) {
         lightDataDirty_ = true;
       }
     }
+    while (nodes_.ddgiVolumeHead[nodeIndex] != kInvalidIndex) {
+      const uint32_t volumeIndex = nodes_.ddgiVolumeHead[nodeIndex];
+      detachComponentFromNode(ddgiVolumes_, nodes_.ddgiVolumeHead,
+                              nodes_.ddgiVolumeTail, volumeIndex);
+      ddgiVolumes_.slots.release(volumeIndex);
+      ddgiVolumeTopologyDirty_ = true;
+      ddgiVolumeTransformsDirty_ = true;
+      ddgiVolumeSettingsDirty_ = true;
+    }
     nodes_.slots.release(nodeIndex);
   }
   markTransformDependentsDirty();
@@ -643,6 +730,9 @@ bool SceneGraph::setNodeParent(NodeId node, NodeId newParent,
   }
   markSubtreeDirty(nodeIndex);
   markTransformDependentsDirty();
+  if (!preserveWorldTransform) {
+    markDDGIVolumeTransformsDirty(nodeIndex);
+  }
   noteTopologyMutation();
   noteTransformMutation();
   return true;
@@ -662,6 +752,7 @@ bool SceneGraph::setNodeLocalTransform(NodeId node,
   nodes_.localFromParent[nodeIndex] = localFromParent;
   markSubtreeDirty(nodeIndex);
   markTransformDependentsDirty();
+  markDDGIVolumeTransformsDirty(nodeIndex);
   noteTransformMutation();
   return true;
 }
@@ -1006,6 +1097,80 @@ bool SceneGraph::setLightNode(LightId id, NodeId node,
   return true;
 }
 
+Result<DDGIVolumeId, std::string>
+SceneGraph::addDDGIVolume(NodeId node, const DDGIVolumeDesc &desc) {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
+  if (!nodeSlotValid(node)) {
+    return Result<DDGIVolumeId, std::string>::makeError(
+        "SceneGraph::addDDGIVolume: node is invalid");
+  }
+  if (validateDDGIVolumeDesc(desc).reason != DDGIVolumeValidationReason::None) {
+    return Result<DDGIVolumeId, std::string>::makeError(
+        "SceneGraph::addDDGIVolume: descriptor is invalid");
+  }
+  auto slotResult = allocateDDGIVolumeSlot();
+  if (slotResult.hasError()) {
+    return Result<DDGIVolumeId, std::string>::makeError(slotResult.error());
+  }
+  const SlotReservation slot = slotResult.value();
+  attachComponentToNode(ddgiVolumes_, nodes_.ddgiVolumeHead,
+                        nodes_.ddgiVolumeTail, slot.index, indexOf(node));
+  writeDDGIVolumeRecord(ddgiVolumes_.records[slot.index], desc);
+  ddgiVolumeTopologyDirty_ = true;
+  ddgiVolumeTransformsDirty_ = true;
+  ddgiVolumeSettingsDirty_ = true;
+  return Result<DDGIVolumeId, std::string>::makeResult(
+      makeDDGIVolumeId(slot.index, slot.generation));
+}
+
+bool SceneGraph::removeDDGIVolume(DDGIVolumeId id) {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
+  if (!ddgiVolumeSlotValid(id)) {
+    return false;
+  }
+  detachComponentFromNode(ddgiVolumes_, nodes_.ddgiVolumeHead,
+                          nodes_.ddgiVolumeTail, indexOf(id));
+  ddgiVolumes_.slots.release(indexOf(id));
+  ddgiVolumeTopologyDirty_ = true;
+  ddgiVolumeTransformsDirty_ = true;
+  ddgiVolumeSettingsDirty_ = true;
+  return true;
+}
+
+bool SceneGraph::updateDDGIVolume(DDGIVolumeId id, const DDGIVolumeDesc &desc) {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
+  if (!ddgiVolumeSlotValid(id) ||
+      validateDDGIVolumeDesc(desc).reason != DDGIVolumeValidationReason::None) {
+    return false;
+  }
+  DDGIVolumeRecord &record = ddgiVolumes_.records[indexOf(id)];
+  if (ddgiVolumeRecordEqual(record, desc)) {
+    return true;
+  }
+  const bool enabledChanged = record.enabled != desc.enabled;
+  writeDDGIVolumeRecord(record, desc);
+  ddgiVolumeTopologyDirty_ |= enabledChanged;
+  ddgiVolumeSettingsDirty_ = true;
+  return true;
+}
+
+bool SceneGraph::getDDGIVolume(DDGIVolumeId id, DDGIVolumeDesc &out) const {
+  if (!ddgiVolumeSlotValid(id)) {
+    return false;
+  }
+  out = makeDDGIVolumeDesc(ddgiVolumes_.records[indexOf(id)]);
+  return true;
+}
+
+bool SceneGraph::getDDGIVolumeNode(DDGIVolumeId id, NodeId &out) const {
+  if (!ddgiVolumeSlotValid(id)) {
+    return false;
+  }
+  const uint32_t nodeIndex = ddgiVolumes_.records[indexOf(id)].node;
+  out = makeNodeId(nodeIndex, nodes_.slots.generation(nodeIndex));
+  return true;
+}
+
 Result<NodeId, std::string>
 SceneGraph::instantiatePrefabStructure(const ScenePrefab &prefab, NodeId parent,
                                        SceneInstantiationMap *outMap) {
@@ -1232,6 +1397,19 @@ void SceneGraph::clearLights() {
   }
   lightTopologyDirty_ = true;
   lightDataDirty_ = false;
+}
+
+void SceneGraph::clearDDGIVolumes() {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
+  const bool hadVolumes = ddgiVolumes_.slots.liveCount() != 0u;
+  ddgiVolumes_ = DDGIVolumeStore(memory_);
+  std::fill(nodes_.ddgiVolumeHead.begin(), nodes_.ddgiVolumeHead.end(),
+            kInvalidIndex);
+  std::fill(nodes_.ddgiVolumeTail.begin(), nodes_.ddgiVolumeTail.end(),
+            kInvalidIndex);
+  ddgiVolumeTopologyDirty_ |= hadVolumes;
+  ddgiVolumeTransformsDirty_ |= hadVolumes;
+  ddgiVolumeSettingsDirty_ |= hadVolumes;
 }
 
 } // namespace nuri

@@ -73,6 +73,8 @@ struct AutotestRequirements {
   std::vector<std::string> assets{};
   std::vector<std::string> backends{};
   bool allowVisibleWindow = true;
+  bool accelerationStructure = false;
+  bool rayQuery = false;
 };
 
 struct AutotestCaptureTarget {
@@ -252,8 +254,13 @@ struct AutotestTimelineEvent {
   uint32_t frame = 0u;
   std::string type{};
   std::string eventReason{};
+  std::string target{};
   AutotestCameraConfig camera{};
   RenderSettings settings{};
+  glm::vec3 translation{0.0f};
+  glm::uvec3 probeCounts{0u};
+  float intensity = 0.0f;
+  uint32_t volumeIndex = 0u;
   bool hasSettings = false;
   bool preserveHistory = true;
 };
@@ -261,6 +268,13 @@ struct AutotestTimelineEvent {
 struct AutotestTimeline {
   std::vector<AutotestCameraPath> cameraPaths{};
   std::vector<AutotestTimelineEvent> events{};
+};
+
+struct AutotestDDGIProbeInspection {
+  uint32_t frame = 0u;
+  uint32_t volumeIndex = 0u;
+  uint32_t probeId = 0u;
+  uint32_t rayCount = 128u;
 };
 
 struct AutotestCase {
@@ -283,6 +297,7 @@ struct AutotestCase {
   RenderSettings settings{};
   AutotestRequirements requirements{};
   AutotestTimeline timeline{};
+  std::optional<AutotestDDGIProbeInspection> ddgiProbeInspection{};
   std::vector<AutotestCheckpoint> checkpoints{};
   std::vector<AutotestMetricWindow> metricWindows{};
   std::filesystem::path manifestPath{};

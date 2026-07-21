@@ -23,6 +23,9 @@ struct Submesh;
 struct SceneInstanceRecord {
   const Renderable *renderable = nullptr;
   const Model *model = nullptr;
+  uint32_t firstDraw = 0u;
+  uint32_t drawCount = 0u;
+  bool dynamicCaster = false;
 };
 
 struct SceneDrawRecord {
@@ -57,7 +60,6 @@ struct SceneDrawRecord {
   bool transmission = false;
   bool sortedTransmissionFeedback = false;
   bool materialNormalRequired = false;
-  bool dynamicCaster = false;
 };
 
 class NURI_API SceneDrawDatabase {
@@ -77,11 +79,16 @@ public:
   [[nodiscard]] std::span<const SceneDrawRecord> draws() const noexcept {
     return draws_;
   }
+  [[nodiscard]] std::span<const TextureHandle>
+  rayTracingMaterialTextures() const noexcept {
+    return rayTracingMaterialTextures_;
+  }
 
 private:
   GPUDevice &gpu_;
   std::pmr::vector<SceneInstanceRecord> instances_;
   std::pmr::vector<SceneDrawRecord> draws_;
+  std::pmr::vector<TextureHandle> rayTracingMaterialTextures_;
   const RenderScene *scene_ = nullptr;
   uint64_t topologyVersion_ = UINT64_MAX;
   uint64_t materialVersion_ = UINT64_MAX;

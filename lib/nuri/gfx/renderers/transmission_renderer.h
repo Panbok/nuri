@@ -53,7 +53,7 @@ public:
 
 private:
   using FrameData = ForwardSceneFrameData;
-  static_assert(sizeof(FrameData) == 464,
+  static_assert(sizeof(FrameData) == 488,
                 "TransmissionRenderer::FrameData must match shader layout");
   using MeshPushConstants = ForwardMeshPushConstants;
   struct MeshDrawTemplate : SceneDrawRecord {
@@ -122,7 +122,6 @@ private:
   EnvironmentHandles cachedEnvironmentHandles_{};
   bool environmentTextureAccessCacheValid_ = false;
   bool materialTextureAccessCacheValid_ = false;
-  bool staticPassTextureReadsValid_ = false;
   std::pmr::vector<MeshDrawTemplate> meshDrawTemplates_;
   std::pmr::vector<InstanceData> instanceMatrices_;
   std::pmr::vector<uint32_t> instanceRemap_;

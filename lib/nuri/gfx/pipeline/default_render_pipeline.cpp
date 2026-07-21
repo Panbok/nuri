@@ -1,4 +1,5 @@
 #include "nuri/gfx/pipeline/default_render_pipeline.h"
+#include "nuri/gfx/ddgi/ddgi_feature.h"
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/gfx/pipeline/features/composite_feature.h"
 #include "nuri/gfx/pipeline/features/gtao_feature.h"
@@ -10,6 +11,7 @@
 #include "nuri/gfx/pipeline/providers/material_table_gpu_provider.h"
 #include "nuri/gfx/pipeline/providers/scene_lighting_provider.h"
 #include "nuri/gfx/pipeline/render_pipeline.h"
+#include "nuri/gfx/ray_tracing/ray_tracing_scene.h"
 #include "nuri/gfx/renderers/debug_renderer.h"
 #include "nuri/gfx/renderers/opaque_renderer.h"
 #include "nuri/gfx/renderers/scene_draw_database.h"
@@ -105,6 +107,10 @@ registerDefaultRenderPipeline(RenderPipeline &pipeline, GPUDevice &gpu,
   pipeline.addProvider(std::make_unique<MaterialTableGpuProvider>(gpu));
   auto *drawDatabase =
       pipeline.addProvider(std::make_unique<SceneDrawDatabase>(gpu, memory));
+  pipeline.addProvider(
+      std::make_unique<RayTracingScene>(gpu, shaderConfig.ddgi, memory));
+  pipeline.addProvider(
+      std::make_unique<DDGIFeature>(gpu, shaderConfig.ddgi, memory));
   pipeline.addProvider(std::make_unique<FrameCompositionProvider>(gpu, memory));
   pipeline.addProvider(std::make_unique<SceneLightingProvider>(gpu));
   registerShadowStage(pipeline, gpu, shaderConfig.opaque, memory, drawDatabase);
@@ -126,7 +132,10 @@ registerDefaultRenderPipeline(RenderPipeline &pipeline, GPUDevice &gpu,
   registerSpatialAAStage(pipeline, gpu, shaderConfig.composite,
                          SpatialAAPlacement::PostTransparent);
   registerHDRPostProcessStages(pipeline, gpu, shaderConfig.composite);
-  registerDebugStages(pipeline, gpu, shaderConfig.debugGrid, memory);
+  registerDebugStages(pipeline, gpu,
+                      DebugRendererConfig{.grid = shaderConfig.debugGrid,
+                                          .ddgi = shaderConfig.ddgi},
+                      memory);
   registerFramePresentStage(pipeline, gpu, shaderConfig.composite);
   return Result<bool, std::string>::makeResult(true);
 }

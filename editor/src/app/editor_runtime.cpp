@@ -536,9 +536,28 @@ void EditorRuntime::initialize() {
       activeDocument_->scene, activeDocument_->sceneRuntime,
       sceneEditorSelectionState_, [this]() { return timeSeconds(); },
       [this]() { return advanceSimulationFrameIndex(); }, &pipelineMemory_);
-  animationFrameProvider_ = app_.getRenderPipeline().addProvider(
-      std::make_unique<AnimationSceneFrameProvider>(
-          activeDocument_->sceneRuntime));
+  auto animationFrameProvider = std::make_unique<AnimationSceneFrameProvider>(
+      activeDocument_->sceneRuntime);
+  animationFrameProvider_ = animationFrameProvider.get();
+  app_.getRenderPipeline().addComponent(
+      std::move(animationFrameProvider),
+      PipelineComponentDesc{
+          .publish =
+              [](void *state, FrameBuildContext &ctx) {
+                return static_cast<AnimationSceneFrameProvider *>(state)
+                    ->prepare(ctx);
+              },
+          .submitted =
+              [](void *state, const RenderFrameContext &frame) noexcept {
+                static_cast<AnimationSceneFrameProvider *>(state)
+                    ->onFrameSubmitted(frame);
+              },
+          .abandoned =
+              [](void *state, const RenderFrameContext &frame) noexcept {
+                static_cast<AnimationSceneFrameProvider *>(state)
+                    ->onFrameAbandoned(frame);
+              },
+      });
 
   auto bakeryResult = bakery::BakerySystem::create({
       .gpu = app_.getGPU(),
@@ -1518,6 +1537,8 @@ void EditorRuntime::buildFrameContext(const Camera &camera,
   frameContext_.metrics.frameIndex = frameContext_.frameIndex;
   frameContext_.metrics.antiAliasing =
       makeAntiAliasingFrameMetrics(frameContext_.camera);
+  frameContext_.ddgiProbeInspectRequest.reset();
+  frameContext_.ddgiProbeInspectResult.reset();
   frameContext_.sharedDepthTexture = {};
   frameContext_.timeSeconds = timeSecondsIn;
   frameContext_.deltaSeconds = frameDeltaSeconds_;
@@ -1525,6 +1546,10 @@ void EditorRuntime::buildFrameContext(const Camera &camera,
 }
 
 void EditorRuntime::submitPipelineFrame() {
+  if (editorOverlay_ != nullptr) {
+    frameContext_.ddgiProbeInspectRequest =
+        editorOverlay_->takeDDGIProbeInspectRequest();
+  }
   auto renderResult =
       app_.getRenderer().render(app_.getRenderPipeline(), frameContext_);
   NURI_ASSERT(!renderResult.hasError(), "Render failed: %s",

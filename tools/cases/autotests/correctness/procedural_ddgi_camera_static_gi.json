@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "id": "correctness.procedural.ddgi_camera_static_gi",
+  "suite": "correctness",
+  "description": "Moves only the camera around an authored volume and verifies settled DDGI resources, AS work, and history remain camera-invariant",
+  "scene": {"kind": "procedural", "generator": "nuri.procedural.ddgi_camera_static_gi.v1", "seed": 1, "contentHash": "nuri.procedural.ddgi_camera_static_gi.v1:1"},
+  "backend": "default",
+  "resolution": [640, 360],
+  "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 4,
+  "endFrame": 18,
+  "authoritative": false,
+  "presentMode": "immediate",
+  "windowMode": "visible",
+  "renderGraph": {"workerCount": 1, "parallelCompile": false, "parallelRecording": false},
+  "camera": {"position": [-0.8, 0.75, 4.2], "target": [0.0, 0.25, 0.0], "verticalFovDegrees": 60.0, "nearPlane": 0.05, "farPlane": 100.0},
+  "settings": {
+    "ddgi": {"enabled": true, "preset": "Low", "raysPerProbe": 64, "maxProbeUpdatesPerFrame": 144, "maxRayQueriesPerFrame": 18432, "freezeUpdates": true, "debugView": "DiffuseIndirect"},
+    "opaque": {"enableInstanceAnimation": false},
+    "antiAliasing": {"mode": "None"},
+    "ambientOcclusion": {"mode": "Disabled"},
+    "shadow": {"enabled": true, "qualityPreset": "Low"}
+  },
+  "timeline": {
+    "cameraPaths": [
+      {"id": "authored_volume_camera_move", "startFrame": 8, "endFrame": 16, "interpolation": "smoothstep", "keyframes": [
+        {"frame": 8, "position": [-0.8, 0.75, 4.2], "target": [0.0, 0.25, 0.0]},
+        {"frame": 16, "position": [0.8, 0.75, 4.2], "target": [0.0, 0.25, 0.0]}
+      ]}
+    ]
+  },
+  "checkpoints": [
+    {
+      "id": "second_camera",
+      "frame": 16,
+      "captures": [
+        {"target": "frame_color_hdr", "profile": "hdr_color", "required": true, "compare": false},
+        {"target": "ddgi_volume0_irradiance_atlas", "profile": "hdr_color", "required": true, "compare": false},
+        {"target": "ddgi_volume0_distance_atlas", "profile": "scalar", "required": true, "compare": false}
+      ],
+      "assertions": [
+        {"id": "authored_volume_did_not_scroll", "metric": "renderer.ddgi.scroll_count", "equals": 0},
+        {"id": "no_tlas_update", "metric": "renderer.ray_tracing.tlas_updates", "equals": 0},
+        {"id": "no_blas_work", "metric": "renderer.ray_tracing.blas_builds", "equals": 0},
+        {"id": "history_ready", "metric": "renderer.ddgi.history_ready", "equals": 1},
+        {"id": "same_layout", "metric": "renderer.ddgi.layout_generation", "equals": 1}
+      ]
+    }
+  ],
+  "requirements": {"assets": ["modelsRoot:common/flat_plane.obj"], "backends": [], "allowVisibleWindow": true, "accelerationStructure": true, "rayQuery": true}
+}

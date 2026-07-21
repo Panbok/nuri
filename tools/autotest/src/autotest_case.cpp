@@ -24,6 +24,7 @@ std::string autotestExitCodeName(AutotestExitCode code) {
 
 void sanitizeAutotestRenderSettings(RenderSettings &settings) {
   nuri::tools::snapshot::sanitizeSnapshotRenderSettings(settings);
+  sanitizeDDGISettings(settings.ddgi);
 }
 
 } // namespace nuri::tools::autotest

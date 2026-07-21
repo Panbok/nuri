@@ -37,7 +37,7 @@ private:
     HasSceneColor = 1u << 5u,
   };
   using FrameData = ForwardSceneFrameData;
-  static_assert(sizeof(FrameData) == 464,
+  static_assert(sizeof(FrameData) == 488,
                 "SkyboxPass::FrameData must match shader FrameDataBuffer "
                 "layout");
   struct PushConstants {

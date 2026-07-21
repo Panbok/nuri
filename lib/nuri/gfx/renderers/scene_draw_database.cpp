@@ -17,12 +17,22 @@ MaterialRef resolveMaterial(const Renderable &renderable,
   }
   return isValid(material) ? material : renderable.material;
 }
+
+void appendUniqueTexture(std::pmr::vector<TextureHandle> &textures,
+                         TextureHandle texture) {
+  if (nuri::isValid(texture) &&
+      std::ranges::find(textures, texture) == textures.end()) {
+    textures.push_back(texture);
+  }
+}
 } // namespace
 
 SceneDrawDatabase::SceneDrawDatabase(GPUDevice &gpu,
                                      std::pmr::memory_resource *memory)
     : gpu_(gpu), instances_(memory ? memory : std::pmr::get_default_resource()),
-      draws_(memory ? memory : std::pmr::get_default_resource()) {}
+      draws_(memory ? memory : std::pmr::get_default_resource()),
+      rayTracingMaterialTextures_(memory ? memory
+                                         : std::pmr::get_default_resource()) {}
 
 Result<bool, std::string> SceneDrawDatabase::prepare(FrameBuildContext &ctx) {
   if (!ctx.frame.scene) {
@@ -61,6 +71,7 @@ SceneDrawDatabase::update(const RenderScene &scene,
   }
   instances_.clear();
   draws_.clear();
+  rayTracingMaterialTextures_.clear();
   const std::span<const Renderable> renderables = scene.renderables();
   for (uint32_t instanceIndex = 0;
        instanceIndex < static_cast<uint32_t>(renderables.size());
@@ -72,7 +83,6 @@ SceneDrawDatabase::update(const RenderScene &scene,
           "SceneDrawDatabase: failed to resolve model");
     }
     const Model &model = *modelRecord->model;
-    instances_.push_back(SceneInstanceRecord{&renderable, &model});
     GeometryAllocationView geometry{};
     if (!gpu_.resolveGeometry(model.geometryHandle(), geometry)) {
       return Result<bool, std::string>::makeError(
@@ -91,6 +101,12 @@ SceneDrawDatabase::update(const RenderScene &scene,
             : IndexFormat::U32;
     const bool dynamicCaster =
         !renderable.morphWeights.empty() || !renderable.skinPalette.empty();
+    instances_.push_back(SceneInstanceRecord{
+        .renderable = &renderable,
+        .model = &model,
+        .firstDraw = static_cast<uint32_t>(draws_.size()),
+        .dynamicCaster = dynamicCaster,
+    });
     const std::span<const Submesh> submeshes = model.submeshes();
     for (uint32_t submeshIndex = 0;
          submeshIndex < static_cast<uint32_t>(submeshes.size());
@@ -107,6 +123,21 @@ SceneDrawDatabase::update(const RenderScene &scene,
       const bool transmission =
           materialRecord && (materialRecord->desc.featureMask &
                              kMaterialFeatureTransmission) != 0;
+      if (materialRecord != nullptr && !alphaBlended && !transmission) {
+        constexpr std::array rtTextureSlots{
+            kMaterialTextureSlotBaseColor,
+            kMaterialTextureSlotMetallicRoughness,
+            kMaterialTextureSlotNormal,
+            kMaterialTextureSlotEmissive,
+        };
+        for (const uint32_t textureSlot : rtTextureSlots) {
+          const TextureRecord *texture =
+              resources.tryGet(materialRecord->textureRefs[textureSlot]);
+          if (texture != nullptr) {
+            appendUniqueTexture(rayTracingMaterialTextures_, texture->texture);
+          }
+        }
+      }
       const TextureRecord *baseColor =
           materialRecord
               ? resources.tryGet(
@@ -157,9 +188,10 @@ SceneDrawDatabase::update(const RenderScene &scene,
                     materialRecord->textureRefs[kMaterialTextureSlotNormal]) ||
                 isValid(materialRecord->desc
                             .textures[kMaterialTextureSlotNormal]))),
-          .dynamicCaster = dynamicCaster,
       });
     }
+    instances_.back().drawCount =
+        static_cast<uint32_t>(draws_.size()) - instances_.back().firstDraw;
   }
   scene_ = &scene;
   topologyVersion_ = scene.topologyVersion();

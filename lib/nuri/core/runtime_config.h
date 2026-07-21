@@ -66,12 +66,30 @@ struct NURI_API RuntimeCompositeConfig {
   std::filesystem::path agxLut;
 };
 
+struct NURI_API RuntimeDDGIShaderConfig {
+  uint64_t persistentMemoryLimitBytes = 256ull * 1024ull * 1024ull;
+  uint64_t peakMemoryLimitBytes = 512ull * 1024ull * 1024ull;
+  std::filesystem::path shaderBasePath;
+  std::filesystem::path decodePositions;
+  std::filesystem::path prepareDynamicVertices;
+  std::filesystem::path trace;
+  std::filesystem::path traceInspect;
+  std::filesystem::path blendIrradiance;
+  std::filesystem::path blendDistance;
+  std::filesystem::path updateProbeState;
+  std::filesystem::path probeDebugVertex;
+  std::filesystem::path probeDebugFragment;
+  std::filesystem::path rayDebugVertex;
+  std::filesystem::path rayDebugFragment;
+};
+
 struct NURI_API RuntimeShaderConfig {
   RuntimeRasterShaderConfig debugGrid;
   RuntimeRasterShaderConfig skybox;
   RuntimeOpaqueShaderConfig opaque;
   RuntimeCompositeConfig composite;
   RuntimeTextMtsdfShaderConfig textMtsdf;
+  RuntimeDDGIShaderConfig ddgi;
 };
 
 struct NURI_API RuntimeConfig {

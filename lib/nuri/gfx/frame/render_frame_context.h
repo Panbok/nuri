@@ -1,8 +1,10 @@
 #pragma once
 #include "nuri/core/log.h"
 #include "nuri/core/result.h"
+#include "nuri/gfx/ddgi/ddgi_types.h"
 #include "nuri/gfx/gpu_render_types.h"
 #include "nuri/gfx/gpu_types.h"
+#include "nuri/gfx/ray_tracing/ray_tracing_types.h"
 #include "nuri/gfx/render_graph/render_graph.h"
 #include "nuri/gfx/sim/animation_scene_frame_data.h"
 #include "nuri/scene/camera.h"
@@ -287,6 +289,25 @@ enum class ShadowPreviewMode : uint8_t {
   TiledAllCascades = 1,
 };
 
+enum class DDGIQualityPreset : uint8_t {
+  Low = 0,
+  Balanced = 1,
+  High = 2,
+  Custom = 3,
+};
+
+struct DDGICommandEpochs {
+  uint64_t resetHistory = 0u;
+  uint64_t forceFullUpdate = 0u;
+  uint64_t rebuildRayTracingScene = 0u;
+  constexpr bool operator==(const DDGICommandEpochs &) const = default;
+};
+
+[[nodiscard]] constexpr bool ddgiEpochIsPending(uint64_t requested,
+                                                uint64_t consumed) noexcept {
+  return requested > consumed;
+}
+
 enum class VisibilityCullingMode : uint8_t {
   Disabled = 0,
   CpuCoarse = 1,
@@ -534,6 +555,18 @@ sanitizeTemporalAAQualityPreset(TemporalAAQualityPreset preset) noexcept {
                                 TemporalAAQualityPreset::Quality);
 }
 
+[[nodiscard]] constexpr DDGIQualityPreset
+sanitizeDDGIQualityPreset(DDGIQualityPreset preset) noexcept {
+  return sanitizeContiguousEnum(preset, DDGIQualityPreset::Custom,
+                                DDGIQualityPreset::Balanced);
+}
+
+[[nodiscard]] constexpr DDGIDebugView
+sanitizeDDGIDebugView(DDGIDebugView view) noexcept {
+  return sanitizeContiguousEnum(view, DDGIDebugView::LeakRisk,
+                                DDGIDebugView::None);
+}
+
 struct RenderSettings {
   struct SkyboxSettings {
     bool enabled = true;
@@ -704,6 +737,30 @@ struct RenderSettings {
     TemporalAAQualityPreset qualityPreset = TemporalAAQualityPreset::Quality;
     AntiAliasingDebugSettings debug{};
   };
+  struct DDGISettings {
+    bool enabled = false;
+    DDGIQualityPreset preset = DDGIQualityPreset::Balanced;
+    uint32_t raysPerProbe = 128u;
+    uint32_t maxProbeUpdatesPerFrame = 512u;
+    uint32_t maxRayQueriesPerFrame = 65'536u;
+    uint32_t maxLocalLightsPerHit = 8u;
+    uint32_t maxCandidateIntersectionsPerRay = 64u;
+    float irradianceHysteresis = 0.97f;
+    float distanceHysteresis = 0.98f;
+    float changeIrradianceHysteresisScale = 0.50f;
+    float changeDistanceHysteresisScale = 0.50f;
+    float selfShadowBias = 0.30f;
+    float multiBounceLuminanceClamp = 32.0f;
+    bool relocation = true;
+    bool classification = true;
+    bool multiBounce = true;
+    bool freezeUpdates = false;
+    DDGIDebugView debugView = DDGIDebugView::None;
+    bool showVolumes = false;
+    bool showProbes = false;
+    bool showSelectedProbeRays = false;
+    DDGICommandEpochs requestedEpochs{};
+  };
   SkyboxSettings skybox{};
   OpaqueSettings opaque{};
   TransmissionSettings transmission{};
@@ -716,6 +773,7 @@ struct RenderSettings {
   TextureFilteringSettings textureFiltering{};
   ToneMapSettings toneMap{};
   HDRPostProcessSettings hdrPostProcess{};
+  DDGISettings ddgi{};
 };
 
 [[nodiscard]] constexpr VisibilityCullingMode
@@ -741,6 +799,74 @@ inline void sanitizeVisibilitySettings(VisibilitySettings &settings) noexcept {
 [[nodiscard]] inline float finiteClamp(float value, float minimum,
                                        float maximum, float fallback) noexcept {
   return std::clamp(std::isfinite(value) ? value : fallback, minimum, maximum);
+}
+
+inline void applyDDGIQualityPreset(RenderSettings::DDGISettings &settings,
+                                   DDGIQualityPreset preset) noexcept {
+  settings.preset = sanitizeDDGIQualityPreset(preset);
+  if (settings.preset == DDGIQualityPreset::Custom) {
+    return;
+  }
+  struct Preset {
+    uint32_t raysPerProbe;
+    uint32_t maxProbeUpdatesPerFrame;
+    uint32_t maxRayQueriesPerFrame;
+    float irradianceHysteresis;
+    float distanceHysteresis;
+  };
+  static constexpr std::array presets{
+      Preset{64u, 512u, 32'768u, 0.98f, 0.99f},
+      Preset{128u, 512u, 65'536u, 0.97f, 0.98f},
+      Preset{256u, 512u, 131'072u, 0.95f, 0.98f},
+  };
+  const Preset &values = presets[static_cast<uint8_t>(settings.preset)];
+  settings.raysPerProbe = values.raysPerProbe;
+  settings.maxProbeUpdatesPerFrame = values.maxProbeUpdatesPerFrame;
+  settings.maxRayQueriesPerFrame = values.maxRayQueriesPerFrame;
+  settings.irradianceHysteresis = values.irradianceHysteresis;
+  settings.distanceHysteresis = values.distanceHysteresis;
+}
+
+inline void
+sanitizeDDGISettings(RenderSettings::DDGISettings &settings,
+                     uint32_t maxRayQueriesHardCap =
+                         std::numeric_limits<uint32_t>::max()) noexcept {
+  settings.preset = sanitizeDDGIQualityPreset(settings.preset);
+  applyDDGIQualityPreset(settings, settings.preset);
+  settings.debugView = sanitizeDDGIDebugView(settings.debugView);
+  settings.raysPerProbe = std::clamp(settings.raysPerProbe, 16u, 1024u);
+  settings.maxProbeUpdatesPerFrame =
+      std::clamp(settings.maxProbeUpdatesPerFrame, 1u, 65'536u);
+  const uint32_t minimumQueries = 2u * settings.raysPerProbe;
+  const uint32_t effectiveHardCap =
+      std::max(maxRayQueriesHardCap, minimumQueries);
+  settings.maxRayQueriesPerFrame = std::clamp(settings.maxRayQueriesPerFrame,
+                                              minimumQueries, effectiveHardCap);
+  settings.maxLocalLightsPerHit =
+      std::clamp(settings.maxLocalLightsPerHit, 0u, 16u);
+  settings.maxCandidateIntersectionsPerRay =
+      std::clamp(settings.maxCandidateIntersectionsPerRay, 8u, 256u);
+  settings.irradianceHysteresis =
+      finiteClamp(settings.irradianceHysteresis, 0.0f, 0.9999f, 0.97f);
+  settings.distanceHysteresis =
+      finiteClamp(settings.distanceHysteresis, 0.0f, 0.9999f, 0.98f);
+  settings.changeIrradianceHysteresisScale =
+      finiteClamp(settings.changeIrradianceHysteresisScale, 0.0f, 1.0f, 0.50f);
+  settings.changeDistanceHysteresisScale =
+      finiteClamp(settings.changeDistanceHysteresisScale, 0.0f, 1.0f, 0.50f);
+  settings.selfShadowBias =
+      finiteClamp(settings.selfShadowBias, 0.0f, 2.0f, 0.30f);
+  if (!std::isfinite(settings.multiBounceLuminanceClamp) ||
+      settings.multiBounceLuminanceClamp <= 0.0f) {
+    settings.multiBounceLuminanceClamp = 32.0f;
+  }
+}
+
+inline void
+copyDDGIQualityPresetToCustom(RenderSettings::DDGISettings &settings) noexcept {
+  const DDGIQualityPreset preset = sanitizeDDGIQualityPreset(settings.preset);
+  applyDDGIQualityPreset(settings, preset);
+  settings.preset = DDGIQualityPreset::Custom;
 }
 
 inline void sanitizeAmbientOcclusionSettings(
@@ -1644,6 +1770,11 @@ struct ForwardSceneFrameData {
   uint32_t materialSamplerReserved0 = 0;
   uint32_t materialSamplerReserved1 = 0;
   uint32_t materialSamplerReserved2 = 0;
+  uint64_t ddgiFrameBufferAddress = 0u;
+  uint32_t ddgiFlags = 0u;
+  uint32_t ddgiDebugView = 0u;
+  uint32_t ddgiReserved0 = 0u;
+  uint32_t ddgiReserved1 = 0u;
   glm::mat4 previousViewProj{1.0f};
   glm::uvec4 sceneDepthPyramidInfo{0u};
   [[nodiscard]] bool
@@ -1651,7 +1782,7 @@ struct ForwardSceneFrameData {
     return std::memcmp(this, &other, sizeof(ForwardSceneFrameData)) == 0;
   }
 };
-static_assert(sizeof(ForwardSceneFrameData) == 464u);
+static_assert(sizeof(ForwardSceneFrameData) == 488u);
 
 struct ForwardSceneGpuData {
   BufferHandle buffer{};
@@ -1665,6 +1796,24 @@ struct ForwardSceneGpuData {
   uint32_t directionalLightCount = 0;
   uint32_t localLightCount = 0;
   uint32_t shadowFlags = 0;
+  std::span<const BufferHandle> indirectDependencyBuffers{};
+  std::span<const TextureHandle> indirectDependencyTextures{};
+};
+
+struct DDGIFrameGpuDataHandle {
+  BufferHandle buffer{};
+  uint64_t bufferAddress = 0u;
+  std::span<const BufferHandle> dependencyBuffers{};
+  std::span<const TextureHandle> dependencyTextures{};
+  uint32_t activeVolumeCount = 0u;
+  uint32_t flags = 0u;
+  DDGIDebugView debugView = DDGIDebugView::None;
+  std::array<DDGIVolumeId, kMaxDDGIVolumes> volumeIds{};
+  std::array<uint32_t, kMaxDDGIVolumes> probeCounts{};
+  std::array<float, kMaxDDGIVolumes> minimumProbeSpacing{};
+  BufferHandle diagnosticBuffer{};
+  uint64_t diagnosticRayAddress = 0u;
+  uint32_t diagnosticRayCount = 0u;
 };
 
 struct MaterialTableGpuData {
@@ -2246,6 +2395,8 @@ struct RenderFrameMetrics {
   AntiAliasingFrameMetrics antiAliasing{};
   AmbientOcclusionFrameMetrics ambientOcclusion{};
   HDRPostProcessFrameMetrics hdrPostProcess{};
+  RayTracingSceneFrameMetrics rayTracingScene{};
+  DDGIFrameMetrics ddgi{};
   struct TransparentFrameMetrics {
     uint32_t meshDraws = 0;
     uint32_t contributorSortableDraws = 0;
@@ -2330,6 +2481,45 @@ struct ShadowInspectResult {
   float sampledDepth = 0.0f;
   uint32_t cascadeIndex = 0u;
   float cascadeBlendFactor = 0.0f;
+};
+
+struct DDGIProbeInspectRequest {
+  uint64_t requestId = 0u;
+  DDGIVolumeId volume = kInvalidDDGIVolumeId;
+  uint32_t probeId = 0u;
+  uint32_t rayCount = 128u;
+};
+
+struct DDGIProbeInspectResult {
+  uint64_t requestId = 0u;
+  uint64_t sceneId = 0u;
+  DDGIVolumeId volume = kInvalidDDGIVolumeId;
+  uint32_t probeId = 0u;
+  uint32_t volumeSlot = 0u;
+  glm::uvec3 volumeCoordinate{0u};
+  glm::uvec2 irradianceAtlasCoordinate{0u};
+  glm::uvec2 distanceAtlasCoordinate{0u};
+  uint32_t probeState = 0u;
+  uint32_t lastSuccessfulUpdate = 0u;
+  uint32_t updateAge = 0u;
+  uint32_t hitCount = 0u;
+  uint32_t missCount = 0u;
+  uint32_t rejectedAlphaCount = 0u;
+  uint32_t rejectedBackfaceCount = 0u;
+  uint32_t candidateOverflowCount = 0u;
+  uint32_t diagnosticEventOverflowCount = 0u;
+  uint32_t rayCount = 0u;
+  glm::vec3 nominalWorldPosition{0.0f};
+  glm::vec3 relocatedWorldPosition{0.0f};
+  glm::vec3 irradiance{0.0f};
+  glm::vec2 distanceMoments{0.0f};
+  uint64_t layoutGeneration = 0u;
+  uint64_t resourceGeneration = 0u;
+  uint64_t deviceEpoch = 0u;
+  uint64_t submissionSequence = 0u;
+  bool active = false;
+  bool inside = false;
+  bool valid = false;
 };
 
 enum class RenderCaptureValueKind : uint8_t {
@@ -2493,6 +2683,8 @@ static constexpr FrameTextureRequirementFlags
 
 struct FrameSharedResources {
   const SceneDrawDatabase *sceneDrawDatabase = nullptr;
+  std::optional<RayTracingSceneFrameView> rayTracingScene{};
+  std::optional<DDGIFrameGpuDataHandle> ddgiFrameGpuData{};
   std::optional<ForwardSceneGpuData> forwardSceneGpuData{};
   std::optional<MaterialTableGpuData> materialTableGpuData{};
   std::optional<AnimationSceneFrameData> animationSceneGpuData{};
@@ -2561,6 +2753,7 @@ struct FrameSharedResources {
   RenderGraphTextureId opaquePickDepthGraphTexture{};
   std::optional<LightId> selectedLightId{};
   std::optional<LightId> selectedShadowLightId{};
+  std::optional<DDGIVolumeId> selectedDDGIVolumeId{};
   bool transparentStageEnabled = false;
   bool transparentTransmissionStageEnabled = false;
   bool exposureHistoryValid = false;
@@ -2644,6 +2837,8 @@ struct RenderFrameContext {
   std::optional<OpaquePickResult> opaquePickResult{};
   std::optional<ShadowInspectRequest> shadowInspectRequest{};
   std::optional<ShadowInspectResult> shadowInspectResult{};
+  std::optional<DDGIProbeInspectRequest> ddgiProbeInspectRequest{};
+  std::optional<DDGIProbeInspectResult> ddgiProbeInspectResult{};
   FrameSharedResources sharedResources{};
   RenderCaptureRequest captureRequests{};
   RenderCaptureRegistry captureRegistry{};
@@ -2670,6 +2865,7 @@ resolveRenderSettings(const RenderSettings &source) {
   sanitizeHDRPostProcessSettings(resolved.hdrPostProcess);
   sanitizeTransmissionSettings(resolved.transmission);
   sanitizeShadowSettings(resolved.shadow);
+  sanitizeDDGISettings(resolved.ddgi);
   return resolved;
 }
 

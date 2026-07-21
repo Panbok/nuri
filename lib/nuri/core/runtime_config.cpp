@@ -119,6 +119,42 @@ constexpr std::array kTextFields = {
         "world_fragment", "text_3d_mtsdf.frag",
         &RuntimeTextMtsdfShaderConfig::worldFragment},
 };
+constexpr std::array kDDGIFields = {
+    PathField<RuntimeDDGIShaderConfig>{
+        "decode_positions", "rt_decode_positions.comp",
+        &RuntimeDDGIShaderConfig::decodePositions},
+    PathField<RuntimeDDGIShaderConfig>{
+        "prepare_dynamic_vertices", "rt_prepare_dynamic_vertices.comp",
+        &RuntimeDDGIShaderConfig::prepareDynamicVertices},
+    PathField<RuntimeDDGIShaderConfig>{"trace", "ddgi_trace.comp",
+                                       &RuntimeDDGIShaderConfig::trace},
+    PathField<RuntimeDDGIShaderConfig>{"trace_inspect",
+                                       "ddgi_trace_inspect.comp",
+                                       &RuntimeDDGIShaderConfig::traceInspect},
+    PathField<RuntimeDDGIShaderConfig>{
+        "blend_irradiance", "ddgi_blend_irradiance.comp",
+        &RuntimeDDGIShaderConfig::blendIrradiance},
+    PathField<RuntimeDDGIShaderConfig>{"blend_distance",
+                                       "ddgi_blend_distance.comp",
+                                       &RuntimeDDGIShaderConfig::blendDistance},
+    PathField<RuntimeDDGIShaderConfig>{
+        "update_probe_state", "ddgi_update_probe_state.comp",
+        &RuntimeDDGIShaderConfig::updateProbeState},
+    PathField<RuntimeDDGIShaderConfig>{
+        "probe_debug_vertex", "ddgi_probe_debug.vert",
+        &RuntimeDDGIShaderConfig::probeDebugVertex},
+    PathField<RuntimeDDGIShaderConfig>{
+        "probe_debug_fragment", "ddgi_probe_debug.frag",
+        &RuntimeDDGIShaderConfig::probeDebugFragment},
+    PathField<RuntimeDDGIShaderConfig>{
+        "ray_debug_vertex", "ddgi_ray_debug.vert",
+        &RuntimeDDGIShaderConfig::rayDebugVertex},
+    PathField<RuntimeDDGIShaderConfig>{
+        "ray_debug_fragment", "ddgi_ray_debug.frag",
+        &RuntimeDDGIShaderConfig::rayDebugFragment},
+};
+constexpr auto kDDGIConfigFields = std::to_array<std::string_view>(
+    {"persistent_memory_limit_mb", "peak_memory_limit_mb"});
 template <typename T>
 [[nodiscard]] Result<T, std::string> makeError(std::string message) {
   return Result<T, std::string>::makeError(std::move(message));
@@ -232,6 +268,14 @@ public:
     }
     return static_cast<int32_t>(raw);
   }
+  [[nodiscard]] int32_t positiveIntOr(yyjson_val *object, const char *key,
+                                      std::string_view parentName,
+                                      int32_t fallback) {
+    if (!object || !yyjson_obj_get(object, key)) {
+      return fallback;
+    }
+    return positiveInt(object, key, parentName);
+  }
   [[nodiscard]] std::filesystem::path path(std::string_view raw,
                                            const std::filesystem::path &base,
                                            std::string_view fieldName,
@@ -288,8 +332,13 @@ void readPaths(ConfigReader &reader, yyjson_val *object,
                std::string_view section,
                const std::filesystem::path &shaderRoot,
                const std::filesystem::path &textureRoot, T &target,
-               const std::array<PathField<T>, N> &fields) {
-  reader.validate(object, section, fieldPredicate(fields));
+               const std::array<PathField<T>, N> &fields,
+               std::span<const std::string_view> additionalFields = {}) {
+  const auto pathField = fieldPredicate(fields);
+  reader.validate(object, section, [&](std::string_view key) {
+    return pathField(key) ||
+           std::ranges::find(additionalFields, key) != additionalFields.end();
+  });
   for (const auto &field : fields) {
     const auto &root = field.textureRoot ? textureRoot : shaderRoot;
     target.*field.member =
@@ -344,7 +393,7 @@ loadRuntimeConfig(const std::filesystem::path &configPath) {
   constexpr auto windowKeys =
       std::to_array<std::string_view>({"title", "width", "height", "mode"});
   constexpr auto shaderKeys = std::to_array<std::string_view>(
-      {"debug_grid", "skybox", "opaque", "composite", "text_mtsdf"});
+      {"debug_grid", "skybox", "opaque", "composite", "text_mtsdf", "ddgi"});
   const auto listed = [](const auto &keys) {
     return [&keys](std::string_view key) {
       return std::ranges::find(keys, key) != keys.end();
@@ -381,6 +430,7 @@ loadRuntimeConfig(const std::filesystem::path &configPath) {
   yyjson_val *composite = reader.object(shaders, "composite", "shaders", false);
   yyjson_val *textMtsdf =
       reader.object(shaders, "text_mtsdf", "shaders", false);
+  yyjson_val *ddgi = reader.object(shaders, "ddgi", "shaders", false);
   readPaths(reader, debug, "shaders.debug_grid", config.roots.shaders,
             config.roots.textures, config.shaders.debugGrid, kDebugFields);
   readPaths(reader, skybox, "shaders.skybox", config.roots.shaders,
@@ -393,6 +443,25 @@ loadRuntimeConfig(const std::filesystem::path &configPath) {
             config.roots.textures, config.shaders.composite, kCompositeFields);
   readPaths(reader, textMtsdf, "shaders.text_mtsdf", config.roots.shaders,
             config.roots.textures, config.shaders.textMtsdf, kTextFields);
+  config.shaders.ddgi.shaderBasePath = config.roots.shaders;
+  readPaths(reader, ddgi, "shaders.ddgi", config.roots.shaders,
+            config.roots.textures, config.shaders.ddgi, kDDGIFields,
+            kDDGIConfigFields);
+  constexpr uint64_t kMiB = 1024ull * 1024ull;
+  config.shaders.ddgi.persistentMemoryLimitBytes =
+      static_cast<uint64_t>(reader.positiveIntOr(
+          ddgi, "persistent_memory_limit_mb", "shaders.ddgi", 256)) *
+      kMiB;
+  config.shaders.ddgi.peakMemoryLimitBytes =
+      static_cast<uint64_t>(reader.positiveIntOr(ddgi, "peak_memory_limit_mb",
+                                                 "shaders.ddgi", 512)) *
+      kMiB;
+  if (config.shaders.ddgi.peakMemoryLimitBytes <
+          config.shaders.ddgi.persistentMemoryLimitBytes &&
+      reader.error().empty()) {
+    reader.fail("Config field 'shaders.ddgi.peak_memory_limit_mb' must be "
+                "greater than or equal to persistent_memory_limit_mb");
+  }
   if (!reader.error().empty()) {
     return makeError<RuntimeConfig>(reader.error());
   }

@@ -35,6 +35,8 @@ struct RecordingContextHandleTag;
 struct RecordedCommandBufferHandleTag;
 struct SubmissionHandleTag;
 struct GeometryAllocationHandleTag;
+struct AccelerationStructureHandleTag;
+struct RayQueryBindingHandleTag;
 
 using BufferHandle = Handle<BufferHandleTag>;
 using TextureHandle = Handle<TextureHandleTag>;
@@ -47,6 +49,8 @@ using RecordingContextHandle = Handle<RecordingContextHandleTag>;
 using RecordedCommandBufferHandle = Handle<RecordedCommandBufferHandleTag>;
 using SubmissionHandle = Handle<SubmissionHandleTag>;
 using GeometryAllocationHandle = Handle<GeometryAllocationHandleTag>;
+using AccelerationStructureHandle = Handle<AccelerationStructureHandleTag>;
+using RayQueryBindingHandle = Handle<RayQueryBindingHandleTag>;
 
 template <typename Tag> constexpr bool isValid(Handle<Tag> handle) noexcept {
   return handle.generation != 0;
@@ -101,6 +105,7 @@ enum class Format : uint8_t {
   RG16_FLOAT,
   R8_UNORM,
   R16_UNORM,
+  RGB32_FLOAT,
   Count
 };
 
@@ -122,6 +127,8 @@ enum class Format : uint8_t {
   case Format::RG32_FLOAT:
   case Format::RGBA16_FLOAT:
     return 8u;
+  case Format::RGB32_FLOAT:
+    return 12u;
   case Format::RGBA32_FLOAT:
     return 16u;
   default:
@@ -145,6 +152,8 @@ enum class BufferUsage : uint8_t {
   Uniform = 1u << 2u,
   Storage = 1u << 3u,
   Indirect = 1u << 4u,
+  AccelerationStructureBuildInput = 1u << 5u,
+  AccelerationStructureStorage = 1u << 6u,
 };
 
 constexpr BufferUsage operator|(BufferUsage lhs, BufferUsage rhs) {
@@ -260,7 +269,66 @@ enum class ShaderStage : uint8_t {
 
 enum class GPUFeature : uint8_t {
   Meshlets,
+  RayQuery,
+  RayTracingAccelerationStructure,
   RayTracingClusters,
+};
+
+struct RayTracingCapabilities {
+  bool accelerationStructure = false;
+  bool rayQuery = false;
+  bool bufferDeviceAddress = false;
+  bool rayTracingPipeline = false;
+  uint64_t maxGeometryCount = 0u;
+  uint64_t maxInstanceCount = 0u;
+  uint64_t maxPrimitiveCount = 0u;
+  uint32_t minScratchOffsetAlignment = 0u;
+};
+
+struct DeviceCaps {
+  RayTracingCapabilities rayTracing{};
+  uint32_t maxTextureDimension2D = 0u;
+};
+
+enum class AccelerationStructureKind : uint8_t {
+  BottomLevel = 0,
+  TopLevel = 1,
+};
+
+enum class AccelerationStructureBuildFlags : uint8_t {
+  None = 0,
+  PreferFastTrace = 1u << 0u,
+  PreferFastBuild = 1u << 1u,
+  AllowUpdate = 1u << 2u,
+};
+
+constexpr AccelerationStructureBuildFlags
+operator|(AccelerationStructureBuildFlags lhs,
+          AccelerationStructureBuildFlags rhs) noexcept {
+  return static_cast<AccelerationStructureBuildFlags>(
+      static_cast<uint8_t>(lhs) | static_cast<uint8_t>(rhs));
+}
+
+constexpr AccelerationStructureBuildFlags
+operator&(AccelerationStructureBuildFlags lhs,
+          AccelerationStructureBuildFlags rhs) noexcept {
+  return static_cast<AccelerationStructureBuildFlags>(
+      static_cast<uint8_t>(lhs) & static_cast<uint8_t>(rhs));
+}
+
+[[nodiscard]] constexpr bool hasAccelerationStructureBuildFlag(
+    AccelerationStructureBuildFlags flags,
+    AccelerationStructureBuildFlags requested) noexcept {
+  return (flags & requested) != AccelerationStructureBuildFlags::None;
+}
+
+struct AccelerationStructureFacts {
+  AccelerationStructureKind kind = AccelerationStructureKind::BottomLevel;
+  AccelerationStructureBuildFlags buildFlags =
+      AccelerationStructureBuildFlags::None;
+  uint32_t geometryCount = 0u;
+  uint32_t maxInstanceCount = 0u;
+  uint64_t deviceAddress = 0u;
 };
 
 struct GpuMultisampleCapabilities {
