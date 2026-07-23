@@ -550,6 +550,78 @@ TEST(NuriBenchmarkingTest, ManifestRejectsUnknownKeys) {
   std::filesystem::remove(path, ec);
 }
 
+TEST(NuriBenchmarkingTest, ManifestParsesCanonicalMsaaSampleRequirement) {
+  const std::filesystem::path path =
+      makeTempPath("benchmark_msaa_requirement", ".json");
+  writeFile(path,
+            R"json({
+              "schemaVersion": 1,
+              "id": "aa.requirement.msaa8x",
+              "suite": "aa",
+              "comparisonGroup": "aa.requirement",
+              "variant": "msaa8x",
+              "requirements": {"msaaSamples": 8}
+            })json");
+
+  auto loaded = loadBenchmarkCaseManifest(path);
+  ASSERT_FALSE(loaded.hasError()) << loaded.error();
+  ASSERT_TRUE(loaded.value().requirements.msaaSamples.has_value());
+  EXPECT_EQ(*loaded.value().requirements.msaaSamples, 8u);
+
+  writeFile(path,
+            R"json({
+              "schemaVersion": 1,
+              "id": "aa.requirement.invalid",
+              "suite": "aa",
+              "comparisonGroup": "aa.requirement",
+              "variant": "invalid",
+              "requirements": {"msaaSamples": 2}
+            })json");
+  loaded = loadBenchmarkCaseManifest(path);
+  EXPECT_TRUE(loaded.hasError());
+  EXPECT_NE(loaded.error().find("must be 1, 4, or 8"), std::string::npos);
+
+  writeFile(path,
+            R"json({
+              "schemaVersion": 1,
+              "id": "aa.requirement.conflict",
+              "suite": "aa",
+              "comparisonGroup": "aa.requirement",
+              "variant": "conflict",
+              "requirements": {"msaaSamples": 8, "msaa4x": true}
+            })json");
+  loaded = loadBenchmarkCaseManifest(path);
+  EXPECT_TRUE(loaded.hasError());
+  EXPECT_NE(loaded.error().find("conflicts"), std::string::npos);
+
+  std::error_code ec;
+  std::filesystem::remove(path, ec);
+}
+
+TEST(NuriBenchmarkingTest, MsaaRequirementPreflightCoversEightSamples) {
+  BenchmarkRequirements requirements{};
+  requirements.msaaSamples = 8u;
+  GpuMultisampleCapabilities capabilities{
+      .sample4Color = true,
+      .sample4Depth = true,
+      .sample8Color = true,
+      .sample8Depth = false,
+      .depthResolveMin = true,
+      .alphaToCoverage = true,
+  };
+  std::string message;
+  auto unavailable =
+      checkBenchmarkGpuRequirements(requirements, capabilities, message);
+  ASSERT_TRUE(unavailable.hasError());
+  EXPECT_EQ(unavailable.error(), BenchmarkExitCode::EnvironmentUnavailable);
+  EXPECT_NE(message.find("sample8_depth"), std::string::npos);
+
+  capabilities.sample8Depth = true;
+  auto available =
+      checkBenchmarkGpuRequirements(requirements, capabilities, message);
+  ASSERT_FALSE(available.hasError()) << message;
+}
+
 TEST(NuriBenchmarkingTest, ManifestParsesStrictVersionedDDGICoverage) {
   const std::filesystem::path path =
       makeTempPath("benchmark_ddgi_coverage", ".json");
@@ -1361,7 +1433,7 @@ TEST(NuriBenchmarkingTest, ReportWritesReadsAndComputesMeasuredStats) {
                                             .hasTarget = true,
                                         }}});
   report.benchmarkCase.requirements.assets = {"modelsRoot:Test/Test.gltf"};
-  report.benchmarkCase.requirements.msaa4x = true;
+  report.benchmarkCase.requirements.msaaSamples = 4u;
   report.benchmarkCase.settings.opaque.meshletMode =
       MeshletRenderMode::Required;
   report.benchmarkCase.settings.opaque.enableInstanceAnimation = false;
@@ -1604,7 +1676,7 @@ TEST(NuriBenchmarkingTest, ReportWritesReadsAndComputesMeasuredStats) {
             std::string::npos);
   EXPECT_NE(reportJson.find("\"variant\": \"reference_taa\""),
             std::string::npos);
-  EXPECT_NE(reportJson.find("\"msaa4x\": true"), std::string::npos);
+  EXPECT_NE(reportJson.find("\"msaaSamples\": 4"), std::string::npos);
   EXPECT_NE(reportJson.find("\"meshletMode\": \"Required\""),
             std::string::npos);
   EXPECT_NE(reportJson.find("\"ddgi\""), std::string::npos);
@@ -1635,7 +1707,9 @@ TEST(NuriBenchmarkingTest, ReportWritesReadsAndComputesMeasuredStats) {
   ASSERT_EQ(loaded.value().benchmarkCase.requirements.assets.size(), 1u);
   EXPECT_EQ(loaded.value().benchmarkCase.requirements.assets[0],
             "modelsRoot:Test/Test.gltf");
-  EXPECT_TRUE(loaded.value().benchmarkCase.requirements.msaa4x);
+  ASSERT_TRUE(
+      loaded.value().benchmarkCase.requirements.msaaSamples.has_value());
+  EXPECT_EQ(*loaded.value().benchmarkCase.requirements.msaaSamples, 4u);
   EXPECT_TRUE(
       loaded.value()
           .benchmarkCase.settings.antiAliasing.debug.spatialPostMsaaCleanup);

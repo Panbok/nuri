@@ -215,6 +215,43 @@ void flattenAutotestRendererMetrics(std::map<std::string, double> &out,
             opaque.meshletRejectedMissingAssetData);
   addMetric(out, "renderer.opaque.meshlet_rejected_incompatible_frame",
             opaque.meshletRejectedIncompatibleFrame);
+  addMetric(out, "renderer.opaque.classic_main_draws", opaque.classicMainDraws);
+  addMetric(out, "renderer.opaque.classic_alpha_masked_main_draws",
+            opaque.classicAlphaMaskedMainDraws);
+  addMetric(out, "renderer.opaque.meshlet_main_dispatches",
+            opaque.meshletMainDispatches);
+  addMetric(out, "renderer.opaque.meshlet_main_represented_items",
+            opaque.meshletMainRepresentedItems);
+  addMetric(out, "renderer.opaque.meshlet_alpha_masked_main_dispatches",
+            opaque.meshletAlphaMaskedMainDispatches);
+  addMetric(out, "renderer.opaque.meshlet_alpha_masked_main_items",
+            opaque.meshletAlphaMaskedMainItems);
+  addMetric(out, "renderer.opaque.msaa_depth_prepass_draws",
+            opaque.msaaDepthPrepassDraws);
+  addMetric(out, "renderer.opaque.msaa_depth_prepass_dispatches",
+            opaque.msaaDepthPrepassDispatches);
+  addMetric(out, "renderer.opaque.gtao_auxiliary_prepass_draws",
+            opaque.gtaoAuxiliaryPrepassDraws);
+  addMetric(out, "renderer.opaque.gtao_auxiliary_prepass_dispatches",
+            opaque.gtaoAuxiliaryPrepassDispatches);
+  addMetric(out, "renderer.opaque.gtao_auxiliary_writes_single_sample_depth",
+            opaque.gtaoAuxiliaryWritesSingleSampleDepth);
+  addMetric(out, "renderer.opaque.main_equal_readonly_draws",
+            opaque.mainEqualReadOnlyDraws);
+  addMetric(out, "renderer.opaque.main_equal_readonly_dispatches",
+            opaque.mainEqualReadOnlyDispatches);
+  addMetric(out, "renderer.opaque.main_less_write_draws",
+            opaque.mainLessWriteDraws);
+  addMetric(out, "renderer.opaque.main_less_write_dispatches",
+            opaque.mainLessWriteDispatches);
+  addMetric(out, "renderer.opaque.depth_pyramid_requested",
+            opaque.depthPyramidRequested);
+  addMetric(out, "renderer.opaque.depth_pyramid_active",
+            opaque.depthPyramidActive);
+  addMetric(out, "renderer.visibility.hiz_requested", opaque.hiZRequested);
+  addMetric(out, "renderer.visibility.hiz_active", opaque.hiZActive);
+  addMetric(out, "renderer.visibility.hiz_source_frame_policy",
+            static_cast<uint32_t>(opaque.hiZSourceFramePolicy));
 
   const VisibilityFrameMetrics &visibility = metrics.visibility;
   addMetric(out, "renderer.visibility.cpu_main_candidates",
@@ -418,6 +455,8 @@ void flattenAutotestRendererMetrics(std::map<std::string, double> &out,
             rayTracing.gpuTimingAvailable);
 
   const DDGIFrameMetrics &ddgi = metrics.ddgi;
+  addMetric(out, "renderer.ddgi.requested", ddgi.requested);
+  addMetric(out, "renderer.ddgi.active", ddgi.active);
   addMetric(out, "renderer.ddgi.active_volumes", ddgi.activeVolumes);
   addMetric(out, "renderer.ddgi.ready_volumes", ddgi.readyVolumes);
   addMetric(out, "renderer.ddgi.total_probes", ddgi.totalProbes);
@@ -742,6 +781,10 @@ void flattenAutotestRendererMetrics(std::map<std::string, double> &out,
   addMetric(out, "renderer.aa.taa_copy_back_passes", aa.taaCopyBackPassCount);
   addMetric(out, "renderer.aa.spatial_aa_passes", aa.spatialAAPassCount);
   addMetric(out, "renderer.aa.msaa_resolve_passes", aa.msaaResolvePassCount);
+  addMetric(out, "renderer.aa.msaa_color_resolves", aa.msaaColorResolveCount);
+  addMetric(out, "renderer.aa.msaa_depth_resolves", aa.msaaDepthResolveCount);
+  addMetric(out, "renderer.aa.msaa_resolved_sample_count",
+            aa.msaaResolvedSampleCount);
   addMetric(out, "renderer.aa.msaa_sample_count", aa.msaaSampleCount);
   addBoolMetric(out, "renderer.aa.msaa_sample4_color_supported",
                 aa.msaaSample4ColorSupported);
@@ -761,12 +804,32 @@ void flattenAutotestRendererMetrics(std::map<std::string, double> &out,
                 aa.msaaAlphaToCoverageEnabled);
   addBoolMetric(out, "renderer.aa.msaa_sample_shading_active",
                 aa.msaaSampleShadingEnabled);
+  addBoolMetric(out, "renderer.aa.msaa_alpha_coverage_requested",
+                aa.msaaAlphaCoverageRequested);
+  addBoolMetric(out, "renderer.aa.msaa_spatial_cleanup_requested",
+                aa.msaaSpatialCleanupRequested);
+  addBoolMetric(out, "renderer.aa.msaa_spatial_cleanup_active",
+                aa.msaaSpatialCleanupActive);
   addMetric(out, "renderer.aa.msaa_unsupported_reason",
             static_cast<uint32_t>(aa.msaaUnsupportedReason));
   addMetric(out, "renderer.aa.msaa_alpha_coverage_policy",
             static_cast<uint32_t>(aa.msaaAlphaCoveragePolicy));
   addMetric(out, "renderer.aa.msaa_transparency_policy",
             static_cast<uint32_t>(aa.msaaTransparencyPolicy));
+  addMetric(out, "renderer.aa.msaa_resolve_placement",
+            static_cast<uint32_t>(aa.msaaResolvePlacement));
+  addMetric(out, "renderer.aa.msaa_main_color_format",
+            static_cast<uint32_t>(aa.msaaMainColorFormat));
+  addMetric(out, "renderer.aa.msaa_main_depth_format",
+            static_cast<uint32_t>(aa.msaaMainDepthFormat));
+  addMetric(out, "renderer.aa.msaa_main_attachment_sample_count",
+            aa.msaaMainAttachmentSampleCount);
+  addMetric(out, "renderer.aa.msaa_extent_width", aa.msaaExtentWidth);
+  addMetric(out, "renderer.aa.msaa_extent_height", aa.msaaExtentHeight);
+  addMetric(out, "renderer.aa.msaa_color_texel_bytes", aa.msaaColorTexelBytes);
+  addMetric(out, "renderer.aa.msaa_depth_texel_bytes", aa.msaaDepthTexelBytes);
+  addMetric(out, "renderer.aa.msaa_traffic_formula_version",
+            aa.msaaTrafficFormulaVersion);
   addBytesAsMiB(out, "gpu.memory.aa.motion_vector_total_mb",
                 aa.motionVectorTotalBytes);
   addBytesAsMiB(out, "gpu.memory.aa.motion_class_total_mb",
@@ -778,8 +841,27 @@ void flattenAutotestRendererMetrics(std::map<std::string, double> &out,
   addBytesAsMiB(out, "gpu.memory.aa.spatial_aa_total_mb",
                 aa.spatialAATotalBytes);
   addBytesAsMiB(out, "gpu.memory.aa.msaa_total_mb", aa.msaaTotalBytes);
+  addBytesAsMiB(out, "gpu.memory.aa.msaa_active_color_mb",
+                aa.msaaColorTextureBytes);
+  addBytesAsMiB(out, "gpu.memory.aa.msaa_active_depth_mb",
+                aa.msaaDepthTextureBytes);
+  addBytesAsMiB(out, "gpu.memory.aa.msaa_ring_color_mb", aa.msaaRingColorBytes);
+  addBytesAsMiB(out, "gpu.memory.aa.msaa_ring_depth_mb", aa.msaaRingDepthBytes);
+  addBytesAsMiB(out, "gpu.traffic.aa.msaa_resolve_read_estimated_mb",
+                aa.msaaResolveReadEstimateBytes);
+  addBytesAsMiB(out, "gpu.traffic.aa.msaa_resolve_write_estimated_mb",
+                aa.msaaResolveWriteEstimateBytes);
   addMetric(out, "renderer.aa.msaa_color_textures", aa.msaaColorTextureCount);
   addMetric(out, "renderer.aa.msaa_depth_textures", aa.msaaDepthTextureCount);
+  addMetric(out, "renderer.aa.msaa_ring_slots", aa.msaaRingSlots);
+  addMetric(out, "renderer.aa.msaa_color_allocations",
+            aa.msaaColorAllocationCount);
+  addMetric(out, "renderer.aa.msaa_color_reallocations",
+            aa.msaaColorReallocationCount);
+  addMetric(out, "renderer.aa.msaa_depth_allocations",
+            aa.msaaDepthAllocationCount);
+  addMetric(out, "renderer.aa.msaa_depth_reallocations",
+            aa.msaaDepthReallocationCount);
 
   const AmbientOcclusionFrameMetrics &ao = metrics.ambientOcclusion;
   addBoolMetric(out, "renderer.ao.enabled", ao.enabled);
@@ -853,6 +935,15 @@ void applyAutotestGpuTimingReport(
   applyGpuScope(frames, report, GpuTimingScope::Opaque,
                 report.opaqueSourceFrameIndex, "gpu.scopes.opaque_ms",
                 report.opaqueTimeMs);
+  applyGpuScope(frames, report, GpuTimingScope::OpaqueDepth,
+                report.opaqueDepthSourceFrameIndex,
+                "gpu.scopes.opaque_depth_ms", report.opaqueDepthTimeMs);
+  applyGpuScope(frames, report, GpuTimingScope::OpaqueNormal,
+                report.opaqueNormalSourceFrameIndex,
+                "gpu.scopes.opaque_normal_ms", report.opaqueNormalTimeMs);
+  applyGpuScope(frames, report, GpuTimingScope::OpaqueMain,
+                report.opaqueMainSourceFrameIndex, "gpu.scopes.opaque_main_ms",
+                report.opaqueMainTimeMs);
   applyGpuScope(frames, report, GpuTimingScope::GTAO,
                 report.gtaoSourceFrameIndex, "gpu.scopes.gtao_ms",
                 report.gtaoTimeMs);
@@ -916,6 +1007,40 @@ void applyAutotestGpuTimingReport(
                 report.ddgiRelocateClassifySourceFrameIndex,
                 "gpu.scopes.ddgi_relocate_classify_ms",
                 report.ddgiRelocateClassifyTimeMs);
+  if (auto frame = frames.find(report.wholeFrameSourceFrameIndex);
+      frame != frames.end()) {
+    const auto addAbsent = [&](GpuTimingScope scope, std::string_view id) {
+      if (!hasGpuTimingScope(report, scope)) {
+        frame->second[std::string(id)] = 0.0;
+      }
+    };
+    addAbsent(GpuTimingScope::OpaqueDepth, "gpu.scopes.opaque_depth_ms");
+    addAbsent(GpuTimingScope::OpaqueNormal, "gpu.scopes.opaque_normal_ms");
+    addAbsent(GpuTimingScope::OpaqueMain, "gpu.scopes.opaque_main_ms");
+  }
+  if (auto frame = frames.find(report.opaquePipelineStatisticsSourceFrameIndex);
+      frame != frames.end()) {
+    frame->second["renderer.opaque.pipeline_statistics_requested"] =
+        report.opaquePipelineStatisticsRequested ? 1.0 : 0.0;
+    frame->second["renderer.opaque.pipeline_statistics_available"] =
+        report.opaquePipelineStatisticsAvailable ? 1.0 : 0.0;
+    if (report.opaquePipelineStatisticsAvailable) {
+      frame->second
+          ["renderer.opaque.pipeline_statistics_input_assembly_vertices"] =
+          static_cast<double>(report.opaqueInputAssemblyVertices);
+      frame->second
+          ["renderer.opaque.pipeline_statistics_input_assembly_primitives"] =
+          static_cast<double>(report.opaqueInputAssemblyPrimitives);
+      frame
+          ->second["renderer.opaque.pipeline_statistics_clipping_invocations"] =
+          static_cast<double>(report.opaqueClippingInvocations);
+      frame->second["renderer.opaque.pipeline_statistics_clipping_primitives"] =
+          static_cast<double>(report.opaqueClippingPrimitives);
+      frame->second
+          ["renderer.opaque.pipeline_statistics_fragment_shader_invocations"] =
+          static_cast<double>(report.opaqueFragmentShaderInvocations);
+    }
+  }
 
   for (auto &[frameIndex, metrics] : frames) {
     double sum = 0.0;

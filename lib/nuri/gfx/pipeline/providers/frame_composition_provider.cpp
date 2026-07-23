@@ -226,9 +226,15 @@ FrameCompositionProvider::prepare(FrameBuildContext &ctx) {
   AntiAliasingFrameMetrics &aaMetrics = ctx.frame.metrics.antiAliasing;
   aaMetrics.msaaEnabled = coverage != CoverageMode::Sample1;
   aaMetrics.msaaSampleCount = sampleCount;
+  aaMetrics.msaaAlphaCoverageRequested = isMsaaMode(settings.antiAliasing.mode);
+  aaMetrics.msaaSpatialCleanupRequested =
+      settings.antiAliasing.debug.spatialPostMsaaCleanup;
   aaMetrics.msaaSpatialCleanupEnabled =
       aaMetrics.msaaEnabled &&
       settings.antiAliasing.debug.spatialPostMsaaCleanup;
+  aaMetrics.msaaResolvePlacement = aaMetrics.msaaEnabled
+                                       ? MsaaResolvePlacement::ExplicitPass
+                                       : MsaaResolvePlacement::None;
   aaMetrics.msaaWidth = framebufferWidth_;
   aaMetrics.msaaHeight = framebufferHeight_;
   aaMetrics.msaaColorAllocated =
@@ -239,8 +245,20 @@ FrameCompositionProvider::prepare(FrameBuildContext &ctx) {
       static_cast<uint32_t>(ringSize(Ring::MsaaSceneColor));
   aaMetrics.msaaDepthTextureCount =
       static_cast<uint32_t>(ringSize(Ring::MsaaSceneDepth));
+  aaMetrics.msaaRingSlots = std::max(aaMetrics.msaaColorTextureCount,
+                                     aaMetrics.msaaDepthTextureCount);
+  aaMetrics.msaaColorAllocationCount = allocations(Ring::MsaaSceneColor);
+  aaMetrics.msaaColorReallocationCount = reallocations(Ring::MsaaSceneColor);
+  aaMetrics.msaaDepthAllocationCount = allocations(Ring::MsaaSceneDepth);
+  aaMetrics.msaaDepthReallocationCount = reallocations(Ring::MsaaSceneDepth);
   const uint64_t msaaPixelCount = static_cast<uint64_t>(framebufferWidth_) *
                                   static_cast<uint64_t>(framebufferHeight_);
+  aaMetrics.msaaExtentWidth = framebufferWidth_;
+  aaMetrics.msaaExtentHeight = framebufferHeight_;
+  aaMetrics.msaaColorTexelBytes =
+      formatTexelBytes(kFrameCompositionSceneColorFormat);
+  aaMetrics.msaaDepthTexelBytes =
+      formatTexelBytes(kFrameCompositionDepthFormat);
   aaMetrics.msaaColorTextureBytes =
       aaMetrics.msaaColorAllocated
           ? msaaPixelCount *
@@ -254,11 +272,25 @@ FrameCompositionProvider::prepare(FrameBuildContext &ctx) {
                                              kFrameCompositionDepthFormat)) *
                                          static_cast<uint64_t>(sampleCount)
                                    : 0u;
-  aaMetrics.msaaTotalBytes =
+  aaMetrics.msaaRingColorBytes =
       aaMetrics.msaaColorTextureBytes *
-          static_cast<uint64_t>(aaMetrics.msaaColorTextureCount) +
+      static_cast<uint64_t>(aaMetrics.msaaColorTextureCount);
+  aaMetrics.msaaRingDepthBytes =
       aaMetrics.msaaDepthTextureBytes *
-          static_cast<uint64_t>(aaMetrics.msaaDepthTextureCount);
+      static_cast<uint64_t>(aaMetrics.msaaDepthTextureCount);
+  aaMetrics.msaaTotalBytes =
+      aaMetrics.msaaRingColorBytes + aaMetrics.msaaRingDepthBytes;
+  aaMetrics.msaaResolveReadEstimateBytes =
+      aaMetrics.msaaColorTextureBytes + aaMetrics.msaaDepthTextureBytes;
+  aaMetrics.msaaResolveWriteEstimateBytes =
+      aaMetrics.msaaEnabled
+          ? msaaPixelCount *
+                static_cast<uint64_t>(
+                    formatTexelBytes(kFrameCompositionSceneColorFormat) +
+                    formatTexelBytes(kFrameCompositionDepthFormat))
+          : 0u;
+  aaMetrics.msaaResolveBandwidthEstimateBytes =
+      aaMetrics.msaaResolveReadEstimateBytes;
   aaMetrics.motionVectorFormat = kFrameCompositionMotionVectorFormat;
   aaMetrics.motionVectorWidth = framebufferWidth_;
   aaMetrics.motionVectorHeight = framebufferHeight_;
@@ -339,6 +371,8 @@ FrameCompositionProvider::prepare(FrameBuildContext &ctx) {
     ctx.shared.sceneDepthSamplerId = gpu_.getDefaultSamplerBindlessIndex();
   }
   ctx.frame.sharedDepthTexture = ctx.shared.sceneDepthTexture;
+  allocationCounts_.fill(0u);
+  reallocationCounts_.fill(0u);
   return Result<bool, std::string>::makeResult(true);
 }
 

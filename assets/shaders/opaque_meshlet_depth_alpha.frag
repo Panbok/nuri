@@ -5,6 +5,8 @@
 layout(location = 0) in OpaqueMeshletVertex vtx;
 layout(location = 7) flat in uint meshletMaterialIndex;
 
+layout(location = 0) out vec4 out_Coverage;
+
 void main() {
   const MaterialData material = loadMaterialData(meshletMaterialIndex);
   const PerVertex materialVertex = opaqueMeshletMaterialVertex(vtx);
@@ -30,4 +32,9 @@ void main() {
   if (baseColor.a < material.header.metallicRoughnessOcclusionAlphaCutoff.w) {
     discard;
   }
+
+  // The MSAA depth prepass must produce the same coverage mask as the shaded
+  // alpha pipeline. Otherwise depth-only samples block later opaque geometry
+  // while the shaded pass leaves those color samples untouched.
+  out_Coverage = vec4(0.0, 0.0, 0.0, baseColor.a);
 }

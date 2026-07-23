@@ -251,8 +251,10 @@ ShadedMaterial evaluateMaterial(MaterialData material, PerVertex vtx) {
     float blend = clamp(sqrt(sm.clearcoatRoughness), kBrdfMinRoughness, 1.0);
     sm.nClearcoat = normalize(mix(sm.nClearcoat, perturbed, blend));
   }
-  sm.clearcoatRoughness =
-      applySpecularAARoughnessBias(sm.clearcoatRoughness, sm.nClearcoat);
+  if (sm.hasClearcoat) {
+    sm.clearcoatRoughness =
+        applySpecularAARoughnessBias(sm.clearcoatRoughness, sm.nClearcoat);
+  }
 
   sm.emissive = material.header.emissiveFactorStrength.xyz;
   if (emissiveTexId != kInvalidTextureBindlessIndex) {
@@ -331,9 +333,11 @@ void accumulateSurfaceLightContribution(
     directSpecular +=
         sheenScale * ndotl * lightRadiance *
         (f * g * d / max(4.0 * ndotl * sm.ndotv, kEpsilon));
-    directSheen += computeDirectSheen(sm.sheenColor, sm.sheenWeight,
-                                      sm.sheenRoughness, ndotl, sm.ndotv,
-                                      ndoth, lightRadiance);
+    if (sm.sheenWeight > 0.0) {
+      directSheen += computeDirectSheen(sm.sheenColor, sm.sheenWeight,
+                                        sm.sheenRoughness, ndotl, sm.ndotv,
+                                        ndoth, lightRadiance);
+    }
   }
 
   if (sm.hasClearcoat && sm.clearcoat > 0.0 && clearcoatNdotL > 0.0 &&

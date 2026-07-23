@@ -15,7 +15,9 @@ struct AutotestFramePlan {
   uint32_t frame = 0u;
   AutotestCameraConfig camera{};
   RenderSettings settings{};
+  std::array<uint32_t, 2> resolution{0u, 0u};
   bool resetTemporalHistory = false;
+  bool resizeRequested = false;
   bool cameraCut = false;
   bool drainOnly = false;
   std::string resetReason{};

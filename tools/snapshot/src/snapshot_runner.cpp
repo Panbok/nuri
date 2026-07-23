@@ -3,6 +3,7 @@
 #include "nuri/core/log.h"
 #include "nuri/core/runtime_config.h"
 #include "nuri/core/window.h"
+#include "nuri/gfx/frame/presentation_aa_plan.h"
 #include "nuri/gfx/frame/temporal_frame_service.h"
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/gfx/owned_gpu_resource.h"
@@ -217,10 +218,29 @@ snapshotWorkloadFingerprint(const SnapshotCase &snapshotCase) {
       {"scene.content", snapshotCase.scene.contentHash},
       {"resolution.width", std::to_string(snapshotCase.resolution[0])},
       {"resolution.height", std::to_string(snapshotCase.resolution[1])},
+      {"requirements.msaaSamples",
+       std::to_string(snapshotCase.requirements.msaaSamples.value_or(0u))},
       {"fixedDelta", std::format("{:.17g}", snapshotCase.fixedDeltaSeconds)},
       {"frames.warmup", std::to_string(snapshotCase.warmupFrames)},
       {"frames.capture", std::to_string(snapshotCase.captureFrame)},
   };
+  const auto appendEnvironmentTexture =
+      [&fields](std::string_view name,
+                const SnapshotEnvironmentTextureConfig &texture) {
+        const std::string prefix = "environment." + std::string(name);
+        fields.push_back({prefix + ".pathBase", texture.pathBase});
+        fields.push_back({prefix + ".path", texture.path.generic_string()});
+        fields.push_back({prefix + ".kind", texture.kind});
+        fields.push_back(
+            {prefix + ".required", texture.required ? "true" : "false"});
+      };
+  appendEnvironmentTexture("cubemap", snapshotCase.environment.cubemap);
+  appendEnvironmentTexture("irradiance", snapshotCase.environment.irradiance);
+  appendEnvironmentTexture("prefilteredGgx",
+                           snapshotCase.environment.prefilteredGgx);
+  appendEnvironmentTexture("prefilteredCharlie",
+                           snapshotCase.environment.prefilteredCharlie);
+  appendEnvironmentTexture("brdfLut", snapshotCase.environment.brdfLut);
   for (const SnapshotCaptureTarget &capture : snapshotCase.captures) {
     fields.push_back({"capture." + capture.name + ".profile", capture.profile});
     fields.push_back({"capture." + capture.name + ".required",
@@ -942,6 +962,108 @@ populateShadowPlanesScene(const SnapshotCase &snapshotCase, Renderer &renderer,
   return Result<bool, std::string>::makeResult(true);
 }
 
+[[nodiscard]] Result<TextureRequestKind, std::string>
+parseSnapshotEnvironmentTextureKind(std::string_view kind) {
+  if (kind == "Texture2D") {
+    return Result<TextureRequestKind, std::string>::makeResult(
+        TextureRequestKind::Texture2D);
+  }
+  if (kind == "Ktx2Texture2D") {
+    return Result<TextureRequestKind, std::string>::makeResult(
+        TextureRequestKind::Ktx2Texture2D);
+  }
+  if (kind == "Ktx2Cubemap") {
+    return Result<TextureRequestKind, std::string>::makeResult(
+        TextureRequestKind::Ktx2Cubemap);
+  }
+  if (kind == "EquirectHdrCubemap") {
+    return Result<TextureRequestKind, std::string>::makeResult(
+        TextureRequestKind::EquirectHdrCubemap);
+  }
+  return Result<TextureRequestKind, std::string>::makeError(
+      "unsupported snapshot environment texture kind '" + std::string(kind) +
+      "'");
+}
+
+[[nodiscard]] Result<std::optional<TextureRequest>, std::string>
+makeSnapshotEnvironmentTextureRequest(
+    const SnapshotEnvironmentTextureConfig &desc,
+    std::string_view fallbackDebugName) {
+  if (!desc.enabled) {
+    return Result<std::optional<TextureRequest>, std::string>::makeResult(
+        std::nullopt);
+  }
+  auto path = resolveSnapshotPath(desc.pathBase, desc.path);
+  if (path.hasError()) {
+    return Result<std::optional<TextureRequest>, std::string>::makeError(
+        path.error());
+  }
+  if (!std::filesystem::exists(path.value())) {
+    if (desc.required) {
+      return Result<std::optional<TextureRequest>, std::string>::makeError(
+          "missing required snapshot environment texture: " +
+          path.value().string());
+    }
+    return Result<std::optional<TextureRequest>, std::string>::makeResult(
+        std::nullopt);
+  }
+  auto kind = parseSnapshotEnvironmentTextureKind(desc.kind);
+  if (kind.hasError()) {
+    return Result<std::optional<TextureRequest>, std::string>::makeError(
+        kind.error());
+  }
+  return Result<std::optional<TextureRequest>, std::string>::makeResult(
+      TextureRequest{
+          .path = path.value().string(),
+          .kind = kind.value(),
+          .debugName = desc.debugName.empty() ? std::string(fallbackDebugName)
+                                              : desc.debugName,
+      });
+}
+
+[[nodiscard]] Result<EnvironmentAssetHandle, std::string>
+requestSnapshotEnvironment(const SnapshotCase &snapshotCase, Renderer &renderer,
+                           RenderScene &scene) {
+  const SnapshotEnvironmentConfig &environment = snapshotCase.environment;
+  auto cubemap = makeSnapshotEnvironmentTextureRequest(
+      environment.cubemap, "snapshot_environment_cubemap");
+  auto irradiance = makeSnapshotEnvironmentTextureRequest(
+      environment.irradiance, "snapshot_environment_irradiance");
+  auto prefilteredGgx = makeSnapshotEnvironmentTextureRequest(
+      environment.prefilteredGgx, "snapshot_environment_prefiltered_ggx");
+  auto prefilteredCharlie = makeSnapshotEnvironmentTextureRequest(
+      environment.prefilteredCharlie,
+      "snapshot_environment_prefiltered_charlie");
+  auto brdfLut = makeSnapshotEnvironmentTextureRequest(
+      environment.brdfLut, "snapshot_environment_brdf_lut");
+  for (const auto *request : {&cubemap, &irradiance, &prefilteredGgx,
+                              &prefilteredCharlie, &brdfLut}) {
+    if (request->hasError()) {
+      return Result<EnvironmentAssetHandle, std::string>::makeError(
+          request->error());
+    }
+  }
+  if (!cubemap.value().has_value() && !irradiance.value().has_value() &&
+      !prefilteredGgx.value().has_value() &&
+      !prefilteredCharlie.value().has_value() && !brdfLut.value().has_value()) {
+    scene.setEnvironment(EnvironmentHandles{});
+    return Result<EnvironmentAssetHandle, std::string>::makeResult({});
+  }
+  return renderer.assets().requestEnvironment(EnvironmentAssetRequest{
+      .textures = {std::move(cubemap.value()), std::move(irradiance.value()),
+                   std::move(prefilteredGgx.value()),
+                   std::move(prefilteredCharlie.value()),
+                   std::move(brdfLut.value())},
+      .priority = AssetPriority::Critical,
+      .optionalTextures = {!environment.cubemap.required,
+                           !environment.irradiance.required,
+                           !environment.prefilteredGgx.required,
+                           !environment.prefilteredCharlie.required,
+                           !environment.brdfLut.required},
+      .debugName = "snapshot_environment",
+  });
+}
+
 [[nodiscard]] Result<bool, std::string>
 populateScene(const SnapshotCase &snapshotCase, Renderer &renderer,
               RenderScene &scene, std::pmr::memory_resource *memory,
@@ -1030,27 +1152,47 @@ populateScene(const SnapshotCase &snapshotCase, Renderer &renderer,
 
 [[nodiscard]] Result<bool, std::string>
 waitForSnapshotAssets(Renderer &renderer, RenderScene &scene,
-                      SceneLoadHandle sceneLoad) {
-  if (!isValid(sceneLoad)) {
+                      SceneLoadHandle sceneLoad,
+                      EnvironmentAssetHandle environmentLoad) {
+  if (!isValid(sceneLoad) && !isValid(environmentLoad)) {
     return Result<bool, std::string>::makeResult(true);
   }
   const auto deadline =
       std::chrono::steady_clock::now() + std::chrono::seconds(120);
   for (;;) {
-    const SceneLoadSnapshot status = renderer.assets().query(sceneLoad);
-    if (status.terminal()) {
-      if (status.state == SceneLoadState::Complete ||
-          status.state == SceneLoadState::CompleteWithErrors) {
-        return Result<bool, std::string>::makeResult(true);
-      }
+    const SceneLoadSnapshot sceneStatus =
+        isValid(sceneLoad)
+            ? renderer.assets().query(sceneLoad)
+            : SceneLoadSnapshot{.state = SceneLoadState::Complete};
+    const AssetLoadSnapshot environmentStatus =
+        isValid(environmentLoad)
+            ? renderer.assets().query(environmentLoad)
+            : AssetLoadSnapshot{.state = AssetState::Published};
+    if (sceneStatus.terminal() &&
+        sceneStatus.state != SceneLoadState::Complete &&
+        sceneStatus.state != SceneLoadState::CompleteWithErrors) {
       std::ostringstream message;
       message << "snapshot async scene load failed: state="
-              << static_cast<uint32_t>(status.state)
-              << " progress=" << status.progress;
-      if (!status.error.empty()) {
-        message << " error=" << status.error;
+              << static_cast<uint32_t>(sceneStatus.state)
+              << " progress=" << sceneStatus.progress;
+      if (!sceneStatus.error.empty()) {
+        message << " error=" << sceneStatus.error;
       }
       return Result<bool, std::string>::makeError(message.str());
+    }
+    if (environmentStatus.terminal() &&
+        environmentStatus.state != AssetState::Published) {
+      std::ostringstream message;
+      message << "snapshot async environment load failed: state="
+              << static_cast<uint32_t>(environmentStatus.state)
+              << " progress=" << environmentStatus.progress;
+      if (!environmentStatus.error.empty()) {
+        message << " error=" << environmentStatus.error;
+      }
+      return Result<bool, std::string>::makeError(message.str());
+    }
+    if (sceneStatus.terminal() && environmentStatus.terminal()) {
+      return Result<bool, std::string>::makeResult(true);
     }
     auto pumped = renderer.assets().prepareFrame(AssetPublicationContext{
         .scene = &scene,
@@ -1059,17 +1201,11 @@ waitForSnapshotAssets(Renderer &renderer, RenderScene &scene,
       return Result<bool, std::string>::makeError(pumped.error());
     }
     if (std::chrono::steady_clock::now() >= deadline) {
-      const SceneLoadSnapshot timedOut = renderer.assets().query(sceneLoad);
       std::ostringstream message;
-      message << "snapshot async scene load timed out: state="
-              << static_cast<uint32_t>(timedOut.state)
-              << " progress=" << timedOut.progress
-              << " models=" << timedOut.models.published << "/"
-              << timedOut.models.total
-              << " materials=" << timedOut.materials.published << "/"
-              << timedOut.materials.total
-              << " textures=" << timedOut.textures.published << "/"
-              << timedOut.textures.total;
+      message << "snapshot async assets timed out: sceneState="
+              << static_cast<uint32_t>(sceneStatus.state)
+              << " environmentState="
+              << static_cast<uint32_t>(environmentStatus.state);
       return Result<bool, std::string>::makeError(message.str());
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -1317,7 +1453,13 @@ formatSnapshotCaseListJson(const std::vector<SnapshotCase> &cases,
     first = false;
     out << "    {\"id\": \"" << snapshotCase->id << "\", \"suite\": \""
         << snapshotCase->suite << "\", \"description\": \""
-        << snapshotCase->description << "\", \"captures\": [";
+        << snapshotCase->description << "\", \"msaaSamples\": ";
+    if (snapshotCase->requirements.msaaSamples.has_value()) {
+      out << *snapshotCase->requirements.msaaSamples;
+    } else {
+      out << "null";
+    }
+    out << ", \"captures\": [";
     for (size_t i = 0u; i < snapshotCase->captures.size(); ++i) {
       if (i != 0u) {
         out << ", ";
@@ -1336,7 +1478,13 @@ std::string formatSnapshotCaseListText(const std::vector<SnapshotCase> &cases,
   for (const SnapshotCase *snapshotCase :
        filterSnapshotCasesBySuite(cases, suite)) {
     out << snapshotCase->id << " [" << snapshotCase->suite << "] "
-        << snapshotCase->description << "\n";
+        << snapshotCase->description << " (MSAA requirement: ";
+    if (snapshotCase->requirements.msaaSamples.has_value()) {
+      out << *snapshotCase->requirements.msaaSamples << "x";
+    } else {
+      out << "none";
+    }
+    out << ")\n";
   }
   return out.str();
 }
@@ -1350,6 +1498,13 @@ formatSnapshotCaseExplanationJson(const SnapshotCase &snapshotCase) {
       << "  \"description\": \"" << snapshotCase.description << "\",\n"
       << "  \"sceneKind\": \"" << snapshotCase.scene.kind << "\",\n"
       << "  \"backend\": \"" << snapshotCase.backend << "\",\n"
+      << "  \"msaaSamples\": ";
+  if (snapshotCase.requirements.msaaSamples.has_value()) {
+    out << *snapshotCase.requirements.msaaSamples;
+  } else {
+    out << "null";
+  }
+  out << ",\n"
       << "  \"captures\": [\n";
   for (size_t i = 0u; i < snapshotCase.captures.size(); ++i) {
     const SnapshotCaptureTarget &capture = snapshotCase.captures[i];
@@ -1380,7 +1535,13 @@ formatSnapshotCaseExplanationText(const SnapshotCase &snapshotCase) {
       << "description: " << snapshotCase.description << "\n"
       << "scene: " << snapshotCase.scene.kind << "\n"
       << "backend: " << snapshotCase.backend << "\n"
-      << "resolution: " << snapshotCase.resolution[0] << "x"
+      << "MSAA requirement: ";
+  if (snapshotCase.requirements.msaaSamples.has_value()) {
+    out << *snapshotCase.requirements.msaaSamples << "x\n";
+  } else {
+    out << "none\n";
+  }
+  out << "resolution: " << snapshotCase.resolution[0] << "x"
       << snapshotCase.resolution[1] << "\n"
       << "captures:";
   for (const SnapshotCaptureTarget &capture : snapshotCase.captures) {
@@ -1405,6 +1566,8 @@ formatSnapshotEffectiveConfigJson(const SnapshotCase &snapshotCase,
       << "  \"presentMode\": \"" << present << "\",\n"
       << "  \"presentModeSource\": \"" << presentSource << "\",\n"
       << "  \"windowMode\": \"" << options.windowMode << "\",\n"
+      << "  \"requiredMsaaSamples\": "
+      << snapshotCase.requirements.msaaSamples.value_or(0u) << ",\n"
       << "  \"artifactDir\": \"" << options.artifactDir.generic_string()
       << "\"\n"
       << "}\n";
@@ -1584,6 +1747,25 @@ SnapshotRunResult captureSnapshotCase(SnapshotCase snapshotCase,
     report.environment.gpuVendorId = adapter.vendorId;
     report.environment.gpuDeviceId = adapter.deviceId;
     report.environment.gpuDriverVersion = adapter.driverVersion;
+    if (const uint32_t samples =
+            snapshotCase.requirements.msaaSamples.value_or(1u);
+        samples != 1u) {
+      const AntiAliasingMode mode =
+          samples == 8u ? AntiAliasingMode::MSAA8x : AntiAliasingMode::MSAA4x;
+      const PresentationAAUnsupportedReason reason =
+          msaaUnsupportedReason(mode, gpu->getMultisampleCapabilities());
+      if (reason != PresentationAAUnsupportedReason::None) {
+        result.exitCode = SnapshotExitCode::EnvironmentUnavailable;
+        result.message =
+            "required MSAA" + std::to_string(samples) +
+            "x capability unavailable: " +
+            std::string(presentationAAUnsupportedReasonName(reason));
+        report.warnings.push_back(result.message);
+        writeReports(result, report, reportPath, htmlPath);
+        result.report = std::move(report);
+        return result;
+      }
+    }
     const RayTracingCapabilities &rayTracingCaps =
         gpu->getDeviceCaps().rayTracing;
     if ((snapshotCase.requirements.accelerationStructure &&
@@ -1628,7 +1810,18 @@ SnapshotRunResult captureSnapshotCase(SnapshotCase snapshotCase,
       result.report = std::move(report);
       return result;
     }
-    auto assetsReady = waitForSnapshotAssets(*renderer, scene, sceneLoad);
+    auto environmentLoad =
+        requestSnapshotEnvironment(snapshotCase, *renderer, scene);
+    if (environmentLoad.hasError()) {
+      result.exitCode = SnapshotExitCode::EnvironmentUnavailable;
+      result.message = environmentLoad.error();
+      report.warnings.push_back(result.message);
+      writeReports(result, report, reportPath, htmlPath);
+      result.report = std::move(report);
+      return result;
+    }
+    auto assetsReady = waitForSnapshotAssets(*renderer, scene, sceneLoad,
+                                             environmentLoad.value());
     if (assetsReady.hasError()) {
       result.exitCode = SnapshotExitCode::RuntimeError;
       result.message = assetsReady.error();

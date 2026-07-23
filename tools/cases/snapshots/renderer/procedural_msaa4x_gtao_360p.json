@@ -1,0 +1,103 @@
+{
+  "schemaVersion": 1,
+  "id": "renderer.procedural.msaa4x_gtao_360p",
+  "suite": "renderer",
+  "description": "Generated alpha/thin-geometry contact scene with GTAO Ultra and MSAA4x",
+  "scene": {
+    "kind": "procedural",
+    "generator": "nuri.procedural.reactive_mask.v1",
+    "contentHash": "reactive-mask-v1"
+  },
+  "backend": "default",
+  "resolution": [640, 360],
+  "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 12,
+  "captureFrame": 16,
+  "authoritative": false,
+  "presentMode": "immediate",
+  "windowMode": "visible",
+  "renderGraph": {
+    "workerCount": 1,
+    "parallelCompile": false,
+    "parallelRecording": false
+  },
+  "camera": {
+    "position": [0.0, 0.0, 4.0],
+    "target": [0.0, 0.0, 0.0],
+    "positionDeltaPerFrame": [0.035, 0.0, 0.0],
+    "verticalFovDegrees": 48.0,
+    "nearPlane": 0.05,
+    "farPlane": 30.0
+  },
+  "settings": {
+    "opaque": {
+      "enabled": true,
+      "meshletMode": "Disabled",
+      "enableDepthPrepass": true,
+      "enableInstanceCompute": true,
+      "enableInstanceAnimation": false,
+      "enableMeshLod": false,
+      "enableTessellation": false,
+      "forcedMeshLod": -1
+    },
+    "antiAliasing": {
+      "mode": "MSAA4x",
+      "qualityPreset": "Quality"
+    },
+    "ambientOcclusion": {
+      "mode": "GTAO",
+      "preset": "Ultra"
+    },
+    "shadow": {
+      "enabled": false,
+      "qualityPreset": "Low"
+    },
+    "hdrPostProcess": {
+      "bloomEnabled": false,
+      "adaptationEnabled": false
+    },
+    "transmission": {
+      "enabled": false
+    },
+    "transparent": {
+      "enabled": false
+    },
+    "textureFiltering": {
+      "mode": "Anisotropic",
+      "anisotropy": 8
+    }
+  },
+  "requirements": {
+    "assets": ["modelsRoot:common/flat_plane.obj"],
+    "backends": [],
+    "allowVisibleWindow": true,
+    "msaaSamples": 4
+  },
+  "captures": [
+    {
+      "target": "final_color",
+      "profile": "ldr_color",
+      "required": true
+    },
+    {
+      "target": "frame_color_hdr",
+      "profile": "hdr_color",
+      "required": true
+    },
+    {
+      "target": "scene_depth",
+      "profile": "depth",
+      "required": true
+    },
+    {
+      "target": "material_normals",
+      "profile": "normal",
+      "required": true
+    },
+    {
+      "target": "ambient_occlusion",
+      "profile": "scalar",
+      "required": true
+    }
+  ]
+}

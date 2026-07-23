@@ -1837,6 +1837,7 @@ loadBenchmarkCaseManifest(const std::filesystem::path &path) {
     static constexpr std::array keys{std::string_view("assets"),
                                      std::string_view("backends"),
                                      std::string_view("allowVisibleWindow"),
+                                     std::string_view("msaaSamples"),
                                      std::string_view("msaa4x"),
                                      std::string_view("accelerationStructure"),
                                      std::string_view("rayQuery")};
@@ -1867,12 +1868,35 @@ loadBenchmarkCaseManifest(const std::filesystem::path &path) {
       return Result<BenchmarkCase, std::string>::makeError(boolean.error());
     }
     out.requirements.allowVisibleWindow = boolean.value();
-    boolean = readBool(requirements, "msaa4x", "requirements",
-                       out.requirements.msaa4x);
-    if (boolean.hasError()) {
-      return Result<BenchmarkCase, std::string>::makeError(boolean.error());
+    const bool hasMsaaSamples =
+        yyjson_obj_get(requirements, "msaaSamples") != nullptr;
+    if (hasMsaaSamples) {
+      u32 = readU32(requirements, "msaaSamples", "requirements", 0u);
+      if (u32.hasError()) {
+        return Result<BenchmarkCase, std::string>::makeError(u32.error());
+      }
+      if (u32.value() != 1u && u32.value() != 4u && u32.value() != 8u) {
+        return Result<BenchmarkCase, std::string>::makeError(
+            "requirements.msaaSamples must be 1, 4, or 8");
+      }
+      out.requirements.msaaSamples = u32.value();
     }
-    out.requirements.msaa4x = boolean.value();
+    const bool hasLegacyMsaa4x =
+        yyjson_obj_get(requirements, "msaa4x") != nullptr;
+    if (hasLegacyMsaa4x) {
+      boolean = readBool(requirements, "msaa4x", "requirements", false);
+      if (boolean.hasError()) {
+        return Result<BenchmarkCase, std::string>::makeError(boolean.error());
+      }
+      if (boolean.value()) {
+        if (out.requirements.msaaSamples.has_value() &&
+            *out.requirements.msaaSamples != 4u) {
+          return Result<BenchmarkCase, std::string>::makeError(
+              "requirements.msaa4x conflicts with requirements.msaaSamples");
+        }
+        out.requirements.msaaSamples = 4u;
+      }
+    }
     boolean = readBool(requirements, "accelerationStructure", "requirements",
                        out.requirements.accelerationStructure);
     if (boolean.hasError()) {

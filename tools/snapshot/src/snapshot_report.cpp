@@ -166,6 +166,7 @@ validateSnapshotReportV1(yyjson_val *root) {
       JsonField{"warmupFrames", JsonType::Unsigned},
       JsonField{"captureFrame", JsonType::Unsigned},
       JsonField{"authoritative", JsonType::Boolean},
+      JsonField{"msaaSamples", JsonType::NullOrNumber, false},
       JsonField{"captures", JsonType::Array},
   };
   yyjson_val *caseObject = yyjson_obj_get(root, "case");
@@ -452,6 +453,12 @@ yyjson_mut_val *makeCaseObject(yyjson_mut_doc *doc,
                           snapshotCase.captureFrame);
   yyjson_mut_obj_add_bool(doc, object, "authoritative",
                           snapshotCase.authoritative);
+  if (snapshotCase.requirements.msaaSamples.has_value()) {
+    yyjson_mut_obj_add_uint(doc, object, "msaaSamples",
+                            *snapshotCase.requirements.msaaSamples);
+  } else {
+    yyjson_mut_obj_add_null(doc, object, "msaaSamples");
+  }
   yyjson_mut_val *captures = yyjson_mut_arr(doc);
   for (const SnapshotCaptureTarget &capture : snapshotCase.captures) {
     yyjson_mut_val *entry = yyjson_mut_obj(doc);
@@ -1635,6 +1642,10 @@ readSnapshotReportFile(const std::filesystem::path &path) {
         readU32(caseObject, "captureFrame", report.snapshotCase.captureFrame);
     report.snapshotCase.authoritative = readBool(
         caseObject, "authoritative", report.snapshotCase.authoritative);
+    if (yyjson_is_uint(yyjson_obj_get(caseObject, "msaaSamples"))) {
+      report.snapshotCase.requirements.msaaSamples =
+          readU32(caseObject, "msaaSamples");
+    }
     yyjson_val *caseCaptures = yyjson_obj_get(caseObject, "captures");
     if (yyjson_is_arr(caseCaptures)) {
       yyjson_arr_iter captureIter;

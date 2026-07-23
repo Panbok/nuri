@@ -1,0 +1,240 @@
+{
+  "schemaVersion": 1,
+  "id": "aa.procedural.alpha_reactive_1080p.msaa8x",
+  "suite": "aa",
+  "comparisonGroup": "aa.procedural.alpha_reactive_1080p",
+  "variant": "msaa8x",
+  "description": "AA-16 procedural alpha-mask/reactive coverage sweep paired variant: MSAA8x",
+  "scene": {
+    "kind": "procedural",
+    "generator": "nuri.procedural.reactive_mask.v1",
+    "seed": 71,
+    "contentHash": "nuri.procedural.reactive_mask.v1:71"
+  },
+  "backend": "nvrhi",
+  "resolution": [
+    1920,
+    1080
+  ],
+  "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 60,
+  "measurementFrames": 300,
+  "cooldownFrames": 2,
+  "maxDrainFrames": 180,
+  "drainTimeoutMs": 8000,
+  "samples": 5,
+  "authoritative": false,
+  "presentMode": "immediate",
+  "renderGraph": {
+    "workerCount": 1,
+    "parallelCompile": false,
+    "parallelRecording": false
+  },
+  "camera": {
+    "position": [
+      -0.65,
+      0.35,
+      3.25
+    ],
+    "target": [
+      0,
+      0.25,
+      0
+    ],
+    "verticalFovDegrees": 55,
+    "nearPlane": 0.05,
+    "farPlane": 100
+  },
+  "timeline": {
+    "cameraPaths": [
+      {
+        "id": "alpha_reactive_sweep",
+        "startFrame": 0,
+        "endFrame": 359,
+        "interpolation": "smoothstep",
+        "keyframes": [
+          {
+            "frame": 0,
+            "position": [
+              -0.65,
+              0.35,
+              3.25
+            ],
+            "target": [
+              0,
+              0.25,
+              0
+            ]
+          },
+          {
+            "frame": 180,
+            "position": [
+              0.65,
+              0.45,
+              3
+            ],
+            "target": [
+              0,
+              0.22,
+              0
+            ]
+          },
+          {
+            "frame": 359,
+            "position": [
+              -0.65,
+              0.35,
+              3.25
+            ],
+            "target": [
+              0,
+              0.25,
+              0
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "settings": {
+    "ddgi": {
+      "enabled": false
+    },
+    "opaque": {
+      "enabled": true,
+      "meshletMode": "Disabled",
+      "enableDepthPrepass": true,
+      "enableInstanceCompute": true,
+      "enableInstanceAnimation": false,
+      "enableMeshLod": false,
+      "enableTessellation": false,
+      "forcedMeshLod": -1
+    },
+    "antiAliasing": {
+      "mode": "MSAA8x",
+      "temporalProvider": "Reference",
+      "qualityPreset": "Ultra",
+      "spatialPostMsaaCleanup": false
+    },
+    "ambientOcclusion": {
+      "mode": "GTAO",
+      "preset": "Ultra"
+    },
+    "shadow": {
+      "enabled": true,
+      "qualityPreset": "Ultra"
+    },
+    "hdrPostProcess": {
+      "bloomEnabled": false,
+      "adaptationEnabled": false
+    },
+    "transmission": {
+      "enabled": false
+    },
+    "transparent": {
+      "enabled": false
+    },
+    "textureFiltering": {
+      "mode": "Anisotropic",
+      "anisotropy": 8
+    }
+  },
+  "requirements": {
+    "assets": [
+      "modelsRoot:common/flat_plane.obj"
+    ],
+    "backends": [
+      "nvrhi"
+    ],
+    "allowVisibleWindow": true,
+    "msaaSamples": 8
+  },
+  "thresholds": {
+    "failPercent": 12,
+    "failAbsoluteMs": 0.35,
+    "warnPercent": 6,
+    "warnAbsoluteMs": 0.18
+  },
+  "requiredMetrics": [
+    "gpu.frame_ms",
+    "gpu.scopes_sum_ms",
+    "gpu.scopes.opaque_ms",
+    "gpu.scopes.opaque_depth_ms",
+    "gpu.scopes.opaque_normal_ms",
+    "gpu.scopes.opaque_main_ms",
+    "gpu.scopes.gtao_ms",
+    "gpu.scopes.shadow_ms",
+    "gpu.scopes.msaa_resolve_ms",
+    "cpu.render_submit_ms",
+    "renderer.aa.msaa_sample_count",
+    "renderer.aa.msaa_sample4_color_supported",
+    "renderer.aa.msaa_sample4_depth_supported",
+    "renderer.aa.msaa_sample8_color_supported",
+    "renderer.aa.msaa_sample8_depth_supported",
+    "renderer.aa.msaa_depth_resolve_min_supported",
+    "renderer.aa.msaa_alpha_to_coverage_supported",
+    "renderer.aa.msaa_sample_rate_shading_supported",
+    "renderer.aa.msaa_alpha_coverage_requested",
+    "renderer.aa.msaa_alpha_coverage_policy",
+    "renderer.aa.msaa_alpha_to_coverage_active",
+    "renderer.aa.msaa_sample_shading_active",
+    "renderer.aa.msaa_transparency_policy",
+    "renderer.aa.msaa_spatial_cleanup_requested",
+    "renderer.aa.msaa_spatial_cleanup_active",
+    "renderer.aa.msaa_resolve_placement",
+    "renderer.aa.msaa_main_color_format",
+    "renderer.aa.msaa_main_depth_format",
+    "renderer.aa.msaa_main_attachment_sample_count",
+    "renderer.aa.msaa_extent_width",
+    "renderer.aa.msaa_extent_height",
+    "renderer.aa.msaa_color_texel_bytes",
+    "renderer.aa.msaa_depth_texel_bytes",
+    "renderer.aa.msaa_traffic_formula_version",
+    "renderer.ddgi.requested",
+    "renderer.ddgi.active",
+    "renderer.opaque.depth_pyramid_requested",
+    "renderer.opaque.depth_pyramid_active",
+    "renderer.visibility.hiz_requested",
+    "renderer.visibility.hiz_active",
+    "renderer.visibility.hiz_source_frame_policy",
+    "renderer.opaque.classic_main_draws",
+    "renderer.opaque.classic_alpha_masked_main_draws",
+    "renderer.opaque.meshlet_main_dispatches",
+    "renderer.opaque.meshlet_main_represented_items",
+    "renderer.opaque.meshlet_alpha_masked_main_dispatches",
+    "renderer.opaque.meshlet_alpha_masked_main_items",
+    "renderer.opaque.msaa_depth_prepass_draws",
+    "renderer.opaque.msaa_depth_prepass_dispatches",
+    "renderer.opaque.gtao_auxiliary_prepass_draws",
+    "renderer.opaque.gtao_auxiliary_prepass_dispatches",
+    "renderer.opaque.gtao_auxiliary_writes_single_sample_depth",
+    "renderer.opaque.main_equal_readonly_draws",
+    "renderer.opaque.main_equal_readonly_dispatches",
+    "renderer.opaque.main_less_write_draws",
+    "renderer.opaque.main_less_write_dispatches",
+    "renderer.aa.msaa_resolve_passes",
+    "renderer.aa.msaa_color_resolves",
+    "renderer.aa.msaa_depth_resolves",
+    "renderer.aa.msaa_resolved_sample_count",
+    "renderer.aa.msaa_ring_slots",
+    "gpu.memory.aa.msaa_active_color_mb",
+    "gpu.memory.aa.msaa_active_depth_mb",
+    "gpu.memory.aa.msaa_ring_color_mb",
+    "gpu.memory.aa.msaa_ring_depth_mb",
+    "gpu.memory.aa.msaa_total_mb",
+    "gpu.traffic.aa.msaa_resolve_read_estimated_mb",
+    "gpu.traffic.aa.msaa_resolve_write_estimated_mb",
+    "renderer.aa.msaa_color_allocations",
+    "renderer.aa.msaa_color_reallocations",
+    "renderer.aa.msaa_depth_allocations",
+    "renderer.aa.msaa_depth_reallocations",
+    "renderer.backend.render_pipeline_creations",
+    "renderer.backend.compute_pipeline_creations",
+    "renderer.backend.meshlet_pipeline_creations",
+    "renderer.backend.framebuffer_creations",
+    "rendergraph.summary.pass_count",
+    "rendergraph.summary.pass_barrier_record_count",
+    "rendergraph.summary.recorded_command_buffer_count",
+    "rendergraph.summary.submit_batch_count"
+  ]
+}

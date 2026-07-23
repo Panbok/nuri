@@ -117,6 +117,9 @@ enum class GpuTimingScope : uint8_t {
   DDGITrace = 23,
   DDGIUpdate = 24,
   DDGIRelocateClassify = 25,
+  OpaqueDepth = 26,
+  OpaqueNormal = 27,
+  OpaqueMain = 28,
 };
 
 [[nodiscard]] constexpr uint32_t
@@ -134,6 +137,9 @@ gpuTimingParentScope(GpuTimingScope scope) noexcept {
     return GpuTimingScope::Shadow;
   case GpuTimingScope::Velocity:
   case GpuTimingScope::ReactiveMask:
+  case GpuTimingScope::OpaqueDepth:
+  case GpuTimingScope::OpaqueNormal:
+  case GpuTimingScope::OpaqueMain:
     return GpuTimingScope::Opaque;
   case GpuTimingScope::TemporalAACopyBack:
     return GpuTimingScope::TemporalAAResolve;
@@ -201,6 +207,12 @@ constexpr uint32_t kGpuTimingScopeDDGIUpdateBit =
     gpuTimingScopeToBit(GpuTimingScope::DDGIUpdate);
 constexpr uint32_t kGpuTimingScopeDDGIRelocateClassifyBit =
     gpuTimingScopeToBit(GpuTimingScope::DDGIRelocateClassify);
+constexpr uint32_t kGpuTimingScopeOpaqueDepthBit =
+    gpuTimingScopeToBit(GpuTimingScope::OpaqueDepth);
+constexpr uint32_t kGpuTimingScopeOpaqueNormalBit =
+    gpuTimingScopeToBit(GpuTimingScope::OpaqueNormal);
+constexpr uint32_t kGpuTimingScopeOpaqueMainBit =
+    gpuTimingScopeToBit(GpuTimingScope::OpaqueMain);
 
 struct GpuTimingReport {
   uint64_t shadowSourceFrameIndex = std::numeric_limits<uint64_t>::max();
@@ -237,6 +249,9 @@ struct GpuTimingReport {
   uint64_t ddgiUpdateSourceFrameIndex = std::numeric_limits<uint64_t>::max();
   uint64_t ddgiRelocateClassifySourceFrameIndex =
       std::numeric_limits<uint64_t>::max();
+  uint64_t opaqueDepthSourceFrameIndex = std::numeric_limits<uint64_t>::max();
+  uint64_t opaqueNormalSourceFrameIndex = std::numeric_limits<uint64_t>::max();
+  uint64_t opaqueMainSourceFrameIndex = std::numeric_limits<uint64_t>::max();
   float shadowTimeMs = 0.0f;
   float shadowDepthTimeMs = 0.0f;
   float shadowSdsmTimeMs = 0.0f;
@@ -262,6 +277,18 @@ struct GpuTimingReport {
   float ddgiTraceTimeMs = 0.0f;
   float ddgiUpdateTimeMs = 0.0f;
   float ddgiRelocateClassifyTimeMs = 0.0f;
+  float opaqueDepthTimeMs = 0.0f;
+  float opaqueNormalTimeMs = 0.0f;
+  float opaqueMainTimeMs = 0.0f;
+  bool opaquePipelineStatisticsRequested = false;
+  bool opaquePipelineStatisticsAvailable = false;
+  uint64_t opaquePipelineStatisticsSourceFrameIndex =
+      std::numeric_limits<uint64_t>::max();
+  uint64_t opaqueInputAssemblyVertices = 0u;
+  uint64_t opaqueInputAssemblyPrimitives = 0u;
+  uint64_t opaqueClippingInvocations = 0u;
+  uint64_t opaqueClippingPrimitives = 0u;
+  uint64_t opaqueFragmentShaderInvocations = 0u;
   uint32_t availableScopeMask = 0u;
   struct PassTiming {
     std::string debugName{};
@@ -376,6 +403,15 @@ inline constexpr auto kGpuTimingScopeDescs =
          &GpuTimingReport::ddgiRelocateClassifyTimeMs,
          &GpuTimingReport::ddgiRelocateClassifySourceFrameIndex,
          gpuTimingScopeToBit(GpuTimingScope::DDGIRelocateClassify)},
+        {GpuTimingScope::OpaqueDepth, &GpuTimingReport::opaqueDepthTimeMs,
+         &GpuTimingReport::opaqueDepthSourceFrameIndex,
+         gpuTimingScopeToBit(GpuTimingScope::OpaqueDepth)},
+        {GpuTimingScope::OpaqueNormal, &GpuTimingReport::opaqueNormalTimeMs,
+         &GpuTimingReport::opaqueNormalSourceFrameIndex,
+         gpuTimingScopeToBit(GpuTimingScope::OpaqueNormal)},
+        {GpuTimingScope::OpaqueMain, &GpuTimingReport::opaqueMainTimeMs,
+         &GpuTimingReport::opaqueMainSourceFrameIndex,
+         gpuTimingScopeToBit(GpuTimingScope::OpaqueMain)},
     });
 
 [[nodiscard]] constexpr const GpuTimingScopeMergeDesc *

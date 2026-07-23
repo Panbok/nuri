@@ -1,0 +1,90 @@
+{
+  "schemaVersion": 1,
+  "id": "aa.procedural.resize_epoch_msaa8x",
+  "suite": "aa",
+  "description": "Exercise MSAA8x swapchain resize epochs and prove settled resources are current and churn-free",
+  "scene": {
+    "kind": "procedural",
+    "generator": "nuri.procedural.reactive_mask.v1",
+    "seed": 29,
+    "contentHash": "nuri.procedural.reactive_mask.v1:29"
+  },
+  "backend": "default",
+  "resolution": [640, 360],
+  "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 2,
+  "endFrame": 11,
+  "authoritative": false,
+  "presentMode": "immediate",
+  "windowMode": "visible",
+  "camera": {
+    "position": [0.0, 0.35, 3.25],
+    "target": [0.0, 0.25, 0.0],
+    "verticalFovDegrees": 55.0,
+    "nearPlane": 0.05,
+    "farPlane": 500.0
+  },
+  "settings": {
+    "antiAliasing": {
+      "mode": "MSAA8x"
+    }
+  },
+  "timeline": {
+    "events": [
+      {
+        "frame": 3,
+        "type": "resize",
+        "resolution": [800, 450]
+      },
+      {
+        "frame": 8,
+        "type": "resize",
+        "resolution": [640, 360]
+      }
+    ]
+  },
+  "checkpoints": [
+    {
+      "id": "large_extent_settled",
+      "frame": 6,
+      "captures": [],
+      "assertions": [
+        {"id": "large_width", "metric": "renderer.aa.msaa_extent_width", "equals": 800},
+        {"id": "large_height", "metric": "renderer.aa.msaa_extent_height", "equals": 450},
+        {"id": "large_sample_count", "metric": "renderer.aa.msaa_sample_count", "equals": 8},
+        {"id": "large_one_color_resolve", "metric": "renderer.aa.msaa_color_resolves", "equals": 1},
+        {"id": "large_one_depth_resolve", "metric": "renderer.aa.msaa_depth_resolves", "equals": 1},
+        {"id": "large_no_color_allocations", "metric": "renderer.aa.msaa_color_allocations", "equals": 0},
+        {"id": "large_no_depth_allocations", "metric": "renderer.aa.msaa_depth_allocations", "equals": 0},
+        {"id": "large_no_color_reallocations", "metric": "renderer.aa.msaa_color_reallocations", "equals": 0},
+        {"id": "large_no_depth_reallocations", "metric": "renderer.aa.msaa_depth_reallocations", "equals": 0},
+        {"id": "large_no_framebuffer_creations", "metric": "renderer.backend.framebuffer_creations", "equals": 0},
+        {"id": "large_no_pipeline_creations", "metric": "renderer.backend.render_pipeline_creations", "equals": 0}
+      ]
+    },
+    {
+      "id": "original_extent_settled",
+      "frame": 11,
+      "captures": [],
+      "assertions": [
+        {"id": "original_width", "metric": "renderer.aa.msaa_extent_width", "equals": 640},
+        {"id": "original_height", "metric": "renderer.aa.msaa_extent_height", "equals": 360},
+        {"id": "original_sample_count", "metric": "renderer.aa.msaa_sample_count", "equals": 8},
+        {"id": "original_one_color_resolve", "metric": "renderer.aa.msaa_color_resolves", "equals": 1},
+        {"id": "original_one_depth_resolve", "metric": "renderer.aa.msaa_depth_resolves", "equals": 1},
+        {"id": "original_no_color_allocations", "metric": "renderer.aa.msaa_color_allocations", "equals": 0},
+        {"id": "original_no_depth_allocations", "metric": "renderer.aa.msaa_depth_allocations", "equals": 0},
+        {"id": "original_no_color_reallocations", "metric": "renderer.aa.msaa_color_reallocations", "equals": 0},
+        {"id": "original_no_depth_reallocations", "metric": "renderer.aa.msaa_depth_reallocations", "equals": 0},
+        {"id": "original_no_framebuffer_creations", "metric": "renderer.backend.framebuffer_creations", "equals": 0},
+        {"id": "original_no_pipeline_creations", "metric": "renderer.backend.render_pipeline_creations", "equals": 0}
+      ]
+    }
+  ],
+  "requirements": {
+    "assets": ["modelsRoot:common/flat_plane.obj"],
+    "backends": [],
+    "allowVisibleWindow": true,
+    "msaaSamples": 8
+  }
+}

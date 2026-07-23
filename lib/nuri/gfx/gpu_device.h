@@ -67,6 +67,13 @@ struct TextureUploadTelemetry {
   uint32_t pendingTextures = 0u;
 };
 
+struct BackendCreationTelemetry {
+  uint64_t renderPipelines = 0u;
+  uint64_t computePipelines = 0u;
+  uint64_t meshletPipelines = 0u;
+  uint64_t framebuffers = 0u;
+};
+
 struct GPUAdapterInfo {
   std::string name = "unknown";
   uint32_t vendorId = 0u;
@@ -167,6 +174,8 @@ public:
   virtual TextureCompressionCaps getTextureCompressionCaps() const;
   [[nodiscard]] virtual TextureUploadTelemetry
   getTextureUploadTelemetry() const;
+  [[nodiscard]] virtual BackendCreationTelemetry
+  getBackendCreationTelemetry() const;
   virtual GPUAdapterInfo getAdapterInfo() const;
   virtual GpuMultisampleCapabilities getMultisampleCapabilities() const;
   [[nodiscard]] virtual DeviceCaps getDeviceCaps() const;

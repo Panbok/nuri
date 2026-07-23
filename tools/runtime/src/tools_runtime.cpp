@@ -2,6 +2,7 @@
 
 #include "nuri/core/runtime_config.h"
 #include "nuri/core/window.h"
+#include "nuri/gfx/frame/presentation_aa_plan.h"
 #include "nuri/gfx/pipeline/default_render_pipeline.h"
 #include "nuri/gfx/sim/animation_scene_frame_data.h"
 #include "nuri/resources/gpu/resource_manager.h"
@@ -917,6 +918,29 @@ ToolRendererRuntime::pumpAssetLoads() {
 Result<bool, std::string> ToolRendererRuntime::commitScene() {
   return impl_->scene.commit();
 }
+Result<std::array<uint32_t, 2>, std::string>
+ToolRendererRuntime::resize(uint32_t width, uint32_t height) {
+  if (width == 0u || height == 0u || width > static_cast<uint32_t>(INT32_MAX) ||
+      height > static_cast<uint32_t>(INT32_MAX)) {
+    return Result<std::array<uint32_t, 2>, std::string>::makeError(
+        "tool runtime resize requires a non-zero int32 extent");
+  }
+  impl_->window->setWindowSize(static_cast<int32_t>(width),
+                               static_cast<int32_t>(height));
+  impl_->window->pollEvents();
+  int32_t framebufferWidth = 0;
+  int32_t framebufferHeight = 0;
+  impl_->window->getFramebufferSize(framebufferWidth, framebufferHeight);
+  if (framebufferWidth <= 0 || framebufferHeight <= 0) {
+    return Result<std::array<uint32_t, 2>, std::string>::makeError(
+        "tool runtime resize produced an empty framebuffer");
+  }
+  impl_->renderer->onResize(static_cast<uint32_t>(framebufferWidth),
+                            static_cast<uint32_t>(framebufferHeight));
+  return Result<std::array<uint32_t, 2>, std::string>::makeResult(
+      {static_cast<uint32_t>(framebufferWidth),
+       static_cast<uint32_t>(framebufferHeight)});
+}
 void ToolRendererRuntime::setExternalAnimationSceneFrameData(
     const AnimationSceneFrameData &frameData) noexcept {
   impl_->externalAnimationSceneFrameData = frameData;
@@ -948,6 +972,19 @@ createToolRendererRuntime(const ToolRuntimeDesc &desc) {
   if (!impl->gpu) {
     return Result<std::unique_ptr<ToolRendererRuntime>, std::string>::makeError(
         "failed to create GPU device");
+  }
+  if (const uint32_t samples = desc.requiredMsaaSamples.value_or(1u);
+      samples != 1u) {
+    const AntiAliasingMode mode =
+        samples == 8u ? AntiAliasingMode::MSAA8x : AntiAliasingMode::MSAA4x;
+    const PresentationAAUnsupportedReason reason =
+        msaaUnsupportedReason(mode, impl->gpu->getMultisampleCapabilities());
+    if (reason != PresentationAAUnsupportedReason::None) {
+      return Result<std::unique_ptr<ToolRendererRuntime>, std::string>::
+          makeError("required MSAA" + std::to_string(samples) +
+                    "x capability unavailable: " +
+                    std::string(presentationAAUnsupportedReasonName(reason)));
+    }
   }
   impl->renderer = Renderer::create(*impl->gpu, impl->rendererMemory);
   impl->pipeline.addProvider(std::make_unique<ToolAnimationFrameProvider>(

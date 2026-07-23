@@ -2708,7 +2708,7 @@ parseTimeline(yyjson_val *root, const AutotestCameraConfig &baseCamera,
           std::string_view("settings"),    std::string_view("preserveHistory"),
           std::string_view("target"),      std::string_view("translation"),
           std::string_view("intensity"),   std::string_view("volumeIndex"),
-          std::string_view("probeCounts")};
+          std::string_view("probeCounts"), std::string_view("resolution")};
       result = rejectUnknownKeys(eventValue, eventKeys, "timeline.events[]");
       if (result.hasError()) {
         return Result<AutotestTimeline, std::string>::makeError(result.error());
@@ -2765,6 +2765,23 @@ parseTimeline(yyjson_val *root, const AutotestCameraConfig &baseCamera,
         return Result<AutotestTimeline, std::string>::makeError(counts.error());
       }
       event.probeCounts = counts.value();
+      if (yyjson_val *resolution = optionalObject(eventValue, "resolution")) {
+        if (!yyjson_is_arr(resolution) || yyjson_arr_size(resolution) != 2u) {
+          return Result<AutotestTimeline, std::string>::makeError(
+              "timeline.events[].resolution must be [width, height]");
+        }
+        for (uint32_t i = 0u; i < 2u; ++i) {
+          yyjson_val *entry = yyjson_arr_get(resolution, i);
+          if (!yyjson_is_uint(entry) || yyjson_get_uint(entry) == 0u ||
+              yyjson_get_uint(entry) > UINT32_MAX) {
+            return Result<AutotestTimeline, std::string>::makeError(
+                "timeline.events[].resolution entries must be non-zero "
+                "uint32");
+          }
+          event.resolution[i] = static_cast<uint32_t>(yyjson_get_uint(entry));
+        }
+        event.hasResolution = true;
+      }
       auto real = readDouble(eventValue, "intensity", "timeline.events[]",
                              event.intensity);
       if (real.hasError()) {
@@ -2801,6 +2818,9 @@ parseTimeline(yyjson_val *root, const AutotestCameraConfig &baseCamera,
               "setSettings event requires settings");
         }
         currentSettings = event.settings;
+      } else if (event.type == "resize" && !event.hasResolution) {
+        return Result<AutotestTimeline, std::string>::makeError(
+            "resize event requires resolution");
       }
       const bool lightIntensityEvent =
           event.type == "setDirectionalLightIntensity" ||
@@ -2829,7 +2849,8 @@ parseTimeline(yyjson_val *root, const AutotestCameraConfig &baseCamera,
             "setDDGIVolumeProbeCounts requires non-zero probeCounts");
       }
       if (event.type != "resetTemporalHistory" && event.type != "setCamera" &&
-          event.type != "setSettings" && !sceneEvent) {
+          event.type != "setSettings" && event.type != "resize" &&
+          !sceneEvent) {
         return Result<AutotestTimeline, std::string>::makeError(
             "unsupported timeline event type '" + event.type + "'");
       }
@@ -3307,7 +3328,7 @@ Result<bool, std::string> validateAutotestCase(const AutotestCase &testCase) {
           "timeline event frame is outside endFrame");
     }
     if (event.type != "resetTemporalHistory" && event.type != "setCamera" &&
-        event.type != "setSettings" &&
+        event.type != "setSettings" && event.type != "resize" &&
         event.type != "setDirectionalLightIntensity" &&
         event.type != "setLocalLightIntensity" &&
         event.type != "setNodeTranslation" &&
@@ -3544,6 +3565,8 @@ loadAutotestCaseManifest(const std::filesystem::path &path) {
     static constexpr std::array keys{std::string_view("assets"),
                                      std::string_view("backends"),
                                      std::string_view("allowVisibleWindow"),
+                                     std::string_view("msaaSamples"),
+                                     std::string_view("msaa4x"),
                                      std::string_view("accelerationStructure"),
                                      std::string_view("rayQuery")};
     auto parsed = rejectUnknownKeys(requirements, keys, "requirements");
@@ -3566,6 +3589,33 @@ loadAutotestCaseManifest(const std::filesystem::path &path) {
       return Result<AutotestCase, std::string>::makeError(boolean.error());
     }
     out.requirements.allowVisibleWindow = boolean.value();
+    const bool hasMsaaSamples =
+        yyjson_obj_get(requirements, "msaaSamples") != nullptr;
+    if (hasMsaaSamples) {
+      u32 = readU32(requirements, "msaaSamples", "requirements", 0u);
+      if (u32.hasError()) {
+        return Result<AutotestCase, std::string>::makeError(u32.error());
+      }
+      if (u32.value() != 1u && u32.value() != 4u && u32.value() != 8u) {
+        return Result<AutotestCase, std::string>::makeError(
+            "requirements.msaaSamples must be 1, 4, or 8");
+      }
+      out.requirements.msaaSamples = u32.value();
+    }
+    if (yyjson_obj_get(requirements, "msaa4x") != nullptr) {
+      boolean = readBool(requirements, "msaa4x", "requirements", false);
+      if (boolean.hasError()) {
+        return Result<AutotestCase, std::string>::makeError(boolean.error());
+      }
+      if (boolean.value()) {
+        if (out.requirements.msaaSamples.has_value() &&
+            *out.requirements.msaaSamples != 4u) {
+          return Result<AutotestCase, std::string>::makeError(
+              "requirements.msaa4x conflicts with requirements.msaaSamples");
+        }
+        out.requirements.msaaSamples = 4u;
+      }
+    }
     boolean = readBool(requirements, "accelerationStructure", "requirements",
                        out.requirements.accelerationStructure);
     if (boolean.hasError()) {

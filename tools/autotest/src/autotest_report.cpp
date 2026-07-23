@@ -172,6 +172,12 @@ yyjson_mut_val *makeCaseObject(yyjson_mut_doc *doc,
   addString(doc, object, "presentMode", testCase.presentMode);
   addString(doc, object, "windowMode", testCase.windowMode);
   yyjson_mut_obj_add_bool(doc, object, "authoritative", testCase.authoritative);
+  if (testCase.requirements.msaaSamples.has_value()) {
+    yyjson_mut_obj_add_uint(doc, object, "msaaSamples",
+                            *testCase.requirements.msaaSamples);
+  } else {
+    yyjson_mut_obj_add_null(doc, object, "msaaSamples");
+  }
   return object;
 }
 
@@ -993,6 +999,7 @@ validateAutotestReportV1(yyjson_val *root) {
       JsonField{"presentMode", JsonType::String},
       JsonField{"windowMode", JsonType::String},
       JsonField{"authoritative", JsonType::Boolean},
+      JsonField{"msaaSamples", JsonType::NullOrNumber, false},
   };
   yyjson_val *caseObject = yyjson_obj_get(root, "case");
   valid = validateObject(caseObject, caseFields, "$.case");
@@ -1535,6 +1542,9 @@ autotestWorkloadFingerprint(const AutotestCase &testCase) {
                        std::to_string(testCase.resolution[0])},
       FingerprintField{"resolution.height",
                        std::to_string(testCase.resolution[1])},
+      FingerprintField{
+          "requirements.msaaSamples",
+          std::to_string(testCase.requirements.msaaSamples.value_or(0u))},
       FingerprintField{"fixedDelta",
                        std::format("{:.17g}", testCase.fixedDeltaSeconds)},
       FingerprintField{"frames.warmup", std::to_string(testCase.warmupFrames)},
@@ -1922,6 +1932,10 @@ readAutotestReportPayloadV1(std::string json) {
     report.testCase.windowMode =
         readString(caseObject, "windowMode", "visible");
     report.testCase.authoritative = readBool(caseObject, "authoritative");
+    if (yyjson_is_uint(yyjson_obj_get(caseObject, "msaaSamples"))) {
+      report.testCase.requirements.msaaSamples =
+          readU32(caseObject, "msaaSamples");
+    }
   }
   yyjson_val *run = yyjson_obj_get(root, "run");
   if (yyjson_is_obj(run)) {

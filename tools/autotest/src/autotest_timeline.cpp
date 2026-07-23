@@ -104,11 +104,15 @@ Result<std::vector<AutotestFramePlan>, std::string>
 compileAutotestTimeline(const AutotestCase &testCase) {
   std::map<uint32_t, AutotestFramePlan> frames;
   RenderSettings currentSettings = testCase.settings;
+  std::array<uint32_t, 2> currentResolution = testCase.resolution;
   for (uint32_t frame = 0u; frame <= testCase.endFrame; ++frame) {
     for (const AutotestTimelineEvent &event : testCase.timeline.events) {
       if (event.frame <= frame && event.type == "setSettings" &&
           event.hasSettings) {
         currentSettings = event.settings;
+      } else if (event.frame <= frame && event.type == "resize" &&
+                 event.hasResolution) {
+        currentResolution = event.resolution;
       }
     }
     auto camera = evaluateAutotestCameraAtFrame(testCase, frame);
@@ -118,7 +122,8 @@ compileAutotestTimeline(const AutotestCase &testCase) {
     }
     frames.emplace(frame, AutotestFramePlan{.frame = frame,
                                             .camera = camera.value(),
-                                            .settings = currentSettings});
+                                            .settings = currentSettings,
+                                            .resolution = currentResolution});
   }
 
   for (const AutotestTimelineEvent &event : testCase.timeline.events) {
@@ -137,6 +142,13 @@ compileAutotestTimeline(const AutotestCase &testCase) {
             "setSettings event requires settings");
       }
       plan.settings = event.settings;
+    } else if (event.type == "resize") {
+      if (!event.hasResolution) {
+        return Result<std::vector<AutotestFramePlan>, std::string>::makeError(
+            "resize event requires resolution");
+      }
+      plan.resolution = event.resolution;
+      plan.resizeRequested = true;
     } else if (event.type == "setDirectionalLightIntensity" ||
                event.type == "setLocalLightIntensity" ||
                event.type == "setNodeTranslation" ||
@@ -169,6 +181,7 @@ compileAutotestTimeline(const AutotestCase &testCase) {
       AutotestFramePlan drain = finalPlanned;
       drain.frame = finalPlanned.frame + i;
       drain.resetTemporalHistory = false;
+      drain.resizeRequested = false;
       drain.cameraCut = false;
       drain.drainOnly = true;
       drain.resetReason.clear();

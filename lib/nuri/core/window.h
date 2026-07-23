@@ -34,6 +34,7 @@ public:
   virtual void getWindowSize(int32_t &outWidth, int32_t &outHeight) const = 0;
   virtual void getFramebufferSize(int32_t &outWidth,
                                   int32_t &outHeight) const = 0;
+  virtual void setWindowSize(int32_t width, int32_t height) = 0;
   virtual double getTime() const = 0;
   virtual void *nativeHandle() const = 0;
   virtual void requestClose() = 0;

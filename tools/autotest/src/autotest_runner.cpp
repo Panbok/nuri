@@ -630,6 +630,7 @@ makeToolRuntimeDesc(const AutotestCase &testCase, std::string_view presentMode,
   desc.renderGraph.parallelRecording = testCase.renderGraph.parallelRecording;
   desc.scene = makeToolSceneDesc(testCase.scene);
   desc.environment = makeToolEnvironmentDesc(testCase.environment);
+  desc.requiredMsaaSamples = testCase.requirements.msaaSamples;
   desc.resolvePath = resolveAutotestPath;
   return desc;
 }
@@ -1536,8 +1537,13 @@ formatAutotestCaseListJson(const std::vector<AutotestCase> &cases,
     first = false;
     out << "    {\"id\": \"" << jsonEscape(testCase->id) << "\", \"suite\": \""
         << jsonEscape(testCase->suite) << "\", \"description\": \""
-        << jsonEscape(testCase->description)
-        << "\", \"checkpoints\": " << testCase->checkpoints.size() << "}";
+        << jsonEscape(testCase->description) << "\", \"msaaSamples\": ";
+    if (testCase->requirements.msaaSamples.has_value()) {
+      out << *testCase->requirements.msaaSamples;
+    } else {
+      out << "null";
+    }
+    out << ", \"checkpoints\": " << testCase->checkpoints.size() << "}";
   }
   out << "\n  ]\n}\n";
   return Result<std::string, std::string>::makeResult(out.str());
@@ -1549,7 +1555,13 @@ std::string formatAutotestCaseListText(const std::vector<AutotestCase> &cases,
   for (const AutotestCase *testCase :
        filterAutotestCasesBySuite(cases, suite)) {
     out << testCase->id << " [" << testCase->suite << "] "
-        << testCase->description << "\n";
+        << testCase->description << " (MSAA requirement: ";
+    if (testCase->requirements.msaaSamples.has_value()) {
+      out << *testCase->requirements.msaaSamples << "x";
+    } else {
+      out << "none";
+    }
+    out << ")\n";
   }
   return out.str();
 }
@@ -1563,6 +1575,13 @@ formatAutotestCaseExplanationJson(const AutotestCase &testCase) {
       << "  \"description\": \"" << jsonEscape(testCase.description) << "\",\n"
       << "  \"sceneKind\": \"" << jsonEscape(testCase.scene.kind) << "\",\n"
       << "  \"backend\": \"" << jsonEscape(testCase.backend) << "\",\n"
+      << "  \"msaaSamples\": ";
+  if (testCase.requirements.msaaSamples.has_value()) {
+    out << *testCase.requirements.msaaSamples;
+  } else {
+    out << "null";
+  }
+  out << ",\n"
       << "  \"endFrame\": " << testCase.endFrame << ",\n"
       << "  \"checkpoints\": [\n";
   for (size_t i = 0u; i < testCase.checkpoints.size(); ++i) {
@@ -1589,7 +1608,13 @@ std::string formatAutotestCaseExplanationText(const AutotestCase &testCase) {
       << "description: " << testCase.description << "\n"
       << "scene: " << testCase.scene.kind << "\n"
       << "backend: " << testCase.backend << "\n"
-      << "resolution: " << testCase.resolution[0] << "x"
+      << "MSAA requirement: ";
+  if (testCase.requirements.msaaSamples.has_value()) {
+    out << *testCase.requirements.msaaSamples << "x\n";
+  } else {
+    out << "none\n";
+  }
+  out << "resolution: " << testCase.resolution[0] << "x"
       << testCase.resolution[1] << "\n"
       << "frames: warmup=" << testCase.warmupFrames
       << " end=" << testCase.endFrame << "\n"
@@ -1622,6 +1647,8 @@ formatAutotestEffectiveConfigJson(const AutotestCase &testCase,
       << "  \"windowMode\": \"" << jsonEscape(windowMode.value) << "\",\n"
       << "  \"windowModeSource\": \"" << jsonEscape(windowMode.source)
       << "\",\n"
+      << "  \"requiredMsaaSamples\": "
+      << testCase.requirements.msaaSamples.value_or(0u) << ",\n"
       << "  \"artifactDir\": \""
       << jsonEscape(options.artifactDir.generic_string()) << "\"\n"
       << "}\n";
@@ -1858,6 +1885,16 @@ AutotestRunResult runAutotestCase(AutotestCase testCase,
         drainStartedAt = std::chrono::steady_clock::now();
       }
       runtime->window().pollEvents();
+      if (frame.resizeRequested) {
+        auto resized =
+            runtime->resize(frame.resolution[0], frame.resolution[1]);
+        if (resized.hasError()) {
+          result.exitCode = AutotestExitCode::RuntimeError;
+          result.message = resized.error();
+          report.errors.push_back(result.message);
+          break;
+        }
+      }
       auto sceneEvents = applySceneEvents(runtime->scene(), frame.sceneEvents);
       if (sceneEvents.hasError()) {
         result.exitCode = AutotestExitCode::RuntimeError;
@@ -1879,6 +1916,15 @@ AutotestRunResult runAutotestCase(AutotestCase testCase,
       }
       const Camera camera = nuri::tools::runtime::makeToolCamera(
           makeToolCameraDesc(frame.camera));
+      int32_t framebufferWidth = 0;
+      int32_t framebufferHeight = 0;
+      runtime->gpu().getFramebufferSize(framebufferWidth, framebufferHeight);
+      if (framebufferWidth <= 0 || framebufferHeight <= 0) {
+        result.exitCode = AutotestExitCode::RuntimeError;
+        result.message = "autotest framebuffer extent is empty";
+        report.errors.push_back(result.message);
+        break;
+      }
       nuri::tools::runtime::buildToolFrameContext(
           runtime->frameContext(), runtime->scene(), runtime->renderer(),
           settings, runtime->temporalFrameService(), camera,
@@ -1886,8 +1932,8 @@ AutotestRunResult runAutotestCase(AutotestCase testCase,
               .frameIndex = frame.frame,
               .timeSeconds = timeSeconds,
               .deltaSeconds = testCase.fixedDeltaSeconds,
-              .width = testCase.resolution[0],
-              .height = testCase.resolution[1],
+              .width = static_cast<uint32_t>(framebufferWidth),
+              .height = static_cast<uint32_t>(framebufferHeight),
               .cameraCutRequested = frame.cameraCut,
           });
       if (dynamicDDGIFixture) {
@@ -1935,6 +1981,8 @@ AutotestRunResult runAutotestCase(AutotestCase testCase,
                                          pendingReadouts, nextReadoutRequestId,
                                          result);
 
+      const BackendCreationTelemetry creationBefore =
+          runtime->gpu().getBackendCreationTelemetry();
       auto renderResult = runtime->renderer().render(runtime->pipeline(),
                                                      runtime->frameContext());
       if (renderResult.hasError()) {
@@ -1955,6 +2003,20 @@ AutotestRunResult runAutotestCase(AutotestCase testCase,
       std::map<std::string, double> measurements;
       flattenAutotestRendererMetrics(measurements,
                                      runtime->frameContext().metrics);
+      const BackendCreationTelemetry creationAfter =
+          runtime->gpu().getBackendCreationTelemetry();
+      measurements["renderer.backend.render_pipeline_creations"] =
+          static_cast<double>(creationAfter.renderPipelines -
+                              creationBefore.renderPipelines);
+      measurements["renderer.backend.compute_pipeline_creations"] =
+          static_cast<double>(creationAfter.computePipelines -
+                              creationBefore.computePipelines);
+      measurements["renderer.backend.meshlet_pipeline_creations"] =
+          static_cast<double>(creationAfter.meshletPipelines -
+                              creationBefore.meshletPipelines);
+      measurements["renderer.backend.framebuffer_creations"] =
+          static_cast<double>(creationAfter.framebuffers -
+                              creationBefore.framebuffers);
       frameMeasurements[frame.frame] = std::move(measurements);
       drainAutotestGpuTimings(runtime->gpu(), frameMeasurements);
       resolvePendingReadoutsForFrame(runtime->frameContext(), frame.frame,

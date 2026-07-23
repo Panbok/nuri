@@ -191,6 +191,7 @@ int main(int argc, char **argv) {
   bool dryRun = false;
   bool printEffectiveConfig = false;
   bool tracyDiagnostic = false;
+  bool opaquePipelineStatisticsDiagnostic = false;
   bool rgpShaderDiagnostic = false;
   std::filesystem::path rgpToolPath;
   uint32_t rgpCaptureFrame = 30u;
@@ -224,6 +225,10 @@ int main(int argc, char **argv) {
                 "Print resolved config before running");
   run->add_flag("--tracy-diagnostic", tracyDiagnostic,
                 "Capture benchmark-owned Tracy CPU/GPU diagnostics");
+  run->add_flag(
+      "--opaque-pipeline-statistics-diagnostic",
+      opaquePipelineStatisticsDiagnostic,
+      "Collect request-driven opaque-main Vulkan pipeline statistics");
   run->add_flag("--rgp-shader-diagnostic", rgpShaderDiagnostic,
                 "Capture AMD RGP shader diagnostics; never performance data");
   auto *rgpToolOption = run->add_option(
@@ -252,19 +257,23 @@ int main(int argc, char **argv) {
   run->callback([&]() {
     const uint32_t diagnosticCount =
         static_cast<uint32_t>(tracyDiagnostic) +
+        static_cast<uint32_t>(opaquePipelineStatisticsDiagnostic) +
         static_cast<uint32_t>(rgpShaderDiagnostic) +
         static_cast<uint32_t>(renderDocDiagnostic);
-    const bool gpuDiagnostic = rgpShaderDiagnostic || renderDocDiagnostic;
-    const std::string_view gpuDiagnosticFlag = rgpShaderDiagnostic
-                                                   ? "--rgp-shader-diagnostic"
-                                                   : "--renderdoc-diagnostic";
+    const bool gpuDiagnostic = opaquePipelineStatisticsDiagnostic ||
+                               rgpShaderDiagnostic || renderDocDiagnostic;
+    const std::string_view gpuDiagnosticFlag =
+        opaquePipelineStatisticsDiagnostic
+            ? "--opaque-pipeline-statistics-diagnostic"
+        : rgpShaderDiagnostic ? "--rgp-shader-diagnostic"
+                              : "--renderdoc-diagnostic";
     if (runCase.empty() == runSuite.empty()) {
       std::cerr << "run requires exactly one of --case or --suite\n";
       std::exit(exitCode(BenchmarkExitCode::InvalidInput));
     }
     if (diagnosticCount > 1u) {
-      std::cerr << "Tracy, RGP, and RenderDoc diagnostics must be collected "
-                   "in separate runs\n";
+      std::cerr << "Tracy, pipeline-statistics, RGP, and RenderDoc "
+                   "diagnostics must be collected in separate runs\n";
       std::exit(exitCode(BenchmarkExitCode::InvalidInput));
     }
     if (gpuDiagnostic && runCase.empty()) {
@@ -346,6 +355,8 @@ int main(int argc, char **argv) {
         .dryRun = dryRun,
         .printEffectiveConfig = printEffectiveConfig,
         .tracyDiagnostic = tracyDiagnostic,
+        .opaquePipelineStatisticsDiagnostic =
+            opaquePipelineStatisticsDiagnostic,
         .gpuDiagnostic = gpuDiagnosticOptions,
         .verboseFrames = verboseFrames,
         .baselineProfileId = profile.id,

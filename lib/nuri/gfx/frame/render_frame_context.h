@@ -102,6 +102,19 @@ enum class TransparencyAAPolicy : uint8_t {
   SingleSamplePostResolve = 1,
 };
 
+enum class MsaaResolvePlacement : uint8_t {
+  None = 0,
+  ExplicitPass = 1,
+  OpaqueInline = 2,
+  SkyboxInline = 3,
+};
+
+enum class HiZSourceFramePolicy : uint8_t {
+  Disabled = 0,
+  PreviousFrame = 1,
+  CurrentFrame = 2,
+};
+
 enum class PresentationAAUnsupportedReason : uint8_t {
   None = 0,
   Sample4Color = 1,
@@ -1947,6 +1960,26 @@ struct OpaqueFrameMetrics {
   uint32_t depthPrepassDraws = 0;
   uint32_t depthPyramidLevels = 0;
   uint32_t depthPrepassEnabled = 0;
+  uint32_t classicMainDraws = 0;
+  uint32_t classicAlphaMaskedMainDraws = 0;
+  uint32_t meshletMainDispatches = 0;
+  uint32_t meshletMainRepresentedItems = 0;
+  uint32_t meshletAlphaMaskedMainDispatches = 0;
+  uint32_t meshletAlphaMaskedMainItems = 0;
+  uint32_t msaaDepthPrepassDraws = 0;
+  uint32_t msaaDepthPrepassDispatches = 0;
+  uint32_t gtaoAuxiliaryPrepassDraws = 0;
+  uint32_t gtaoAuxiliaryPrepassDispatches = 0;
+  uint32_t gtaoAuxiliaryWritesSingleSampleDepth = 0;
+  uint32_t mainEqualReadOnlyDraws = 0;
+  uint32_t mainEqualReadOnlyDispatches = 0;
+  uint32_t mainLessWriteDraws = 0;
+  uint32_t mainLessWriteDispatches = 0;
+  uint32_t depthPyramidRequested = 0;
+  uint32_t depthPyramidActive = 0;
+  uint32_t hiZRequested = 0;
+  uint32_t hiZActive = 0;
+  HiZSourceFramePolicy hiZSourceFramePolicy = HiZSourceFramePolicy::Disabled;
   float gpuTimeMs = 0.0f;
   uint64_t gpuTimingSourceFrameIndex = std::numeric_limits<uint64_t>::max();
   uint32_t gpuTimingAvailable = 0u;
@@ -2133,7 +2166,15 @@ struct AntiAliasingFrameMetrics {
   uint32_t msaaColorTextureCount = 0u;
   uint32_t msaaDepthTextureCount = 0u;
   uint32_t msaaResolvePassCount = 0u;
+  uint32_t msaaColorResolveCount = 0u;
+  uint32_t msaaDepthResolveCount = 0u;
+  uint32_t msaaResolvedSampleCount = 0u;
   uint32_t msaaAlphaMaskedDrawCount = 0u;
+  uint32_t msaaRingSlots = 0u;
+  uint32_t msaaColorAllocationCount = 0u;
+  uint32_t msaaColorReallocationCount = 0u;
+  uint32_t msaaDepthAllocationCount = 0u;
+  uint32_t msaaDepthReallocationCount = 0u;
   uint32_t msaaResolveGpuTimingAvailable = 0u;
   uint64_t taaResolveGpuTimingSourceFrameIndex =
       std::numeric_limits<uint64_t>::max();
@@ -2168,8 +2209,17 @@ struct AntiAliasingFrameMetrics {
   uint64_t spatialAABandwidthEstimateBytes = 0u;
   uint64_t msaaColorTextureBytes = 0u;
   uint64_t msaaDepthTextureBytes = 0u;
+  uint64_t msaaRingColorBytes = 0u;
+  uint64_t msaaRingDepthBytes = 0u;
   uint64_t msaaTotalBytes = 0u;
   uint64_t msaaResolveBandwidthEstimateBytes = 0u;
+  uint64_t msaaResolveReadEstimateBytes = 0u;
+  uint64_t msaaResolveWriteEstimateBytes = 0u;
+  uint32_t msaaExtentWidth = 0u;
+  uint32_t msaaExtentHeight = 0u;
+  uint32_t msaaColorTexelBytes = 0u;
+  uint32_t msaaDepthTexelBytes = 0u;
+  uint32_t msaaTrafficFormulaVersion = 1u;
   float velocityAverageObjectMotion = 0.0f;
   float velocityMaxObjectMotion = 0.0f;
   float velocityEstimatedAverageMagnitude = 0.0f;
@@ -2303,6 +2353,8 @@ struct AntiAliasingFrameMetrics {
   bool msaaDepthResolveMinSupported = false;
   bool msaaAlphaToCoverageSupported = false;
   bool msaaSampleRateShadingSupported = false;
+  bool msaaAlphaCoverageRequested = false;
+  bool msaaSpatialCleanupRequested = false;
   bool msaaSpatialCleanupEnabled = false;
   bool msaaSpatialCleanupActive = false;
   PresentationAAUnsupportedReason msaaUnsupportedReason =
@@ -2310,6 +2362,10 @@ struct AntiAliasingFrameMetrics {
   AlphaCoveragePolicy msaaAlphaCoveragePolicy = AlphaCoveragePolicy::Off;
   TransparencyAAPolicy msaaTransparencyPolicy =
       TransparencyAAPolicy::InheritCoverage;
+  MsaaResolvePlacement msaaResolvePlacement = MsaaResolvePlacement::None;
+  Format msaaMainColorFormat = Format::Count;
+  Format msaaMainDepthFormat = Format::Count;
+  uint32_t msaaMainAttachmentSampleCount = 1u;
   bool spatialAAEdgesDebugViewRendered = false;
   bool spatialAABlendWeightsDebugViewRendered = false;
   bool spatialAACleanupMaskDebugViewRendered = false;

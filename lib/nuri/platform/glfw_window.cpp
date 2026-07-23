@@ -17,6 +17,7 @@ public:
   bool shouldClose() const override;
   void getWindowSize(int32_t &width, int32_t &height) const override;
   void getFramebufferSize(int32_t &width, int32_t &height) const override;
+  void setWindowSize(int32_t width, int32_t height) override;
   double getTime() const override;
   void *nativeHandle() const override;
   void requestClose() override;
@@ -364,6 +365,12 @@ void GlfwWindow::getFramebufferSize(int32_t &outWidth,
   glfwGetFramebufferSize(window_, &fbw, &fbh);
   outWidth = static_cast<int32_t>(fbw);
   outHeight = static_cast<int32_t>(fbh);
+}
+
+void GlfwWindow::setWindowSize(int32_t width, int32_t height) {
+  if (window_ && width > 0 && height > 0) {
+    glfwSetWindowSize(window_, width, height);
+  }
 }
 
 double GlfwWindow::getTime() const { return glfwGetTime(); }

@@ -73,6 +73,7 @@ struct AutotestRequirements {
   std::vector<std::string> assets{};
   std::vector<std::string> backends{};
   bool allowVisibleWindow = true;
+  std::optional<uint32_t> msaaSamples{};
   bool accelerationStructure = false;
   bool rayQuery = false;
 };
@@ -259,9 +260,11 @@ struct AutotestTimelineEvent {
   RenderSettings settings{};
   glm::vec3 translation{0.0f};
   glm::uvec3 probeCounts{0u};
+  std::array<uint32_t, 2> resolution{0u, 0u};
   float intensity = 0.0f;
   uint32_t volumeIndex = 0u;
   bool hasSettings = false;
+  bool hasResolution = false;
   bool preserveHistory = true;
 };
 

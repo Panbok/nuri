@@ -556,7 +556,7 @@ private:
                           CoverageMode coverage) const;
   [[nodiscard]] MeshletPipelineHandle
   selectMeshletScenePipeline(bool compacted, CoverageMode coverage,
-                             bool doubleSided) const;
+                             bool alphaMasked, bool doubleSided) const;
   [[nodiscard]] MeshletPipelineHandle
   selectMeshletDepthPipeline(CoverageMode coverage, bool alphaMasked,
                              bool doubleSided) const;
@@ -638,7 +638,7 @@ private:
   RenderPipelineHandle currentFrameDepthVerificationPipelineHandle_{};
   RenderPipelineHandle depthPyramidPipelineHandle_{};
   RenderPipelineHandle depthMotionVectorPipelineHandle_{};
-  std::array<MeshletPipelineHandle, 4 * kCoverageModeCount>
+  std::array<MeshletPipelineHandle, 8 * kCoverageModeCount>
       meshletScenePipelines_{};
   std::array<MeshletPipelineHandle, 4 * kCoverageModeCount>
       meshletDepthPipelines_{};

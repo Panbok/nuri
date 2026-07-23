@@ -39,6 +39,7 @@ struct BenchmarkRunOptions {
   bool dryRun = false;
   bool printEffectiveConfig = false;
   bool tracyDiagnostic = false;
+  bool opaquePipelineStatisticsDiagnostic = false;
   BenchmarkGpuDiagnosticOptions gpuDiagnostic{};
   bool verboseFrames = false;
   bool internalIsolatedChild = false;

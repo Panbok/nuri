@@ -165,6 +165,7 @@
       "modelsRoot:common/flat_plane.obj"
     ],
     "backends": [],
-    "allowVisibleWindow": true
+    "allowVisibleWindow": true,
+    "msaaSamples": 4
   }
 }

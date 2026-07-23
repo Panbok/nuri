@@ -143,7 +143,7 @@
       "nvrhi"
     ],
     "allowVisibleWindow": true,
-    "msaa4x": true
+    "msaaSamples": 4
   },
   "thresholds": {
     "failPercent": 12,

@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <memory>
 #include <memory_resource>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -93,6 +94,7 @@ struct ToolRuntimeDesc {
   ToolRenderGraphDesc renderGraph{};
   ToolSceneDesc scene{};
   ToolEnvironmentDesc environment{};
+  std::optional<uint32_t> requiredMsaaSamples{};
   ToolResolvePathFn resolvePath = nullptr;
 };
 
@@ -137,6 +139,8 @@ public:
   [[nodiscard]] ToolAssetLoadStatus assetLoadStatus() const;
   [[nodiscard]] Result<AssetPublicationStats, std::string> pumpAssetLoads();
   [[nodiscard]] Result<bool, std::string> commitScene();
+  [[nodiscard]] Result<std::array<uint32_t, 2>, std::string>
+  resize(uint32_t width, uint32_t height);
   void setExternalAnimationSceneFrameData(
       const AnimationSceneFrameData &frameData) noexcept;
 

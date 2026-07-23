@@ -17,7 +17,7 @@
     720
   ],
   "fixedDeltaSeconds": 0.016666667,
-  "warmupFrames": 30,
+  "warmupFrames": 60,
   "measurementFrames": 300,
   "cooldownFrames": 2,
   "maxDrainFrames": 180,
@@ -50,7 +50,7 @@
       {
         "id": "alpha_reactive_sweep",
         "startFrame": 0,
-        "endFrame": 329,
+        "endFrame": 359,
         "interpolation": "smoothstep",
         "keyframes": [
           {
@@ -67,7 +67,7 @@
             ]
           },
           {
-            "frame": 165,
+            "frame": 180,
             "position": [
               0.65,
               0.45,
@@ -80,7 +80,7 @@
             ]
           },
           {
-            "frame": 329,
+            "frame": 359,
             "position": [
               -0.65,
               0.35,
@@ -143,7 +143,7 @@
       "nvrhi"
     ],
     "allowVisibleWindow": true,
-    "msaa4x": true
+    "msaaSamples": 4
   },
   "thresholds": {
     "failPercent": 12,

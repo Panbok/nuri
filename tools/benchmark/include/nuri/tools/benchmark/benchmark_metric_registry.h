@@ -46,6 +46,7 @@ enum class BenchmarkMetricAvailability : uint8_t {
   WhenRenderGraphTelemetryAvailable,
   WhenPlatformMemoryAvailable,
   WhenMotionClassCoverageAvailable,
+  WhenOpaquePipelineStatisticsAvailable,
 };
 
 enum class BenchmarkMetricSamplingPhase : uint8_t {

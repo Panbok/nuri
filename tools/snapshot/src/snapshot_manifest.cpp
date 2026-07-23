@@ -882,9 +882,10 @@ parseSettings(yyjson_val *object, RenderSettings &settings) {
   }
 
   if (yyjson_val *aa = optionalObject(object, "antiAliasing")) {
-    static constexpr std::array aaKeys{std::string_view("mode"),
-                                       std::string_view("temporalProvider"),
-                                       std::string_view("qualityPreset")};
+    static constexpr std::array aaKeys{
+        std::string_view("mode"), std::string_view("temporalProvider"),
+        std::string_view("qualityPreset"),
+        std::string_view("spatialPostMsaaCleanup")};
     result = rejectUnknownKeys(aa, aaKeys, "settings.antiAliasing");
     if (result.hasError()) {
       return result;
@@ -919,6 +920,13 @@ parseSettings(yyjson_val *object, RenderSettings &settings) {
     if (result.hasError()) {
       return result;
     }
+    auto cleanup =
+        readBool(aa, "spatialPostMsaaCleanup", "settings.antiAliasing",
+                 settings.antiAliasing.debug.spatialPostMsaaCleanup);
+    if (cleanup.hasError()) {
+      return Result<bool, std::string>::makeError(cleanup.error());
+    }
+    settings.antiAliasing.debug.spatialPostMsaaCleanup = cleanup.value();
   }
 
   if (yyjson_val *ao = optionalObject(object, "ambientOcclusion")) {
@@ -1319,6 +1327,80 @@ parseSettings(yyjson_val *object, RenderSettings &settings) {
 }
 
 [[nodiscard]] Result<bool, std::string>
+parseEnvironmentTexture(yyjson_val *object,
+                        SnapshotEnvironmentTextureConfig &texture,
+                        std::string_view path) {
+  static constexpr std::array keys{
+      std::string_view("pathBase"), std::string_view("path"),
+      std::string_view("kind"), std::string_view("debugName"),
+      std::string_view("required")};
+  auto result = rejectUnknownKeys(object, keys, path);
+  if (result.hasError()) {
+    return result;
+  }
+  texture.enabled = true;
+  auto text = readString(object, "pathBase", path, true);
+  if (text.hasError()) {
+    return Result<bool, std::string>::makeError(text.error());
+  }
+  texture.pathBase = std::move(text.value());
+  text = readString(object, "path", path, true);
+  if (text.hasError()) {
+    return Result<bool, std::string>::makeError(text.error());
+  }
+  texture.path = text.value();
+  text = readString(object, "kind", path, false, texture.kind);
+  if (text.hasError()) {
+    return Result<bool, std::string>::makeError(text.error());
+  }
+  texture.kind = std::move(text.value());
+  text = readString(object, "debugName", path, false, texture.debugName);
+  if (text.hasError()) {
+    return Result<bool, std::string>::makeError(text.error());
+  }
+  texture.debugName = std::move(text.value());
+  auto required = readBool(object, "required", path, texture.required);
+  if (required.hasError()) {
+    return Result<bool, std::string>::makeError(required.error());
+  }
+  texture.required = required.value();
+  return Result<bool, std::string>::makeResult(true);
+}
+
+[[nodiscard]] Result<bool, std::string>
+parseEnvironment(yyjson_val *object, SnapshotEnvironmentConfig &environment) {
+  static constexpr std::array keys{
+      std::string_view("cubemap"), std::string_view("irradiance"),
+      std::string_view("prefilteredGgx"),
+      std::string_view("prefilteredCharlie"), std::string_view("brdfLut")};
+  auto result = rejectUnknownKeys(object, keys, "environment");
+  if (result.hasError()) {
+    return result;
+  }
+  struct TextureField {
+    std::string_view key{};
+    SnapshotEnvironmentTextureConfig *texture = nullptr;
+  };
+  const std::array fields{
+      TextureField{"cubemap", &environment.cubemap},
+      TextureField{"irradiance", &environment.irradiance},
+      TextureField{"prefilteredGgx", &environment.prefilteredGgx},
+      TextureField{"prefilteredCharlie", &environment.prefilteredCharlie},
+      TextureField{"brdfLut", &environment.brdfLut},
+  };
+  for (const TextureField &field : fields) {
+    if (yyjson_val *texture = optionalObject(object, field.key)) {
+      const std::string path = "environment." + std::string(field.key);
+      result = parseEnvironmentTexture(texture, *field.texture, path);
+      if (result.hasError()) {
+        return result;
+      }
+    }
+  }
+  return Result<bool, std::string>::makeResult(true);
+}
+
+[[nodiscard]] Result<bool, std::string>
 parseCamera(yyjson_val *object, SnapshotCameraConfig &camera) {
   static constexpr std::array keys{std::string_view("position"),
                                    std::string_view("direction"),
@@ -1609,15 +1691,25 @@ loadSnapshotCaseManifest(const std::filesystem::path &path) {
   }
   yyjson_val *root = yyjson_doc_get_root(doc.get());
   static constexpr std::array rootKeys{
-      std::string_view("schemaVersion"), std::string_view("id"),
-      std::string_view("suite"),         std::string_view("description"),
-      std::string_view("scene"),         std::string_view("backend"),
-      std::string_view("resolution"),    std::string_view("fixedDeltaSeconds"),
-      std::string_view("warmupFrames"),  std::string_view("captureFrame"),
-      std::string_view("authoritative"), std::string_view("presentMode"),
-      std::string_view("windowMode"),    std::string_view("renderGraph"),
-      std::string_view("camera"),        std::string_view("settings"),
-      std::string_view("requirements"),  std::string_view("captures"),
+      std::string_view("schemaVersion"),
+      std::string_view("id"),
+      std::string_view("suite"),
+      std::string_view("description"),
+      std::string_view("scene"),
+      std::string_view("environment"),
+      std::string_view("backend"),
+      std::string_view("resolution"),
+      std::string_view("fixedDeltaSeconds"),
+      std::string_view("warmupFrames"),
+      std::string_view("captureFrame"),
+      std::string_view("authoritative"),
+      std::string_view("presentMode"),
+      std::string_view("windowMode"),
+      std::string_view("renderGraph"),
+      std::string_view("camera"),
+      std::string_view("settings"),
+      std::string_view("requirements"),
+      std::string_view("captures"),
   };
   auto keysResult = rejectUnknownKeys(root, rootKeys, "$");
   if (keysResult.hasError()) {
@@ -1722,6 +1814,12 @@ loadSnapshotCaseManifest(const std::filesystem::path &path) {
       return Result<SnapshotCase, std::string>::makeError(parsed.error());
     }
   }
+  if (yyjson_val *environment = optionalObject(root, "environment")) {
+    auto parsed = parseEnvironment(environment, out.environment);
+    if (parsed.hasError()) {
+      return Result<SnapshotCase, std::string>::makeError(parsed.error());
+    }
+  }
   if (yyjson_val *camera = optionalObject(root, "camera")) {
     auto parsed = parseCamera(camera, out.camera);
     if (parsed.hasError()) {
@@ -1765,6 +1863,8 @@ loadSnapshotCaseManifest(const std::filesystem::path &path) {
     static constexpr std::array keys{std::string_view("assets"),
                                      std::string_view("backends"),
                                      std::string_view("allowVisibleWindow"),
+                                     std::string_view("msaaSamples"),
+                                     std::string_view("msaa4x"),
                                      std::string_view("accelerationStructure"),
                                      std::string_view("rayQuery")};
     auto parsed = rejectUnknownKeys(requirements, keys, "requirements");
@@ -1794,6 +1894,33 @@ loadSnapshotCaseManifest(const std::filesystem::path &path) {
       return Result<SnapshotCase, std::string>::makeError(boolean.error());
     }
     out.requirements.allowVisibleWindow = boolean.value();
+    const bool hasMsaaSamples =
+        yyjson_obj_get(requirements, "msaaSamples") != nullptr;
+    if (hasMsaaSamples) {
+      u32 = readU32(requirements, "msaaSamples", "requirements", 0u);
+      if (u32.hasError()) {
+        return Result<SnapshotCase, std::string>::makeError(u32.error());
+      }
+      if (u32.value() != 1u && u32.value() != 4u && u32.value() != 8u) {
+        return Result<SnapshotCase, std::string>::makeError(
+            "requirements.msaaSamples must be 1, 4, or 8");
+      }
+      out.requirements.msaaSamples = u32.value();
+    }
+    if (yyjson_obj_get(requirements, "msaa4x") != nullptr) {
+      boolean = readBool(requirements, "msaa4x", "requirements", false);
+      if (boolean.hasError()) {
+        return Result<SnapshotCase, std::string>::makeError(boolean.error());
+      }
+      if (boolean.value()) {
+        if (out.requirements.msaaSamples.has_value() &&
+            *out.requirements.msaaSamples != 4u) {
+          return Result<SnapshotCase, std::string>::makeError(
+              "requirements.msaa4x conflicts with requirements.msaaSamples");
+        }
+        out.requirements.msaaSamples = 4u;
+      }
+    }
     boolean = readBool(requirements, "accelerationStructure", "requirements",
                        out.requirements.accelerationStructure);
     if (boolean.hasError()) {

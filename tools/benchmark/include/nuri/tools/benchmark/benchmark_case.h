@@ -5,6 +5,7 @@
 #include <array>
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -85,7 +86,7 @@ struct BenchmarkRequirements {
   std::vector<std::string> assets{};
   std::vector<std::string> backends{};
   bool allowVisibleWindow = true;
-  bool msaa4x = false;
+  std::optional<uint32_t> msaaSamples{};
   bool accelerationStructure = false;
   bool rayQuery = false;
 };

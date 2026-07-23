@@ -1,5 +1,6 @@
 #include "nuri/gfx/pipeline/default_render_pipeline.h"
 #include "nuri/gfx/ddgi/ddgi_feature.h"
+#include "nuri/gfx/frame/render_capture.h"
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/gfx/pipeline/features/composite_feature.h"
 #include "nuri/gfx/pipeline/features/gtao_feature.h"
@@ -27,7 +28,8 @@ bool needsMsaaResolve(const FrameBuildContext &ctx) {
          !(metrics.msaaColorResolveTargetBound &&
            metrics.msaaDepthResolveTargetBound);
 }
-Result<bool, std::string> appendMsaaResolve(FrameBuildContext &ctx) {
+Result<bool, std::string> appendMsaaResolve(FrameBuildContext &ctx,
+                                            GPUDevice &gpu) {
   const auto import = [&ctx](RenderGraphTextureId id, TextureHandle handle,
                              std::string_view name) {
     return nuri::isValid(id) ? id
@@ -72,12 +74,27 @@ Result<bool, std::string> appendMsaaResolve(FrameBuildContext &ctx) {
   ctx.shared.sceneDepthGraphTexture = depthTarget;
   AntiAliasingFrameMetrics &metrics = ctx.frame.metrics.antiAliasing;
   metrics.msaaResolvePassCount = 1u;
+  metrics.msaaColorResolveCount = 1u;
+  metrics.msaaDepthResolveCount = 1u;
+  metrics.msaaResolvedSampleCount =
+      coverageSampleCount(ctx.frame.presentationAA.coverage);
+  metrics.msaaResolvePlacement = MsaaResolvePlacement::ExplicitPass;
   metrics.msaaColorGraphPublished = true;
   metrics.msaaDepthGraphPublished = true;
   metrics.msaaColorResolveTargetBound = true;
   metrics.msaaDepthResolveTargetBound = true;
+  publishRequestedCapture(ctx.frame, gpu, "scene_color_hdr",
+                          ctx.shared.sceneColorTexture,
+                          RenderCaptureValueKind::LinearHdrColor,
+                          RenderCaptureLifetimeClass::FrameSharedRingTexture,
+                          "linear_hdr", "hdr_color", "MSAA Resolve Pass");
+  publishRequestedCapture(ctx.frame, gpu, "scene_depth",
+                          ctx.shared.sceneDepthTexture,
+                          RenderCaptureValueKind::Depth,
+                          RenderCaptureLifetimeClass::FrameSharedRingTexture,
+                          "linear_depth", "depth", "MSAA Resolve Pass");
   metrics.msaaResolveBandwidthEstimateBytes =
-      metrics.msaaColorTextureBytes + metrics.msaaDepthTextureBytes;
+      metrics.msaaResolveReadEstimateBytes;
   if (hasGpuTimingScope(ctx.frame.gpuTiming, GpuTimingScope::MsaaResolve)) {
     metrics.msaaResolveGpuTimeMs = ctx.frame.gpuTiming.msaaResolveTimeMs;
     metrics.msaaResolveGpuTimingSourceFrameIndex =
@@ -86,16 +103,19 @@ Result<bool, std::string> appendMsaaResolve(FrameBuildContext &ctx) {
   }
   return Result<bool, std::string>::makeResult(true);
 }
-void registerMsaaResolveStage(RenderPipeline &pipeline) {
+void registerMsaaResolveStage(RenderPipeline &pipeline, GPUDevice &gpu) {
   pipeline.addStage(PipelineStageDesc{
       .componentName = "MsaaResolveFeature",
       .name = "MsaaResolvePass",
+      .state = &gpu,
       .enabled =
           [](const void *, const FrameBuildContext &ctx) {
             return needsMsaaResolve(ctx);
           },
-      .build = [](void *,
-                  FrameBuildContext &ctx) { return appendMsaaResolve(ctx); },
+      .build =
+          [](void *state, FrameBuildContext &ctx) {
+            return appendMsaaResolve(ctx, *static_cast<GPUDevice *>(state));
+          },
   });
 }
 } // namespace
@@ -120,7 +140,7 @@ registerDefaultRenderPipeline(RenderPipeline &pipeline, GPUDevice &gpu,
   registerGTAOStage(pipeline, gpu, shaderConfig.opaque);
   registerOpaqueMainStage(pipeline, *opaqueRenderer);
   registerSkyboxStage(pipeline, gpu, shaderConfig.skybox);
-  registerMsaaResolveStage(pipeline);
+  registerMsaaResolveStage(pipeline, gpu);
   registerTemporalAAStages(pipeline, gpu, shaderConfig.composite);
   registerSpatialAAStage(pipeline, gpu, shaderConfig.composite);
   registerFrameCompositionStages(pipeline, gpu, shaderConfig.composite);

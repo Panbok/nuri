@@ -2461,6 +2461,7 @@ void DDGIFeature::publishFrameData(FrameBuildContext &ctx, FrameSlot &slot,
     metrics.relocateClassifyGpuTimingAvailable = 1u;
   }
   metrics.activeVolumes = static_cast<uint32_t>(volumes_.size());
+  metrics.active = metrics.activeVolumes != 0u ? 1u : 0u;
   metrics.diagnosticCountersEnabled =
       renderSettingsOrDefault(ctx.frame).ddgi.diagnosticCounters ? 1u : 0u;
   metrics.surfaceGatherArchitecture =

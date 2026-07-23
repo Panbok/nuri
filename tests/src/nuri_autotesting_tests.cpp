@@ -717,6 +717,48 @@ TEST(NuriAutotestingTest, TimelineSetSettingsPatchesPersist) {
   std::filesystem::remove(path, ec);
 }
 
+TEST(NuriAutotestingTest, TimelineResizePersistsAndOnlyFiresAtEventFrame) {
+  const std::filesystem::path path =
+      makeTempPath("autotest_resize_msaa", ".json");
+  writeFile(path,
+            R"json({
+              "schemaVersion": 1,
+              "id": "resize.msaa",
+              "suite": "aa",
+              "resolution": [640, 360],
+              "endFrame": 5,
+              "settings": {"antiAliasing": {"mode": "MSAA8x"}},
+              "timeline": {
+                "events": [{
+                  "frame": 2,
+                  "type": "resize",
+                  "resolution": [800, 450]
+                }]
+              },
+              "requirements": {"msaaSamples": 8}
+            })json");
+
+  auto loaded = loadAutotestCaseManifest(path);
+  ASSERT_FALSE(loaded.hasError()) << loaded.error();
+  ASSERT_TRUE(loaded.value().requirements.msaaSamples.has_value());
+  EXPECT_EQ(*loaded.value().requirements.msaaSamples, 8u);
+  ASSERT_EQ(loaded.value().timeline.events.size(), 1u);
+  EXPECT_TRUE(loaded.value().timeline.events[0].hasResolution);
+
+  auto plan = compileAutotestTimeline(loaded.value());
+  ASSERT_FALSE(plan.hasError()) << plan.error();
+  ASSERT_EQ(plan.value().size(), 6u);
+  EXPECT_EQ(plan.value()[1].resolution, (std::array<uint32_t, 2>{640u, 360u}));
+  EXPECT_EQ(plan.value()[2].resolution, (std::array<uint32_t, 2>{800u, 450u}));
+  EXPECT_EQ(plan.value()[5].resolution, (std::array<uint32_t, 2>{800u, 450u}));
+  EXPECT_FALSE(plan.value()[1].resizeRequested);
+  EXPECT_TRUE(plan.value()[2].resizeRequested);
+  EXPECT_FALSE(plan.value()[3].resizeRequested);
+
+  std::error_code ec;
+  std::filesystem::remove(path, ec);
+}
+
 TEST(NuriAutotestingTest, ReadoutDrainFramesPreserveFinalPlannedState) {
   AutotestCase testCase{};
   testCase.id = "drain.state";

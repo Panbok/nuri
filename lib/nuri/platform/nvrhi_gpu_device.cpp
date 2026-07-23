@@ -1122,11 +1122,15 @@ struct NvrhiWholeFrameTimingSlot {
   VkQueryPool queryPool = VK_NULL_HANDLE;
   std::array<nvrhi::CommandListHandle, 2> commandLists{};
 };
+struct NvrhiOpaquePipelineStatisticsQuery {
+  VkQueryPool queryPool = VK_NULL_HANDLE;
+};
 struct ActiveGraphicsRecordingContext {
   RecordingContextHandle handle{};
   nvrhi::CommandListHandle commandList{};
   std::vector<nvrhi::FramebufferHandle> framebuffers;
   std::vector<NvrhiTimingQuery> timingQueries;
+  std::vector<NvrhiOpaquePipelineStatisticsQuery> opaqueStatisticsQueries;
   uint64_t recordingSerial = 0u;
   uint32_t workerIndex = 0u;
 };
@@ -1135,6 +1139,7 @@ struct RecordedGraphicsCommandBuffer {
   nvrhi::CommandListHandle commandList{};
   std::vector<nvrhi::FramebufferHandle> framebuffers;
   std::vector<NvrhiTimingQuery> timingQueries;
+  std::vector<NvrhiOpaquePipelineStatisticsQuery> opaqueStatisticsQueries;
   uint64_t recordingSerial = 0u;
 };
 struct PendingGraphicsCommandList {
@@ -1147,6 +1152,7 @@ struct PendingGpuTimingSubmission {
   uint64_t submissionInstance = 0u;
   std::vector<NvrhiTimingQuery> timingQueries;
   NvrhiWholeFrameTimingSlot wholeFrameTiming{};
+  std::vector<NvrhiOpaquePipelineStatisticsQuery> opaqueStatisticsQueries;
 };
 struct PendingAsyncUploadSubmission {
   uint64_t submissionInstance = 0u;
@@ -1276,6 +1282,8 @@ struct GPUDeviceImpl {
   bool meshletExtensionEnabled = false;
   bool meshletFeaturesEnabled = false;
   bool meshletsSupported = false;
+  bool opaquePipelineStatisticsRequested = false;
+  bool opaquePipelineStatisticsEnabled = false;
   MeshletLimits meshletLimits{};
   DeviceCaps caps{};
   ResourceTable<SamplerHandle, ResourceSlot<nvrhi::SamplerHandle>> samplers;
@@ -1348,6 +1356,7 @@ struct GPUDeviceImpl {
   uint64_t textureUploadBatchesSubmitted = 0u;
   uint64_t textureUploadBoundedBatchFlushes = 0u;
   uint64_t textureUploadCompletionWaits = 0u;
+  BackendCreationTelemetry creationTelemetry{};
   bool trimAsyncUploadCommandListPoolAfterTextureUploads = false;
   std::vector<PendingAsyncUploadSubmission> pendingAsyncUploadSubmissions;
   std::vector<nvrhi::CommandListHandle> availableAsyncUploadCommandLists;
@@ -1361,6 +1370,7 @@ struct GPUDeviceImpl {
   std::unique_ptr<GeometryPool> geometryPool;
   bool loggedGpuTimingQueryWarning = false;
   bool loggedWholeFrameTimingQueryWarning = false;
+  bool loggedOpaquePipelineStatisticsQueryWarning = false;
   bool loggedShadowSdsmTimingCollectionDiagnostic = false;
 };
 
@@ -1722,6 +1732,8 @@ void collectCompletedGpuTimingSubmissions(Impl &impl) {
       continue;
     }
     GpuTimingReport completedReport{};
+    completedReport.opaquePipelineStatisticsRequested =
+        impl.opaquePipelineStatisticsRequested;
     completedReport.passTimings.reserve(pending.timingQueries.size());
     bool collectedShadowSdsm = false;
     float collectedShadowSdsmTimeMs = 0.0f;
@@ -1771,6 +1783,36 @@ void collectCompletedGpuTimingSubmissions(Impl &impl) {
       pending.wholeFrameTiming = {};
       impl.availableWholeFrameTimingSlots.push_back(std::move(completedSlot));
     }
+    bool opaqueStatisticsReadbackSucceeded =
+        !pending.opaqueStatisticsQueries.empty();
+    for (NvrhiOpaquePipelineStatisticsQuery &statisticsQuery :
+         pending.opaqueStatisticsQueries) {
+      std::array<uint64_t, 5> values{};
+      const VkResult statisticsResult = vkGetQueryPoolResults(
+          impl.device, statisticsQuery.queryPool, 0u, 1u, sizeof(values),
+          values.data(), sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);
+      if (statisticsResult == VK_SUCCESS) {
+        completedReport.opaqueInputAssemblyVertices += values[0];
+        completedReport.opaqueInputAssemblyPrimitives += values[1];
+        completedReport.opaqueClippingInvocations += values[2];
+        completedReport.opaqueClippingPrimitives += values[3];
+        completedReport.opaqueFragmentShaderInvocations += values[4];
+      } else {
+        opaqueStatisticsReadbackSucceeded = false;
+        if (!impl.loggedOpaquePipelineStatisticsQueryWarning) {
+          impl.loggedOpaquePipelineStatisticsQueryWarning = true;
+          NURI_LOG_WARNING(
+              "GPUDevice: opaque pipeline-statistics readback failed");
+        }
+      }
+      vkDestroyQueryPool(impl.device, statisticsQuery.queryPool, nullptr);
+      statisticsQuery.queryPool = VK_NULL_HANDLE;
+    }
+    completedReport.opaquePipelineStatisticsAvailable =
+        opaqueStatisticsReadbackSucceeded;
+    completedReport.opaquePipelineStatisticsSourceFrameIndex =
+        pending.frameIndex;
+    pending.opaqueStatisticsQueries.clear();
     if (collectedShadowSdsm &&
         !impl.loggedShadowSdsmTimingCollectionDiagnostic) {
       impl.loggedShadowSdsmTimingCollectionDiagnostic = true;
@@ -2489,6 +2531,13 @@ void destroyDebugMessenger(Impl &impl) {
       .pNext = enableMeshShaderExtension ? static_cast<void *>(&enabledMesh)
                                          : enabledFeatureChain,
   };
+  impl.opaquePipelineStatisticsRequested =
+      readEnvFlag("NURI_GPU_OPAQUE_PIPELINE_STATISTICS");
+  impl.opaquePipelineStatisticsEnabled =
+      impl.opaquePipelineStatisticsRequested &&
+      supported2.features.pipelineStatisticsQuery == VK_TRUE;
+  enabled2.features.pipelineStatisticsQuery =
+      impl.opaquePipelineStatisticsEnabled ? VK_TRUE : VK_FALSE;
   enabled2.features.samplerAnisotropy = supported2.features.samplerAnisotropy;
   enabled2.features.fillModeNonSolid = supported2.features.fillModeNonSolid;
   enabled2.features.multiDrawIndirect = supported2.features.multiDrawIndirect;
@@ -3000,6 +3049,12 @@ void destroyVulkan(Impl &impl) {
 #endif
   for (PendingGpuTimingSubmission &pending : impl.pendingGpuTimingSubmissions) {
     destroyWholeFrameTimingSlot(impl, pending.wholeFrameTiming);
+    for (NvrhiOpaquePipelineStatisticsQuery &query :
+         pending.opaqueStatisticsQueries) {
+      if (query.queryPool != VK_NULL_HANDLE) {
+        vkDestroyQueryPool(impl.device, query.queryPool, nullptr);
+      }
+    }
   }
   for (NvrhiWholeFrameTimingSlot &slot : impl.availableWholeFrameTimingSlots) {
     destroyWholeFrameTimingSlot(impl, slot);
@@ -3009,6 +3064,23 @@ void destroyVulkan(Impl &impl) {
   impl.pendingAsyncUploadCommandList = nullptr;
   impl.pendingAsyncUploadSubmissions.clear();
   impl.availableAsyncUploadCommandLists.clear();
+  for (ActiveGraphicsRecordingContext &context : impl.activeGraphicsContexts) {
+    for (NvrhiOpaquePipelineStatisticsQuery &query :
+         context.opaqueStatisticsQueries) {
+      if (query.queryPool != VK_NULL_HANDLE) {
+        vkDestroyQueryPool(impl.device, query.queryPool, nullptr);
+      }
+    }
+  }
+  for (RecordedGraphicsCommandBuffer &recorded :
+       impl.recordedGraphicsCommandBuffers) {
+    for (NvrhiOpaquePipelineStatisticsQuery &query :
+         recorded.opaqueStatisticsQueries) {
+      if (query.queryPool != VK_NULL_HANDLE) {
+        vkDestroyQueryPool(impl.device, query.queryPool, nullptr);
+      }
+    }
+  }
   impl.activeGraphicsContexts.clear();
   impl.recordedGraphicsCommandBuffers.clear();
   impl.pendingGraphicsCommandLists.clear();
@@ -4252,11 +4324,11 @@ recordMeshDispatches(Impl &impl, nvrhi::ICommandList &commandList,
   return Result<bool, std::string>::makeResult(true);
 }
 
-[[nodiscard]] Result<bool, std::string>
-recordRenderPass(Impl &impl,
-                 std::vector<nvrhi::FramebufferHandle> *framebuffers,
-                 std::vector<NvrhiTimingQuery> *timingQueries,
-                 nvrhi::ICommandList &commandList, const RenderPass &pass) {
+[[nodiscard]] Result<bool, std::string> recordRenderPass(
+    Impl &impl, std::vector<nvrhi::FramebufferHandle> *framebuffers,
+    std::vector<NvrhiTimingQuery> *timingQueries,
+    std::vector<NvrhiOpaquePipelineStatisticsQuery> *opaqueStatisticsQueries,
+    nvrhi::ICommandList &commandList, const RenderPass &pass) {
 #if defined(NURI_PROFILING)
   constexpr size_t kMaxMarkerLabelBytes = 255u;
   constexpr std::string_view kUnnamedPass = "Unnamed Render Pass";
@@ -4422,6 +4494,7 @@ recordRenderPass(Impl &impl,
           .key = framebufferKey,
           .framebuffer = framebuffer,
       });
+      ++impl.creationTelemetry.framebuffers;
     }
   }
   if (!framebuffer) {
@@ -4472,6 +4545,57 @@ recordRenderPass(Impl &impl,
     commandList.commitBarriers();
     NURI_PROFILER_ZONE_END();
   }
+  VkQueryPool opaqueStatisticsQueryPool = VK_NULL_HANDLE;
+  VkCommandBuffer opaqueStatisticsCommandBuffer = VK_NULL_HANDLE;
+  if (impl.opaquePipelineStatisticsEnabled &&
+      pass.gpuTimingScope == GpuTimingScope::OpaqueMain &&
+      opaqueStatisticsQueries != nullptr) {
+    constexpr VkQueryPipelineStatisticFlags kStatistics =
+        VK_QUERY_PIPELINE_STATISTIC_INPUT_ASSEMBLY_VERTICES_BIT |
+        VK_QUERY_PIPELINE_STATISTIC_INPUT_ASSEMBLY_PRIMITIVES_BIT |
+        VK_QUERY_PIPELINE_STATISTIC_CLIPPING_INVOCATIONS_BIT |
+        VK_QUERY_PIPELINE_STATISTIC_CLIPPING_PRIMITIVES_BIT |
+        VK_QUERY_PIPELINE_STATISTIC_FRAGMENT_SHADER_INVOCATIONS_BIT;
+    const VkQueryPoolCreateInfo queryInfo{
+        .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+        .queryType = VK_QUERY_TYPE_PIPELINE_STATISTICS,
+        .queryCount = 1u,
+        .pipelineStatistics = kStatistics,
+    };
+    if (vkCreateQueryPool(impl.device, &queryInfo, nullptr,
+                          &opaqueStatisticsQueryPool) == VK_SUCCESS) {
+      opaqueStatisticsCommandBuffer = static_cast<VkCommandBuffer>(
+          commandList.getNativeObject(nvrhi::ObjectTypes::VK_CommandBuffer));
+      if (opaqueStatisticsCommandBuffer != VK_NULL_HANDLE) {
+        vkCmdResetQueryPool(opaqueStatisticsCommandBuffer,
+                            opaqueStatisticsQueryPool, 0u, 1u);
+        vkCmdBeginQuery(opaqueStatisticsCommandBuffer,
+                        opaqueStatisticsQueryPool, 0u, 0u);
+      } else {
+        vkDestroyQueryPool(impl.device, opaqueStatisticsQueryPool, nullptr);
+        opaqueStatisticsQueryPool = VK_NULL_HANDLE;
+      }
+    }
+    if (opaqueStatisticsQueryPool == VK_NULL_HANDLE &&
+        !impl.loggedOpaquePipelineStatisticsQueryWarning) {
+      impl.loggedOpaquePipelineStatisticsQueryWarning = true;
+      NURI_LOG_WARNING(
+          "GPUDevice: opaque pipeline-statistics query is unavailable");
+    }
+  }
+  const auto finishOpaqueStatisticsQuery = [&](bool commit) {
+    if (opaqueStatisticsQueryPool == VK_NULL_HANDLE) {
+      return;
+    }
+    vkCmdEndQuery(opaqueStatisticsCommandBuffer, opaqueStatisticsQueryPool, 0u);
+    if (commit) {
+      opaqueStatisticsQueries->push_back(
+          {.queryPool = opaqueStatisticsQueryPool});
+    } else {
+      vkDestroyQueryPool(impl.device, opaqueStatisticsQueryPool, nullptr);
+    }
+    opaqueStatisticsQueryPool = VK_NULL_HANDLE;
+  };
   {
     NURI_PROFILER_ZONE("GPUDevice.record_draws", NURI_PROFILER_COLOR_CMD_DRAW);
     for (const DrawItem &draw : pass.draws) {
@@ -4480,6 +4604,7 @@ recordRenderPass(Impl &impl,
       nvrhi::IGraphicsPipeline *variant =
           findPipelineVariant(*pipeline, makePipelineVariantKey(draw));
       if (!variant) {
+        finishOpaqueStatisticsQuery(false);
         return Result<bool, std::string>::makeError(
             "GPUDevice::recordRenderPass: undeclared raster variant");
       }
@@ -4567,10 +4692,12 @@ recordRenderPass(Impl &impl,
     auto meshDispatchResult = recordMeshDispatches(
         impl, commandList, framebuffer.Get(), viewport, pass.meshDispatches);
     if (meshDispatchResult.hasError()) {
+      finishOpaqueStatisticsQuery(false);
       return meshDispatchResult;
     }
     NURI_PROFILER_ZONE_END();
   }
+  finishOpaqueStatisticsQuery(true);
   if ((colorFramebufferResolve || depthFramebufferResolve) &&
       pass.draws.empty() && pass.meshDispatches.empty()) {
     commandList.resolveFramebuffer(framebuffer.Get());
@@ -5227,6 +5354,7 @@ GPUDevice::createRenderPipeline(const RenderPipelineDesc &desc,
           *pipelineError);
     }
   }
+  ++impl_->creationTelemetry.renderPipelines;
   return Result<RenderPipelineHandle, std::string>::makeResult(reserved.handle);
 }
 
@@ -5279,6 +5407,7 @@ GPUDevice::createComputePipeline(const ComputePipelineDesc &desc,
     return Result<ComputePipelineHandle, std::string>::makeError(
         "Failed to create compute pipeline");
   }
+  ++impl_->creationTelemetry.computePipelines;
   return Result<ComputePipelineHandle, std::string>::makeResult(
       reserved.handle);
 }
@@ -5381,6 +5510,7 @@ GPUDevice::createMeshletPipeline(const MeshletPipelineDesc &desc,
           *pipelineError);
     }
   }
+  ++impl_->creationTelemetry.meshletPipelines;
   return Result<MeshletPipelineHandle, std::string>::makeResult(
       reserved.handle);
 }
@@ -5504,6 +5634,11 @@ TextureUploadTelemetry GPUDevice::getTextureUploadTelemetry() const {
       .pendingBytes = impl_->pendingAsyncUploadBytes,
       .pendingTextures = impl_->pendingAsyncUploadTextureCount,
   };
+}
+
+BackendCreationTelemetry GPUDevice::getBackendCreationTelemetry() const {
+  std::scoped_lock lock(impl_->immediateMutex, impl_->graphicsContextMutex);
+  return impl_->creationTelemetry;
 }
 
 GPUAdapterInfo GPUDevice::getAdapterInfo() const { return impl_->adapterInfo; }
@@ -6135,7 +6270,8 @@ GPUDevice::recordGraphicsPass(RecordingContextHandle ctx,
         "GPUDevice::recordGraphicsPass: unknown recording context");
   }
   return recordRenderPass(*impl_, &entry->framebuffers, &entry->timingQueries,
-                          *entry->commandList, pass);
+                          &entry->opaqueStatisticsQueries, *entry->commandList,
+                          pass);
 }
 
 Result<RecordedCommandBufferHandle, std::string>
@@ -6165,6 +6301,7 @@ GPUDevice::finishGraphicsRecordingContext(RecordingContextHandle ctx) {
       .commandList = active->commandList,
       .framebuffers = std::move(active->framebuffers),
       .timingQueries = std::move(active->timingQueries),
+      .opaqueStatisticsQueries = std::move(active->opaqueStatisticsQueries),
       .recordingSerial = active->recordingSerial});
   impl_->activeGraphicsContexts[ctx.index] = ActiveGraphicsRecordingContext{};
   impl_->recordingContextSlots.release(ctx.index);
@@ -6180,6 +6317,12 @@ GPUDevice::discardGraphicsRecordingContext(RecordingContextHandle ctx) {
     return Result<bool, std::string>::makeError(
         "GPUDevice::discardGraphicsRecordingContext: unknown recording "
         "context");
+  }
+  for (NvrhiOpaquePipelineStatisticsQuery &query :
+       active->opaqueStatisticsQueries) {
+    if (query.queryPool != VK_NULL_HANDLE) {
+      vkDestroyQueryPool(impl_->device, query.queryPool, nullptr);
+    }
   }
   (void)impl_->recordingRetirement.resolveRecording(active->recordingSerial,
                                                     0u);
@@ -6198,6 +6341,12 @@ Result<bool, std::string> GPUDevice::discardRecordedGraphicsCommandBuffer(
     }
     const uint64_t recordingSerial =
         impl_->recordedGraphicsCommandBuffers[i].recordingSerial;
+    for (NvrhiOpaquePipelineStatisticsQuery &query :
+         impl_->recordedGraphicsCommandBuffers[i].opaqueStatisticsQueries) {
+      if (query.queryPool != VK_NULL_HANDLE) {
+        vkDestroyQueryPool(impl_->device, query.queryPool, nullptr);
+      }
+    }
     nvrhi::CommandListHandle reusableCommandList =
         std::move(impl_->recordedGraphicsCommandBuffers[i].commandList);
     if (i + 1u != impl_->recordedGraphicsCommandBuffers.size()) {
@@ -6277,6 +6426,7 @@ GPUDevice::submitRecordedGraphicsFrame(
   }
   std::vector<NvrhiTimingQuery> timingQueries;
   timingQueries.reserve(timingQueryCount);
+  std::vector<NvrhiOpaquePipelineStatisticsQuery> opaqueStatisticsQueries;
   for (const size_t matchedIndex : matchedIndices) {
     RecordedGraphicsCommandBuffer &recorded =
         impl_->recordedGraphicsCommandBuffers[matchedIndex];
@@ -6286,6 +6436,13 @@ GPUDevice::submitRecordedGraphicsFrame(
           std::make_move_iterator(recorded.timingQueries.begin()),
           std::make_move_iterator(recorded.timingQueries.end()));
       recorded.timingQueries.clear();
+    }
+    if (!recorded.opaqueStatisticsQueries.empty()) {
+      opaqueStatisticsQueries.insert(
+          opaqueStatisticsQueries.end(),
+          std::make_move_iterator(recorded.opaqueStatisticsQueries.begin()),
+          std::make_move_iterator(recorded.opaqueStatisticsQueries.end()));
+      recorded.opaqueStatisticsQueries.clear();
     }
   }
   NvrhiWholeFrameTimingSlot wholeFrameTiming =
@@ -6367,12 +6524,15 @@ GPUDevice::submitRecordedGraphicsFrame(
                             impl_->frameResourceReuseWaitInstances.size());
     impl_->frameResourceReuseWaitInstances[frameResourceSlot] = instance;
   }
-  if (!timingQueries.empty() || wholeFrameTiming.queryPool != VK_NULL_HANDLE) {
+  if (!timingQueries.empty() || wholeFrameTiming.queryPool != VK_NULL_HANDLE ||
+      !opaqueStatisticsQueries.empty() ||
+      impl_->opaquePipelineStatisticsRequested) {
     impl_->pendingGpuTimingSubmissions.push_back(PendingGpuTimingSubmission{
         .frameIndex = impl_->currentFrameIndex,
         .submissionInstance = instance,
         .timingQueries = std::move(timingQueries),
         .wholeFrameTiming = std::move(wholeFrameTiming),
+        .opaqueStatisticsQueries = std::move(opaqueStatisticsQueries),
     });
   }
   std::sort(matchedIndices.begin(), matchedIndices.end(), std::greater<>());

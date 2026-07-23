@@ -1034,7 +1034,7 @@ makeSettingsSignature(const RenderSettings &sourceSettings) {
 makeConfigSignature(const BenchmarkCase &benchmarkCase,
                     std::string_view settingsSignature) {
   std::ostringstream out;
-  out << std::setprecision(9) << "config.v1";
+  out << std::setprecision(9) << "config.v2";
   appendSignatureField(out, "suite", benchmarkCase.suite);
   appendSignatureField(out, "comparisonGroup", benchmarkCase.comparisonGroup);
   appendSignatureField(out, "variant", benchmarkCase.variant);
@@ -1120,8 +1120,8 @@ makeConfigSignature(const BenchmarkCase &benchmarkCase,
                       benchmarkCase.requirements.backends);
   appendSignatureField(out, "requirements.allowVisibleWindow",
                        benchmarkCase.requirements.allowVisibleWindow);
-  appendSignatureField(out, "requirements.msaa4x",
-                       benchmarkCase.requirements.msaa4x);
+  appendSignatureField(out, "requirements.msaaSamples",
+                       benchmarkCase.requirements.msaaSamples.value_or(0u));
   appendSignatureField(out, "settingsSignature",
                        std::string(settingsSignature));
   return out.str();
@@ -1578,8 +1578,10 @@ yyjson_mut_val *makeCaseObject(yyjson_mut_doc *doc,
       makeStringArray(doc, benchmarkCase.requirements.backends));
   yyjson_mut_obj_add_bool(doc, requirements, "allowVisibleWindow",
                           benchmarkCase.requirements.allowVisibleWindow);
-  yyjson_mut_obj_add_bool(doc, requirements, "msaa4x",
-                          benchmarkCase.requirements.msaa4x);
+  if (benchmarkCase.requirements.msaaSamples.has_value()) {
+    yyjson_mut_obj_add_uint(doc, requirements, "msaaSamples",
+                            *benchmarkCase.requirements.msaaSamples);
+  }
   yyjson_mut_obj_add_val(doc, object, "requirements", requirements);
   yyjson_mut_obj_add_val(doc, object, "settings",
                          makeSettingsObject(doc, benchmarkCase.settings));
@@ -3181,8 +3183,12 @@ readBenchmarkReportFile(const std::filesystem::path &path) {
       report.benchmarkCase.requirements.allowVisibleWindow =
           readBool(requirements, "allowVisibleWindow",
                    report.benchmarkCase.requirements.allowVisibleWindow);
-      report.benchmarkCase.requirements.msaa4x = readBool(
-          requirements, "msaa4x", report.benchmarkCase.requirements.msaa4x);
+      if (yyjson_is_uint(yyjson_obj_get(requirements, "msaaSamples"))) {
+        report.benchmarkCase.requirements.msaaSamples =
+            readU32(requirements, "msaaSamples");
+      } else if (readBool(requirements, "msaa4x", false)) {
+        report.benchmarkCase.requirements.msaaSamples = 4u;
+      }
     }
     report.benchmarkCase.settings =
         readSettingsObject(yyjson_obj_get(caseObject, "settings"));

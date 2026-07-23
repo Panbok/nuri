@@ -2411,6 +2411,49 @@ void addRendererFrameMetrics(BenchmarkFrameMeasurements &measurements,
                opaque.autoLodLod0Instances);
   addIfNonzero(measurements, "renderer.opaque.auto_lod_lod1_instances",
                opaque.autoLodLod1Instances);
+  addIfNonzero(measurements, "renderer.opaque.classic_main_draws",
+               opaque.classicMainDraws);
+  addIfNonzero(measurements, "renderer.opaque.classic_alpha_masked_main_draws",
+               opaque.classicAlphaMaskedMainDraws);
+  addIfNonzero(measurements, "renderer.opaque.meshlet_main_dispatches",
+               opaque.meshletMainDispatches);
+  addIfNonzero(measurements, "renderer.opaque.meshlet_main_represented_items",
+               opaque.meshletMainRepresentedItems);
+  addIfNonzero(measurements,
+               "renderer.opaque.meshlet_alpha_masked_main_dispatches",
+               opaque.meshletAlphaMaskedMainDispatches);
+  addIfNonzero(measurements, "renderer.opaque.meshlet_alpha_masked_main_items",
+               opaque.meshletAlphaMaskedMainItems);
+  addIfNonzero(measurements, "renderer.opaque.msaa_depth_prepass_draws",
+               opaque.msaaDepthPrepassDraws);
+  addIfNonzero(measurements, "renderer.opaque.msaa_depth_prepass_dispatches",
+               opaque.msaaDepthPrepassDispatches);
+  addIfNonzero(measurements, "renderer.opaque.gtao_auxiliary_prepass_draws",
+               opaque.gtaoAuxiliaryPrepassDraws);
+  addIfNonzero(measurements,
+               "renderer.opaque.gtao_auxiliary_prepass_dispatches",
+               opaque.gtaoAuxiliaryPrepassDispatches);
+  addIfNonzero(measurements,
+               "renderer.opaque.gtao_auxiliary_writes_single_sample_depth",
+               opaque.gtaoAuxiliaryWritesSingleSampleDepth);
+  addIfNonzero(measurements, "renderer.opaque.main_equal_readonly_draws",
+               opaque.mainEqualReadOnlyDraws);
+  addIfNonzero(measurements, "renderer.opaque.main_equal_readonly_dispatches",
+               opaque.mainEqualReadOnlyDispatches);
+  addIfNonzero(measurements, "renderer.opaque.main_less_write_draws",
+               opaque.mainLessWriteDraws);
+  addIfNonzero(measurements, "renderer.opaque.main_less_write_dispatches",
+               opaque.mainLessWriteDispatches);
+  addIfNonzero(measurements, "renderer.opaque.depth_pyramid_requested",
+               opaque.depthPyramidRequested);
+  addIfNonzero(measurements, "renderer.opaque.depth_pyramid_active",
+               opaque.depthPyramidActive);
+  addIfNonzero(measurements, "renderer.visibility.hiz_requested",
+               opaque.hiZRequested);
+  addIfNonzero(measurements, "renderer.visibility.hiz_active",
+               opaque.hiZActive);
+  addIfNonzero(measurements, "renderer.visibility.hiz_source_frame_policy",
+               static_cast<uint32_t>(opaque.hiZSourceFramePolicy));
 
   const VisibilityFrameMetrics &visibility = metrics.visibility;
   addIfNonzero(measurements, "renderer.visibility.cpu_main_candidates",
@@ -2594,12 +2637,27 @@ void addRendererFrameMetrics(BenchmarkFrameMeasurements &measurements,
                aa.spatialAAPassCount);
   addIfNonzero(measurements, "renderer.aa.msaa_resolve_passes",
                aa.msaaResolvePassCount);
+  addIfNonzero(measurements, "renderer.aa.msaa_color_resolves",
+               aa.msaaColorResolveCount);
+  addIfNonzero(measurements, "renderer.aa.msaa_depth_resolves",
+               aa.msaaDepthResolveCount);
+  addIfNonzero(measurements, "renderer.aa.msaa_resolved_sample_count",
+               aa.msaaResolvedSampleCount);
   addIfNonzero(measurements, "renderer.aa.msaa_sample_count",
                aa.msaaSampleCount);
   addIfNonzero(measurements, "renderer.aa.msaa_color_textures",
                aa.msaaColorTextureCount);
   addIfNonzero(measurements, "renderer.aa.msaa_depth_textures",
                aa.msaaDepthTextureCount);
+  addIfNonzero(measurements, "renderer.aa.msaa_ring_slots", aa.msaaRingSlots);
+  addIfNonzero(measurements, "renderer.aa.msaa_color_allocations",
+               aa.msaaColorAllocationCount);
+  addIfNonzero(measurements, "renderer.aa.msaa_color_reallocations",
+               aa.msaaColorReallocationCount);
+  addIfNonzero(measurements, "renderer.aa.msaa_depth_allocations",
+               aa.msaaDepthAllocationCount);
+  addIfNonzero(measurements, "renderer.aa.msaa_depth_reallocations",
+               aa.msaaDepthReallocationCount);
   addIfNonzero(measurements, "renderer.aa.msaa_sample4_color_supported",
                aa.msaaSample4ColorSupported);
   addIfNonzero(measurements, "renderer.aa.msaa_sample4_depth_supported",
@@ -2618,12 +2676,36 @@ void addRendererFrameMetrics(BenchmarkFrameMeasurements &measurements,
                aa.msaaAlphaToCoverageEnabled);
   addIfNonzero(measurements, "renderer.aa.msaa_sample_shading_active",
                aa.msaaSampleShadingEnabled);
+  addIfNonzero(measurements, "renderer.aa.msaa_alpha_coverage_requested",
+               aa.msaaAlphaCoverageRequested);
+  addIfNonzero(measurements, "renderer.aa.msaa_spatial_cleanup_requested",
+               aa.msaaSpatialCleanupRequested);
+  addIfNonzero(measurements, "renderer.aa.msaa_spatial_cleanup_active",
+               aa.msaaSpatialCleanupActive);
   addIfNonzero(measurements, "renderer.aa.msaa_unsupported_reason",
                static_cast<uint32_t>(aa.msaaUnsupportedReason));
   addIfNonzero(measurements, "renderer.aa.msaa_alpha_coverage_policy",
                static_cast<uint32_t>(aa.msaaAlphaCoveragePolicy));
   addIfNonzero(measurements, "renderer.aa.msaa_transparency_policy",
                static_cast<uint32_t>(aa.msaaTransparencyPolicy));
+  addIfNonzero(measurements, "renderer.aa.msaa_resolve_placement",
+               static_cast<uint32_t>(aa.msaaResolvePlacement));
+  addIfNonzero(measurements, "renderer.aa.msaa_main_color_format",
+               static_cast<uint32_t>(aa.msaaMainColorFormat));
+  addIfNonzero(measurements, "renderer.aa.msaa_main_depth_format",
+               static_cast<uint32_t>(aa.msaaMainDepthFormat));
+  addIfNonzero(measurements, "renderer.aa.msaa_main_attachment_sample_count",
+               aa.msaaMainAttachmentSampleCount);
+  addIfNonzero(measurements, "renderer.aa.msaa_extent_width",
+               aa.msaaExtentWidth);
+  addIfNonzero(measurements, "renderer.aa.msaa_extent_height",
+               aa.msaaExtentHeight);
+  addIfNonzero(measurements, "renderer.aa.msaa_color_texel_bytes",
+               aa.msaaColorTexelBytes);
+  addIfNonzero(measurements, "renderer.aa.msaa_depth_texel_bytes",
+               aa.msaaDepthTexelBytes);
+  addIfNonzero(measurements, "renderer.aa.msaa_traffic_formula_version",
+               aa.msaaTrafficFormulaVersion);
   addBytesAsMiB(measurements, "gpu.memory.aa.motion_vector_total_mb",
                 aa.motionVectorTotalBytes);
   addBytesAsMiB(measurements, "gpu.memory.aa.reactive_mask_total_mb",
@@ -2635,6 +2717,18 @@ void addRendererFrameMetrics(BenchmarkFrameMeasurements &measurements,
   addBytesAsMiB(measurements, "gpu.memory.aa.spatial_aa_total_mb",
                 aa.spatialAATotalBytes);
   addBytesAsMiB(measurements, "gpu.memory.aa.msaa_total_mb", aa.msaaTotalBytes);
+  addBytesAsMiB(measurements, "gpu.memory.aa.msaa_active_color_mb",
+                aa.msaaColorTextureBytes);
+  addBytesAsMiB(measurements, "gpu.memory.aa.msaa_active_depth_mb",
+                aa.msaaDepthTextureBytes);
+  addBytesAsMiB(measurements, "gpu.memory.aa.msaa_ring_color_mb",
+                aa.msaaRingColorBytes);
+  addBytesAsMiB(measurements, "gpu.memory.aa.msaa_ring_depth_mb",
+                aa.msaaRingDepthBytes);
+  addBytesAsMiB(measurements, "gpu.traffic.aa.msaa_resolve_read_estimated_mb",
+                aa.msaaResolveReadEstimateBytes);
+  addBytesAsMiB(measurements, "gpu.traffic.aa.msaa_resolve_write_estimated_mb",
+                aa.msaaResolveWriteEstimateBytes);
   addIfNonzero(measurements, "renderer.aa.transparent_transmission_blend_draws",
                aa.transparentTransmissionBlendDrawCount);
   addIfNonzero(measurements,
@@ -2768,6 +2862,8 @@ void addRendererFrameMetrics(BenchmarkFrameMeasurements &measurements,
                "renderer.ray_tracing.direct_binding_pool_high_water",
                rt.directBindingPoolHighWater);
   const DDGIFrameMetrics &ddgi = metrics.ddgi;
+  addIfNonzero(measurements, "renderer.ddgi.requested", ddgi.requested);
+  addIfNonzero(measurements, "renderer.ddgi.active", ddgi.active);
   addIfNonzero(measurements, "renderer.ddgi.active_volumes",
                ddgi.activeVolumes);
   addIfNonzero(measurements, "renderer.ddgi.ready_volumes", ddgi.readyVolumes);
@@ -3326,37 +3422,54 @@ void applyGpuTimingReport(BenchmarkReport &report,
                           const std::map<uint64_t, size_t> &frameByIndex) {
   std::map<uint64_t, double> scopeSumsByFrame;
   const auto add = [&](BenchmarkMetricIndex index, GpuTimingScope scope,
-                       uint64_t sourceFrameIndex, float ms) {
+                       uint64_t sourceFrameIndex, float ms) -> bool {
     if (!hasGpuTimingScope(timingReport, scope)) {
-      return;
+      return false;
     }
     const auto frameIt = frameByIndex.find(sourceFrameIndex);
     if (frameIt == frameByIndex.end()) {
-      return;
+      return false;
     }
     report.frames[frameIt->second].measurements.appendRegistered(
         index, static_cast<double>(ms));
     if (shouldIncludeGpuScopeInSum(timingReport, scope, sourceFrameIndex)) {
       scopeSumsByFrame[sourceFrameIndex] += static_cast<double>(ms);
     }
+    return true;
   };
   add(NURI_BENCHMARK_METRIC("gpu.frame_ms"), GpuTimingScope::WholeFrame,
       timingReport.wholeFrameSourceFrameIndex, timingReport.wholeFrameTimeMs);
-  add(NURI_BENCHMARK_METRIC("gpu.scopes.shadow_ms"), GpuTimingScope::Shadow,
-      timingReport.shadowSourceFrameIndex, timingReport.shadowTimeMs);
+  const bool shadowAdded =
+      add(NURI_BENCHMARK_METRIC("gpu.scopes.shadow_ms"), GpuTimingScope::Shadow,
+          timingReport.shadowSourceFrameIndex, timingReport.shadowTimeMs);
   add(NURI_BENCHMARK_METRIC("gpu.scopes.shadow_depth_ms"),
       GpuTimingScope::ShadowDepth, timingReport.shadowDepthSourceFrameIndex,
       timingReport.shadowDepthTimeMs);
   add(NURI_BENCHMARK_METRIC("gpu.scopes.shadow_sdsm_ms"),
       GpuTimingScope::ShadowSdsm, timingReport.shadowSdsmSourceFrameIndex,
       timingReport.shadowSdsmTimeMs);
-  add(NURI_BENCHMARK_METRIC("gpu.scopes.opaque_ms"), GpuTimingScope::Opaque,
-      timingReport.opaqueSourceFrameIndex, timingReport.opaqueTimeMs);
-  add(NURI_BENCHMARK_METRIC("gpu.scopes.gtao_ms"), GpuTimingScope::GTAO,
-      timingReport.gtaoSourceFrameIndex, timingReport.gtaoTimeMs);
-  add(NURI_BENCHMARK_METRIC("gpu.scopes.msaa_resolve_ms"),
-      GpuTimingScope::MsaaResolve, timingReport.msaaResolveSourceFrameIndex,
-      timingReport.msaaResolveTimeMs);
+  const bool opaqueAdded =
+      add(NURI_BENCHMARK_METRIC("gpu.scopes.opaque_ms"), GpuTimingScope::Opaque,
+          timingReport.opaqueSourceFrameIndex, timingReport.opaqueTimeMs);
+  const bool opaqueDepthAdded =
+      add(NURI_BENCHMARK_METRIC("gpu.scopes.opaque_depth_ms"),
+          GpuTimingScope::OpaqueDepth, timingReport.opaqueDepthSourceFrameIndex,
+          timingReport.opaqueDepthTimeMs);
+  const bool opaqueNormalAdded = add(
+      NURI_BENCHMARK_METRIC("gpu.scopes.opaque_normal_ms"),
+      GpuTimingScope::OpaqueNormal, timingReport.opaqueNormalSourceFrameIndex,
+      timingReport.opaqueNormalTimeMs);
+  const bool opaqueMainAdded =
+      add(NURI_BENCHMARK_METRIC("gpu.scopes.opaque_main_ms"),
+          GpuTimingScope::OpaqueMain, timingReport.opaqueMainSourceFrameIndex,
+          timingReport.opaqueMainTimeMs);
+  const bool gtaoAdded =
+      add(NURI_BENCHMARK_METRIC("gpu.scopes.gtao_ms"), GpuTimingScope::GTAO,
+          timingReport.gtaoSourceFrameIndex, timingReport.gtaoTimeMs);
+  const bool msaaResolveAdded =
+      add(NURI_BENCHMARK_METRIC("gpu.scopes.msaa_resolve_ms"),
+          GpuTimingScope::MsaaResolve, timingReport.msaaResolveSourceFrameIndex,
+          timingReport.msaaResolveTimeMs);
   add(NURI_BENCHMARK_METRIC("gpu.scopes.scene_color_downsample_ms"),
       GpuTimingScope::SceneColorDownsample,
       timingReport.sceneColorDownsampleSourceFrameIndex,
@@ -3372,7 +3485,8 @@ void applyGpuTimingReport(BenchmarkReport &report,
   add(NURI_BENCHMARK_METRIC("gpu.scopes.spatial_aa_ms"),
       GpuTimingScope::SpatialAA, timingReport.spatialAASourceFrameIndex,
       timingReport.spatialAATimeMs);
-  add(NURI_BENCHMARK_METRIC("gpu.scopes.transmission_ms"),
+  const bool transmissionAdded = add(
+      NURI_BENCHMARK_METRIC("gpu.scopes.transmission_ms"),
       GpuTimingScope::Transmission, timingReport.transmissionSourceFrameIndex,
       timingReport.transmissionTimeMs);
   add(NURI_BENCHMARK_METRIC("gpu.scopes.hdr_postprocess_ms"),
@@ -3417,6 +3531,62 @@ void applyGpuTimingReport(BenchmarkReport &report,
       GpuTimingScope::DDGIRelocateClassify,
       timingReport.ddgiRelocateClassifySourceFrameIndex,
       timingReport.ddgiRelocateClassifyTimeMs);
+  if (const auto frameIt =
+          frameByIndex.find(timingReport.wholeFrameSourceFrameIndex);
+      frameIt != frameByIndex.end()) {
+    auto &measurements = report.frames[frameIt->second].measurements;
+    const auto addAbsentPhase = [&](BenchmarkMetricIndex index, bool added) {
+      if (!added) {
+        measurements.appendRegistered(index, 0.0);
+      }
+    };
+    addAbsentPhase(NURI_BENCHMARK_METRIC("gpu.scopes.shadow_ms"), shadowAdded);
+    addAbsentPhase(NURI_BENCHMARK_METRIC("gpu.scopes.opaque_ms"), opaqueAdded);
+    addAbsentPhase(NURI_BENCHMARK_METRIC("gpu.scopes.opaque_depth_ms"),
+                   opaqueDepthAdded);
+    addAbsentPhase(NURI_BENCHMARK_METRIC("gpu.scopes.opaque_normal_ms"),
+                   opaqueNormalAdded);
+    addAbsentPhase(NURI_BENCHMARK_METRIC("gpu.scopes.opaque_main_ms"),
+                   opaqueMainAdded);
+    addAbsentPhase(NURI_BENCHMARK_METRIC("gpu.scopes.gtao_ms"), gtaoAdded);
+    addAbsentPhase(NURI_BENCHMARK_METRIC("gpu.scopes.msaa_resolve_ms"),
+                   msaaResolveAdded);
+    addAbsentPhase(NURI_BENCHMARK_METRIC("gpu.scopes.transmission_ms"),
+                   transmissionAdded);
+  }
+  if (const auto frameIt = frameByIndex.find(
+          timingReport.opaquePipelineStatisticsSourceFrameIndex);
+      frameIt != frameByIndex.end()) {
+    auto &measurements = report.frames[frameIt->second].measurements;
+    measurements.appendRegistered(
+        NURI_BENCHMARK_METRIC("renderer.opaque.pipeline_statistics_requested"),
+        timingReport.opaquePipelineStatisticsRequested ? 1.0 : 0.0);
+    measurements.appendRegistered(
+        NURI_BENCHMARK_METRIC("renderer.opaque.pipeline_statistics_available"),
+        timingReport.opaquePipelineStatisticsAvailable ? 1.0 : 0.0);
+    if (timingReport.opaquePipelineStatisticsAvailable) {
+      measurements.appendRegistered(
+          NURI_BENCHMARK_METRIC(
+              "renderer.opaque.pipeline_statistics_input_assembly_vertices"),
+          static_cast<double>(timingReport.opaqueInputAssemblyVertices));
+      measurements.appendRegistered(
+          NURI_BENCHMARK_METRIC(
+              "renderer.opaque.pipeline_statistics_input_assembly_primitives"),
+          static_cast<double>(timingReport.opaqueInputAssemblyPrimitives));
+      measurements.appendRegistered(
+          NURI_BENCHMARK_METRIC(
+              "renderer.opaque.pipeline_statistics_clipping_invocations"),
+          static_cast<double>(timingReport.opaqueClippingInvocations));
+      measurements.appendRegistered(
+          NURI_BENCHMARK_METRIC(
+              "renderer.opaque.pipeline_statistics_clipping_primitives"),
+          static_cast<double>(timingReport.opaqueClippingPrimitives));
+      measurements.appendRegistered(
+          NURI_BENCHMARK_METRIC("renderer.opaque.pipeline_statistics_fragment_"
+                                "shader_invocations"),
+          static_cast<double>(timingReport.opaqueFragmentShaderInvocations));
+    }
+  }
   for (const auto &[sourceFrameIndex, sum] : scopeSumsByFrame) {
     const auto frameIt = frameByIndex.find(sourceFrameIndex);
     if (frameIt != frameByIndex.end()) {
@@ -3899,15 +4069,25 @@ Result<bool, BenchmarkExitCode>
 checkBenchmarkGpuRequirements(const BenchmarkRequirements &requirements,
                               const GpuMultisampleCapabilities &capabilities,
                               std::string &message) {
-  if (!requirements.msaa4x) {
+  const uint32_t samples = requirements.msaaSamples.value_or(1u);
+  if (samples == 1u) {
     return Result<bool, BenchmarkExitCode>::makeResult(true);
   }
   std::vector<std::string_view> missing;
-  if (!capabilities.sample4Color) {
-    missing.push_back("sample4_color");
-  }
-  if (!capabilities.sample4Depth) {
-    missing.push_back("sample4_depth");
+  if (samples == 4u) {
+    if (!capabilities.sample4Color) {
+      missing.push_back("sample4_color");
+    }
+    if (!capabilities.sample4Depth) {
+      missing.push_back("sample4_depth");
+    }
+  } else {
+    if (!capabilities.sample8Color) {
+      missing.push_back("sample8_color");
+    }
+    if (!capabilities.sample8Depth) {
+      missing.push_back("sample8_depth");
+    }
   }
   if (!capabilities.depthResolveMin) {
     missing.push_back("depth_resolve_min");
@@ -3918,7 +4098,8 @@ checkBenchmarkGpuRequirements(const BenchmarkRequirements &requirements,
   if (missing.empty()) {
     return Result<bool, BenchmarkExitCode>::makeResult(true);
   }
-  message = "required MSAA4x capability unavailable:";
+  message =
+      "required MSAA" + std::to_string(samples) + "x capability unavailable:";
   for (const std::string_view capability : missing) {
     message += " ";
     message += capability;
@@ -3945,7 +4126,13 @@ formatBenchmarkCaseListJson(const std::vector<BenchmarkCase> &cases,
         << benchmarkCase->suite << "\", \"comparisonGroup\": \""
         << benchmarkCase->comparisonGroup << "\", \"variant\": \""
         << benchmarkCase->variant << "\", \"description\": \""
-        << benchmarkCase->description << "\"}";
+        << benchmarkCase->description << "\", \"msaaSamples\": ";
+    if (benchmarkCase->requirements.msaaSamples.has_value()) {
+      out << *benchmarkCase->requirements.msaaSamples;
+    } else {
+      out << "null";
+    }
+    out << "}";
   }
   out << "\n  ]\n}\n";
   return Result<std::string, std::string>::makeResult(out.str());
@@ -3957,7 +4144,13 @@ std::string formatBenchmarkCaseListText(const std::vector<BenchmarkCase> &cases,
   for (const BenchmarkCase *benchmarkCase :
        filterBenchmarkCasesBySuite(cases, suite)) {
     out << benchmarkCase->id << " [" << benchmarkCase->suite << "] "
-        << benchmarkCase->description << "\n";
+        << benchmarkCase->description << " (MSAA requirement: ";
+    if (benchmarkCase->requirements.msaaSamples.has_value()) {
+      out << *benchmarkCase->requirements.msaaSamples << "x";
+    } else {
+      out << "none";
+    }
+    out << ")\n";
   }
   return out.str();
 }
@@ -3973,6 +4166,13 @@ formatBenchmarkCaseExplanationJson(const BenchmarkCase &benchmarkCase) {
       << "  \"description\": \"" << benchmarkCase.description << "\",\n"
       << "  \"sceneKind\": \"" << benchmarkCase.scene.kind << "\",\n"
       << "  \"backend\": \"" << benchmarkCase.backend << "\",\n"
+      << "  \"msaaSamples\": ";
+  if (benchmarkCase.requirements.msaaSamples.has_value()) {
+    out << *benchmarkCase.requirements.msaaSamples;
+  } else {
+    out << "null";
+  }
+  out << ",\n"
       << "  \"samples\": " << benchmarkCase.samples << ",\n"
       << "  \"measurementFrames\": " << benchmarkCase.measurementFrames << "\n"
       << "}\n";
@@ -3989,7 +4189,13 @@ formatBenchmarkCaseExplanationText(const BenchmarkCase &benchmarkCase) {
       << "description: " << benchmarkCase.description << "\n"
       << "scene: " << benchmarkCase.scene.kind << "\n"
       << "backend: " << benchmarkCase.backend << "\n"
-      << "resolution: " << benchmarkCase.resolution[0] << "x"
+      << "MSAA requirement: ";
+  if (benchmarkCase.requirements.msaaSamples.has_value()) {
+    out << *benchmarkCase.requirements.msaaSamples << "x\n";
+  } else {
+    out << "none\n";
+  }
+  out << "resolution: " << benchmarkCase.resolution[0] << "x"
       << benchmarkCase.resolution[1] << "\n"
       << "frames: warmup=" << benchmarkCase.warmupFrames
       << " measured=" << benchmarkCase.measurementFrames << "\n";
@@ -4032,8 +4238,11 @@ formatEffectiveConfigJson(const BenchmarkCase &benchmarkCase,
       << "  \"backendSource\": \"" << backendSource << "\",\n"
       << "  \"presentMode\": \"" << present << "\",\n"
       << "  \"presentModeSource\": \"" << presentSource << "\",\n"
-      << "  \"requiresMsaa4x\": "
-      << (benchmarkCase.requirements.msaa4x ? "true" : "false") << ",\n"
+      << "  \"requiredMsaaSamples\": "
+      << benchmarkCase.requirements.msaaSamples.value_or(0u) << ",\n"
+      << "  \"opaquePipelineStatisticsDiagnostic\": "
+      << (options.opaquePipelineStatisticsDiagnostic ? "true" : "false")
+      << ",\n"
       << "  \"artifactDir\": \"" << options.artifactDir.generic_string()
       << "\"\n"
       << "}\n";
@@ -4991,6 +5200,16 @@ BenchmarkRunResult runBenchmarkCase(BenchmarkCase benchmarkCase,
     report.warnings.push_back(
         "Tracy diagnostic mode is not valid for authoritative comparison");
   }
+  if (options.opaquePipelineStatisticsDiagnostic) {
+    report.run.validForComparison = false;
+    report.profile.authoritative = false;
+    report.profile.authorityBlockers.push_back(
+        "opaque pipeline-statistics diagnostics cannot be compared or "
+        "accepted as a benchmark baseline");
+    report.warnings.push_back(
+        "Opaque pipeline statistics are diagnostic-only; ignore timing data "
+        "from this run");
+  }
   if (rgpDiagnostic) {
     report.run.validForComparison = false;
     report.profile.authoritative = false;
@@ -5140,6 +5359,10 @@ BenchmarkRunResult runBenchmarkCase(BenchmarkCase benchmarkCase,
     if (presentSource == "manifest" && presentMode != "default") {
       env.push_back(
           std::make_unique<ScopedEnvVar>("NURI_PRESENT_MODE", presentMode));
+    }
+    if (options.opaquePipelineStatisticsDiagnostic) {
+      env.push_back(std::make_unique<ScopedEnvVar>(
+          "NURI_GPU_OPAQUE_PIPELINE_STATISTICS", "1"));
     }
 
     auto configResult = loadRuntimeConfigFromEnvOrDefault();
@@ -5355,12 +5578,16 @@ BenchmarkRunResult runBenchmarkCase(BenchmarkCase benchmarkCase,
         renderer->renderGraphTelemetry().requestCapture(
             RenderGraphTelemetryLevel::PassTimings);
       }
+      const BackendCreationTelemetry creationBefore =
+          gpu->getBackendCreationTelemetry();
       const auto renderBegin = std::chrono::steady_clock::now();
       auto renderResult = renderer->render(pipeline, frameContext);
       const double renderSubmitMs = elapsedMs(renderBegin);
       if (renderResult.hasError()) {
         return Result<bool, std::string>::makeError(renderResult.error());
       }
+      const BackendCreationTelemetry creationAfter =
+          gpu->getBackendCreationTelemetry();
       const double totalMs = elapsedMs(totalBegin);
       frame.metrics = frameContext.metrics;
       if (!measured) {
@@ -5384,6 +5611,24 @@ BenchmarkRunResult runBenchmarkCase(BenchmarkCase benchmarkCase,
         frame.measurements.appendRegistered(
             NURI_BENCHMARK_METRIC("cpu.scene_resource_prepare_ms"),
             sceneResourcePrepareMs);
+        frame.measurements.appendRegistered(
+            NURI_BENCHMARK_METRIC("renderer.backend.render_pipeline_creations"),
+            static_cast<double>(creationAfter.renderPipelines -
+                                creationBefore.renderPipelines));
+        frame.measurements.appendRegistered(
+            NURI_BENCHMARK_METRIC(
+                "renderer.backend.compute_pipeline_creations"),
+            static_cast<double>(creationAfter.computePipelines -
+                                creationBefore.computePipelines));
+        frame.measurements.appendRegistered(
+            NURI_BENCHMARK_METRIC(
+                "renderer.backend.meshlet_pipeline_creations"),
+            static_cast<double>(creationAfter.meshletPipelines -
+                                creationBefore.meshletPipelines));
+        frame.measurements.appendRegistered(
+            NURI_BENCHMARK_METRIC("renderer.backend.framebuffer_creations"),
+            static_cast<double>(creationAfter.framebuffers -
+                                creationBefore.framebuffers));
         addRendererFrameMetrics(frame.measurements, frame.metrics);
         addRenderGraphTelemetryMetrics(frame.measurements, *renderer);
         addTextureResourceMetrics(frame.measurements, *gpu);

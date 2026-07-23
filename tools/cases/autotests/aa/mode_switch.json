@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "aa.procedural.mode_switch",
   "suite": "aa",
-  "description": "Switch AA modes through timeline settings and verify SpatialAA and MSAA passes",
+  "description": "Settle through None, MSAA4x, MSAA8x, and None while proving resolve, memory, and churn contracts",
   "scene": {
     "kind": "procedural",
     "generator": "nuri.procedural.reactive_mask.v1",
@@ -13,7 +13,7 @@
   "resolution": [640, 360],
   "fixedDeltaSeconds": 0.016666667,
   "warmupFrames": 2,
-  "endFrame": 8,
+  "endFrame": 18,
   "authoritative": false,
   "presentMode": "immediate",
   "windowMode": "visible",
@@ -36,16 +36,25 @@
         "type": "setSettings",
         "settings": {
           "antiAliasing": {
-            "mode": "SpatialFallback"
+            "mode": "MSAA4x"
           }
         }
       },
       {
-        "frame": 8,
+        "frame": 9,
         "type": "setSettings",
         "settings": {
           "antiAliasing": {
-            "mode": "MSAA4x"
+            "mode": "MSAA8x"
+          }
+        }
+      },
+      {
+        "frame": 14,
+        "type": "setSettings",
+        "settings": {
+          "antiAliasing": {
+            "mode": "None"
           }
         }
       }
@@ -53,37 +62,88 @@
   },
   "checkpoints": [
     {
-      "id": "spatial",
-      "frame": 4,
-      "captures": [
-        {"target": "final_color", "profile": "ldr_color", "required": true, "compare": true}
-      ],
+      "id": "none_initial",
+      "frame": 3,
+      "captures": [],
       "assertions": [
         {
-          "id": "spatial_aa_pass_present",
-          "metric": "renderer.aa.spatial_aa_passes",
-          "greaterOrEqual": 1
-        }
+          "id": "sample_count_1x",
+          "metric": "renderer.aa.msaa_sample_count",
+          "equals": 1
+        },
+        {"id": "no_color_resolve", "metric": "renderer.aa.msaa_color_resolves", "equals": 0},
+        {"id": "no_depth_resolve", "metric": "renderer.aa.msaa_depth_resolves", "equals": 0},
+        {"id": "no_ring_slots", "metric": "renderer.aa.msaa_ring_slots", "equals": 0},
+        {"id": "no_ring_memory", "metric": "gpu.memory.aa.msaa_total_mb", "equals": 0}
       ]
     },
     {
-      "id": "msaa",
+      "id": "msaa4x_settled",
       "frame": 8,
-      "captures": [
-        {"target": "final_color", "profile": "ldr_color", "required": true, "compare": true}
-      ],
+      "captures": [],
       "assertions": [
         {
-          "id": "msaa_resolve_present",
-          "metric": "renderer.aa.msaa_resolve_passes",
-          "greaterOrEqual": 1
-        }
+          "id": "sample_count_4x",
+          "metric": "renderer.aa.msaa_sample_count",
+          "equals": 4
+        },
+        {"id": "one_color_resolve_4x", "metric": "renderer.aa.msaa_color_resolves", "equals": 1},
+        {"id": "one_depth_resolve_4x", "metric": "renderer.aa.msaa_depth_resolves", "equals": 1},
+        {"id": "resolved_sample_count_4x", "metric": "renderer.aa.msaa_resolved_sample_count", "equals": 4},
+        {"id": "ring_present_4x", "metric": "renderer.aa.msaa_ring_slots", "greaterOrEqual": 1},
+        {"id": "active_color_bytes_4x", "metric": "gpu.memory.aa.msaa_active_color_mb", "equals": 7.03125},
+        {"id": "active_depth_bytes_4x", "metric": "gpu.memory.aa.msaa_active_depth_mb", "equals": 3.515625},
+        {"id": "ring_color_bytes_4x", "metric": "gpu.memory.aa.msaa_ring_color_mb", "equals": 21.09375},
+        {"id": "ring_depth_bytes_4x", "metric": "gpu.memory.aa.msaa_ring_depth_mb", "equals": 10.546875},
+        {"id": "total_bytes_4x", "metric": "gpu.memory.aa.msaa_total_mb", "equals": 31.640625},
+        {"id": "no_color_allocation_churn_4x", "metric": "renderer.aa.msaa_color_allocations", "equals": 0},
+        {"id": "no_depth_allocation_churn_4x", "metric": "renderer.aa.msaa_depth_allocations", "equals": 0},
+        {"id": "no_framebuffer_churn_4x", "metric": "renderer.backend.framebuffer_creations", "equals": 0},
+        {"id": "no_pipeline_churn_4x", "metric": "renderer.backend.render_pipeline_creations", "equals": 0},
+        {"id": "no_compute_pipeline_churn_4x", "metric": "renderer.backend.compute_pipeline_creations", "equals": 0},
+        {"id": "no_meshlet_pipeline_churn_4x", "metric": "renderer.backend.meshlet_pipeline_creations", "equals": 0}
+      ]
+    },
+    {
+      "id": "msaa8x_settled",
+      "frame": 13,
+      "captures": [],
+      "assertions": [
+        {"id": "sample_count_8x", "metric": "renderer.aa.msaa_sample_count", "equals": 8},
+        {"id": "one_color_resolve_8x", "metric": "renderer.aa.msaa_color_resolves", "equals": 1},
+        {"id": "one_depth_resolve_8x", "metric": "renderer.aa.msaa_depth_resolves", "equals": 1},
+        {"id": "resolved_sample_count_8x", "metric": "renderer.aa.msaa_resolved_sample_count", "equals": 8},
+        {"id": "ring_present_8x", "metric": "renderer.aa.msaa_ring_slots", "greaterOrEqual": 1},
+        {"id": "active_color_bytes_8x", "metric": "gpu.memory.aa.msaa_active_color_mb", "equals": 14.0625},
+        {"id": "active_depth_bytes_8x", "metric": "gpu.memory.aa.msaa_active_depth_mb", "equals": 7.03125},
+        {"id": "ring_color_bytes_8x", "metric": "gpu.memory.aa.msaa_ring_color_mb", "equals": 42.1875},
+        {"id": "ring_depth_bytes_8x", "metric": "gpu.memory.aa.msaa_ring_depth_mb", "equals": 21.09375},
+        {"id": "total_bytes_8x", "metric": "gpu.memory.aa.msaa_total_mb", "equals": 63.28125},
+        {"id": "no_color_allocation_churn_8x", "metric": "renderer.aa.msaa_color_allocations", "equals": 0},
+        {"id": "no_depth_allocation_churn_8x", "metric": "renderer.aa.msaa_depth_allocations", "equals": 0},
+        {"id": "no_framebuffer_churn_8x", "metric": "renderer.backend.framebuffer_creations", "equals": 0},
+        {"id": "no_pipeline_churn_8x", "metric": "renderer.backend.render_pipeline_creations", "equals": 0},
+        {"id": "no_compute_pipeline_churn_8x", "metric": "renderer.backend.compute_pipeline_creations", "equals": 0},
+        {"id": "no_meshlet_pipeline_churn_8x", "metric": "renderer.backend.meshlet_pipeline_creations", "equals": 0}
+      ]
+    },
+    {
+      "id": "none_final",
+      "frame": 18,
+      "captures": [],
+      "assertions": [
+        {"id": "sample_count_final_1x", "metric": "renderer.aa.msaa_sample_count", "equals": 1},
+        {"id": "no_final_color_resolve", "metric": "renderer.aa.msaa_color_resolves", "equals": 0},
+        {"id": "no_final_depth_resolve", "metric": "renderer.aa.msaa_depth_resolves", "equals": 0},
+        {"id": "no_final_ring_slots", "metric": "renderer.aa.msaa_ring_slots", "equals": 0},
+        {"id": "no_final_ring_memory", "metric": "gpu.memory.aa.msaa_total_mb", "equals": 0}
       ]
     }
   ],
   "requirements": {
     "assets": ["modelsRoot:common/flat_plane.obj"],
     "backends": [],
-    "allowVisibleWindow": true
+    "allowVisibleWindow": true,
+    "msaaSamples": 8
   }
 }

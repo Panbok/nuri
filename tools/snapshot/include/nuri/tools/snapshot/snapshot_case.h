@@ -5,6 +5,7 @@
 #include <array>
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -50,10 +51,28 @@ struct SnapshotSceneConfig {
   std::string contentHash = "procedural-empty-v1";
 };
 
+struct SnapshotEnvironmentTextureConfig {
+  bool enabled = false;
+  bool required = false;
+  std::string pathBase{};
+  std::filesystem::path path{};
+  std::string kind = "Texture2D";
+  std::string debugName{};
+};
+
+struct SnapshotEnvironmentConfig {
+  SnapshotEnvironmentTextureConfig cubemap{};
+  SnapshotEnvironmentTextureConfig irradiance{};
+  SnapshotEnvironmentTextureConfig prefilteredGgx{};
+  SnapshotEnvironmentTextureConfig prefilteredCharlie{};
+  SnapshotEnvironmentTextureConfig brdfLut{};
+};
+
 struct SnapshotRequirements {
   std::vector<std::string> assets{};
   std::vector<std::string> backends{};
   bool allowVisibleWindow = true;
+  std::optional<uint32_t> msaaSamples{};
   bool accelerationStructure = false;
   bool rayQuery = false;
 };
@@ -80,6 +99,7 @@ struct SnapshotCase {
   std::string windowMode = "visible";
   SnapshotRenderGraphConfig renderGraph{};
   SnapshotCameraConfig camera{};
+  SnapshotEnvironmentConfig environment{};
   RenderSettings settings{};
   SnapshotRequirements requirements{};
   std::vector<SnapshotCaptureTarget> captures{};

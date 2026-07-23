@@ -2,11 +2,20 @@
   "schemaVersion": 1,
   "id": "renderer.procedural.msaa8x_360p",
   "suite": "renderer",
-  "description": "Generated alpha-mask scene rendered with MSAA8x at 640x360",
+  "description": "Generated alpha-mask and Skybox scene rendered on the classic route with MSAA8x at 640x360",
   "scene": {
     "kind": "procedural",
     "generator": "nuri.procedural.reactive_mask.v1",
     "contentHash": "reactive-mask-v1"
+  },
+  "environment": {
+    "cubemap": {
+      "pathBase": "texturesRoot",
+      "path": "qwantani_moon_noon_puresky_4k.hdr",
+      "kind": "EquirectHdrCubemap",
+      "debugName": "msaa_silhouette_sky",
+      "required": true
+    }
   },
   "backend": "default",
   "resolution": [640, 360],
@@ -32,6 +41,7 @@
   "settings": {
     "opaque": {
       "enabled": true,
+      "meshletMode": "Disabled",
       "enableDepthPrepass": true,
       "enableInstanceCompute": true,
       "enableInstanceAnimation": false,
@@ -67,14 +77,28 @@
     }
   },
   "requirements": {
-    "assets": ["modelsRoot:common/flat_plane.obj"],
+    "assets": [
+      "modelsRoot:common/flat_plane.obj",
+      "texturesRoot:qwantani_moon_noon_puresky_4k.hdr"
+    ],
     "backends": [],
-    "allowVisibleWindow": true
+    "allowVisibleWindow": true,
+    "msaaSamples": 8
   },
   "captures": [
     {
       "target": "final_color",
       "profile": "ldr_color",
+      "required": true
+    },
+    {
+      "target": "frame_color_hdr",
+      "profile": "hdr_color",
+      "required": true
+    },
+    {
+      "target": "scene_depth",
+      "profile": "depth",
       "required": true
     }
   ]

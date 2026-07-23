@@ -198,6 +198,53 @@ TEST(NuriSnapshotTestingTest, ManifestRejectsUnknownKeys) {
   std::filesystem::remove(path, ec);
 }
 
+TEST(NuriSnapshotTestingTest,
+     ManifestParsesMsaaEnvironmentAndSpatialCleanupContract) {
+  const std::filesystem::path path =
+      makeTempPath("snapshot_msaa_environment", ".json");
+  writeFile(path,
+            R"json({
+              "schemaVersion": 1,
+              "id": "msaa.environment",
+              "suite": "renderer",
+              "environment": {
+                "cubemap": {
+                  "pathBase": "texturesRoot",
+                  "path": "sky.hdr",
+                  "kind": "EquirectHdrCubemap",
+                  "debugName": "test_sky",
+                  "required": true
+                }
+              },
+              "settings": {
+                "antiAliasing": {
+                  "mode": "MSAA8x",
+                  "spatialPostMsaaCleanup": true
+                }
+              },
+              "requirements": {"msaaSamples": 8},
+              "captures": [{"target": "final_color"}]
+            })json");
+
+  auto loaded = loadSnapshotCaseManifest(path);
+  ASSERT_FALSE(loaded.hasError()) << loaded.error();
+  ASSERT_TRUE(loaded.value().requirements.msaaSamples.has_value());
+  EXPECT_EQ(*loaded.value().requirements.msaaSamples, 8u);
+  EXPECT_EQ(loaded.value().settings.antiAliasing.mode,
+            AntiAliasingMode::MSAA8x);
+  EXPECT_TRUE(
+      loaded.value().settings.antiAliasing.debug.spatialPostMsaaCleanup);
+  EXPECT_EQ(loaded.value().environment.cubemap.pathBase, "texturesRoot");
+  EXPECT_EQ(loaded.value().environment.cubemap.path,
+            std::filesystem::path("sky.hdr"));
+  EXPECT_EQ(loaded.value().environment.cubemap.kind, "EquirectHdrCubemap");
+  EXPECT_EQ(loaded.value().environment.cubemap.debugName, "test_sky");
+  EXPECT_TRUE(loaded.value().environment.cubemap.required);
+
+  std::error_code ec;
+  std::filesystem::remove(path, ec);
+}
+
 TEST(NuriSnapshotTestingTest, ManifestParsesStrictVersionedDDGICoverage) {
   const std::filesystem::path path =
       makeTempPath("snapshot_ddgi_coverage", ".json");

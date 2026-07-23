@@ -221,6 +221,8 @@ struct DDGICaptureMetadata {
 
 struct DDGIFrameMetrics {
   uint32_t version = kDDGIFrameMetricsVersion;
+  uint32_t requested = 0u;
+  uint32_t active = 0u;
   uint32_t activeVolumes = 0u;
   uint32_t readyVolumes = 0u;
   uint32_t totalProbes = 0u;
