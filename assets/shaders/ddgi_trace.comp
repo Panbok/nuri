@@ -24,6 +24,15 @@ struct DDGITraceCountersGpuData {
   uint secondaryQueriesReserved;
   uint sourceFrame;
   uint localSecondaryQueries;
+  uint secondaryQueryBudgetOverflows;
+  uint nonFiniteRadianceRejects;
+  uint emissiveRadianceClamps;
+  uint directRadianceClamps;
+  uint skyRadianceClamps;
+  uint multiBounceRadianceClamps;
+  uint finalRadianceClamps;
+  uint reserved1;
+  uint reserved2;
   uint primaryQueriesIssuedByVolume[8];
   uint secondaryQueriesByVolume[8];
 };
@@ -42,7 +51,7 @@ layout(push_constant) uniform PushConstants {
   vec4 directionalDirectionIlluminance;
   vec4 directionalColor;
   DDGITraceInputBuffer traceInputs;
-  uint rayCount;
+  uint updateCount;
   uint raysPerProbe;
   uint skyTextureId;
   uint skySamplerId;
@@ -55,13 +64,70 @@ layout(push_constant) uniform PushConstants {
 }
 pc;
 
+const uint kDDGIRadianceDomainEmissive = 0u;
+const uint kDDGIRadianceDomainDirect = 1u;
+const uint kDDGIRadianceDomainSky = 2u;
+const uint kDDGIRadianceDomainMultiBounce = 3u;
+const uint kDDGIRadianceDomainFinal = 4u;
+
+bool ddgiDiagnosticCountersEnabled() {
+  return (pc.maxLocalLights & 0x40000000u) != 0u;
+}
+
+vec3 ddgiFiniteRadiance(vec3 value) {
+  if (any(isnan(value)) || any(isinf(value))) {
+    if (ddgiDiagnosticCountersEnabled()) {
+      atomicAdd(pc.traceInputs.counters.nonFiniteRadianceRejects, 1u);
+    }
+    return vec3(0.0);
+  }
+  return max(value, vec3(0.0));
+}
+
+vec3 ddgiClampRadiance(vec3 value, uint domain) {
+  value = ddgiFiniteRadiance(value);
+  const float valueLuminance = dot(value, vec3(0.2126, 0.7152, 0.0722));
+  const float limit = max(pc.directionalColor.w, 0.0);
+  if (valueLuminance > limit && ddgiDiagnosticCountersEnabled()) {
+    if (domain == kDDGIRadianceDomainEmissive) {
+      atomicAdd(pc.traceInputs.counters.emissiveRadianceClamps, 1u);
+    } else if (domain == kDDGIRadianceDomainDirect) {
+      atomicAdd(pc.traceInputs.counters.directRadianceClamps, 1u);
+    } else if (domain == kDDGIRadianceDomainSky) {
+      atomicAdd(pc.traceInputs.counters.skyRadianceClamps, 1u);
+    } else if (domain == kDDGIRadianceDomainMultiBounce) {
+      atomicAdd(pc.traceInputs.counters.multiBounceRadianceClamps, 1u);
+    } else {
+      atomicAdd(pc.traceInputs.counters.finalRadianceClamps, 1u);
+    }
+  }
+  return value * min(1.0, limit / max(valueLuminance, 1.0e-6));
+}
+
 bool ddgiDirectLightVisible(vec3 origin, vec3 direction, float maximumDistance,
                             uint volumeSlot, bool localLight) {
-  atomicAdd(pc.traceInputs.counters.secondaryQueries, 1u);
-  if (localLight) {
+  uint reservedIndex = pc.traceInputs.counters.secondaryQueries;
+  for (;;) {
+    if (reservedIndex >= pc.traceInputs.counters.secondaryQueriesReserved) {
+      // This is scheduler feedback, not optional diagnostics. It only executes
+      // on overflow and keeps the next frame's reservation conservative.
+      atomicAdd(pc.traceInputs.counters.secondaryQueryBudgetOverflows, 1u);
+      return false;
+    }
+    const uint observed =
+        atomicCompSwap(pc.traceInputs.counters.secondaryQueries, reservedIndex,
+                       reservedIndex + 1u);
+    if (observed == reservedIndex) {
+      break;
+    }
+    reservedIndex = observed;
+  }
+  if (localLight && ddgiDiagnosticCountersEnabled()) {
     atomicAdd(pc.traceInputs.counters.localSecondaryQueries, 1u);
   }
-  atomicAdd(pc.traceInputs.counters.secondaryQueriesByVolume[volumeSlot], 1u);
+  if (ddgiDiagnosticCountersEnabled()) {
+    atomicAdd(pc.traceInputs.counters.secondaryQueriesByVolume[volumeSlot], 1u);
+  }
   rayQueryEXT shadowQuery;
   rayQueryInitializeEXT(shadowQuery, kSceneTlas,
                         gl_RayFlagsTerminateOnFirstHitEXT, 0xff, origin, 0.001,
@@ -69,10 +135,14 @@ bool ddgiDirectLightVisible(vec3 origin, vec3 direction, float maximumDistance,
   uint candidates = 0u;
   bool overflow = false;
   while (rayQueryProceedEXT(shadowQuery)) {
-    atomicAdd(pc.traceInputs.counters.secondaryCandidateIntersections, 1u);
-    if (++candidates > pc.maxCandidates) {
+    if (ddgiDiagnosticCountersEnabled()) {
+      atomicAdd(pc.traceInputs.counters.secondaryCandidateIntersections, 1u);
+    }
+    if (++candidates > (pc.maxCandidates & 0xffffu)) {
       overflow = true;
-      atomicAdd(pc.traceInputs.counters.candidateOverflows, 1u);
+      if (ddgiDiagnosticCountersEnabled()) {
+        atomicAdd(pc.traceInputs.counters.candidateOverflows, 1u);
+      }
       break;
     }
     const uint instanceIndex =
@@ -95,12 +165,16 @@ bool ddgiDirectLightVisible(vec3 origin, vec3 direction, float maximumDistance,
     if (!rtAlphaPasses(geometry, instance, primitive, bary, pc.materials,
                        pc.materialSamplerId, candidateDistance,
                        pc.raysPerProbe)) {
-      atomicAdd(pc.traceInputs.counters.alphaCandidateRejections, 1u);
+      if (ddgiDiagnosticCountersEnabled()) {
+        atomicAdd(pc.traceInputs.counters.alphaCandidateRejections, 1u);
+      }
       continue;
     }
     const bool front = rayQueryGetIntersectionFrontFaceEXT(shadowQuery, false);
     if (!front && (geometry.flags & kRtGeometryDoubleSided) == 0u) {
-      atomicAdd(pc.traceInputs.counters.backfaceCandidateRejections, 1u);
+      if (ddgiDiagnosticCountersEnabled()) {
+        atomicAdd(pc.traceInputs.counters.backfaceCandidateRejections, 1u);
+      }
       continue;
     }
     rayQueryConfirmIntersectionEXT(shadowQuery);
@@ -125,14 +199,23 @@ float ddgiDirectLightRandom(uint rayIndex, uint volumeSlot) {
 }
 
 vec3 ddgiDirectLighting(vec3 hitPoint, vec3 geometricNormal, vec3 shadingNormal,
-                        vec3 diffuseColor, float maximumRayDistance,
-                        float minimumSpacing, uint volumeSlot, uint rayIndex) {
+                        vec3 diffuseColor, float minimumSpacing,
+                        uint volumeSlot, uint rayIndex) {
   const uint localLimit = min(pc.maxLocalLights & 0xffffu, 16u);
+  const uint selectedDirectionalLightCount = pc.directionalLightCount & 0xffffu;
+  const uint totalDirectionalLightCount = pc.directionalLightCount >> 16u;
+  const uint sampledLocalLightCount = pc.localLightCount & 0xffffu;
+  const uint totalLocalLightCount = pc.localLightCount >> 16u;
+  const float localDomainScale =
+      sampledLocalLightCount > 0u
+          ? float(totalLocalLightCount) / float(sampledLocalLightCount)
+          : 0.0;
   uint candidateIndices[16];
   float candidateScores[16];
   uint candidateCount = 0u;
   uint eligibleCount = 0u;
-  for (uint lightIndex = 0u; lightIndex < pc.localLightCount; ++lightIndex) {
+  for (uint lightIndex = 0u; lightIndex < sampledLocalLightCount;
+       ++lightIndex) {
     const LocalLightGpuData light = pc.traceInputs.lights[lightIndex];
     if (!localLightEnabled(light)) {
       continue;
@@ -152,9 +235,10 @@ vec3 ddgiDirectLighting(vec3 hitPoint, vec3 geometricNormal, vec3 shadingNormal,
           localLightOuterCos(light));
     }
     const vec3 lightColor = localLightColor(light);
-    const vec3 contribution = diffuseColor * lightColor *
-                              localLightIntensity(light) * attenuation * ndotl /
-                              3.14159265359;
+    const vec3 contribution = ddgiClampRadiance(
+        diffuseColor * lightColor * localLightIntensity(light) * attenuation *
+            ndotl / 3.14159265359,
+        kDDGIRadianceDomainDirect);
     const float score = dot(contribution, vec3(0.2126, 0.7152, 0.0722));
     if (score <= 0.0) {
       continue;
@@ -181,26 +265,30 @@ vec3 ddgiDirectLighting(vec3 hitPoint, vec3 geometricNormal, vec3 shadingNormal,
     candidateIndices[insert] = lightIndex;
     candidateCount = min(candidateCount + 1u, localLimit);
   }
-  if (eligibleCount > localLimit) {
+  if ((totalLocalLightCount > sampledLocalLightCount ||
+       eligibleCount > localLimit) &&
+      ddgiDiagnosticCountersEnabled()) {
     atomicAdd(pc.traceInputs.counters.localLightTruncations, 1u);
   }
 
   const vec3 directionalDirection =
-      pc.directionalLightCount > 0u
+      selectedDirectionalLightCount > 0u
           ? normalize(-pc.directionalDirectionIlluminance.xyz)
           : vec3(0.0);
   const float directionalNdotL =
-      pc.directionalLightCount > 0u
+      selectedDirectionalLightCount > 0u
           ? max(dot(shadingNormal, directionalDirection), 0.0)
           : 0.0;
-  const vec3 directionalContribution = diffuseColor * pc.directionalColor.rgb *
-                                       pc.directionalDirectionIlluminance.w *
-                                       directionalNdotL / 3.14159265359;
+  const vec3 directionalContribution = ddgiClampRadiance(
+      diffuseColor * pc.directionalColor.rgb *
+          pc.directionalDirectionIlluminance.w * directionalNdotL /
+          3.14159265359 * float(totalDirectionalLightCount),
+      kDDGIRadianceDomainDirect);
   const float directionalScore =
       dot(directionalContribution, vec3(0.2126, 0.7152, 0.0722));
   float totalScore = max(directionalScore, 0.0);
   for (uint candidate = 0u; candidate < candidateCount; ++candidate) {
-    totalScore += candidateScores[candidate];
+    totalScore += candidateScores[candidate] * localDomainScale;
   }
   if (totalScore <= 1.0e-8) {
     return vec3(0.0);
@@ -209,14 +297,16 @@ vec3 ddgiDirectLighting(vec3 hitPoint, vec3 geometricNormal, vec3 shadingNormal,
   float selected = ddgiDirectLightRandom(rayIndex, volumeSlot) * totalScore;
   vec3 selectedDirection = directionalDirection;
   vec3 selectedContribution = directionalContribution;
-  float selectedDistance = maximumRayDistance;
+  float selectedDistance = float(pc.maxCandidates >> 16u);
   float selectedScore = directionalScore;
   bool selectedLocal = false;
   bool found = directionalScore > 0.0 && selected < directionalScore;
   selected -= directionalScore;
   for (uint candidate = 0u; candidate < candidateCount; ++candidate) {
-    if (found || selected >= candidateScores[candidate]) {
-      selected -= found ? 0.0 : candidateScores[candidate];
+    const float candidateDomainScore =
+        candidateScores[candidate] * localDomainScale;
+    if (found || selected >= candidateDomainScore) {
+      selected -= found ? 0.0 : candidateDomainScore;
       continue;
     }
     const LocalLightGpuData light =
@@ -233,10 +323,11 @@ vec3 ddgiDirectLighting(vec3 hitPoint, vec3 geometricNormal, vec3 shadingNormal,
     }
     selectedDirection = lightDirection;
     selectedDistance = sqrt(distanceSq);
-    selectedContribution = diffuseColor * localLightColor(light) *
-                           localLightIntensity(light) * attenuation *
-                           max(dot(shadingNormal, lightDirection), 0.0) /
-                           3.14159265359;
+    selectedContribution = ddgiClampRadiance(
+        diffuseColor * localLightColor(light) * localLightIntensity(light) *
+            attenuation * max(dot(shadingNormal, lightDirection), 0.0) /
+            3.14159265359,
+        kDDGIRadianceDomainDirect);
     selectedScore = candidateScores[candidate];
     selectedLocal = true;
     found = true;
@@ -246,30 +337,37 @@ vec3 ddgiDirectLighting(vec3 hitPoint, vec3 geometricNormal, vec3 shadingNormal,
     return vec3(0.0);
   }
 
-  const float shadowBias =
-      max(0.001, 0.75 * minimumSpacing *
-                     pc.frame.volumes[volumeSlot].probeSpacingAndBias.w);
+  DDGIVolumeGpuData volume = pc.frame.volumes[volumeSlot];
+  const float configuredBias =
+      selectedLocal ? volume.rayBiases.y : volume.rayBiases.z;
+  const float shadowBias = clamp(0.75 * minimumSpacing * configuredBias, 0.001,
+                                 max(0.25 * minimumSpacing, 0.001));
   const float offsetSign =
       dot(geometricNormal, selectedDirection) >= 0.0 ? 1.0 : -1.0;
   const vec3 shadowOrigin =
       hitPoint + geometricNormal * (shadowBias * offsetSign);
-  const float traceDistance =
-      min(maximumRayDistance, max(selectedDistance - shadowBias, 0.0));
+  const float traceDistance = max(selectedDistance - shadowBias, 0.0);
   if (traceDistance <= 0.001 ||
       !ddgiDirectLightVisible(shadowOrigin, selectedDirection, traceDistance,
                               volumeSlot, selectedLocal)) {
     return vec3(0.0);
   }
-  return selectedContribution * (totalScore / selectedScore);
+  return ddgiClampRadiance(selectedContribution * (totalScore / selectedScore),
+                           kDDGIRadianceDomainDirect);
 }
 
 void main() {
-  const uint rayIndex = gl_GlobalInvocationID.x;
-  if (rayIndex >= pc.rayCount) {
+  const uint updateIndex = gl_WorkGroupID.x;
+  if (updateIndex >= pc.updateCount) {
     return;
   }
-  const DDGIProbeUpdateEntryGpu update =
-      pc.updates.values[rayIndex / pc.raysPerProbe];
+  const DDGIProbeUpdateEntryGpu update = pc.updates.values[updateIndex];
+  const uint updateRay =
+      gl_WorkGroupID.y * gl_WorkGroupSize.x + gl_LocalInvocationID.x;
+  if (updateRay >= update.rayCount) {
+    return;
+  }
+  const uint rayIndex = update.rayBase + updateRay;
   DDGIVolumeGpuData volume = pc.frame.volumes[update.volumeSlot];
   const uint probeState =
       volume.probeStates.values[update.probeId].stateAgeFlags.x;
@@ -282,10 +380,6 @@ void main() {
         uvec4(0u, update.volumeSlot, update.probeId, 0u);
     return;
   }
-  atomicAdd(pc.traceInputs.counters.primaryQueriesIssued, 1u);
-  atomicAdd(
-      pc.traceInputs.counters.primaryQueriesIssuedByVolume[update.volumeSlot],
-      1u);
   const uvec3 counts = volume.probeCountsAndCount.xyz;
   const uint xy = counts.x * counts.y;
   const uvec3 physical =
@@ -297,21 +391,25 @@ void main() {
       ddgiNominalLocalPosition(volume, logical) +
       volume.probeStates.values[update.probeId].relocation.xyz;
   const vec3 origin = (volume.worldFromLocal * vec4(localOrigin, 1.0)).xyz;
-  const vec3 direction = ddgiRayDirection(rayIndex - update.rayBase,
-                                          update.rayCount, pc.frameSeed);
+  const vec3 direction =
+      ddgiRayDirection(updateRay, update.rayCount, pc.frameSeed);
   rayQueryEXT query;
   rayQueryInitializeEXT(query, kSceneTlas, gl_RayFlagsNoneEXT, 0xff, origin,
-                        ddgiProbeRayTMin(volume.probeSpacingAndBias.xyz),
-                        direction, volume.centerHalfExtentsAndMaxDistance.w);
+                        ddgiProbeRayTMin(volume), direction,
+                        volume.centerHalfExtentsAndMaxDistance.w);
   uint candidates = 0u;
   float containmentDistance = 0.0;
   uint containmentFlags = 0u;
   bool overflow = false;
   while (rayQueryProceedEXT(query)) {
-    atomicAdd(pc.traceInputs.counters.primaryCandidateIntersections, 1u);
-    if (++candidates > pc.maxCandidates) {
+    if (ddgiDiagnosticCountersEnabled()) {
+      atomicAdd(pc.traceInputs.counters.primaryCandidateIntersections, 1u);
+    }
+    if (++candidates > (pc.maxCandidates & 0xffffu)) {
       overflow = true;
-      atomicAdd(pc.traceInputs.counters.candidateOverflows, 1u);
+      if (ddgiDiagnosticCountersEnabled()) {
+        atomicAdd(pc.traceInputs.counters.candidateOverflows, 1u);
+      }
       break;
     }
     const uint instanceIndex =
@@ -332,7 +430,9 @@ void main() {
     if (!rtAlphaPasses(geometry, instance, primitive, bary, pc.materials,
                        pc.materialSamplerId, candidateDistance,
                        pc.raysPerProbe)) {
-      atomicAdd(pc.traceInputs.counters.alphaCandidateRejections, 1u);
+      if (ddgiDiagnosticCountersEnabled()) {
+        atomicAdd(pc.traceInputs.counters.alphaCandidateRejections, 1u);
+      }
       continue;
     }
     const bool front = rayQueryGetIntersectionFrontFaceEXT(query, false);
@@ -349,7 +449,9 @@ void main() {
       continue;
     }
     if (!front && (geometry.flags & kRtGeometryDoubleSided) == 0u) {
-      atomicAdd(pc.traceInputs.counters.backfaceCandidateRejections, 1u);
+      if (ddgiDiagnosticCountersEnabled()) {
+        atomicAdd(pc.traceInputs.counters.backfaceCandidateRejections, 1u);
+      }
       const float distance = rayQueryGetIntersectionTEXT(query, false);
       if (containmentDistance == 0.0 || distance < containmentDistance) {
         containmentDistance = distance;
@@ -396,27 +498,30 @@ void main() {
     const float metallic =
         rtMetallic(geometry, instance, primitive, bary, material,
                    pc.materialSamplerId, hitDistance, pc.raysPerProbe);
-    vec3 radiance =
+    vec3 radiance = ddgiClampRadiance(
         rtEmissive(geometry, instance, primitive, bary, material,
-                   pc.materialSamplerId, hitDistance, pc.raysPerProbe);
+                   pc.materialSamplerId, hitDistance, pc.raysPerProbe),
+        kDDGIRadianceDomainEmissive);
     const vec3 hitPoint = origin + direction * hitDistance;
     const float minSpacing =
         min(min(volume.probeSpacingAndBias.x, volume.probeSpacingAndBias.y),
             volume.probeSpacingAndBias.z);
     radiance += ddgiDirectLighting(hitPoint, geometricNormal, normal,
-                                   baseColor.rgb * (1.0 - metallic),
-                                   volume.centerHalfExtentsAndMaxDistance.w,
-                                   minSpacing, update.volumeSlot, rayIndex);
+                                   baseColor.rgb * (1.0 - metallic), minSpacing,
+                                   update.volumeSlot, rayIndex);
     if ((pc.maxLocalLights & 0x80000000u) != 0u) {
       const DDGIQueryResult bounce =
           queryDDGI(pc.frame, hitPoint, normal, -direction);
-      vec3 contribution =
-          bounce.irradiance * baseColor.rgb * (1.0 - metallic) / 3.14159265359;
+      vec3 contribution = ddgiFiniteRadiance(bounce.irradiance) *
+                          ddgiFiniteRadiance(baseColor.rgb) *
+                          max(1.0 - metallic, 0.0) / 3.14159265359;
       const float luminance = dot(contribution, vec3(0.2126, 0.7152, 0.0722));
       contribution *= min(1.0, pc.directionalColor.w / max(luminance, 1.0e-6));
-      radiance += contribution;
+      radiance +=
+          ddgiClampRadiance(contribution, kDDGIRadianceDomainMultiBounce);
     }
-    result.radianceAndDistance = vec4(max(radiance, vec3(0.0)), hitDistance);
+    result.radianceAndDistance = vec4(
+        ddgiClampRadiance(radiance, kDDGIRadianceDomainFinal), hitDistance);
     result.metadata.x = 1u;
     result.metadata.w = instance.geometryRenderableFlags.w;
   } else if (containmentDistance > 0.0) {
@@ -429,7 +534,8 @@ void main() {
                                pc.skyTextureId, pc.skySamplerId, direction, 0.0)
                                .rgb
                          : vec3(0.0);
-    result.radianceAndDistance = vec4(sky, -1.0);
+    result.radianceAndDistance =
+        vec4(ddgiClampRadiance(sky, kDDGIRadianceDomainSky), -1.0);
     result.metadata.x = 0u;
   }
   pc.results.values[rayIndex] = result;

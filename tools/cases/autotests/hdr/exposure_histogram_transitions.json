@@ -1,0 +1,71 @@
+{
+  "schemaVersion": 1,
+  "id": "hdr.procedural.exposure_histogram_transitions",
+  "suite": "hdr",
+  "description": "Finite percentile histogram exposure publishes delayed completion-tagged telemetry without synchronizing the frame",
+  "scene": {
+    "kind": "procedural",
+    "generator": "nuri.procedural.reactive_mask.v1",
+    "seed": 31,
+    "contentHash": "nuri.procedural.reactive_mask.v1:31"
+  },
+  "backend": "default",
+  "resolution": [640, 360],
+  "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 4,
+  "endFrame": 16,
+  "authoritative": false,
+  "presentMode": "immediate",
+  "windowMode": "visible",
+  "camera": {
+    "position": [0.0, 0.2, 3.2],
+    "target": [0.0, 0.15, 0.0],
+    "verticalFovDegrees": 52.0,
+    "nearPlane": 0.05,
+    "farPlane": 500.0
+  },
+  "settings": {
+    "antiAliasing": {"mode": "None"},
+    "hdrPostProcess": {
+      "bloomEnabled": false,
+      "adaptationEnabled": true,
+      "meteringMode": "CenterWeighted",
+      "adaptationTargetGray": 0.18,
+      "adaptationBrightenSpeed": 3.0,
+      "adaptationDarkenSpeed": 3.0,
+      "adaptationMaxEvChange": 0.5,
+      "adaptationMinEv": -8.0,
+      "adaptationMaxEv": 8.0,
+      "histogramLowPercentile": 0.01,
+      "histogramHighPercentile": 0.99,
+      "histogramMinLogLuminance": -12.0,
+      "histogramMaxLogLuminance": 12.0
+    }
+  },
+  "checkpoints": [
+    {
+      "id": "histogram_telemetry",
+      "frame": 16,
+      "captures": [
+        {
+          "target": "frame_color_hdr",
+          "profile": "hdr_color",
+          "required": true,
+          "compare": false
+        }
+      ],
+      "assertions": [
+        {"id": "adaptation_active", "metric": "renderer.hdr.adaptation_active", "equals": 1},
+        {"id": "telemetry_available", "metric": "renderer.hdr.exposure_telemetry_available", "equals": 1},
+        {"id": "telemetry_source", "metric": "renderer.hdr.exposure_telemetry_source_frame", "greaterOrEqual": 1},
+        {"id": "finite_meter", "metric": "renderer.hdr.exposure_invalid_sample_fraction", "lessOrEqual": 1},
+        {"id": "bounded_ring", "metric": "renderer.hdr.exposure_telemetry_pending_slots", "lessOrEqual": 6}
+      ]
+    }
+  ],
+  "requirements": {
+    "assets": ["modelsRoot:common/flat_plane.obj"],
+    "backends": [],
+    "allowVisibleWindow": true
+  }
+}

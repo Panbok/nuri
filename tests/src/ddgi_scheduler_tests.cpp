@@ -53,6 +53,59 @@ TEST(DDGISchedulerTests, ConservativelyReservesSecondaryQueryForEveryPrimary) {
   EXPECT_TRUE(result->truncated);
 }
 
+TEST(DDGISchedulerTests, LendsUnreservedSecondaryCapacityToPrimaryQueries) {
+  std::array<nuri::DDGIProbeScheduleCandidate, 4> candidates{};
+  for (uint32_t index = 0u; index < candidates.size(); ++index) {
+    candidates[index] = {1u, index, nuri::DDGIProbeState::Vigilant, index};
+  }
+  std::array<nuri::DDGIProbeScheduleCandidate, 4> workspace{};
+  std::array<nuri::DDGIProbeUpdateEntry, 4> output{};
+  auto result =
+      nuri::scheduleDDGIProbeUpdates(candidates,
+                                     {.raysPerProbe = 32u,
+                                      .maxProbeUpdates = 4u,
+                                      .maxRayQueries = 128u,
+                                      .secondaryQueriesPer1024Primary = 256u},
+                                     workspace, output);
+  ASSERT_TRUE(result.hasValue());
+  EXPECT_EQ(result->updatedProbes, 3u);
+  EXPECT_EQ(result->primaryQueries, 96u);
+  EXPECT_EQ(result->secondaryQueriesReserved, 24u);
+  EXPECT_EQ(result->unusedQueryCapacity, 8u);
+  EXPECT_TRUE(result->truncated);
+}
+
+TEST(DDGISchedulerTests, AccountsLowRayClassificationSeparatelyFromIrradiance) {
+  const std::array candidates{
+      nuri::DDGIProbeScheduleCandidate{1u, 0u,
+                                       nuri::DDGIProbeState::Uninitialized, 0u},
+      nuri::DDGIProbeScheduleCandidate{1u, 1u, nuri::DDGIProbeState::Vigilant,
+                                       1u},
+  };
+  std::array<nuri::DDGIProbeScheduleCandidate, candidates.size()> workspace{};
+  std::array<nuri::DDGIProbeUpdateEntry, candidates.size()> output{};
+
+  auto result =
+      nuri::scheduleDDGIProbeUpdates(candidates,
+                                     {.raysPerProbe = 64u,
+                                      .classificationRaysPerProbe = 16u,
+                                      .maxProbeUpdates = 2u,
+                                      .maxRayQueries = 160u,
+                                      .secondaryQueriesPer1024Primary = 0u},
+                                     workspace, output);
+
+  ASSERT_TRUE(result.hasValue());
+  ASSERT_EQ(result->updatedProbes, 2u);
+  EXPECT_EQ(output[0].rayBase, 0u);
+  EXPECT_EQ(output[0].rayCount, 16u);
+  EXPECT_EQ(output[1].rayBase, 16u);
+  EXPECT_EQ(output[1].rayCount, 64u);
+  EXPECT_EQ(result->primaryQueries, 80u);
+  EXPECT_EQ(result->classificationProbeUpdates, 1u);
+  EXPECT_EQ(result->classificationPrimaryQueries, 16u);
+  EXPECT_EQ(result->irradiancePrimaryQueries, 64u);
+}
+
 TEST(DDGISchedulerTests, OffAndSleepingProbesRemainUnscheduledWhenForced) {
   const std::array candidates{
       nuri::DDGIProbeScheduleCandidate{1u, 0u, nuri::DDGIProbeState::Off},

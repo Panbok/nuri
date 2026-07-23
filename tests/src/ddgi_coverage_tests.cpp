@@ -253,6 +253,27 @@ TEST(DDGICoverageTests,
   EXPECT_NE(changedProfile.volumes[0].key, positive.volumes[0].key);
 }
 
+TEST(DDGICoverageTests, AuthoredKeysAreIsolatedBySceneActivation) {
+  nuri::RenderDDGIVolume authored{};
+  authored.id = nuri::makeDDGIVolumeId(3u, 1u);
+  std::array volumes{authored};
+  nuri::DDGICoverageResolveInput input{};
+  input.sceneId = 41u;
+  input.authoredVolumes = volumes;
+  input.settings.mode = nuri::DDGICoverageMode::Manual;
+
+  nuri::DDGIEffectiveVolumePlan first;
+  ASSERT_TRUE(nuri::resolveDDGIEffectiveVolumePlan(input, first).hasValue());
+  ASSERT_EQ(first.volumeCount, 1u);
+
+  input.sceneId = 42u;
+  nuri::DDGIEffectiveVolumePlan second;
+  ASSERT_TRUE(nuri::resolveDDGIEffectiveVolumePlan(input, second).hasValue());
+  ASSERT_EQ(second.volumeCount, 1u);
+  EXPECT_NE(first.volumes[0].key, second.volumes[0].key);
+  EXPECT_EQ(first.volumes[0].key.authoredId, second.volumes[0].key.authoredId);
+}
+
 TEST(DDGICoverageTests, EffectivePlanOrdersAndReportsEveryOmittedKey) {
   std::array<nuri::RenderDDGIVolume, 10u> authored{};
   for (uint32_t index = 0u; index < authored.size(); ++index) {
@@ -322,6 +343,46 @@ TEST(DDGICoverageTests, HybridPlanPublishesClipmapsAndContainingSceneFit) {
             nuri::DDGIEffectiveVolumeKind::SceneFit);
   EXPECT_GT(plan.persistentBytes, 0u);
   EXPECT_GE(plan.replacementPeakBytes, plan.persistentBytes);
+}
+
+TEST(DDGICoverageTests, RedundancyRequiresFullCoverageAndNoDensityBenefit) {
+  nuri::DDGIEffectiveVolume sceneFit{
+      .key = {.kind = nuri::DDGIEffectiveVolumeKind::SceneFit},
+      .probeSpacing = glm::vec3(1.0f),
+      .worldFromLocal = glm::mat4(1.0f),
+      .probeCenterHalfExtents = glm::vec3(10.0f),
+      .fadeEndHalfExtents = glm::vec3(10.0f),
+  };
+  nuri::DDGIEffectiveVolume authored{
+      .key = {.kind = nuri::DDGIEffectiveVolumeKind::Authored},
+      .probeSpacing = glm::vec3(2.0f),
+      .worldFromLocal =
+          glm::translate(glm::mat4(1.0f), glm::vec3(2.0f, 0.0f, 0.0f)),
+      .probeCenterHalfExtents = glm::vec3(3.0f),
+      .fadeEndHalfExtents = glm::vec3(3.0f),
+  };
+
+  const nuri::DDGIRedundancyAnalysis redundant =
+      nuri::analyzeDDGIVolumeRedundancy(authored, sceneFit);
+  EXPECT_TRUE(redundant.fullyCovered);
+  EXPECT_TRUE(redundant.densityRedundant);
+  EXPECT_TRUE(redundant.fullyRedundant);
+
+  authored.probeSpacing = glm::vec3(0.5f);
+  const nuri::DDGIRedundancyAnalysis denser =
+      nuri::analyzeDDGIVolumeRedundancy(authored, sceneFit);
+  EXPECT_TRUE(denser.fullyCovered);
+  EXPECT_FALSE(denser.densityRedundant);
+  EXPECT_FALSE(denser.fullyRedundant);
+
+  authored.probeSpacing = glm::vec3(2.0f);
+  authored.worldFromLocal =
+      glm::translate(glm::mat4(1.0f), glm::vec3(20.0f, 0.0f, 0.0f));
+  const nuri::DDGIRedundancyAnalysis outside =
+      nuri::analyzeDDGIVolumeRedundancy(authored, sceneFit);
+  EXPECT_FALSE(outside.fullyCovered);
+  EXPECT_TRUE(outside.densityRedundant);
+  EXPECT_FALSE(outside.fullyRedundant);
 }
 
 } // namespace

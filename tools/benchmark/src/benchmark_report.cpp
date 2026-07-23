@@ -914,6 +914,28 @@ makeSettingsSignature(const RenderSettings &sourceSettings) {
   appendSignatureField(out, "hdr.bloom", settings.hdrPostProcess.bloomEnabled);
   appendSignatureField(out, "hdr.adaptation",
                        settings.hdrPostProcess.adaptationEnabled);
+  appendSignatureField(out, "hdr.meteringMode",
+                       enumValue(settings.hdrPostProcess.meteringMode));
+  appendSignatureField(out, "hdr.targetGray",
+                       settings.hdrPostProcess.adaptationTargetGray);
+  appendSignatureField(out, "hdr.brightenSpeed",
+                       settings.hdrPostProcess.adaptationBrightenSpeed);
+  appendSignatureField(out, "hdr.darkenSpeed",
+                       settings.hdrPostProcess.adaptationDarkenSpeed);
+  appendSignatureField(out, "hdr.maxEvChange",
+                       settings.hdrPostProcess.adaptationMaxEvChange);
+  appendSignatureField(out, "hdr.minEv",
+                       settings.hdrPostProcess.adaptationMinEv);
+  appendSignatureField(out, "hdr.maxEv",
+                       settings.hdrPostProcess.adaptationMaxEv);
+  appendSignatureField(out, "hdr.histogramLow",
+                       settings.hdrPostProcess.histogramLowPercentile);
+  appendSignatureField(out, "hdr.histogramHigh",
+                       settings.hdrPostProcess.histogramHighPercentile);
+  appendSignatureField(out, "hdr.histogramMinLog",
+                       settings.hdrPostProcess.histogramMinLogLuminance);
+  appendSignatureField(out, "hdr.histogramMaxLog",
+                       settings.hdrPostProcess.histogramMaxLogLuminance);
   appendSignatureField(out, "transmission.enabled",
                        settings.transmission.enabled);
   appendSignatureField(out, "transparent.enabled",
@@ -929,6 +951,8 @@ makeSettingsSignature(const RenderSettings &sourceSettings) {
     appendSignatureField(out, "ddgi.enabled", true);
     appendSignatureField(out, "ddgi.preset", enumValue(ddgi.preset));
     appendSignatureField(out, "ddgi.raysPerProbe", ddgi.raysPerProbe);
+    appendSignatureField(out, "ddgi.classificationRaysPerProbe",
+                         ddgi.classificationRaysPerProbe);
     appendSignatureField(out, "ddgi.maxProbeUpdatesPerFrame",
                          ddgi.maxProbeUpdatesPerFrame);
     appendSignatureField(out, "ddgi.maxRayQueriesPerFrame",
@@ -946,11 +970,19 @@ makeSettingsSignature(const RenderSettings &sourceSettings) {
     appendSignatureField(out, "ddgi.changeDistanceHysteresisScale",
                          ddgi.changeDistanceHysteresisScale);
     appendSignatureField(out, "ddgi.selfShadowBias", ddgi.selfShadowBias);
+    appendSignatureField(out, "ddgi.primaryProbeBias", ddgi.primaryProbeBias);
+    appendSignatureField(out, "ddgi.localShadowBias", ddgi.localShadowBias);
+    appendSignatureField(out, "ddgi.directionalShadowBias",
+                         ddgi.directionalShadowBias);
+    appendSignatureField(out, "ddgi.classificationBias",
+                         ddgi.classificationBias);
     appendSignatureField(out, "ddgi.multiBounceLuminanceClamp",
                          ddgi.multiBounceLuminanceClamp);
     appendSignatureField(out, "ddgi.relocation", ddgi.relocation);
     appendSignatureField(out, "ddgi.classification", ddgi.classification);
     appendSignatureField(out, "ddgi.multiBounce", ddgi.multiBounce);
+    appendSignatureField(out, "ddgi.diagnosticCounters",
+                         ddgi.diagnosticCounters);
     appendSignatureField(out, "ddgi.freezeUpdates", ddgi.freezeUpdates);
     appendSignatureField(out, "ddgi.debugView", enumValue(ddgi.debugView));
     appendSignatureField(out, "ddgi.showVolumes", ddgi.showVolumes);
@@ -1235,6 +1267,31 @@ yyjson_mut_val *makeSettingsObject(yyjson_mut_doc *doc,
                           settings.hdrPostProcess.bloomEnabled);
   yyjson_mut_obj_add_bool(doc, hdr, "adaptationEnabled",
                           settings.hdrPostProcess.adaptationEnabled);
+  addString(doc, hdr, "meteringMode",
+            settings.hdrPostProcess.meteringMode ==
+                    HDRExposureMeteringMode::FullFrame
+                ? "FullFrame"
+                : "CenterWeighted");
+  yyjson_mut_obj_add_real(doc, hdr, "adaptationTargetGray",
+                          settings.hdrPostProcess.adaptationTargetGray);
+  yyjson_mut_obj_add_real(doc, hdr, "adaptationBrightenSpeed",
+                          settings.hdrPostProcess.adaptationBrightenSpeed);
+  yyjson_mut_obj_add_real(doc, hdr, "adaptationDarkenSpeed",
+                          settings.hdrPostProcess.adaptationDarkenSpeed);
+  yyjson_mut_obj_add_real(doc, hdr, "adaptationMaxEvChange",
+                          settings.hdrPostProcess.adaptationMaxEvChange);
+  yyjson_mut_obj_add_real(doc, hdr, "adaptationMinEv",
+                          settings.hdrPostProcess.adaptationMinEv);
+  yyjson_mut_obj_add_real(doc, hdr, "adaptationMaxEv",
+                          settings.hdrPostProcess.adaptationMaxEv);
+  yyjson_mut_obj_add_real(doc, hdr, "histogramLowPercentile",
+                          settings.hdrPostProcess.histogramLowPercentile);
+  yyjson_mut_obj_add_real(doc, hdr, "histogramHighPercentile",
+                          settings.hdrPostProcess.histogramHighPercentile);
+  yyjson_mut_obj_add_real(doc, hdr, "histogramMinLogLuminance",
+                          settings.hdrPostProcess.histogramMinLogLuminance);
+  yyjson_mut_obj_add_real(doc, hdr, "histogramMaxLogLuminance",
+                          settings.hdrPostProcess.histogramMaxLogLuminance);
   yyjson_mut_obj_add_val(doc, object, "hdrPostProcess", hdr);
 
   yyjson_mut_val *transmission = yyjson_mut_obj(doc);
@@ -1259,6 +1316,8 @@ yyjson_mut_val *makeSettingsObject(yyjson_mut_doc *doc,
   yyjson_mut_obj_add_bool(doc, ddgi, "enabled", ddgiSettings.enabled);
   addString(doc, ddgi, "preset", ddgiQualityPresetName(ddgiSettings.preset));
   yyjson_mut_obj_add_uint(doc, ddgi, "raysPerProbe", ddgiSettings.raysPerProbe);
+  yyjson_mut_obj_add_uint(doc, ddgi, "classificationRaysPerProbe",
+                          ddgiSettings.classificationRaysPerProbe);
   yyjson_mut_obj_add_uint(doc, ddgi, "maxProbeUpdatesPerFrame",
                           ddgiSettings.maxProbeUpdatesPerFrame);
   yyjson_mut_obj_add_uint(doc, ddgi, "maxRayQueriesPerFrame",
@@ -1277,12 +1336,22 @@ yyjson_mut_val *makeSettingsObject(yyjson_mut_doc *doc,
                           ddgiSettings.changeDistanceHysteresisScale);
   yyjson_mut_obj_add_real(doc, ddgi, "selfShadowBias",
                           ddgiSettings.selfShadowBias);
+  yyjson_mut_obj_add_real(doc, ddgi, "primaryProbeBias",
+                          ddgiSettings.primaryProbeBias);
+  yyjson_mut_obj_add_real(doc, ddgi, "localShadowBias",
+                          ddgiSettings.localShadowBias);
+  yyjson_mut_obj_add_real(doc, ddgi, "directionalShadowBias",
+                          ddgiSettings.directionalShadowBias);
+  yyjson_mut_obj_add_real(doc, ddgi, "classificationBias",
+                          ddgiSettings.classificationBias);
   yyjson_mut_obj_add_real(doc, ddgi, "multiBounceLuminanceClamp",
                           ddgiSettings.multiBounceLuminanceClamp);
   yyjson_mut_obj_add_bool(doc, ddgi, "relocation", ddgiSettings.relocation);
   yyjson_mut_obj_add_bool(doc, ddgi, "classification",
                           ddgiSettings.classification);
   yyjson_mut_obj_add_bool(doc, ddgi, "multiBounce", ddgiSettings.multiBounce);
+  yyjson_mut_obj_add_bool(doc, ddgi, "diagnosticCounters",
+                          ddgiSettings.diagnosticCounters);
   yyjson_mut_obj_add_bool(doc, ddgi, "freezeUpdates",
                           ddgiSettings.freezeUpdates);
   addString(doc, ddgi, "debugView", ddgiDebugViewName(ddgiSettings.debugView));
@@ -2028,6 +2097,38 @@ readEnumValue(yyjson_val *object, const char *key, Enum defaultValue,
         readBool(hdr, "bloomEnabled", settings.hdrPostProcess.bloomEnabled);
     settings.hdrPostProcess.adaptationEnabled = readBool(
         hdr, "adaptationEnabled", settings.hdrPostProcess.adaptationEnabled);
+    settings.hdrPostProcess.meteringMode = readEnumValue(
+        hdr, "meteringMode", settings.hdrPostProcess.meteringMode,
+        {{"FullFrame", HDRExposureMeteringMode::FullFrame},
+         {"CenterWeighted", HDRExposureMeteringMode::CenterWeighted}});
+    settings.hdrPostProcess.adaptationTargetGray = static_cast<float>(
+        readReal(hdr, "adaptationTargetGray",
+                 settings.hdrPostProcess.adaptationTargetGray));
+    settings.hdrPostProcess.adaptationBrightenSpeed = static_cast<float>(
+        readReal(hdr, "adaptationBrightenSpeed",
+                 settings.hdrPostProcess.adaptationBrightenSpeed));
+    settings.hdrPostProcess.adaptationDarkenSpeed = static_cast<float>(
+        readReal(hdr, "adaptationDarkenSpeed",
+                 settings.hdrPostProcess.adaptationDarkenSpeed));
+    settings.hdrPostProcess.adaptationMaxEvChange = static_cast<float>(
+        readReal(hdr, "adaptationMaxEvChange",
+                 settings.hdrPostProcess.adaptationMaxEvChange));
+    settings.hdrPostProcess.adaptationMinEv = static_cast<float>(readReal(
+        hdr, "adaptationMinEv", settings.hdrPostProcess.adaptationMinEv));
+    settings.hdrPostProcess.adaptationMaxEv = static_cast<float>(readReal(
+        hdr, "adaptationMaxEv", settings.hdrPostProcess.adaptationMaxEv));
+    settings.hdrPostProcess.histogramLowPercentile = static_cast<float>(
+        readReal(hdr, "histogramLowPercentile",
+                 settings.hdrPostProcess.histogramLowPercentile));
+    settings.hdrPostProcess.histogramHighPercentile = static_cast<float>(
+        readReal(hdr, "histogramHighPercentile",
+                 settings.hdrPostProcess.histogramHighPercentile));
+    settings.hdrPostProcess.histogramMinLogLuminance = static_cast<float>(
+        readReal(hdr, "histogramMinLogLuminance",
+                 settings.hdrPostProcess.histogramMinLogLuminance));
+    settings.hdrPostProcess.histogramMaxLogLuminance = static_cast<float>(
+        readReal(hdr, "histogramMaxLogLuminance",
+                 settings.hdrPostProcess.histogramMaxLogLuminance));
   }
   yyjson_val *transmission = yyjson_obj_get(object, "transmission");
   if (yyjson_is_obj(transmission)) {
@@ -2061,6 +2162,9 @@ readEnumValue(yyjson_val *object, const char *key, Enum defaultValue,
                        {"Custom", DDGIQualityPreset::Custom}});
     ddgiSettings.raysPerProbe =
         readU32(ddgi, "raysPerProbe", ddgiSettings.raysPerProbe);
+    ddgiSettings.classificationRaysPerProbe =
+        readU32(ddgi, "classificationRaysPerProbe",
+                ddgiSettings.classificationRaysPerProbe);
     ddgiSettings.maxProbeUpdatesPerFrame = readU32(
         ddgi, "maxProbeUpdatesPerFrame", ddgiSettings.maxProbeUpdatesPerFrame);
     ddgiSettings.maxRayQueriesPerFrame = readU32(
@@ -2082,6 +2186,14 @@ readEnumValue(yyjson_val *object, const char *key, Enum defaultValue,
                  ddgiSettings.changeDistanceHysteresisScale));
     ddgiSettings.selfShadowBias = static_cast<float>(
         readReal(ddgi, "selfShadowBias", ddgiSettings.selfShadowBias));
+    ddgiSettings.primaryProbeBias = static_cast<float>(
+        readReal(ddgi, "primaryProbeBias", ddgiSettings.primaryProbeBias));
+    ddgiSettings.localShadowBias = static_cast<float>(
+        readReal(ddgi, "localShadowBias", ddgiSettings.localShadowBias));
+    ddgiSettings.directionalShadowBias = static_cast<float>(readReal(
+        ddgi, "directionalShadowBias", ddgiSettings.directionalShadowBias));
+    ddgiSettings.classificationBias = static_cast<float>(
+        readReal(ddgi, "classificationBias", ddgiSettings.classificationBias));
     ddgiSettings.multiBounceLuminanceClamp =
         static_cast<float>(readReal(ddgi, "multiBounceLuminanceClamp",
                                     ddgiSettings.multiBounceLuminanceClamp));
@@ -2091,6 +2203,8 @@ readEnumValue(yyjson_val *object, const char *key, Enum defaultValue,
         readBool(ddgi, "classification", ddgiSettings.classification);
     ddgiSettings.multiBounce =
         readBool(ddgi, "multiBounce", ddgiSettings.multiBounce);
+    ddgiSettings.diagnosticCounters =
+        readBool(ddgi, "diagnosticCounters", ddgiSettings.diagnosticCounters);
     ddgiSettings.freezeUpdates =
         readBool(ddgi, "freezeUpdates", ddgiSettings.freezeUpdates);
     ddgiSettings.debugView =

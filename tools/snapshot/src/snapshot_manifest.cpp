@@ -606,6 +606,7 @@ parseSettings(yyjson_val *object, RenderSettings &settings) {
         std::string_view("enabled"),
         std::string_view("preset"),
         std::string_view("raysPerProbe"),
+        std::string_view("classificationRaysPerProbe"),
         std::string_view("maxProbeUpdatesPerFrame"),
         std::string_view("maxRayQueriesPerFrame"),
         std::string_view("maxLocalLightsPerHit"),
@@ -615,10 +616,15 @@ parseSettings(yyjson_val *object, RenderSettings &settings) {
         std::string_view("changeIrradianceHysteresisScale"),
         std::string_view("changeDistanceHysteresisScale"),
         std::string_view("selfShadowBias"),
+        std::string_view("primaryProbeBias"),
+        std::string_view("localShadowBias"),
+        std::string_view("directionalShadowBias"),
+        std::string_view("classificationBias"),
         std::string_view("multiBounceLuminanceClamp"),
         std::string_view("relocation"),
         std::string_view("classification"),
         std::string_view("multiBounce"),
+        std::string_view("diagnosticCounters"),
         std::string_view("freezeUpdates"),
         std::string_view("showVolumes"),
         std::string_view("showProbes"),
@@ -644,9 +650,17 @@ parseSettings(yyjson_val *object, RenderSettings &settings) {
     if (result.hasError()) {
       return result;
     }
+    const bool hasPresetOwnedOverride =
+        yyjson_obj_get(ddgi, "raysPerProbe") != nullptr ||
+        yyjson_obj_get(ddgi, "classificationRaysPerProbe") != nullptr ||
+        yyjson_obj_get(ddgi, "maxProbeUpdatesPerFrame") != nullptr ||
+        yyjson_obj_get(ddgi, "maxRayQueriesPerFrame") != nullptr ||
+        yyjson_obj_get(ddgi, "coverage") != nullptr;
     for (const auto [key, output] :
          {std::pair<std::string_view, uint32_t *>{"raysPerProbe",
                                                   &settings.ddgi.raysPerProbe},
+          {"classificationRaysPerProbe",
+           &settings.ddgi.classificationRaysPerProbe},
           {"maxProbeUpdatesPerFrame", &settings.ddgi.maxProbeUpdatesPerFrame},
           {"maxRayQueriesPerFrame", &settings.ddgi.maxRayQueriesPerFrame},
           {"maxLocalLightsPerHit", &settings.ddgi.maxLocalLightsPerHit},
@@ -667,6 +681,10 @@ parseSettings(yyjson_val *object, RenderSettings &settings) {
           {"changeDistanceHysteresisScale",
            &settings.ddgi.changeDistanceHysteresisScale},
           {"selfShadowBias", &settings.ddgi.selfShadowBias},
+          {"primaryProbeBias", &settings.ddgi.primaryProbeBias},
+          {"localShadowBias", &settings.ddgi.localShadowBias},
+          {"directionalShadowBias", &settings.ddgi.directionalShadowBias},
+          {"classificationBias", &settings.ddgi.classificationBias},
           {"multiBounceLuminanceClamp",
            &settings.ddgi.multiBounceLuminanceClamp}}) {
       auto value = readDouble(ddgi, key, "settings.ddgi", *output);
@@ -680,6 +698,7 @@ parseSettings(yyjson_val *object, RenderSettings &settings) {
                                               &settings.ddgi.relocation},
           {"classification", &settings.ddgi.classification},
           {"multiBounce", &settings.ddgi.multiBounce},
+          {"diagnosticCounters", &settings.ddgi.diagnosticCounters},
           {"freezeUpdates", &settings.ddgi.freezeUpdates},
           {"showVolumes", &settings.ddgi.showVolumes},
           {"showProbes", &settings.ddgi.showProbes},
@@ -714,6 +733,10 @@ parseSettings(yyjson_val *object, RenderSettings &settings) {
       if (result.hasError()) {
         return result;
       }
+    }
+    if (hasPresetOwnedOverride &&
+        settings.ddgi.preset != DDGIQualityPreset::Custom) {
+      settings.ddgi.preset = DDGIQualityPreset::Custom;
     }
   }
 
@@ -1079,8 +1102,20 @@ parseSettings(yyjson_val *object, RenderSettings &settings) {
   }
 
   if (yyjson_val *hdr = optionalObject(object, "hdrPostProcess")) {
-    static constexpr std::array hdrKeys{std::string_view("bloomEnabled"),
-                                        std::string_view("adaptationEnabled")};
+    static constexpr std::array hdrKeys{
+        std::string_view("bloomEnabled"),
+        std::string_view("adaptationEnabled"),
+        std::string_view("meteringMode"),
+        std::string_view("adaptationTargetGray"),
+        std::string_view("adaptationBrightenSpeed"),
+        std::string_view("adaptationDarkenSpeed"),
+        std::string_view("adaptationMaxEvChange"),
+        std::string_view("adaptationMinEv"),
+        std::string_view("adaptationMaxEv"),
+        std::string_view("histogramLowPercentile"),
+        std::string_view("histogramHighPercentile"),
+        std::string_view("histogramMinLogLuminance"),
+        std::string_view("histogramMaxLogLuminance")};
     result = rejectUnknownKeys(hdr, hdrKeys, "settings.hdrPostProcess");
     if (result.hasError()) {
       return result;
@@ -1097,6 +1132,40 @@ parseSettings(yyjson_val *object, RenderSettings &settings) {
       return Result<bool, std::string>::makeError(boolean.error());
     }
     settings.hdrPostProcess.adaptationEnabled = boolean.value();
+    result = readEnumField(
+        hdr, "meteringMode", "settings.hdrPostProcess",
+        settings.hdrPostProcess.meteringMode,
+        {{"FullFrame", HDRExposureMeteringMode::FullFrame},
+         {"CenterWeighted", HDRExposureMeteringMode::CenterWeighted}});
+    if (result.hasError()) {
+      return result;
+    }
+    for (const auto [key, output] :
+         {std::pair<std::string_view, float *>{
+              "adaptationTargetGray",
+              &settings.hdrPostProcess.adaptationTargetGray},
+          {"adaptationBrightenSpeed",
+           &settings.hdrPostProcess.adaptationBrightenSpeed},
+          {"adaptationDarkenSpeed",
+           &settings.hdrPostProcess.adaptationDarkenSpeed},
+          {"adaptationMaxEvChange",
+           &settings.hdrPostProcess.adaptationMaxEvChange},
+          {"adaptationMinEv", &settings.hdrPostProcess.adaptationMinEv},
+          {"adaptationMaxEv", &settings.hdrPostProcess.adaptationMaxEv},
+          {"histogramLowPercentile",
+           &settings.hdrPostProcess.histogramLowPercentile},
+          {"histogramHighPercentile",
+           &settings.hdrPostProcess.histogramHighPercentile},
+          {"histogramMinLogLuminance",
+           &settings.hdrPostProcess.histogramMinLogLuminance},
+          {"histogramMaxLogLuminance",
+           &settings.hdrPostProcess.histogramMaxLogLuminance}}) {
+      auto value = readDouble(hdr, key, "settings.hdrPostProcess", *output);
+      if (value.hasError()) {
+        return Result<bool, std::string>::makeError(value.error());
+      }
+      *output = static_cast<float>(value.value());
+    }
   }
 
   if (yyjson_val *transmission = optionalObject(object, "transmission")) {

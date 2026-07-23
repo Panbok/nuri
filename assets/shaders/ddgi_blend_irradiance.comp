@@ -80,14 +80,18 @@ void main() {
           ddgiRayDirection(ray, update.rayCount, pc.frameSeed);
       const float w = max(dot(texelDirection, direction), 0.0);
       sum +=
-          pc.results.values[update.rayBase + ray].radianceAndDistance.rgb * w;
+          ddgiFiniteNonNegative(
+              pc.results.values[update.rayBase + ray].radianceAndDistance.rgb) *
+          w;
       weight += w;
     }
-    const vec3 encoded = pow(max(sum / max(weight, 1.0e-6), vec3(0.0)),
-                             vec3(1.0 / kDDGIIrradianceGamma));
+    const vec3 encoded =
+        ddgiFiniteNonNegative(pow(max(sum / max(weight, 1.0e-6), vec3(0.0)),
+                                  vec3(1.0 / kDDGIIrradianceGamma)));
     const ivec2 pixel = ivec2(tile * 10u + tilePixel);
-    const vec3 oldValue =
-        imageLoad(kImagesRGBA16F[nonuniformEXT(pc.outputTextureId)], pixel).rgb;
+    const vec3 oldValue = ddgiFiniteNonNegative(
+        imageLoad(kImagesRGBA16F[nonuniformEXT(pc.outputTextureId)], pixel)
+            .rgb);
     const bool probeHistoryValid =
         volume.probeStates.values[update.probeId].stateAgeFlags.y != 0u &&
         probeState != kDDGIProbeStateNewlyAwake &&
@@ -105,7 +109,7 @@ void main() {
       h = max(h - kDDGIIrradianceHysteresisReduction, 0.0);
     }
     imageStore(kImagesRGBA16F[nonuniformEXT(pc.outputTextureId)], pixel,
-               vec4(mix(encoded, oldValue, h), 1.0));
+               vec4(ddgiFiniteNonNegative(mix(encoded, oldValue, h)), 1.0));
   }
   memoryBarrierImage();
   barrier();
@@ -118,8 +122,12 @@ void main() {
     const ivec2 outputPixel = ivec2(tile * 10u + tilePixel);
     const ivec2 copyPixel =
         ivec2(tile * 10u + ddgiBorderCopyCoordinate(tilePixel, 8u));
-    imageStore(kImagesRGBA16F[nonuniformEXT(pc.outputTextureId)], outputPixel,
-               imageLoad(kImagesRGBA16F[nonuniformEXT(pc.outputTextureId)],
-                         copyPixel));
+    imageStore(
+        kImagesRGBA16F[nonuniformEXT(pc.outputTextureId)], outputPixel,
+        vec4(ddgiFiniteNonNegative(
+                 imageLoad(kImagesRGBA16F[nonuniformEXT(pc.outputTextureId)],
+                           copyPixel)
+                     .rgb),
+             1.0));
   }
 }

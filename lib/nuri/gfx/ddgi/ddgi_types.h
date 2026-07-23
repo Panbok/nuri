@@ -13,9 +13,9 @@
 namespace nuri {
 
 inline constexpr uint32_t kDDGILayoutVersion = 1u;
-inline constexpr uint32_t kDDGIFrameGpuDataVersion = 2u;
-inline constexpr uint32_t kDDGICaptureSemanticsVersion = 2u;
-inline constexpr uint32_t kDDGIFrameMetricsVersion = 4u;
+inline constexpr uint32_t kDDGIFrameGpuDataVersion = 3u;
+inline constexpr uint32_t kDDGICaptureSemanticsVersion = 3u;
+inline constexpr uint32_t kDDGIFrameMetricsVersion = 7u;
 inline constexpr uint32_t kMaxDDGIEffectiveVolumes = 8u;
 inline constexpr uint32_t kMaxDDGIClipmapCascades = 4u;
 inline constexpr uint32_t kMaxDDGIVolumesSampledPerSurface = 2u;
@@ -91,15 +91,43 @@ enum class DDGIRayResultKind : uint8_t {
   CandidateOverflow,
 };
 
+enum class DDGISurfaceGatherArchitecture : uint8_t {
+  ForwardFragment = 0,
+};
+
 enum class DDGIFallbackReason : uint8_t {
   None = 0,
   Disabled,
   Unsupported,
   NoVolumes,
+  CoverageBoundsUnavailable,
+  CoverageUnsatisfied,
   RayTracingSceneWarming,
   VolumeResourcesWarming,
   ShaderUnavailable,
   AllocationFailed,
+  ReadbackRingSaturated,
+  OptionalFeatureFailure,
+};
+
+enum class DDGIStartupPhase : uint8_t {
+  ResourcesPending = 0,
+  ResourcesReadyNoHistory,
+  FirstIrradianceReady,
+  CoarseCoverageReady,
+  FullCoverageWarmingDetail,
+  FullCoverageReady,
+  Degraded,
+  Failed,
+};
+
+enum class DDGIReadbackSlotState : uint8_t {
+  Free = 0,
+  Recording,
+  Pending,
+  Completed,
+  Consumed,
+  Dropped,
 };
 
 enum class DDGIVolumeFailureReason : uint8_t {
@@ -160,14 +188,17 @@ struct DDGIVolumeFrameMetrics {
   int64_t deficit = 0;
   uint32_t starvationFrames = 0u;
   uint32_t estimatedFullRefreshFrames = 0u;
+  uint64_t persistentBytes = 0u;
   glm::vec3 interiorHalfExtents{0.0f};
   glm::vec3 fadeStartHalfExtents{0.0f};
   glm::vec3 fadeEndHalfExtents{0.0f};
   glm::ivec3 cameraCell{0};
   float historyReadyPercentage = 0.0f;
   float coverageReadyPercentage = 0.0f;
+  float uniqueCoveragePercentage = 100.0f;
   float confidence = 0.0f;
   uint32_t active = 0u;
+  uint32_t redundantCoverage = 0u;
 };
 
 struct DDGICaptureMetadata {
@@ -206,11 +237,16 @@ struct DDGIFrameMetrics {
   uint32_t probeStateReadbackStaleFrames = 0u;
   uint32_t updatedProbes = 0u;
   uint32_t primaryQueries = 0u;
+  uint32_t classificationProbeUpdates = 0u;
+  uint32_t classificationPrimaryQueries = 0u;
+  uint32_t irradiancePrimaryQueries = 0u;
   uint32_t primaryQueriesIssued = 0u;
   uint32_t traceCounterSourceFrame = 0u;
+  uint32_t traceCounterStaleFrames = 0u;
   uint32_t secondaryQueriesReserved = 0u;
   uint32_t secondaryQueriesUnused = 0u;
   uint32_t secondaryQueries = 0u;
+  uint32_t secondaryQueryBudgetOverflows = 0u;
   uint32_t directionalSecondaryQueries = 0u;
   uint32_t localSecondaryQueries = 0u;
   uint32_t primaryCandidateIntersections = 0u;
@@ -219,8 +255,32 @@ struct DDGIFrameMetrics {
   uint32_t backfaceCandidateRejections = 0u;
   uint32_t candidateOverflows = 0u;
   uint32_t localLightTruncations = 0u;
+  uint32_t nonFiniteRadianceRejects = 0u;
+  uint32_t emissiveRadianceClamps = 0u;
+  uint32_t directRadianceClamps = 0u;
+  uint32_t skyRadianceClamps = 0u;
+  uint32_t multiBounceRadianceClamps = 0u;
+  uint32_t finalRadianceClamps = 0u;
+  uint32_t diagnosticCountersEnabled = 0u;
+  DDGISurfaceGatherArchitecture surfaceGatherArchitecture =
+      DDGISurfaceGatherArchitecture::ForwardFragment;
+  uint32_t surfaceGatherWidth = 0u;
+  uint32_t surfaceGatherHeight = 0u;
+  uint32_t surfaceGatherMaxCandidateVolumes = 0u;
+  uint32_t surfaceGatherMaxSampledVolumes = 0u;
+  uint32_t surfaceGatherMaxStateLoadsPerPixel = 0u;
+  uint32_t surfaceGatherMaxAtlasSamplesPerPixel = 0u;
   uint32_t rayQueryCapacity = 0u;
   uint32_t probeUpdateCapacity = 0u;
+  uint32_t requestedProbeUpdateCapacity = 0u;
+  uint32_t effectiveProbeUpdateCapacity = 0u;
+  uint32_t readbackWaits = 0u;
+  uint32_t readbackPendingSlots = 0u;
+  uint32_t readbackDroppedSamples = 0u;
+  uint32_t readbackOldestPendingAge = 0u;
+  uint32_t readbackBlockingFallbacks = 0u;
+  uint32_t readbackGenerationMismatches = 0u;
+  uint32_t readbackEarlyReuseAttempts = 0u;
   uint32_t resetCount = 0u;
   uint32_t scrollCount = 0u;
   uint32_t invalidatedProbes = 0u;
@@ -228,6 +288,8 @@ struct DDGIFrameMetrics {
   uint32_t effectiveVolumes = 0u;
   uint32_t authoredVolumes = 0u;
   uint32_t generatedVolumes = 0u;
+  uint32_t redundantAuthoredVolumes = 0u;
+  uint32_t redundantAuthoredProbes = 0u;
   uint32_t coverageMode = 0u;
   DDGICoverageStatus coverageStatus = DDGICoverageStatus::SkyFallbackOnly;
   DDGICoverageLimit coverageError = DDGICoverageLimit::None;
@@ -255,7 +317,11 @@ struct DDGIFrameMetrics {
   uint64_t dirtyRegionsMerged = 0u;
   uint64_t dirtyRegionsOverflowed = 0u;
   uint64_t persistentBytes = 0u;
+  uint64_t redundantAuthoredBytes = 0u;
   uint64_t frameBatchBytes = 0u;
+  uint64_t readbackCopyBytes = 0u;
+  uint64_t readbackPerSlotBytes = 0u;
+  uint64_t readbackRingBytes = 0u;
   uint64_t committedAtlasBytes = 0u;
   uint64_t pendingAtlasBytes = 0u;
   uint64_t peakAtlasBytes = 0u;
@@ -279,6 +345,8 @@ struct DDGIFrameMetrics {
   glm::vec3 achievedCoverageHalfExtents{0.0f};
   float sceneCoverageRatio = 0.0f;
   float coverageResolveCpuTimeMs = 0.0f;
+  float skyRemainderOverThresholdPercentage = 1.0f;
+  DDGIStartupPhase startupPhase = DDGIStartupPhase::ResourcesPending;
   DDGIFallbackReason fallbackReason = DDGIFallbackReason::Disabled;
   DDGIVolumeFailureReason volumeFailureReason = DDGIVolumeFailureReason::None;
   DDGIDebugView debugView = DDGIDebugView::None;
@@ -304,6 +372,10 @@ struct alignas(16) DDGIVolumeGpuData {
   uint32_t resourceFlags = 0u;
   uint32_t reserved0 = 0u;
   glm::vec4 probeSpacingAndBias{1.0f, 1.0f, 1.0f, 0.3f};
+  // x: primary probe ray, y: local shadow, z: directional shadow,
+  // w: classification/relocation. Shadow and classification values are
+  // spacing-scaled; primary probe ray bias is an absolute world-space distance.
+  glm::vec4 rayBiases{0.0001f, 0.30f, 0.30f, 0.30f};
   glm::vec4 centerHalfExtentsAndMaxDistance{0.5f, 0.5f, 0.5f, 20.0f};
   glm::uvec4 probeCountsAndCount{2u, 2u, 2u, 8u};
   glm::uvec4 irradianceAtlas{kInvalidTextureBindlessIndex, 0u, 0u, 0u};
@@ -340,6 +412,15 @@ struct alignas(16) DDGITraceCountersGpuData {
   uint32_t secondaryQueriesReserved = 0u;
   uint32_t sourceFrame = 0u;
   uint32_t localSecondaryQueries = 0u;
+  uint32_t secondaryQueryBudgetOverflows = 0u;
+  uint32_t nonFiniteRadianceRejects = 0u;
+  uint32_t emissiveRadianceClamps = 0u;
+  uint32_t directRadianceClamps = 0u;
+  uint32_t skyRadianceClamps = 0u;
+  uint32_t multiBounceRadianceClamps = 0u;
+  uint32_t finalRadianceClamps = 0u;
+  uint32_t reserved1 = 0u;
+  uint32_t reserved2 = 0u;
   std::array<uint32_t, kMaxDDGIVolumes> primaryQueriesIssuedByVolume{};
   std::array<uint32_t, kMaxDDGIVolumes> secondaryQueriesByVolume{};
 };
@@ -374,10 +455,10 @@ inline constexpr size_t kDDGIDiagnosticBufferBytes =
         sizeof(DDGIDiagnosticEventGpuData);
 
 static_assert(sizeof(DDGIProbeStateGpuData) == 32u);
-static_assert(sizeof(DDGIVolumeGpuData) == 336u);
-static_assert(sizeof(DDGIFrameGpuData) == 2704u);
+static_assert(sizeof(DDGIVolumeGpuData) == 352u);
+static_assert(sizeof(DDGIFrameGpuData) == 2832u);
 static_assert(sizeof(DDGIRayResultGpuData) == 32u);
-static_assert(sizeof(DDGITraceCountersGpuData) == 112u);
+static_assert(sizeof(DDGITraceCountersGpuData) == 144u);
 static_assert(sizeof(DDGIDiagnosticHeaderGpuData) == 160u);
 static_assert(sizeof(DDGIDiagnosticRayGpuData) == 32u);
 static_assert(sizeof(DDGIDiagnosticEventGpuData) == 32u);

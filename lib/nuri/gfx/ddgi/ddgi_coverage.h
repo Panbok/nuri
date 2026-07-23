@@ -165,6 +165,12 @@ struct DDGIEffectiveVolume {
   bool requestedCoverageAchieved = false;
 };
 
+struct DDGIRedundancyAnalysis {
+  bool fullyCovered = false;
+  bool densityRedundant = false;
+  bool fullyRedundant = false;
+};
+
 struct DDGIEffectiveVolumePlan {
   explicit DDGIEffectiveVolumePlan(
       std::pmr::memory_resource *memory = std::pmr::get_default_resource())
@@ -230,6 +236,9 @@ ddgiEffectiveVolumeKeyLess(const DDGIEffectiveVolumeKey &left,
 
 [[nodiscard]] NURI_API uint64_t
 ddgiEffectiveVolumeKeyHash(const DDGIEffectiveVolumeKey &key) noexcept;
+[[nodiscard]] NURI_API DDGIRedundancyAnalysis
+analyzeDDGIVolumeRedundancy(const DDGIEffectiveVolume &authored,
+                            const DDGIEffectiveVolume &generated) noexcept;
 
 [[nodiscard]] NURI_API bool
 ddgiBoundsContain(const BoundingBox &outer, const BoundingBox &inner) noexcept;

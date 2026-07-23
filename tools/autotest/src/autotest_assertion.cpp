@@ -440,14 +440,41 @@ void flattenAutotestRendererMetrics(std::map<std::string, double> &out,
   addMetric(out, "renderer.ddgi.max_relocation", ddgi.maxRelocation);
   addMetric(out, "renderer.ddgi.updated_probes", ddgi.updatedProbes);
   addMetric(out, "renderer.ddgi.primary_queries", ddgi.primaryQueries);
+  addMetric(out, "renderer.ddgi.classification_probe_updates",
+            ddgi.classificationProbeUpdates);
+  addMetric(out, "renderer.ddgi.classification_primary_queries",
+            ddgi.classificationPrimaryQueries);
+  addMetric(out, "renderer.ddgi.irradiance_primary_queries",
+            ddgi.irradiancePrimaryQueries);
   addMetric(out, "renderer.ddgi.primary_queries_issued",
             ddgi.primaryQueriesIssued);
   addMetric(out, "renderer.ddgi.trace_counter_source_frame",
             ddgi.traceCounterSourceFrame);
+  addMetric(out, "renderer.ddgi.trace_counter_stale_frames",
+            ddgi.traceCounterStaleFrames);
+  addMetric(out, "renderer.ddgi.readback_waits", ddgi.readbackWaits);
+  addMetric(out, "renderer.ddgi.readback_pending_slots",
+            ddgi.readbackPendingSlots);
+  addMetric(out, "renderer.ddgi.readback_dropped_samples",
+            ddgi.readbackDroppedSamples);
+  addMetric(out, "renderer.ddgi.readback_oldest_pending_age",
+            ddgi.readbackOldestPendingAge);
+  addMetric(out, "renderer.ddgi.readback_blocking_fallbacks",
+            ddgi.readbackBlockingFallbacks);
+  addMetric(out, "renderer.ddgi.readback_generation_mismatches",
+            ddgi.readbackGenerationMismatches);
+  addMetric(out, "renderer.ddgi.readback_early_reuse_attempts",
+            ddgi.readbackEarlyReuseAttempts);
+  addMetric(out, "renderer.ddgi.readback_copy_bytes", ddgi.readbackCopyBytes);
+  addMetric(out, "renderer.ddgi.readback_per_slot_bytes",
+            ddgi.readbackPerSlotBytes);
+  addMetric(out, "renderer.ddgi.readback_ring_bytes", ddgi.readbackRingBytes);
   addMetric(out, "renderer.ddgi.secondary_queries_reserved",
             ddgi.secondaryQueriesReserved);
   addMetric(out, "renderer.ddgi.secondary_queries_unused",
             ddgi.secondaryQueriesUnused);
+  addMetric(out, "renderer.ddgi.secondary_query_budget_overflows",
+            ddgi.secondaryQueryBudgetOverflows);
   addMetric(out, "renderer.ddgi.secondary_queries", ddgi.secondaryQueries);
   addMetric(out, "renderer.ddgi.directional_secondary_queries",
             ddgi.directionalSecondaryQueries);
@@ -467,9 +494,43 @@ void flattenAutotestRendererMetrics(std::map<std::string, double> &out,
   addMetric(out, "renderer.ddgi.candidate_overflows", ddgi.candidateOverflows);
   addMetric(out, "renderer.ddgi.local_light_truncations",
             ddgi.localLightTruncations);
+  addMetric(out, "renderer.ddgi.non_finite_radiance_rejects",
+            ddgi.nonFiniteRadianceRejects);
+  addMetric(out, "renderer.ddgi.emissive_radiance_clamps",
+            ddgi.emissiveRadianceClamps);
+  addMetric(out, "renderer.ddgi.direct_radiance_clamps",
+            ddgi.directRadianceClamps);
+  addMetric(out, "renderer.ddgi.sky_radiance_clamps", ddgi.skyRadianceClamps);
+  addMetric(out, "renderer.ddgi.multi_bounce_radiance_clamps",
+            ddgi.multiBounceRadianceClamps);
+  addMetric(out, "renderer.ddgi.final_radiance_clamps",
+            ddgi.finalRadianceClamps);
+  addMetric(out, "renderer.ddgi.diagnostic_counters_enabled",
+            ddgi.diagnosticCountersEnabled);
+  addMetric(out, "renderer.ddgi.surface_gather_architecture",
+            static_cast<uint32_t>(ddgi.surfaceGatherArchitecture));
+  addMetric(out, "renderer.ddgi.surface_gather_width", ddgi.surfaceGatherWidth);
+  addMetric(out, "renderer.ddgi.surface_gather_height",
+            ddgi.surfaceGatherHeight);
+  addMetric(out, "renderer.ddgi.surface_gather_max_candidate_volumes",
+            ddgi.surfaceGatherMaxCandidateVolumes);
+  addMetric(out, "renderer.ddgi.surface_gather_max_sampled_volumes",
+            ddgi.surfaceGatherMaxSampledVolumes);
+  addMetric(out, "renderer.ddgi.surface_gather_max_state_loads_per_pixel",
+            ddgi.surfaceGatherMaxStateLoadsPerPixel);
+  addMetric(out, "renderer.ddgi.surface_gather_max_atlas_samples_per_pixel",
+            ddgi.surfaceGatherMaxAtlasSamplesPerPixel);
   addMetric(out, "renderer.ddgi.ray_query_capacity", ddgi.rayQueryCapacity);
   addMetric(out, "renderer.ddgi.probe_update_capacity",
             ddgi.probeUpdateCapacity);
+  addMetric(out, "renderer.ddgi.requested_probe_update_capacity",
+            ddgi.requestedProbeUpdateCapacity);
+  addMetric(out, "renderer.ddgi.effective_probe_update_capacity",
+            ddgi.effectiveProbeUpdateCapacity);
+  addMetric(out, "renderer.ddgi.startup_phase",
+            static_cast<uint32_t>(ddgi.startupPhase));
+  addMetric(out, "renderer.ddgi.sky_remainder_over_threshold_percentage",
+            ddgi.skyRemainderOverThresholdPercentage);
   addMetric(out, "renderer.ddgi.reset_count", ddgi.resetCount);
   addMetric(out, "renderer.ddgi.scroll_count", ddgi.scrollCount);
   addMetric(out, "renderer.ddgi.invalidated_probes", ddgi.invalidatedProbes);
@@ -477,6 +538,12 @@ void flattenAutotestRendererMetrics(std::map<std::string, double> &out,
   addMetric(out, "renderer.ddgi.effective_volumes", ddgi.effectiveVolumes);
   addMetric(out, "renderer.ddgi.authored_volumes", ddgi.authoredVolumes);
   addMetric(out, "renderer.ddgi.generated_volumes", ddgi.generatedVolumes);
+  addMetric(out, "renderer.ddgi.redundant_authored_volumes",
+            ddgi.redundantAuthoredVolumes);
+  addMetric(out, "renderer.ddgi.redundant_authored_probes",
+            ddgi.redundantAuthoredProbes);
+  addBytesAsMiB(out, "gpu.memory.ddgi.redundant_authored_mb",
+                ddgi.redundantAuthoredBytes);
   addMetric(out, "renderer.ddgi.coverage_mode", ddgi.coverageMode);
   addMetric(out, "renderer.ddgi.coverage_status",
             static_cast<uint32_t>(ddgi.coverageStatus));
@@ -595,6 +662,12 @@ void flattenAutotestRendererMetrics(std::map<std::string, double> &out,
     addVolumeMetric("starvation_frames", volume.starvationFrames);
     addVolumeMetric("estimated_full_refresh_frames",
                     volume.estimatedFullRefreshFrames);
+    addVolumeMetric("persistent_mb",
+                    static_cast<double>(volume.persistentBytes) /
+                        (1024.0 * 1024.0));
+    addVolumeMetric("unique_coverage_percentage",
+                    volume.uniqueCoveragePercentage);
+    addVolumeMetric("redundant_coverage", volume.redundantCoverage);
     addVolumeMetric("interior_half_extent_x", volume.interiorHalfExtents.x);
     addVolumeMetric("interior_half_extent_y", volume.interiorHalfExtents.y);
     addVolumeMetric("interior_half_extent_z", volume.interiorHalfExtents.z);
@@ -729,7 +802,27 @@ void flattenAutotestRendererMetrics(std::map<std::string, double> &out,
   addMetric(out, "renderer.hdr.bloom_passes", hdr.bloomPassCount);
   addMetric(out, "renderer.hdr.luminance_passes", hdr.luminancePassCount);
   addMetric(out, "renderer.hdr.adaptation_passes", hdr.adaptationPassCount);
+  addBoolMetric(out, "renderer.hdr.adaptation_enabled", hdr.adaptationEnabled);
+  addBoolMetric(out, "renderer.hdr.adaptation_active", hdr.adaptationActive);
   addMetric(out, "renderer.hdr.texture_count", hdr.textureCount);
+  addMetric(out, "renderer.hdr.adapted_exposure_ev", hdr.adaptedExposureEv);
+  addMetric(out, "renderer.hdr.automatic_exposure_ev", hdr.automaticExposureEv);
+  addMetric(out, "renderer.hdr.exposure_target_ev", hdr.exposureTargetEv);
+  addMetric(out, "renderer.hdr.exposure_metered_luminance",
+            hdr.exposureMeteredLuminance);
+  addMetric(out, "renderer.hdr.effective_exposure_ev", hdr.effectiveExposureEv);
+  addMetric(out, "renderer.hdr.exposure_invalid_sample_fraction",
+            hdr.exposureInvalidSampleFraction);
+  addMetric(out, "renderer.hdr.exposure_telemetry_available",
+            hdr.exposureTelemetryAvailable);
+  addMetric(out, "renderer.hdr.exposure_telemetry_source_frame",
+            hdr.exposureTelemetrySourceFrameIndex);
+  addMetric(out, "renderer.hdr.exposure_telemetry_stale_frames",
+            hdr.exposureTelemetryStaleFrames);
+  addMetric(out, "renderer.hdr.exposure_telemetry_pending_slots",
+            hdr.exposureTelemetryPendingSlots);
+  addMetric(out, "renderer.hdr.exposure_telemetry_dropped_samples",
+            hdr.exposureTelemetryDroppedSamples);
   addBytesAsMiB(out, "gpu.memory.hdr.texture_mb", hdr.textureBytes);
 
   addMetric(out, "renderer.transparent.mesh_draws",

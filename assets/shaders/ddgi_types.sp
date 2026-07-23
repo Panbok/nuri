@@ -1,4 +1,4 @@
-const uint kDDGIFrameGpuDataVersion = 2u;
+const uint kDDGIFrameGpuDataVersion = 3u;
 const uint kDDGIMaxVolumes = 8u;
 const uint kDDGIMaxSampledVolumes = 2u;
 const uint kDDGIEffectiveKindAuthored = 0u;
@@ -44,6 +44,7 @@ struct DDGIVolumeGpuData {
   DDGIProbeStateBuffer probeStates;
   uvec2 resourceFlagsReserved;
   vec4 probeSpacingAndBias;
+  vec4 rayBiases;
   vec4 centerHalfExtentsAndMaxDistance;
   uvec4 probeCountsAndCount;
   uvec4 irradianceAtlas;

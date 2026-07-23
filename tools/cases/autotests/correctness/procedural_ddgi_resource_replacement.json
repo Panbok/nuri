@@ -8,14 +8,14 @@
   "resolution": [320, 180],
   "fixedDeltaSeconds": 0.016666667,
   "warmupFrames": 4,
-  "endFrame": 18,
+  "endFrame": 60,
   "authoritative": false,
   "presentMode": "immediate",
   "windowMode": "visible",
   "renderGraph": {"workerCount": 1, "parallelCompile": false, "parallelRecording": false},
   "camera": {"position": [0.0, 0.75, 4.2], "target": [0.0, 0.25, 0.0], "verticalFovDegrees": 60.0, "nearPlane": 0.05, "farPlane": 100.0},
   "settings": {
-    "ddgi": {"enabled": true, "preset": "Low", "raysPerProbe": 64, "maxProbeUpdatesPerFrame": 144, "maxRayQueriesPerFrame": 18432, "debugView": "DiffuseIndirect"},
+    "ddgi": {"enabled": true, "preset": "Low", "relocation": false, "classification": false, "debugView": "DiffuseIndirect"},
     "opaque": {"enableInstanceAnimation": false},
     "antiAliasing": {"mode": "None"},
     "ambientOcclusion": {"mode": "Disabled"},
@@ -34,15 +34,15 @@
       "captures": [{"target": "frame_color_hdr", "profile": "hdr_color", "required": true, "compare": false}],
       "assertions": [
         {"id": "one_replacement_failed", "metric": "renderer.ddgi.failed_volumes", "equals": 1},
-        {"id": "persistent_limit_reported", "metric": "renderer.ddgi.volume_failure_reason", "equals": 3},
+        {"id": "persistent_limit_reported", "metric": "renderer.ddgi.limiting_constraint", "equals": 7},
         {"id": "valid_resources_remain", "metric": "renderer.ddgi.ready_volumes", "equals": 2},
-        {"id": "old_or_sky_not_uninitialized", "metric": "renderer.ddgi.fallback_reason", "equals": 0},
-        {"id": "replacement_generation_advanced", "metric": "renderer.ddgi.resource_generation", "greaterOrEqual": 4}
+        {"id": "typed_allocation_degradation", "metric": "renderer.ddgi.fallback_reason", "equals": 9},
+        {"id": "replacement_generation_preserved", "metric": "renderer.ddgi.resource_generation", "greaterOrEqual": 3}
       ]
     },
     {
       "id": "valid_retry_committed",
-      "frame": 14,
+      "frame": 60,
       "captures": [
         {"target": "frame_color_hdr", "profile": "hdr_color", "required": true, "compare": false},
         {"target": "ddgi_volume2_irradiance_atlas", "profile": "hdr_color", "required": true, "compare": false},
@@ -51,7 +51,7 @@
       "assertions": [
         {"id": "all_resources_ready", "metric": "renderer.ddgi.ready_volumes", "equals": 3},
         {"id": "failure_cleared", "metric": "renderer.ddgi.failed_volumes", "equals": 0},
-        {"id": "valid_generation_published", "metric": "renderer.ddgi.resource_generation", "greaterOrEqual": 7},
+        {"id": "valid_generation_published", "metric": "renderer.ddgi.resource_generation", "greaterOrEqual": 4},
         {"id": "new_layout_published", "metric": "renderer.ddgi.layout_generation", "greaterOrEqual": 3},
         {"id": "history_initialized", "metric": "renderer.ddgi.history_ready", "equals": 1},
         {"id": "no_retry_fallback", "metric": "renderer.ddgi.fallback_reason", "equals": 0}

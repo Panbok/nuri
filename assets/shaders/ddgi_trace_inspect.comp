@@ -125,9 +125,10 @@ void main() {
   const vec3 direction = ddgiRayDirection(ray, pc.rayCount, pc.frameSeed);
   rayQueryEXT query;
   rayQueryInitializeEXT(query, kSceneTlas, gl_RayFlagsNoneEXT, 0xff, origin,
-                        ddgiProbeRayTMin(volume.probeSpacingAndBias.xyz),
-                        direction, volume.centerHalfExtentsAndMaxDistance.w);
+                        ddgiProbeRayTMin(volume), direction,
+                        volume.centerHalfExtentsAndMaxDistance.w);
   uint candidates = 0u;
+  float containmentDistance = 0.0;
   bool overflow = false;
   while (rayQueryProceedEXT(query)) {
     const uint instanceIndex =
@@ -155,8 +156,10 @@ void main() {
     writeCandidateEvent(ray, candidates - 1u, flags, instanceIndex,
                         geometryIndex, primitive, distance, barycentrics);
     if ((geometry.flags &
-         (kRtGeometryAlphaBlended | kRtGeometryTransmission)) != 0u ||
-        !rtAlphaPasses(geometry, instance, primitive, barycentrics,
+         (kRtGeometryAlphaBlended | kRtGeometryTransmission)) != 0u) {
+      continue;
+    }
+    if (!rtAlphaPasses(geometry, instance, primitive, barycentrics,
                        pc.materials, pc.materialSamplerId, distance,
                        pc.rayCount)) {
       atomicAdd(pc.header.value.counts0.z, 1u);
@@ -164,6 +167,9 @@ void main() {
     }
     if ((flags & 1u) == 0u && (flags & 2u) == 0u) {
       atomicAdd(pc.header.value.counts0.w, 1u);
+      if (containmentDistance == 0.0 || distance < containmentDistance) {
+        containmentDistance = distance;
+      }
       continue;
     }
     rayQueryConfirmIntersectionEXT(query);
@@ -178,6 +184,10 @@ void main() {
     terminalKind = 1u;
     terminalDistance = rayQueryGetIntersectionTEXT(query, true);
     atomicAdd(pc.header.value.counts0.x, 1u);
+  } else if (containmentDistance > 0.0) {
+    terminalKind = 2u;
+    terminalDistance = containmentDistance;
+    atomicAdd(pc.header.value.counts0.y, 1u);
   } else {
     atomicAdd(pc.header.value.counts0.y, 1u);
   }

@@ -65,7 +65,8 @@ bool ddgiProbeIntersectsSurfaceBounds(DDGIVolumeGpuData volume, uint probeId,
   const vec3 worldCenter = (volume.worldFromLocal * vec4(localCenter, 1.0)).xyz;
   const vec3 spacing = volume.probeSpacingAndBias.xyz;
   const float minSpacing = min(min(spacing.x, spacing.y), spacing.z);
-  const float queryBias = 0.75 * minSpacing * volume.probeSpacingAndBias.w;
+  const float queryBias =
+      min(0.75 * minSpacing * volume.rayBiases.w, 0.25 * minSpacing);
   const vec3 localHalfExtent = 0.5 * spacing + vec3(queryBias);
   const mat3 rotation = mat3(volume.worldFromLocal);
   const vec3 worldHalfExtent = abs(rotation[0]) * localHalfExtent.x +

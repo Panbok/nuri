@@ -86,6 +86,14 @@ private:
     OwnedBufferHandle diagnostic{};
     OwnedBufferHandle diagnosticReadback{};
     SubmissionHandle submission{};
+    DDGIReadbackSlotState state = DDGIReadbackSlotState::Free;
+    uint64_t sceneId = 0u;
+    uint64_t deviceEpoch = 0u;
+    uint64_t featureGeneration = 0u;
+    uint64_t sourceFrame = 0u;
+    uint64_t requestId = 0u;
+    uint64_t byteCount = 0u;
+    uint32_t payloadSchema = kDDGIFrameMetricsVersion;
     size_t updateCapacity = 0u;
     size_t invalidationCapacity = 0u;
     size_t rayCapacity = 0u;
@@ -108,7 +116,7 @@ private:
     glm::vec4 directionalDirectionIlluminance{0.0f};
     glm::vec4 directionalColor{0.0f};
     uint64_t localLights = 0u;
-    uint32_t rayCount = 0u;
+    uint32_t updateCount = 0u;
     uint32_t raysPerProbe = 0u;
     uint32_t skyTextureId = kInvalidTextureBindlessIndex;
     uint32_t skySamplerId = 0u;
@@ -179,7 +187,8 @@ private:
   [[nodiscard]] Result<bool, std::string> initialize();
   [[nodiscard]] Result<bool, std::string>
   rebuildVolumes(FrameBuildContext &ctx, const DDGIEffectiveVolumePlan &plan,
-                 const DDGICoverageSettings &coverageSettings);
+                 const DDGICoverageSettings &coverageSettings,
+                 bool preserveCompatibleResources);
   [[nodiscard]] Result<bool, std::string>
   ensureFrameSlots(const RenderSettings::DDGISettings &settings,
                    size_t localLightCount, size_t invalidationCapacity);
@@ -196,11 +205,16 @@ private:
   [[nodiscard]] Result<bool, std::string>
   appendInspectionPass(FrameBuildContext &ctx, FrameSlot &slot);
   [[nodiscard]] Result<DDGIScheduleResult, std::string>
-  buildSchedule(const RenderSettings::DDGISettings &settings);
+  buildSchedule(const RenderSettings::DDGISettings &settings,
+                bool conservativeSecondaryBudget);
   void publishFrameData(FrameBuildContext &ctx, FrameSlot &slot, bool rtReady);
   void collectCompletedProbeStates(FrameSlot &slot);
   void collectCompletedTraceMetrics(FrameSlot &slot, DDGIFrameMetrics &metrics);
   void collectCompletedInspection(FrameBuildContext &ctx, FrameSlot &slot);
+  void collectCompletedReadbacks(FrameBuildContext &ctx);
+  [[nodiscard]] FrameSlot *acquireFrameSlot(uint64_t frameIndex) noexcept;
+  void publishReadbackMetrics(DDGIFrameMetrics &metrics,
+                              uint64_t frameIndex) const noexcept;
   void collectDebugProbeStateMetrics(FrameBuildContext &ctx);
   void publishCapturePoints(RenderFrameContext &frame) const;
   [[nodiscard]] uint32_t dirtyFlagsForProbe(uint32_t slot,
@@ -242,6 +256,7 @@ private:
   std::pmr::vector<RenderGraphAccessMode> dependencyTextureModes_;
   std::pmr::vector<BufferHandle> forwardDependencyBuffers_;
   std::pmr::vector<TextureHandle> forwardDependencyTextures_;
+  std::pmr::vector<LocalLightGpuData> selectedLocalLights_;
   std::pmr::vector<LocalLightSnapshot> submittedLocalLights_;
   std::pmr::vector<DirectionalLightGpuData> submittedDirectionalLights_;
   DDGIFrameGpuData frameData_{};
@@ -251,6 +266,9 @@ private:
   ProbeStatePushConstants statePushConstants_{};
   InspectPushConstants inspectPushConstants_{};
   std::optional<DDGIProbeInspectResult> latestInspectionResult_{};
+  DDGITraceCountersGpuData latestTraceCounters_{};
+  std::array<uint64_t, kMaxDDGIVolumes>
+      latestTraceCounterResourceGenerations_{};
   uint64_t sceneId_ = 0u;
   uint64_t volumeTopologyVersion_ = UINT64_MAX;
   uint64_t volumeTransformVersion_ = UINT64_MAX;
@@ -263,6 +281,10 @@ private:
   uint64_t materialVersion_ = UINT64_MAX;
   uint64_t environmentVersion_ = UINT64_MAX;
   uint64_t pendingSceneId_ = 0u;
+  uint32_t selectedLocalLightCount_ = 0u;
+  uint32_t totalLocalLightCount_ = 0u;
+  uint32_t secondaryQueriesPer1024Primary_ = 1024u;
+  bool secondaryLightingPossible_ = false;
   uint64_t pendingVolumeTopologyVersion_ = UINT64_MAX;
   uint64_t pendingVolumeTransformVersion_ = UINT64_MAX;
   uint64_t pendingVolumeSettingsVersion_ = UINT64_MAX;
@@ -274,6 +296,8 @@ private:
   uint64_t pendingSceneBoundsGeneration_ = 0u;
   std::array<DDGIEffectiveVolume, kMaxDDGIEffectiveVolumes>
       pendingEffectiveVolumes_{};
+  std::array<uint32_t, kMaxDDGIEffectiveVolumes>
+      pendingRetainedSourceIndices_{};
   std::array<glm::vec3, kMaxDDGIEffectiveVolumes>
       pendingRequestedCoverageHalfExtents_{};
   std::array<glm::vec3, kMaxDDGIEffectiveVolumes>
@@ -289,6 +313,14 @@ private:
   uint64_t pendingResetEpoch_ = 0u;
   uint64_t pendingForceEpoch_ = 0u;
   uint64_t scheduledFrameIndex_ = UINT64_MAX;
+  uint64_t latestTraceCounterSceneId_ = 0u;
+  uint64_t latestTraceCounterDeviceEpoch_ = 0u;
+  uint64_t latestTraceCounterFeatureGeneration_ = 0u;
+  uint64_t readbackDroppedSamples_ = 0u;
+  uint64_t readbackGenerationMismatches_ = 0u;
+  uint64_t readbackEarlyReuseAttempts_ = 0u;
+  uint64_t scheduledReadbackBytes_ = 0u;
+  size_t activeFrameSlotIndex_ = std::numeric_limits<size_t>::max();
   uint32_t failedVolumeCount_ = 0u;
   uint32_t pendingFailedVolumeCount_ = 0u;
   DDGIVolumeFailureReason volumeFailureReason_ = DDGIVolumeFailureReason::None;
@@ -309,6 +341,7 @@ private:
   bool inspectionScheduled_ = false;
   bool dirtyConsumptionScheduled_ = false;
   bool probeStateMirrorAvailable_ = false;
+  bool latestTraceCountersAvailable_ = false;
 };
 
 } // namespace nuri

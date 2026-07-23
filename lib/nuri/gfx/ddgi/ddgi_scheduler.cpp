@@ -79,6 +79,34 @@ priorityClass(const DDGITieredProbeScheduleCandidate &candidate,
   return value == std::numeric_limits<uint32_t>::max() ? value : value + 1u;
 }
 
+[[nodiscard]] uint64_t secondaryReservation(uint64_t primaryQueries,
+                                            uint32_t per1024Primary) noexcept {
+  const uint64_t scaled = primaryQueries * std::min(per1024Primary, 1024u);
+  return (scaled + 1023u) / 1024u;
+}
+
+template <typename Candidate>
+[[nodiscard]] uint32_t
+primaryRayCount(const Candidate &candidate,
+                const DDGISchedulerLimits &limits) noexcept {
+  const uint32_t classificationRays = limits.classificationRaysPerProbe == 0u
+                                          ? limits.raysPerProbe
+                                          : limits.classificationRaysPerProbe;
+  return candidate.state == DDGIProbeState::Uninitialized ? classificationRays
+                                                          : limits.raysPerProbe;
+}
+
+void accountPrimaryWork(DDGIScheduleResult &result, uint32_t rayCount,
+                        bool classification) noexcept {
+  result.primaryQueries += rayCount;
+  if (classification) {
+    ++result.classificationProbeUpdates;
+    result.classificationPrimaryQueries += rayCount;
+  } else {
+    result.irradiancePrimaryQueries += rayCount;
+  }
+}
+
 } // namespace
 
 Result<DDGIScheduleResult, DDGISchedulerError>
@@ -87,8 +115,14 @@ scheduleDDGIProbeUpdates(std::span<const DDGIProbeScheduleCandidate> candidates,
                          std::span<DDGIProbeScheduleCandidate> workspace,
                          std::span<DDGIProbeUpdateEntry> output) noexcept {
   using ScheduleResult = Result<DDGIScheduleResult, DDGISchedulerError>;
-  if (limits.raysPerProbe == 0u || limits.maxProbeUpdates == 0u ||
-      limits.maxRayQueries < 2u * static_cast<uint64_t>(limits.raysPerProbe)) {
+  if (limits.raysPerProbe == 0u ||
+      limits.classificationRaysPerProbe > limits.raysPerProbe ||
+      limits.maxProbeUpdates == 0u ||
+      limits.secondaryQueriesPer1024Primary > 1024u ||
+      limits.maxRayQueries <
+          static_cast<uint64_t>(limits.raysPerProbe) +
+              secondaryReservation(limits.raysPerProbe,
+                                   limits.secondaryQueriesPer1024Primary)) {
     return ScheduleResult::makeError(DDGISchedulerError::InvalidLimits);
   }
   if (workspace.size() < candidates.size()) {
@@ -125,30 +159,32 @@ scheduleDDGIProbeUpdates(std::span<const DDGIProbeScheduleCandidate> candidates,
             });
 
   DDGIScheduleResult result{};
-  const uint64_t reservedQueriesPerProbe =
-      2u * static_cast<uint64_t>(limits.raysPerProbe);
   const uint32_t probeCapacity = std::min<uint32_t>(
       limits.maxProbeUpdates, static_cast<uint32_t>(output.size()));
-  uint64_t reservedQueries = 0u;
   for (const DDGIProbeScheduleCandidate &candidate : eligible) {
+    const uint32_t rayCount = primaryRayCount(candidate, limits);
+    const uint64_t nextPrimary =
+        static_cast<uint64_t>(result.primaryQueries) + rayCount;
+    const uint64_t nextSecondary = secondaryReservation(
+        nextPrimary, limits.secondaryQueriesPer1024Primary);
     if (result.updatedProbes >= probeCapacity ||
-        reservedQueries + reservedQueriesPerProbe > limits.maxRayQueries) {
+        nextPrimary + nextSecondary > limits.maxRayQueries) {
       break;
     }
     output[result.updatedProbes] = DDGIProbeUpdateEntry{
         .volumeStableId = candidate.volumeStableId,
         .probeId = candidate.probeId,
         .rayBase = result.primaryQueries,
-        .rayCount = limits.raysPerProbe,
+        .rayCount = rayCount,
     };
     ++result.updatedProbes;
-    result.primaryQueries += limits.raysPerProbe;
-    result.secondaryQueriesReserved += limits.raysPerProbe;
-    reservedQueries += reservedQueriesPerProbe;
+    accountPrimaryWork(result, rayCount,
+                       candidate.state == DDGIProbeState::Uninitialized);
+    result.secondaryQueriesReserved = static_cast<uint32_t>(nextSecondary);
   }
   result.unusedProbeCapacity = limits.maxProbeUpdates - result.updatedProbes;
-  result.unusedQueryCapacity =
-      limits.maxRayQueries - static_cast<uint32_t>(reservedQueries);
+  result.unusedQueryCapacity = limits.maxRayQueries - result.primaryQueries -
+                               result.secondaryQueriesReserved;
   result.truncated = result.updatedProbes < eligibleCount;
   return ScheduleResult::makeResult(result);
 }
@@ -161,8 +197,14 @@ scheduleDDGITieredProbeUpdates(
     std::span<DDGITieredProbeScheduleCandidate> workspace,
     std::span<DDGIProbeUpdateEntry> output) noexcept {
   using TieredResult = Result<DDGITieredScheduleResult, DDGISchedulerError>;
-  if (limits.raysPerProbe == 0u || limits.maxProbeUpdates == 0u ||
-      limits.maxRayQueries < 2u * static_cast<uint64_t>(limits.raysPerProbe)) {
+  if (limits.raysPerProbe == 0u ||
+      limits.classificationRaysPerProbe > limits.raysPerProbe ||
+      limits.maxProbeUpdates == 0u ||
+      limits.secondaryQueriesPer1024Primary > 1024u ||
+      limits.maxRayQueries <
+          static_cast<uint64_t>(limits.raysPerProbe) +
+              secondaryReservation(limits.raysPerProbe,
+                                   limits.secondaryQueriesPer1024Primary)) {
     return TieredResult::makeError(DDGISchedulerError::InvalidLimits);
   }
   if (workspace.size() < candidates.size()) {
@@ -272,13 +314,22 @@ scheduleDDGITieredProbeUpdates(
     }
   }
 
-  const uint64_t queriesPerProbe =
-      2u * static_cast<uint64_t>(limits.raysPerProbe);
   const uint32_t outputCapacity = static_cast<uint32_t>(
       std::min<size_t>(output.size(), std::numeric_limits<uint32_t>::max()));
-  const uint32_t capacity =
-      std::min({limits.maxProbeUpdates, outputCapacity,
-                static_cast<uint32_t>(limits.maxRayQueries / queriesPerProbe)});
+  uint32_t queryCapacity = 0u;
+  const uint32_t boundedCapacity =
+      std::min(limits.maxProbeUpdates, outputCapacity);
+  while (queryCapacity < boundedCapacity) {
+    const uint64_t primary =
+        static_cast<uint64_t>(queryCapacity + 1u) * limits.raysPerProbe;
+    if (primary + secondaryReservation(primary,
+                                       limits.secondaryQueriesPer1024Primary) >
+        limits.maxRayQueries) {
+      break;
+    }
+    ++queryCapacity;
+  }
+  const uint32_t capacity = queryCapacity;
   const uint32_t serviceCapacity =
       std::min(capacity, static_cast<uint32_t>(eligibleCount));
   result.urgentReservation = capacity / 2u;
@@ -302,14 +353,18 @@ scheduleDDGITieredProbeUpdates(
     }
     const DDGITieredProbeScheduleCandidate &candidate =
         eligible[cursors[tier]++];
+    const uint32_t rayCount = primaryRayCount(candidate, limits);
     output[result.schedule.updatedProbes++] = DDGIProbeUpdateEntry{
         .volumeStableId = candidate.volumeStableId,
         .probeId = candidate.probeId,
         .rayBase = result.schedule.primaryQueries,
-        .rayCount = limits.raysPerProbe,
+        .rayCount = rayCount,
     };
-    result.schedule.primaryQueries += limits.raysPerProbe;
-    result.schedule.secondaryQueriesReserved += limits.raysPerProbe;
+    accountPrimaryWork(result.schedule, rayCount,
+                       candidate.state == DDGIProbeState::Uninitialized);
+    result.schedule.secondaryQueriesReserved = static_cast<uint32_t>(
+        secondaryReservation(result.schedule.primaryQueries,
+                             limits.secondaryQueriesPer1024Primary));
     ++result.tiers[tier].usedQuota;
     allocationDeficit[tier] =
         saturatingAdd(allocationDeficit[tier], -totalWeight);
@@ -419,10 +474,9 @@ scheduleDDGITieredProbeUpdates(
 
   result.schedule.unusedProbeCapacity =
       limits.maxProbeUpdates - result.schedule.updatedProbes;
-  const uint64_t reservedQueries =
-      queriesPerProbe * result.schedule.updatedProbes;
   result.schedule.unusedQueryCapacity =
-      limits.maxRayQueries - static_cast<uint32_t>(reservedQueries);
+      limits.maxRayQueries - result.schedule.primaryQueries -
+      result.schedule.secondaryQueriesReserved;
   result.schedule.truncated = result.schedule.updatedProbes < eligibleCount;
 
   for (uint32_t tier = 0u; tier < tiers.size(); ++tier) {

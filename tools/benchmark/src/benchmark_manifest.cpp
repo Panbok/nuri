@@ -843,8 +843,20 @@ parseVisibilitySettings(yyjson_val *object, RenderSettings &settings,
 [[nodiscard]] Result<bool, std::string>
 parseHdrSettings(yyjson_val *object, RenderSettings &settings,
                  std::string_view path) {
-  static constexpr std::array keys{std::string_view("bloomEnabled"),
-                                   std::string_view("adaptationEnabled")};
+  static constexpr std::array keys{
+      std::string_view("bloomEnabled"),
+      std::string_view("adaptationEnabled"),
+      std::string_view("meteringMode"),
+      std::string_view("adaptationTargetGray"),
+      std::string_view("adaptationBrightenSpeed"),
+      std::string_view("adaptationDarkenSpeed"),
+      std::string_view("adaptationMaxEvChange"),
+      std::string_view("adaptationMinEv"),
+      std::string_view("adaptationMaxEv"),
+      std::string_view("histogramLowPercentile"),
+      std::string_view("histogramHighPercentile"),
+      std::string_view("histogramMinLogLuminance"),
+      std::string_view("histogramMaxLogLuminance")};
   auto keysResult = rejectUnknownKeys(object, keys, path);
   if (keysResult.hasError()) {
     return keysResult;
@@ -861,6 +873,39 @@ parseHdrSettings(yyjson_val *object, RenderSettings &settings,
     return Result<bool, std::string>::makeError(b.error());
   }
   settings.hdrPostProcess.adaptationEnabled = b.value();
+  auto enumResult = readEnumField(
+      object, "meteringMode", path, settings.hdrPostProcess.meteringMode,
+      {{"FullFrame", HDRExposureMeteringMode::FullFrame},
+       {"CenterWeighted", HDRExposureMeteringMode::CenterWeighted}});
+  if (enumResult.hasError()) {
+    return enumResult;
+  }
+  for (const auto [key, output] :
+       {std::pair<std::string_view, float *>{
+            "adaptationTargetGray",
+            &settings.hdrPostProcess.adaptationTargetGray},
+        {"adaptationBrightenSpeed",
+         &settings.hdrPostProcess.adaptationBrightenSpeed},
+        {"adaptationDarkenSpeed",
+         &settings.hdrPostProcess.adaptationDarkenSpeed},
+        {"adaptationMaxEvChange",
+         &settings.hdrPostProcess.adaptationMaxEvChange},
+        {"adaptationMinEv", &settings.hdrPostProcess.adaptationMinEv},
+        {"adaptationMaxEv", &settings.hdrPostProcess.adaptationMaxEv},
+        {"histogramLowPercentile",
+         &settings.hdrPostProcess.histogramLowPercentile},
+        {"histogramHighPercentile",
+         &settings.hdrPostProcess.histogramHighPercentile},
+        {"histogramMinLogLuminance",
+         &settings.hdrPostProcess.histogramMinLogLuminance},
+        {"histogramMaxLogLuminance",
+         &settings.hdrPostProcess.histogramMaxLogLuminance}}) {
+    auto value = readDouble(object, key, path, *output);
+    if (value.hasError()) {
+      return Result<bool, std::string>::makeError(value.error());
+    }
+    *output = static_cast<float>(value.value());
+  }
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -898,6 +943,7 @@ parseDDGISettings(yyjson_val *object, RenderSettings &settings,
       std::string_view("enabled"),
       std::string_view("preset"),
       std::string_view("raysPerProbe"),
+      std::string_view("classificationRaysPerProbe"),
       std::string_view("maxProbeUpdatesPerFrame"),
       std::string_view("maxRayQueriesPerFrame"),
       std::string_view("maxLocalLightsPerHit"),
@@ -907,10 +953,15 @@ parseDDGISettings(yyjson_val *object, RenderSettings &settings,
       std::string_view("changeIrradianceHysteresisScale"),
       std::string_view("changeDistanceHysteresisScale"),
       std::string_view("selfShadowBias"),
+      std::string_view("primaryProbeBias"),
+      std::string_view("localShadowBias"),
+      std::string_view("directionalShadowBias"),
+      std::string_view("classificationBias"),
       std::string_view("multiBounceLuminanceClamp"),
       std::string_view("relocation"),
       std::string_view("classification"),
       std::string_view("multiBounce"),
+      std::string_view("diagnosticCounters"),
       std::string_view("freezeUpdates"),
       std::string_view("showVolumes"),
       std::string_view("showProbes"),
@@ -934,9 +985,17 @@ parseDDGISettings(yyjson_val *object, RenderSettings &settings,
   if (result.hasError()) {
     return result;
   }
+  const bool hasPresetOwnedOverride =
+      yyjson_obj_get(object, "raysPerProbe") != nullptr ||
+      yyjson_obj_get(object, "classificationRaysPerProbe") != nullptr ||
+      yyjson_obj_get(object, "maxProbeUpdatesPerFrame") != nullptr ||
+      yyjson_obj_get(object, "maxRayQueriesPerFrame") != nullptr ||
+      yyjson_obj_get(object, "coverage") != nullptr;
   for (const auto [key, output] :
        {std::pair<std::string_view, uint32_t *>{"raysPerProbe",
                                                 &settings.ddgi.raysPerProbe},
+        {"classificationRaysPerProbe",
+         &settings.ddgi.classificationRaysPerProbe},
         {"maxProbeUpdatesPerFrame", &settings.ddgi.maxProbeUpdatesPerFrame},
         {"maxRayQueriesPerFrame", &settings.ddgi.maxRayQueriesPerFrame},
         {"maxLocalLightsPerHit", &settings.ddgi.maxLocalLightsPerHit},
@@ -957,6 +1016,10 @@ parseDDGISettings(yyjson_val *object, RenderSettings &settings,
         {"changeDistanceHysteresisScale",
          &settings.ddgi.changeDistanceHysteresisScale},
         {"selfShadowBias", &settings.ddgi.selfShadowBias},
+        {"primaryProbeBias", &settings.ddgi.primaryProbeBias},
+        {"localShadowBias", &settings.ddgi.localShadowBias},
+        {"directionalShadowBias", &settings.ddgi.directionalShadowBias},
+        {"classificationBias", &settings.ddgi.classificationBias},
         {"multiBounceLuminanceClamp",
          &settings.ddgi.multiBounceLuminanceClamp}}) {
     auto value = readDouble(object, key, path, *output);
@@ -970,6 +1033,7 @@ parseDDGISettings(yyjson_val *object, RenderSettings &settings,
                                             &settings.ddgi.relocation},
         {"classification", &settings.ddgi.classification},
         {"multiBounce", &settings.ddgi.multiBounce},
+        {"diagnosticCounters", &settings.ddgi.diagnosticCounters},
         {"freezeUpdates", &settings.ddgi.freezeUpdates},
         {"showVolumes", &settings.ddgi.showVolumes},
         {"showProbes", &settings.ddgi.showProbes},
@@ -1003,6 +1067,10 @@ parseDDGISettings(yyjson_val *object, RenderSettings &settings,
     if (result.hasError()) {
       return result;
     }
+  }
+  if (hasPresetOwnedOverride &&
+      settings.ddgi.preset != DDGIQualityPreset::Custom) {
+    settings.ddgi.preset = DDGIQualityPreset::Custom;
   }
   return Result<bool, std::string>::makeResult(true);
 }

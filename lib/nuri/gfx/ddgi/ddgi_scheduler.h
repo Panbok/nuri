@@ -41,8 +41,15 @@ inline constexpr uint32_t kDDGIProbeUpdateDistanceResponse = 1u << 3u;
 
 struct DDGISchedulerLimits {
   uint32_t raysPerProbe = 128u;
+  // Zero preserves the legacy single-work-class contract for direct callers.
+  // The renderer always supplies its separately sanitized low-ray count.
+  uint32_t classificationRaysPerProbe = 0u;
   uint32_t maxProbeUpdates = 512u;
   uint32_t maxRayQueries = 65'536u;
+  // Fixed-point upper bound for secondary visibility reservations. 1024 means
+  // one secondary query per primary ray; lower values safely lend the
+  // remainder to primary probe work.
+  uint32_t secondaryQueriesPer1024Primary = 1024u;
   bool forceFullUpdate = false;
 };
 
@@ -55,6 +62,9 @@ enum class DDGISchedulerError : uint8_t {
 struct DDGIScheduleResult {
   uint32_t updatedProbes = 0u;
   uint32_t primaryQueries = 0u;
+  uint32_t classificationProbeUpdates = 0u;
+  uint32_t classificationPrimaryQueries = 0u;
+  uint32_t irradiancePrimaryQueries = 0u;
   uint32_t secondaryQueriesReserved = 0u;
   uint32_t unusedProbeCapacity = 0u;
   uint32_t unusedQueryCapacity = 0u;

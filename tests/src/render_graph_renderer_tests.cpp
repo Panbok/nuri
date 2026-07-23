@@ -488,14 +488,20 @@ struct HDRExposurePushConstantsProbe {
   uint32_t previousExposureTexId = 0u;
   uint32_t sourceSamplerId = 0u;
   uint32_t flags = 0u;
+  uint64_t telemetryAddress = 0u;
   float targetGray = 0.0f;
-  float speed = 0.0f;
+  float brightenSpeed = 0.0f;
+  float darkenSpeed = 0.0f;
   float minEv = 0.0f;
   float maxEv = 0.0f;
   float deltaSeconds = 0.0f;
-  float reserved0 = 0.0f;
-  float reserved1 = 0.0f;
-  float reserved2 = 0.0f;
+  float maxEvChange = 0.0f;
+  float lowPercentile = 0.0f;
+  float highPercentile = 0.0f;
+  float minLogLuminance = 0.0f;
+  float maxLogLuminance = 0.0f;
+  uint32_t meteringMode = 0u;
+  uint32_t frameIndex = 0u;
 };
 static_assert(sizeof(HDRExposurePushConstantsProbe) <= 128u);
 
@@ -881,8 +887,16 @@ TEST(RenderGraphRendererTest, SanitizeHDRPostProcessSettingsClampsInputs) {
   hdr.bloomMaxMipCount = 0u;
   hdr.adaptationTargetGray = 0.0f;
   hdr.adaptationSpeed = std::numeric_limits<float>::infinity();
+  hdr.adaptationBrightenSpeed = -1.0f;
+  hdr.adaptationDarkenSpeed = std::numeric_limits<float>::infinity();
+  hdr.adaptationMaxEvChange = -4.0f;
   hdr.adaptationMinEv = 12.0f;
   hdr.adaptationMaxEv = -4.0f;
+  hdr.histogramLowPercentile = 0.9f;
+  hdr.histogramHighPercentile = 0.1f;
+  hdr.histogramMinLogLuminance = 8.0f;
+  hdr.histogramMaxLogLuminance = -8.0f;
+  hdr.meteringMode = static_cast<HDRExposureMeteringMode>(255u);
   hdr.debugView = static_cast<HDRPostProcessDebugView>(255u);
 
   sanitizeHDRPostProcessSettings(hdr);
@@ -893,8 +907,18 @@ TEST(RenderGraphRendererTest, SanitizeHDRPostProcessSettingsClampsInputs) {
   EXPECT_EQ(hdr.bloomMaxMipCount, 1u);
   EXPECT_FLOAT_EQ(hdr.adaptationTargetGray, 0.001f);
   EXPECT_FLOAT_EQ(hdr.adaptationSpeed, kDefaultHDRAdaptationSpeed);
+  EXPECT_FLOAT_EQ(hdr.adaptationBrightenSpeed, 0.0f);
+  EXPECT_FLOAT_EQ(hdr.adaptationDarkenSpeed, kDefaultHDRAdaptationSpeed);
+  EXPECT_FLOAT_EQ(hdr.adaptationMaxEvChange, 0.0f);
   EXPECT_FLOAT_EQ(hdr.adaptationMinEv, -4.0f);
   EXPECT_FLOAT_EQ(hdr.adaptationMaxEv, 12.0f);
+  EXPECT_FLOAT_EQ(hdr.histogramLowPercentile, 0.49f);
+  EXPECT_FLOAT_EQ(hdr.histogramHighPercentile, 0.51f);
+  EXPECT_FLOAT_EQ(hdr.histogramMinLogLuminance,
+                  kDefaultHDRHistogramMinLogLuminance);
+  EXPECT_FLOAT_EQ(hdr.histogramMaxLogLuminance,
+                  kDefaultHDRHistogramMaxLogLuminance);
+  EXPECT_EQ(hdr.meteringMode, HDRExposureMeteringMode::CenterWeighted);
   EXPECT_EQ(hdr.debugView, HDRPostProcessDebugView::None);
 }
 

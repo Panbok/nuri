@@ -30,6 +30,7 @@ constexpr uint32_t kHDRBloomModePrefilterDownsample = 0u;
 constexpr uint32_t kHDRBloomModeDownsample = 1u;
 constexpr uint32_t kHDRBloomModeUpsample = 2u;
 constexpr uint32_t kHDRBloomModeCopy = 3u;
+constexpr uint32_t kHDRExposureTelemetrySchemaVersion = 2u;
 constexpr float kHDRBloomUpsampleScatter = 0.65f;
 constexpr std::array<std::string_view, 2> kToneMapLutNames{"tonemap_aces2_sdr",
                                                            "tonemap_agx_sdr"};
@@ -50,13 +51,28 @@ struct HDRExposurePushConstants {
   uint32_t previousExposureTexId = 0u;
   uint32_t sourceSamplerId = 0u;
   uint32_t flags = 0u;
+  uint64_t telemetryAddress = 0u;
   float targetGray = kDefaultHDRAdaptationTargetGray;
-  float speed = kDefaultHDRAdaptationSpeed;
+  float brightenSpeed = kDefaultHDRAdaptationSpeed;
+  float darkenSpeed = kDefaultHDRAdaptationSpeed;
   float minEv = kDefaultHDRAdaptationMinEv;
   float maxEv = kDefaultHDRAdaptationMaxEv;
   float deltaSeconds = 1.0f / 60.0f;
+  float maxEvChange = kDefaultHDRAdaptationMaxEvChange;
+  float lowPercentile = kDefaultHDRHistogramLowPercentile;
+  float highPercentile = kDefaultHDRHistogramHighPercentile;
+  float minLogLuminance = kDefaultHDRHistogramMinLogLuminance;
+  float maxLogLuminance = kDefaultHDRHistogramMaxLogLuminance;
+  uint32_t meteringMode =
+      static_cast<uint32_t>(HDRExposureMeteringMode::CenterWeighted);
+  uint32_t frameIndex = 0u;
 };
 static_assert(sizeof(HDRExposurePushConstants) <= 128u);
+struct alignas(16) HDRExposureTelemetryGpuData {
+  glm::vec4 values{0.0f};
+  glm::uvec4 metadata{0u};
+};
+static_assert(sizeof(HDRExposureTelemetryGpuData) == 32u);
 struct HDRLuminanceReducePushConstants {
   uint32_t sourceTexId = 0u;
   uint32_t sourceSamplerId = 0u;
@@ -204,7 +220,9 @@ void addFullscreenTexturePass(
     std::span<const TextureHandle> textureReads, std::string_view debugLabel,
     uint32_t debugColor, bool markColorAsFrameOutput = false,
     GpuTimingScope gpuTimingScope = GpuTimingScope::None,
-    std::span<const RenderGraphTextureId> graphReads = {}) {
+    std::span<const RenderGraphTextureId> graphReads = {},
+    std::span<const BufferHandle> dependencyBuffers = {},
+    std::span<const RenderGraphAccessMode> dependencyBufferModes = {}) {
   RenderGraphGraphicsPassDesc passDesc{};
   passDesc.color = {.loadOp = LoadOp::Clear,
                     .storeOp = StoreOp::Store,
@@ -212,6 +230,8 @@ void addFullscreenTexturePass(
   passDesc.colorTexture = colorTexture;
   passDesc.draws = draws;
   passDesc.dependencyTextures = textureReads;
+  passDesc.dependencyBuffers = dependencyBuffers;
+  passDesc.dependencyBufferAccessModes = dependencyBufferModes;
   passDesc.debugLabel = debugLabel;
   passDesc.debugColor = debugColor;
   passDesc.markColorAsFrameOutput = markColorAsFrameOutput;
@@ -279,31 +299,6 @@ uint32_t effectiveLuminanceMipCount(uint32_t width, uint32_t height) {
     mipHeight = std::max((mipHeight + 1u) / 2u, 1u);
   }
   return std::max(mipCount, 1u);
-}
-[[nodiscard]] float
-exposureEvFromLuminance(float luminance,
-                        const RenderSettings::HDRPostProcessSettings &hdr) {
-  const float safeLuminance = std::max(luminance, 1.0e-4f);
-  const float safeTargetGray = std::max(hdr.adaptationTargetGray, 1.0e-4f);
-  return std::clamp(std::log2(safeTargetGray / safeLuminance),
-                    hdr.adaptationMinEv, hdr.adaptationMaxEv);
-}
-[[nodiscard]] std::optional<float>
-readExposureLuminance(GPUDevice &gpu, TextureHandle texture) {
-  if (!nuri::isValid(texture)) {
-    return std::nullopt;
-  }
-  std::array<std::byte, sizeof(float)> bytes{};
-  const TextureReadbackRegion region{
-      .x = 0u, .y = 0u, .width = 1u, .height = 1u, .mipLevel = 0u, .layer = 0u};
-  auto readResult = gpu.readTexture(texture, region, bytes);
-  if (readResult.hasError()) {
-    return std::nullopt;
-  }
-  float luminance = 0.0f;
-  std::memcpy(&luminance, bytes.data(), sizeof(luminance));
-  return std::isfinite(luminance) ? std::optional<float>(luminance)
-                                  : std::nullopt;
 }
 uint64_t textureStorageBytes(GPUDevice &gpu, TextureHandle texture) {
   if (!nuri::isValid(texture)) {
@@ -566,6 +561,125 @@ void HDRExposureAdaptPass::destroyLuminanceTextures() {
   luminanceMipCount_ = 0u;
 }
 
+Result<bool, std::string> HDRExposureAdaptPass::ensureTelemetryRing() {
+  const size_t desiredCount =
+      std::max<size_t>(2u, 2u * std::max(1u, gpu_.getSwapchainImageCount()));
+  if (telemetrySlots_.empty()) {
+    telemetrySlots_.resize(desiredCount);
+  }
+  for (TelemetrySlot &slot : telemetrySlots_) {
+    if (!slot.device.valid()) {
+      auto created = gpu_.createBuffer(
+          BufferDesc{.usage = BufferUsage::Storage,
+                     .storage = Storage::Device,
+                     .size = sizeof(HDRExposureTelemetryGpuData)},
+          "hdr_exposure_telemetry");
+      if (created.hasError()) {
+        return Result<bool, std::string>::makeError(created.error());
+      }
+      slot.device.reset(gpu_, created.value());
+    }
+    if (!slot.readback.valid()) {
+      auto created = gpu_.createBuffer(
+          BufferDesc{.usage = BufferUsage::Copy,
+                     .storage = Storage::Readback,
+                     .size = sizeof(HDRExposureTelemetryGpuData)},
+          "hdr_exposure_telemetry_readback");
+      if (created.hasError()) {
+        return Result<bool, std::string>::makeError(created.error());
+      }
+      slot.readback.reset(gpu_, created.value());
+    }
+  }
+  return Result<bool, std::string>::makeResult(true);
+}
+
+void HDRExposureAdaptPass::collectCompletedTelemetry(FrameBuildContext &ctx) {
+  const uint64_t currentSceneId =
+      ctx.frame.scene != nullptr ? ctx.frame.scene->id() : 0u;
+  for (TelemetrySlot &slot : telemetrySlots_) {
+    if (slot.state != TelemetrySlotState::Pending ||
+        !nuri::isValid(slot.submission) ||
+        !gpu_.isSubmissionComplete(slot.submission)) {
+      continue;
+    }
+    HDRExposureTelemetryGpuData completed{};
+    auto read = gpu_.readBuffer(
+        slot.readback.get(), 0u,
+        std::as_writable_bytes(std::span(&completed, size_t{1u})));
+    const bool finiteValues =
+        std::isfinite(completed.values.x) &&
+        std::isfinite(completed.values.y) &&
+        std::isfinite(completed.values.z) &&
+        std::isfinite(completed.values.w) && completed.values.z > 0.0f &&
+        completed.values.w >= 0.0f && completed.values.w <= 1.0f;
+    if (read.hasError() || slot.sceneId != currentSceneId ||
+        completed.metadata.y != kHDRExposureTelemetrySchemaVersion ||
+        completed.metadata.x != static_cast<uint32_t>(slot.sourceFrame) ||
+        !finiteValues) {
+      slot.state = TelemetrySlotState::Dropped;
+      ++telemetryDroppedSamples_;
+      continue;
+    }
+    if (!latestTelemetryAvailable_ ||
+        slot.sourceFrame >= latestTelemetrySourceFrame_) {
+      latestTelemetryAvailable_ = true;
+      latestTelemetrySourceFrame_ = slot.sourceFrame;
+      latestTelemetrySceneId_ = slot.sceneId;
+      latestAdaptedExposureEv_ = completed.values.x;
+      latestAutomaticExposureEv_ = completed.values.x;
+      latestTargetExposureEv_ = completed.values.y;
+      latestMeteredLuminance_ = completed.values.z;
+      latestInvalidFraction_ = completed.values.w;
+    }
+    slot.state = TelemetrySlotState::Consumed;
+  }
+  HDRPostProcessFrameMetrics &metrics = ctx.frame.metrics.hdrPostProcess;
+  metrics.exposureTelemetryPendingSlots = static_cast<uint32_t>(
+      std::ranges::count_if(telemetrySlots_, [](const TelemetrySlot &slot) {
+        return slot.state == TelemetrySlotState::Pending;
+      }));
+  metrics.exposureTelemetryDroppedSamples = telemetryDroppedSamples_;
+  if (!latestTelemetryAvailable_ || latestTelemetrySceneId_ != currentSceneId) {
+    return;
+  }
+  metrics.exposureTelemetryAvailable = true;
+  metrics.exposureTelemetrySourceFrameIndex = latestTelemetrySourceFrame_;
+  metrics.exposureTelemetryStaleFrames = static_cast<uint32_t>(
+      std::min(ctx.frame.frameIndex >= latestTelemetrySourceFrame_
+                   ? ctx.frame.frameIndex - latestTelemetrySourceFrame_
+                   : 0u,
+               static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())));
+  metrics.adaptedExposureEv = latestAdaptedExposureEv_;
+  metrics.automaticExposureEv = latestAutomaticExposureEv_;
+  metrics.exposureTargetEv = latestTargetExposureEv_;
+  metrics.exposureMeteredLuminance = latestMeteredLuminance_;
+  metrics.effectiveExposureEv =
+      latestAutomaticExposureEv_ +
+      renderSettingsOrDefault(ctx.frame).toneMap.exposureEv;
+  metrics.exposureInvalidSampleFraction = latestInvalidFraction_;
+}
+
+HDRExposureAdaptPass::TelemetrySlot *
+HDRExposureAdaptPass::acquireTelemetrySlot(FrameBuildContext &ctx) {
+  for (size_t index = 0u; index < telemetrySlots_.size(); ++index) {
+    TelemetrySlot &slot = telemetrySlots_[index];
+    if (slot.state != TelemetrySlotState::Free &&
+        slot.state != TelemetrySlotState::Consumed &&
+        slot.state != TelemetrySlotState::Dropped) {
+      continue;
+    }
+    slot.state = TelemetrySlotState::Recording;
+    slot.submission = {};
+    slot.sceneId = ctx.frame.scene != nullptr ? ctx.frame.scene->id() : 0u;
+    slot.sourceFrame = ctx.frame.frameIndex;
+    activeTelemetrySlot_ = index;
+    return &slot;
+  }
+  ++telemetryDroppedSamples_;
+  return nullptr;
+}
+
 Result<bool, std::string> HDRExposureAdaptPass::ensureLuminanceTextures() {
   int32_t framebufferWidth = 0;
   int32_t framebufferHeight = 0;
@@ -620,22 +734,19 @@ HDRExposureAdaptPass::prepare(FrameBuildContext &ctx) {
       renderSettingsOrDefault(ctx.frame).hdrPostProcess;
   sanitizeHDRPostProcessSettings(hdr);
   ctx.frame.metrics.hdrPostProcess.adaptationEnabled = hdr.adaptationEnabled;
-  return runSteps(
-      [&] { return ensureInitialized("hdr_exposure_adapt"); },
-      [&] {
-        return ensureFullscreenPassInitialized(gpu_, luminanceResources_,
-                                               "hdr_luminance_reduce");
-      },
-      [&] {
-        return ensurePipeline(kFrameCompositionExposureFormat,
-                              "hdr_exposure_adapt");
-      },
-      [&] {
-        return ensureFullscreenPassPipeline(gpu_, luminanceResources_,
-                                            kFrameCompositionExposureFormat,
-                                            "hdr_luminance_reduce");
-      },
-      [&] { return ensureLuminanceTextures(); });
+  activeTelemetrySlot_ = std::numeric_limits<size_t>::max();
+  telemetryScheduled_ = false;
+  auto telemetry = ensureTelemetryRing();
+  telemetryRingReady_ = !telemetry.hasError();
+  if (!telemetryRingReady_) {
+    ++telemetryDroppedSamples_;
+  }
+  collectCompletedTelemetry(ctx);
+  return runSteps([&] { return ensureInitialized("hdr_exposure_adapt"); },
+                  [&] {
+                    return ensurePipeline(kFrameCompositionExposureFormat,
+                                          "hdr_exposure_adapt");
+                  });
 }
 
 Result<bool, std::string> HDRExposureAdaptPass::build(FrameBuildContext &ctx) {
@@ -654,76 +765,39 @@ Result<bool, std::string> HDRExposureAdaptPass::build(FrameBuildContext &ctx) {
       nuri::isValid(ctx.shared.frameColorGraphTexture)
           ? ctx.shared.frameColorGraphTexture
           : ctx.graph.importTexture(source, "hdr_source_color").value();
-  const uint32_t ringIndex =
-      luminanceTextures_.empty()
-          ? 0u
-          : static_cast<uint32_t>(ctx.frame.frameIndex %
-                                  luminanceTextures_[0u].size());
   const uint32_t samplerId = gpu_.getLinearRepeatSamplerBindlessIndex(true, 1u);
-  TextureHandle meteringSource = source;
-  RenderGraphTextureId meteringSourceImport = sourceImport;
-  uint32_t sourceTexId = frameColorTexId;
-  bool reducedLuminanceSource = false;
-  if (!luminanceTextures_.empty()) {
-    RenderGraphTextureId previousImport = sourceImport;
-    TextureHandle previousTexture = source;
-    for (uint32_t mip = 0u; mip < luminanceMipCount_; ++mip) {
-      const TextureHandle target = luminanceTextures_[mip][ringIndex];
-      const uint32_t reduceSourceTexId =
-          gpu_.getTextureBindlessIndex(previousTexture);
-      const RenderGraphTextureId targetImport =
-          ctx.graph.importTexture(target, "hdr_luminance_reduce").value();
-      const TextureDimensions sourceDimensions =
-          gpu_.getTextureDimensions(previousTexture);
-      const HDRLuminanceReducePushConstants reduceConstants{
-          .sourceTexId = reduceSourceTexId,
-          .sourceSamplerId = samplerId,
-          .mode = mip == 0u ? 0u : 1u,
-          .texelSizeX =
-              1.0f / static_cast<float>(std::max(sourceDimensions.width, 1u)),
-          .texelSizeY =
-              1.0f / static_cast<float>(std::max(sourceDimensions.height, 1u)),
-      };
-      const DrawItem reduceDraw = makeFullscreenDraw(
-          luminanceResources_.pipelineHandle,
-          std::span<const std::byte>(
-              reinterpret_cast<const std::byte *>(&reduceConstants),
-              sizeof(reduceConstants)),
-          "HDRLuminanceReduce", kDrawDebugColor);
-      addFullscreenTexturePass(
-          ctx.graph, targetImport, std::span<const DrawItem>(&reduceDraw, 1u),
-          std::span<const TextureHandle>(&previousTexture, 1u),
-          "HDR Luminance Reduce Pass", kHDRPassDebugColor, false,
-          GpuTimingScope::HDRPostProcess,
-          std::span<const RenderGraphTextureId>(&previousImport, 1u));
-      previousTexture = target;
-      previousImport = targetImport;
-    }
-    meteringSource = previousTexture;
-    meteringSourceImport = previousImport;
-    sourceTexId = gpu_.getTextureBindlessIndex(meteringSource);
-    reducedLuminanceSource = true;
-  }
-  const uint32_t flags =
-      kHDRPostFlagAdaptationEnabled |
-      (previousExposureTexId != kInvalidTextureBindlessIndex
-           ? kHDRPostFlagExposureHistoryValid
-           : 0u) |
-      (reducedLuminanceSource ? kHDRPostFlagReducedLuminanceSource : 0u);
+  const uint32_t flags = kHDRPostFlagAdaptationEnabled |
+                         (previousExposureTexId != kInvalidTextureBindlessIndex
+                              ? kHDRPostFlagExposureHistoryValid
+                              : 0u);
+  TelemetrySlot *telemetrySlot =
+      telemetryRingReady_ ? acquireTelemetrySlot(ctx) : nullptr;
   const HDRExposurePushConstants pushConstants{
-      .sourceTexId = sourceTexId,
+      .sourceTexId = frameColorTexId,
       .previousExposureTexId = previousExposureTexId,
       .sourceSamplerId = samplerId,
       .flags = flags,
+      .telemetryAddress =
+          telemetrySlot != nullptr
+              ? gpu_.getBufferDeviceAddress(telemetrySlot->device.get())
+              : 0u,
       .targetGray = hdr.adaptationTargetGray,
-      .speed = hdr.adaptationSpeed,
+      .brightenSpeed = hdr.adaptationBrightenSpeed,
+      .darkenSpeed = hdr.adaptationDarkenSpeed,
       .minEv = hdr.adaptationMinEv,
       .maxEv = hdr.adaptationMaxEv,
       .deltaSeconds = static_cast<float>(std::max(ctx.frame.deltaSeconds, 0.0)),
+      .maxEvChange = hdr.adaptationMaxEvChange,
+      .lowPercentile = hdr.histogramLowPercentile,
+      .highPercentile = hdr.histogramHighPercentile,
+      .minLogLuminance = hdr.histogramMinLogLuminance,
+      .maxLogLuminance = hdr.histogramMaxLogLuminance,
+      .meteringMode = static_cast<uint32_t>(hdr.meteringMode),
+      .frameIndex = static_cast<uint32_t>(ctx.frame.frameIndex),
   };
   const RenderGraphTextureId exposureImport =
       ctx.graph.importTexture(exposureWrite, "hdr_exposure_write").value();
-  std::array<TextureHandle, 2> reads{meteringSource, {}};
+  std::array<TextureHandle, 2> reads{source, {}};
   size_t readCount = 1u;
   RenderGraphTextureId previousExposureImport{};
   if (previousExposureTexId != kInvalidTextureBindlessIndex) {
@@ -737,32 +811,84 @@ Result<bool, std::string> HDRExposureAdaptPass::build(FrameBuildContext &ctx) {
           reinterpret_cast<const std::byte *>(&pushConstants),
           sizeof(pushConstants)),
       "HDRExposureAdapt", kDrawDebugColor);
-  std::array<RenderGraphTextureId, 2> graphReads{meteringSourceImport,
+  std::array<RenderGraphTextureId, 2> graphReads{sourceImport,
                                                  previousExposureImport};
   size_t graphReadCount = nuri::isValid(previousExposureImport) ? 2u : 1u;
+  const std::array telemetryDependencies{
+      telemetrySlot != nullptr ? telemetrySlot->device.get() : BufferHandle{}};
+  const std::array telemetryModes{RenderGraphAccessMode::Write};
   addFullscreenTexturePass(
       ctx.graph, exposureImport, std::span<const DrawItem>(&draw, 1u),
       std::span<const TextureHandle>(reads.data(), readCount),
       "HDR Exposure Adapt Pass", kHDRPassDebugColor, false,
       GpuTimingScope::HDRPostProcess,
-      std::span<const RenderGraphTextureId>(graphReads.data(), graphReadCount));
+      std::span<const RenderGraphTextureId>(graphReads.data(), graphReadCount),
+      telemetrySlot != nullptr
+          ? std::span<const BufferHandle>(telemetryDependencies)
+          : std::span<const BufferHandle>{},
+      telemetrySlot != nullptr
+          ? std::span<const RenderGraphAccessMode>(telemetryModes)
+          : std::span<const RenderGraphAccessMode>{});
+  if (telemetrySlot != nullptr) {
+    auto source = ctx.graph.importBuffer(telemetrySlot->device.get(),
+                                         "hdr_exposure_telemetry_source");
+    auto destination = ctx.graph.importBuffer(
+        telemetrySlot->readback.get(), "hdr_exposure_telemetry_readback");
+    if (source.hasError() || destination.hasError()) {
+      return Result<bool, std::string>::makeError(
+          "HDR exposure failed to import telemetry buffers");
+    }
+    const std::array copies{RenderGraphBufferCopyItem{
+        .sourceBuffer = source.value(),
+        .destinationBuffer = destination.value(),
+        .size = sizeof(HDRExposureTelemetryGpuData),
+    }};
+    auto copy = ctx.graph.addBufferCopyPass(RenderGraphBufferCopyPassDesc{
+        .copies = copies,
+        .debugLabel = "HDR Exposure Telemetry Copy",
+        .debugColor = kHDRPassDebugColor,
+    });
+    if (copy.hasError()) {
+      return Result<bool, std::string>::makeError(copy.error());
+    }
+    telemetryScheduled_ = true;
+  }
   ctx.shared.historyWriteRequirements |= FrameTextureRequirementFlags::Exposure;
   HDRPostProcessFrameMetrics &metrics = ctx.frame.metrics.hdrPostProcess;
   metrics.adaptationActive = true;
   metrics.adaptationPassCount += 1u;
-  metrics.luminancePassCount +=
-      reducedLuminanceSource ? luminanceMipCount_ : 0u;
+  metrics.luminancePassCount += 1u;
   metrics.exposureHistoryValid = ctx.shared.exposureHistoryValid;
   metrics.textureCount += 1u;
   metrics.textureBytes += textureStorageBytes(gpu_, exposureWrite);
-  if (reducedLuminanceSource) {
-    metrics.textureCount += luminanceMipCount_;
-    for (uint32_t mip = 0u; mip < luminanceMipCount_; ++mip) {
-      metrics.textureBytes +=
-          textureStorageBytes(gpu_, luminanceTextures_[mip][ringIndex]);
+  return Result<bool, std::string>::makeResult(true);
+}
+
+void HDRExposureAdaptPass::onFrameSubmitted(
+    const RenderFrameContext &frame) noexcept {
+  if (!telemetryScheduled_ || activeTelemetrySlot_ >= telemetrySlots_.size()) {
+    return;
+  }
+  TelemetrySlot &slot = telemetrySlots_[activeTelemetrySlot_];
+  if (slot.sourceFrame == frame.frameIndex) {
+    slot.submission = frame.submission;
+    slot.state = TelemetrySlotState::Pending;
+  }
+  telemetryScheduled_ = false;
+  activeTelemetrySlot_ = std::numeric_limits<size_t>::max();
+}
+
+void HDRExposureAdaptPass::onFrameAbandoned(
+    const RenderFrameContext &frame) noexcept {
+  if (activeTelemetrySlot_ < telemetrySlots_.size()) {
+    TelemetrySlot &slot = telemetrySlots_[activeTelemetrySlot_];
+    if (slot.sourceFrame == frame.frameIndex) {
+      slot.state = TelemetrySlotState::Dropped;
+      ++telemetryDroppedSamples_;
     }
   }
-  return Result<bool, std::string>::makeResult(true);
+  telemetryScheduled_ = false;
+  activeTelemetrySlot_ = std::numeric_limits<size_t>::max();
 }
 
 HDRBloomCompositePass::HDRBloomCompositePass(
@@ -1173,19 +1299,6 @@ Result<bool, std::string> HDRBloomCompositePass::build(FrameBuildContext &ctx) {
           textureStorageBytes(gpu_, bloomUpsampleTextures_[mip][ringIndex]);
     }
   }
-  metrics.effectiveExposureEv = 0.0f;
-  metrics.adaptedExposureEv = 0.0f;
-  if (hdr.adaptationEnabled && ctx.shared.exposureHistoryValid) {
-    const std::optional<float> adaptedLuminance =
-        readExposureLuminance(gpu_, ctx.shared.exposureReadTexture);
-    if (adaptedLuminance.has_value()) {
-      metrics.adaptedExposureEv =
-          exposureEvFromLuminance(*adaptedLuminance, hdr);
-      metrics.effectiveExposureEv =
-          metrics.adaptedExposureEv +
-          renderSettingsOrDefault(ctx.frame).toneMap.exposureEv;
-    }
-  }
   const GpuTimingReport &timingReport = ctx.frame.gpuTiming;
   if (hasGpuTimingScope(timingReport, GpuTimingScope::HDRPostProcess)) {
     metrics.gpuTimeMs = timingReport.hdrPostProcessTimeMs;
@@ -1483,10 +1596,22 @@ void registerHDRPostProcessStages(RenderPipeline &pipeline, GPUDevice &gpu,
   pipeline.addStage(
       std::make_unique<HDRExposureAdaptPass>(gpu, config),
       "HDRPostProcessFeature", "HDRExposureAdaptPass", false,
-      PipelineComponentDesc{.publish = [](void *state, FrameBuildContext &ctx) {
-        return static_cast<HDRExposureAdaptPass *>(state)->publishFrameData(
-            ctx);
-      }});
+      PipelineComponentDesc{
+          .publish =
+              [](void *state, FrameBuildContext &ctx) {
+                return static_cast<HDRExposureAdaptPass *>(state)
+                    ->publishFrameData(ctx);
+              },
+          .submitted =
+              [](void *state, const RenderFrameContext &frame) noexcept {
+                static_cast<HDRExposureAdaptPass *>(state)->onFrameSubmitted(
+                    frame);
+              },
+          .abandoned =
+              [](void *state, const RenderFrameContext &frame) noexcept {
+                static_cast<HDRExposureAdaptPass *>(state)->onFrameAbandoned(
+                    frame);
+              }});
   pipeline.addStage(
       std::make_unique<HDRBloomCompositePass>(gpu, std::move(config)),
       "HDRPostProcessFeature", "HDRBloomCompositePass");

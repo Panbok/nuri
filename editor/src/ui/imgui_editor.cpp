@@ -108,6 +108,10 @@ ddgiFallbackReasonLabel(DDGIFallbackReason reason) noexcept {
     return "ray query unsupported";
   case DDGIFallbackReason::NoVolumes:
     return "no authored volumes";
+  case DDGIFallbackReason::CoverageBoundsUnavailable:
+    return "coverage bounds unavailable";
+  case DDGIFallbackReason::CoverageUnsatisfied:
+    return "coverage contract unsatisfied";
   case DDGIFallbackReason::RayTracingSceneWarming:
     return "ray-traced scene warming";
   case DDGIFallbackReason::VolumeResourcesWarming:
@@ -116,6 +120,33 @@ ddgiFallbackReasonLabel(DDGIFallbackReason reason) noexcept {
     return "shader unavailable";
   case DDGIFallbackReason::AllocationFailed:
     return "allocation failed";
+  case DDGIFallbackReason::ReadbackRingSaturated:
+    return "telemetry ring saturated";
+  case DDGIFallbackReason::OptionalFeatureFailure:
+    return "optional feature failed";
+  }
+  return "unknown";
+}
+
+[[nodiscard]] std::string_view
+ddgiStartupPhaseLabel(DDGIStartupPhase phase) noexcept {
+  switch (phase) {
+  case DDGIStartupPhase::ResourcesPending:
+    return "resources pending";
+  case DDGIStartupPhase::ResourcesReadyNoHistory:
+    return "resources ready, no history";
+  case DDGIStartupPhase::FirstIrradianceReady:
+    return "first irradiance ready";
+  case DDGIStartupPhase::CoarseCoverageReady:
+    return "coarse coverage ready";
+  case DDGIStartupPhase::FullCoverageWarmingDetail:
+    return "full coverage, warming detail";
+  case DDGIStartupPhase::FullCoverageReady:
+    return "full coverage ready";
+  case DDGIStartupPhase::Degraded:
+    return "degraded";
+  case DDGIStartupPhase::Failed:
+    return "failed";
   }
   return "unknown";
 }
@@ -2263,14 +2294,30 @@ void drawHDRPostProcessSettings(RenderSettings::HDRPostProcessSettings &hdr,
   }
   ImGui::Checkbox("Adaptation##HDRPostProcess", &hdr.adaptationEnabled);
   if (hdr.adaptationEnabled) {
+    static constexpr std::array<const char *, 2> kMeteringModeLabels{
+        "Full Frame", "Center Weighted"};
+    int meteringMode = static_cast<int>(hdr.meteringMode);
+    if (ImGui::Combo("Metering##HDRPostProcess", &meteringMode,
+                     kMeteringModeLabels.data(),
+                     static_cast<int>(kMeteringModeLabels.size()))) {
+      hdr.meteringMode = static_cast<HDRExposureMeteringMode>(meteringMode);
+    }
     ImGui::SliderFloat("Target Gray##HDRPostProcess", &hdr.adaptationTargetGray,
                        0.01f, 2.0f, "%.3f");
-    ImGui::SliderFloat("Adaptation Speed##HDRPostProcess", &hdr.adaptationSpeed,
-                       0.0f, 16.0f, "%.2f");
+    ImGui::SliderFloat("Brighten Speed##HDRPostProcess",
+                       &hdr.adaptationBrightenSpeed, 0.0f, 16.0f, "%.2f");
+    ImGui::SliderFloat("Darken Speed##HDRPostProcess",
+                       &hdr.adaptationDarkenSpeed, 0.0f, 16.0f, "%.2f");
+    ImGui::SliderFloat("Max EV Change/Frame##HDRPostProcess",
+                       &hdr.adaptationMaxEvChange, 0.0f, 4.0f, "%.2f");
     ImGui::SliderFloat("Min EV##HDRPostProcess", &hdr.adaptationMinEv, -16.0f,
                        16.0f, "%.2f");
     ImGui::SliderFloat("Max EV##HDRPostProcess", &hdr.adaptationMaxEv, -16.0f,
                        16.0f, "%.2f");
+    ImGui::SliderFloat("Low Percentile##HDRPostProcess",
+                       &hdr.histogramLowPercentile, 0.0f, 0.49f, "%.3f");
+    ImGui::SliderFloat("High Percentile##HDRPostProcess",
+                       &hdr.histogramHighPercentile, 0.51f, 1.0f, "%.3f");
   }
   int hdrDebugIndex = static_cast<int>(hdr.debugView);
   hdrDebugIndex =
@@ -2289,8 +2336,22 @@ void drawHDRPostProcessSettings(RenderSettings::HDRPostProcessSettings &hdr,
               hdrMetrics.adaptationActive ? "yes" : "no");
   ImGui::Text("Exposure history: %s",
               hdrMetrics.exposureHistoryValid ? "valid" : "invalid");
-  ImGui::Text("Adapted EV: %.2f  Effective EV: %.2f",
-              hdrMetrics.adaptedExposureEv, hdrMetrics.effectiveExposureEv);
+  if (hdrMetrics.exposureTelemetryAvailable) {
+    ImGui::Text("Automatic EV: %.2f  Target EV: %.2f  Effective EV: %.2f",
+                hdrMetrics.automaticExposureEv, hdrMetrics.exposureTargetEv,
+                hdrMetrics.effectiveExposureEv);
+    ImGui::Text("Metered luminance: %.4f", hdrMetrics.exposureMeteredLuminance);
+    ImGui::Text("Exposure telemetry: frame %llu, stale %u, invalid %.3f%%",
+                static_cast<unsigned long long>(
+                    hdrMetrics.exposureTelemetrySourceFrameIndex),
+                hdrMetrics.exposureTelemetryStaleFrames,
+                hdrMetrics.exposureInvalidSampleFraction * 100.0f);
+  } else {
+    ImGui::TextUnformatted("Exposure telemetry: unavailable (never blocks)");
+  }
+  ImGui::Text("Exposure telemetry ring: %u pending, %u dropped",
+              hdrMetrics.exposureTelemetryPendingSlots,
+              hdrMetrics.exposureTelemetryDroppedSamples);
   ImGui::Text("Exposure textures: alloc %u, realloc %u",
               hdrMetrics.exposureTextureAllocationCount,
               hdrMetrics.exposureTextureReallocationCount);
@@ -7403,22 +7464,38 @@ struct ImGuiEditor::Impl {
     customChanged |= ImGui::InputScalar("Rays / Probe", ImGuiDataType_U32,
                                         &settings.raysPerProbe);
     customChanged |=
+        ImGui::InputScalar("Classification Rays / Probe", ImGuiDataType_U32,
+                           &settings.classificationRaysPerProbe);
+    customChanged |=
         ImGui::InputScalar("Probe Updates / Frame", ImGuiDataType_U32,
                            &settings.maxProbeUpdatesPerFrame);
-    customChanged |=
-        ImGui::InputScalar("Ray Queries / Frame", ImGuiDataType_U32,
-                           &settings.maxRayQueriesPerFrame);
+    customChanged |= ImGui::InputScalar("Total Query Cap", ImGuiDataType_U32,
+                                        &settings.maxRayQueriesPerFrame);
     customChanged |= ImGui::SliderFloat("Irradiance Hysteresis",
                                         &settings.irradianceHysteresis, 0.0f,
                                         0.9999f, "%.4f");
     customChanged |=
         ImGui::SliderFloat("Distance Hysteresis", &settings.distanceHysteresis,
                            0.0f, 0.9999f, "%.4f");
-    customChanged |= ImGui::SliderFloat(
-        "Spacing Bias", &settings.selfShadowBias, 0.0f, 4.0f, "%.3f");
+    customChanged |=
+        ImGui::SliderFloat("Receiver Bias (spacing scale)",
+                           &settings.selfShadowBias, 0.0f, 2.0f, "%.3f");
+    customChanged |=
+        ImGui::SliderFloat("Primary Probe Bias (world)",
+                           &settings.primaryProbeBias, 0.0f, 0.25f, "%.5f");
+    customChanged |=
+        ImGui::SliderFloat("Local Shadow Bias (spacing scale)",
+                           &settings.localShadowBias, 0.0f, 2.0f, "%.3f");
+    customChanged |=
+        ImGui::SliderFloat("Directional Shadow Bias (spacing scale)",
+                           &settings.directionalShadowBias, 0.0f, 2.0f, "%.3f");
+    customChanged |=
+        ImGui::SliderFloat("Classification Bias (spacing scale)",
+                           &settings.classificationBias, 0.0f, 2.0f, "%.3f");
     ImGui::Checkbox("Relocation", &settings.relocation);
     ImGui::Checkbox("Classification", &settings.classification);
     ImGui::Checkbox("Multi-bounce", &settings.multiBounce);
+    ImGui::Checkbox("Diagnostic Counters", &settings.diagnosticCounters);
     ImGui::SliderFloat("Multi-bounce Luminance Clamp",
                        &settings.multiBounceLuminanceClamp, 0.0f, 256.0f,
                        "%.1f");
@@ -7460,6 +7537,9 @@ struct ImGuiEditor::Impl {
     const std::string_view reason =
         ddgiFallbackReasonLabel(ddgi.fallbackReason);
     ImGui::Text("State: %.*s", static_cast<int>(reason.size()), reason.data());
+    const std::string_view startup = ddgiStartupPhaseLabel(ddgi.startupPhase);
+    ImGui::Text("Startup: %.*s", static_cast<int>(startup.size()),
+                startup.data());
     ImGui::Text("Volumes: %u active / %u ready", ddgi.activeVolumes,
                 ddgi.readyVolumes);
     if (ddgi.failedVolumes != 0u) {
@@ -7471,24 +7551,56 @@ struct ImGuiEditor::Impl {
     }
     ImGui::Text("Probes: %u total / %u updated", ddgi.totalProbes,
                 ddgi.updatedProbes);
+    ImGui::Text("Update capacity: %u requested / %u effective",
+                ddgi.requestedProbeUpdateCapacity,
+                ddgi.effectiveProbeUpdateCapacity);
     if (ddgi.invalidatedProbes != 0u) {
       ImGui::Text("Scroll invalidations: %u probes", ddgi.invalidatedProbes);
     }
-    ImGui::Text(
-        "Queries: %u primary, %u secondary (%u directional + %u local), "
-        "%u reserved unused",
-        ddgi.primaryQueries, ddgi.secondaryQueries,
-        ddgi.directionalSecondaryQueries, ddgi.localSecondaryQueries,
-        ddgi.secondaryQueriesUnused);
+    ImGui::Text("Queries: %u primary (%u classification + %u irradiance), "
+                "%u secondary (%u directional + %u local), "
+                "%u reserved unused, %u budget overflow",
+                ddgi.primaryQueries, ddgi.classificationPrimaryQueries,
+                ddgi.irradiancePrimaryQueries, ddgi.secondaryQueries,
+                ddgi.directionalSecondaryQueries, ddgi.localSecondaryQueries,
+                ddgi.secondaryQueriesUnused,
+                ddgi.secondaryQueryBudgetOverflows);
+    ImGui::Text("Classification work: %u probes @ %u rays/probe",
+                ddgi.classificationProbeUpdates,
+                settings.classificationRaysPerProbe);
     ImGui::Text("Candidates: %u primary + %u secondary; reject alpha %u, "
                 "backface %u; overflow %u; local-light truncation %u",
                 ddgi.primaryCandidateIntersections,
                 ddgi.secondaryCandidateIntersections,
                 ddgi.alphaCandidateRejections, ddgi.backfaceCandidateRejections,
                 ddgi.candidateOverflows, ddgi.localLightTruncations);
+    ImGui::Text("Radiance: non-finite %u; clamps E/D/S/MB/final %u/%u/%u/%u/%u",
+                ddgi.nonFiniteRadianceRejects, ddgi.emissiveRadianceClamps,
+                ddgi.directRadianceClamps, ddgi.skyRadianceClamps,
+                ddgi.multiBounceRadianceClamps, ddgi.finalRadianceClamps);
+    ImGui::Text("Gather: forward %ux%u; <= %u candidates, %u sampled, %u state "
+                "loads/pixel, %u atlas samples/pixel",
+                ddgi.surfaceGatherWidth, ddgi.surfaceGatherHeight,
+                ddgi.surfaceGatherMaxCandidateVolumes,
+                ddgi.surfaceGatherMaxSampledVolumes,
+                ddgi.surfaceGatherMaxStateLoadsPerPixel,
+                ddgi.surfaceGatherMaxAtlasSamplesPerPixel);
     ImGui::Text("History: %s (submission %llu)",
                 ddgi.historyReady != 0u ? "ready" : "warming",
                 static_cast<unsigned long long>(ddgi.submittedSequence));
+    ImGui::Text(
+        "Telemetry: %u pending, oldest %u frames, %u dropped, %u stale; "
+        "waits %u, blocking fallbacks %u",
+        ddgi.readbackPendingSlots, ddgi.readbackOldestPendingAge,
+        ddgi.readbackDroppedSamples, ddgi.traceCounterStaleFrames,
+        ddgi.readbackWaits, ddgi.readbackBlockingFallbacks);
+    if (ddgi.readbackGenerationMismatches != 0u ||
+        ddgi.readbackEarlyReuseAttempts != 0u) {
+      ImGui::TextColored(
+          ImVec4(0.95f, 0.48f, 0.28f, 1.0f),
+          "Telemetry rejected: %u generation mismatch, %u early reuse",
+          ddgi.readbackGenerationMismatches, ddgi.readbackEarlyReuseAttempts);
+    }
     if (ddgi.irradianceResponseRemaining != 0u ||
         ddgi.distanceResponseRemaining != 0u) {
       ImGui::Text("Fast response: irradiance %u / distance %u submissions",
@@ -7498,6 +7610,51 @@ struct ImGuiEditor::Impl {
     ImGui::Text("DDGI memory: %.2f MiB persistent + %.2f MiB frame batch",
                 static_cast<double>(ddgi.persistentBytes) / (1024.0 * 1024.0),
                 static_cast<double>(ddgi.frameBatchBytes) / (1024.0 * 1024.0));
+    if (ddgi.redundantAuthoredVolumes != 0u) {
+      ImGui::TextColored(
+          ImVec4(0.95f, 0.58f, 0.24f, 1.0f),
+          "%u authored volume(s) fully duplicate scene-fit coverage: "
+          "%u probes, %.2f MiB",
+          ddgi.redundantAuthoredVolumes, ddgi.redundantAuthoredProbes,
+          static_cast<double>(ddgi.redundantAuthoredBytes) / (1024.0 * 1024.0));
+    }
+    if (ImGui::BeginTable("DDGIVolumeCosts", 6,
+                          ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
+      ImGui::TableSetupColumn("Slot");
+      ImGui::TableSetupColumn("Kind");
+      ImGui::TableSetupColumn("Probes");
+      ImGui::TableSetupColumn("Memory MiB");
+      ImGui::TableSetupColumn("Refresh frames");
+      ImGui::TableSetupColumn("Coverage");
+      ImGui::TableHeadersRow();
+      for (size_t volumeIndex = 0u; volumeIndex < ddgi.volumes.size();
+           ++volumeIndex) {
+        const DDGIVolumeFrameMetrics &volume = ddgi.volumes[volumeIndex];
+        if (volume.active == 0u) {
+          continue;
+        }
+        ImGui::TableNextRow();
+        ImGui::TableSetColumnIndex(0);
+        ImGui::Text("%zu", volumeIndex);
+        ImGui::TableSetColumnIndex(1);
+        ImGui::Text("%u", volume.effectiveKind);
+        ImGui::TableSetColumnIndex(2);
+        ImGui::Text("%u", volume.totalProbes);
+        ImGui::TableSetColumnIndex(3);
+        ImGui::Text("%.2f", static_cast<double>(volume.persistentBytes) /
+                                (1024.0 * 1024.0));
+        ImGui::TableSetColumnIndex(4);
+        if (volume.estimatedFullRefreshFrames != 0u) {
+          ImGui::Text("%u", volume.estimatedFullRefreshFrames);
+        } else {
+          ImGui::TextUnformatted("unscheduled");
+        }
+        ImGui::TableSetColumnIndex(5);
+        ImGui::TextUnformatted(
+            volume.redundantCoverage != 0u ? "redundant" : "unique/partial");
+      }
+      ImGui::EndTable();
+    }
     ImGui::Text("RT: %s, %u BLAS builds, %u static + %u dynamic instances, "
                 "%u geometries",
                 rt.readiness == RayTracingSceneReadiness::Ready ? "ready"

@@ -40,6 +40,10 @@ TEST(DDGISettingsTests, CustomSettingsClampEveryNormativeRange) {
   settings.changeIrradianceHysteresisScale = 2.0f;
   settings.changeDistanceHysteresisScale = -1.0f;
   settings.selfShadowBias = 4.0f;
+  settings.primaryProbeBias = 1.0f;
+  settings.localShadowBias = 4.0f;
+  settings.directionalShadowBias = -1.0f;
+  settings.classificationBias = std::numeric_limits<float>::quiet_NaN();
   settings.multiBounceLuminanceClamp = 0.0f;
 
   nuri::sanitizeDDGISettings(settings, 4'096u);
@@ -54,7 +58,23 @@ TEST(DDGISettingsTests, CustomSettingsClampEveryNormativeRange) {
   EXPECT_FLOAT_EQ(settings.changeIrradianceHysteresisScale, 1.0f);
   EXPECT_FLOAT_EQ(settings.changeDistanceHysteresisScale, 0.0f);
   EXPECT_FLOAT_EQ(settings.selfShadowBias, 2.0f);
+  EXPECT_FLOAT_EQ(settings.primaryProbeBias, 0.25f);
+  EXPECT_FLOAT_EQ(settings.localShadowBias, 2.0f);
+  EXPECT_FLOAT_EQ(settings.directionalShadowBias, 0.0f);
+  EXPECT_FLOAT_EQ(settings.classificationBias, 0.30f);
   EXPECT_FLOAT_EQ(settings.multiBounceLuminanceClamp, 32.0f);
+}
+
+TEST(DDGISettingsTests, PersistedRadianceClampRemainsHalfFloatRepresentable) {
+  nuri::RenderSettings::DDGISettings settings{};
+  settings.preset = nuri::DDGIQualityPreset::Custom;
+  settings.multiBounceLuminanceClamp =
+      nuri::kMaxDDGIPersistedRadianceLuminance * 4.0f;
+
+  nuri::sanitizeDDGISettings(settings, 4'096u);
+
+  EXPECT_FLOAT_EQ(settings.multiBounceLuminanceClamp,
+                  nuri::kMaxDDGIPersistedRadianceLuminance);
 }
 
 TEST(DDGISettingsTests, RayQueryCapAccountsForReservedSecondaryQueries) {

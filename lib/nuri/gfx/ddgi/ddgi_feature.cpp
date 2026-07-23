@@ -17,6 +17,36 @@ std::atomic_uint64_t nextDDGIFeatureEpoch{1u};
 constexpr uint32_t kDDGIResourceReady = 1u << 0u;
 constexpr uint32_t kDDGIFrameEnabled = 1u << 0u;
 
+[[nodiscard]] constexpr DDGIFallbackReason
+coverageFallbackReason(DDGICoverageLimit limit) noexcept {
+  switch (limit) {
+  case DDGICoverageLimit::SceneBoundsUnavailable:
+  case DDGICoverageLimit::SceneBoundsIncomplete:
+    return DDGIFallbackReason::CoverageBoundsUnavailable;
+  case DDGICoverageLimit::None:
+    return DDGIFallbackReason::None;
+  default:
+    return DDGIFallbackReason::CoverageUnsatisfied;
+  }
+}
+
+[[nodiscard]] constexpr uint64_t
+ddgiPresetPersistentBudget(DDGIQualityPreset preset,
+                           uint64_t customBudget) noexcept {
+  constexpr uint64_t mib = 1024ull * 1024ull;
+  switch (preset) {
+  case DDGIQualityPreset::Low:
+    return std::min(customBudget, 32ull * mib);
+  case DDGIQualityPreset::Balanced:
+    return std::min(customBudget, 64ull * mib);
+  case DDGIQualityPreset::High:
+    return std::min(customBudget, 128ull * mib);
+  case DDGIQualityPreset::Custom:
+    return customBudget;
+  }
+  return customBudget;
+}
+
 template <typename T>
 [[nodiscard]] std::span<const std::byte> bytesOf(const T &value) {
   return {reinterpret_cast<const std::byte *>(&value), sizeof(T)};
@@ -260,7 +290,8 @@ DDGIFeature::DDGIFeature(GPUDevice &gpu, RuntimeDDGIShaderConfig config,
       dependencyBuffers_(memory_), dependencyBufferModes_(memory_),
       dependencyTextures_(memory_), dependencyTextureModes_(memory_),
       forwardDependencyBuffers_(memory_), forwardDependencyTextures_(memory_),
-      submittedLocalLights_(memory_), submittedDirectionalLights_(memory_),
+      selectedLocalLights_(memory_), submittedLocalLights_(memory_),
+      submittedDirectionalLights_(memory_),
       deviceEpoch_(
           nextDDGIFeatureEpoch.fetch_add(1u, std::memory_order_relaxed)) {}
 
@@ -335,10 +366,17 @@ void DDGIFeature::clearVolumes() noexcept {
   environmentVersion_ = UINT64_MAX;
   probeStateMirrorSourceFrame_ = 0u;
   probeStateMirrorAvailable_ = false;
+  latestTraceCounters_ = {};
+  latestTraceCounterResourceGenerations_ = {};
+  latestTraceCounterSceneId_ = 0u;
+  latestTraceCounterDeviceEpoch_ = 0u;
+  latestTraceCounterFeatureGeneration_ = 0u;
+  latestTraceCountersAvailable_ = false;
 }
 
 void DDGIFeature::clearPendingVolumes() noexcept {
   pendingVolumes_.clear();
+  pendingRetainedSourceIndices_.fill(UINT32_MAX);
   replacementPending_ = false;
   compatiblePlanPending_ = false;
   pendingSceneId_ = 0u;
@@ -353,12 +391,16 @@ void DDGIFeature::clearPendingVolumes() noexcept {
   pendingEffectiveVolumeCount_ = 0u;
 }
 
-void DDGIFeature::clearFrameSlots() noexcept { frameSlots_.clear(); }
+void DDGIFeature::clearFrameSlots() noexcept {
+  frameSlots_.clear();
+  activeFrameSlotIndex_ = std::numeric_limits<size_t>::max();
+}
 
 Result<bool, std::string>
 DDGIFeature::rebuildVolumes(FrameBuildContext &ctx,
                             const DDGIEffectiveVolumePlan &plan,
-                            const DDGICoverageSettings &coverageSettings) {
+                            const DDGICoverageSettings &coverageSettings,
+                            bool preserveCompatibleResources) {
   clearPendingVolumes();
   const auto recordFailure = [this](DDGIVolumeFailureReason reason) {
     ++pendingFailedVolumeCount_;
@@ -372,7 +414,8 @@ DDGIFeature::rebuildVolumes(FrameBuildContext &ctx,
   const std::span<const DDGIEffectiveVolume> source = plan.activeVolumes();
   const uint32_t maximumTextureDimension =
       std::max(gpu_.getDeviceCaps().maxTextureDimension2D, 1u);
-  uint64_t aggregateBytes = 0u;
+  uint64_t finalPersistentBytes = 0u;
+  uint64_t newPendingBytes = 0u;
   uint64_t activeBytes = 0u;
   for (const VolumeResource &active : volumes_) {
     activeBytes = saturatingAdd(activeBytes, active.persistentBytes);
@@ -414,6 +457,32 @@ DDGIFeature::rebuildVolumes(FrameBuildContext &ctx,
       resource.requestedCoverageHalfExtents = volume.probeCenterHalfExtents;
       resource.achievedCoverageHalfExtents = volume.probeCenterHalfExtents;
     }
+    if (preserveCompatibleResources) {
+      const auto retained =
+          std::ranges::find_if(volumes_, [&](const VolumeResource &candidate) {
+            const size_t sourceIndex = static_cast<size_t>(
+                std::addressof(candidate) - volumes_.data());
+            return pendingRetainedSourceIndices_[slot] == UINT32_MAX &&
+                   std::ranges::find(pendingRetainedSourceIndices_.begin(),
+                                     pendingRetainedSourceIndices_.begin() +
+                                         slot,
+                                     static_cast<uint32_t>(sourceIndex)) ==
+                       pendingRetainedSourceIndices_.begin() + slot &&
+                   glm::all(glm::equal(candidate.effective.cameraCell,
+                                       volume.cameraCell)) &&
+                   resourceCompatible(candidate, volume);
+          });
+      if (retained != volumes_.end()) {
+        const uint32_t sourceIndex =
+            static_cast<uint32_t>(retained - volumes_.begin());
+        pendingRetainedSourceIndices_[slot] = sourceIndex;
+        resource.persistentBytes = retained->persistentBytes;
+        resource.resourceGeneration = retained->resourceGeneration;
+        finalPersistentBytes =
+            saturatingAdd(finalPersistentBytes, retained->persistentBytes);
+        continue;
+      }
+    }
     if (irradiancePacking.textureExtent.x > maximumTextureDimension ||
         irradiancePacking.textureExtent.y > maximumTextureDimension ||
         distancePacking.textureExtent.x > maximumTextureDimension ||
@@ -424,12 +493,13 @@ DDGIFeature::rebuildVolumes(FrameBuildContext &ctx,
     const DDGIMemoryEstimate &memoryEstimate = volume.memory;
     if (memoryEstimate.persistentBytes >
         config_.persistentMemoryLimitBytes -
-            std::min(aggregateBytes, config_.persistentMemoryLimitBytes)) {
+            std::min(finalPersistentBytes,
+                     config_.persistentMemoryLimitBytes)) {
       recordFailure(DDGIVolumeFailureReason::PersistentMemoryLimit);
       continue;
     }
     const uint64_t replacementBytes =
-        saturatingAdd(activeBytes, aggregateBytes);
+        saturatingAdd(activeBytes, newPendingBytes);
     const uint64_t replacementWithVolume =
         saturatingAdd(replacementBytes, memoryEstimate.persistentBytes);
     const uint64_t replacementPeak =
@@ -506,7 +576,10 @@ DDGIFeature::rebuildVolumes(FrameBuildContext &ctx,
     resource.persistentBytes = memoryEstimate.persistentBytes;
     resource.resourceGeneration = resourceGeneration;
     resource.allocated = true;
-    aggregateBytes += memoryEstimate.persistentBytes;
+    finalPersistentBytes =
+        saturatingAdd(finalPersistentBytes, memoryEstimate.persistentBytes);
+    newPendingBytes =
+        saturatingAdd(newPendingBytes, memoryEstimate.persistentBytes);
   }
   pendingSceneId_ = ctx.frame.scene->id();
   pendingVolumeTopologyVersion_ = ctx.frame.scene->ddgiVolumeTopologyVersion();
@@ -745,10 +818,21 @@ Result<bool, std::string>
 DDGIFeature::ensureFrameSlots(const RenderSettings::DDGISettings &settings,
                               size_t localLightCount,
                               size_t invalidationCapacity) {
-  const uint32_t ringCount = std::max(1u, gpu_.getSwapchainImageCount());
-  if (frameSlots_.size() != ringCount) {
-    clearFrameSlots();
-    frameSlots_.resize(ringCount);
+  // DDGI owns this ring independently from presentation. Two slots per
+  // swapchain image keep ordinary delayed readback from coupling feature
+  // progress to the presentation resource cadence.
+  const uint32_t desiredRingCount =
+      std::max(2u, 2u * std::max(1u, gpu_.getSwapchainImageCount()));
+  if (frameSlots_.size() != desiredRingCount) {
+    const bool hasInFlight =
+        std::ranges::any_of(frameSlots_, [](const FrameSlot &slot) {
+          return slot.state == DDGIReadbackSlotState::Recording ||
+                 slot.state == DDGIReadbackSlotState::Pending;
+        });
+    if (!hasInFlight) {
+      clearFrameSlots();
+      frameSlots_.resize(desiredRingCount);
+    }
   }
   for (FrameSlot &slot : frameSlots_) {
     const auto ensure =
@@ -770,12 +854,22 @@ DDGIFeature::ensureFrameSlots(const RenderSettings::DDGISettings &settings,
       buffer.reset(gpu_, created.value());
       return Result<bool, std::string>::makeResult(true);
     };
+    const bool needsResize =
+        slot.updateCapacity < settings.maxProbeUpdatesPerFrame ||
+        slot.rayCapacity < settings.maxRayQueriesPerFrame ||
+        slot.invalidationCapacity < invalidationCapacity ||
+        slot.localLightCapacity < localLightCount;
+    if (needsResize && (slot.state == DDGIReadbackSlotState::Recording ||
+                        slot.state == DDGIReadbackSlotState::Pending)) {
+      continue;
+    }
     if (slot.updateCapacity < settings.maxProbeUpdatesPerFrame) {
       slot.updates.reset();
       slot.updatesReadback.reset();
       slot.updateCapacity = settings.maxProbeUpdatesPerFrame;
       slot.probeStateResultsValid = false;
       slot.probeStateResultCount = 0u;
+      slot.state = DDGIReadbackSlotState::Dropped;
     }
     if (slot.rayCapacity < settings.maxRayQueriesPerFrame) {
       slot.rayResults.reset();
@@ -789,6 +883,7 @@ DDGIFeature::ensureFrameSlots(const RenderSettings::DDGISettings &settings,
       slot.localLights.reset();
       slot.localLightCapacity = localLightCount;
       slot.traceCountersValid = false;
+      slot.state = DDGIReadbackSlotState::Dropped;
     }
     for (auto result :
          {ensure(slot.frameData, sizeof(DDGIFrameGpuData), Storage::Device,
@@ -842,6 +937,11 @@ Result<bool, std::string> DDGIFeature::updateFrameData(FrameBuildContext &ctx,
     gpuVolume.probeSpacingAndBias =
         glm::vec4(layout.probeSpacing,
                   renderSettingsOrDefault(ctx.frame).ddgi.selfShadowBias);
+    const RenderSettings::DDGISettings &ddgiSettings =
+        renderSettingsOrDefault(ctx.frame).ddgi;
+    gpuVolume.rayBiases = glm::vec4(
+        ddgiSettings.primaryProbeBias, ddgiSettings.localShadowBias,
+        ddgiSettings.directionalShadowBias, ddgiSettings.classificationBias);
     gpuVolume.centerHalfExtentsAndMaxDistance =
         glm::vec4(layout.probeCenterHalfExtents, resource.desc.maxRayDistance);
     gpuVolume.probeCountsAndCount =
@@ -887,10 +987,37 @@ Result<bool, std::string> DDGIFeature::updateFrameData(FrameBuildContext &ctx,
   }
   const std::span<const LocalLightGpuData> localLights =
       ctx.frame.scene->packedLocalLights();
-  if (!localLights.empty()) {
-    auto lightUpload =
-        gpu_.updateBuffer(slot.localLights.get(), bytesOf(localLights),
-                          sizeof(DDGITraceCountersGpuData));
+  totalLocalLightCount_ = static_cast<uint32_t>(std::min<size_t>(
+      localLights.size(), std::numeric_limits<uint16_t>::max()));
+  secondaryLightingPossible_ =
+      !ctx.frame.scene->packedDirectionalLights().empty() ||
+      (totalLocalLightCount_ != 0u &&
+       renderSettingsOrDefault(ctx.frame).ddgi.maxLocalLightsPerHit != 0u);
+  selectedLocalLights_.clear();
+  const uint32_t candidateCap =
+      std::min(renderSettingsOrDefault(ctx.frame).ddgi.maxLocalLightsPerHit,
+               totalLocalLightCount_);
+  selectedLocalLights_.reserve(candidateCap);
+  if (candidateCap != 0u) {
+    const uint32_t first = static_cast<uint32_t>(
+        ctx.frame.frameIndex % std::max<uint32_t>(totalLocalLightCount_, 1u));
+    // Spread the bounded CPU subset across the packed light domain. Advancing
+    // `first` each frame keeps every light's long-run inclusion probability
+    // equal while avoiding a spatially clustered consecutive window.
+    const uint32_t stride = std::max(totalLocalLightCount_ / candidateCap, 1u);
+    for (uint32_t candidate = 0u; candidate < candidateCap; ++candidate) {
+      const uint32_t lightIndex =
+          static_cast<uint32_t>((static_cast<uint64_t>(first) +
+                                 static_cast<uint64_t>(candidate) * stride) %
+                                totalLocalLightCount_);
+      selectedLocalLights_.push_back(localLights[lightIndex]);
+    }
+  }
+  selectedLocalLightCount_ = static_cast<uint32_t>(selectedLocalLights_.size());
+  if (!selectedLocalLights_.empty()) {
+    auto lightUpload = gpu_.updateBuffer(
+        slot.localLights.get(), bytesOf(std::span(selectedLocalLights_)),
+        sizeof(DDGITraceCountersGpuData));
     if (lightUpload.hasError()) {
       return lightUpload;
     }
@@ -982,10 +1109,19 @@ Result<bool, std::string> DDGIFeature::appendScrollPass(FrameBuildContext &ctx,
                RenderGraphAccessMode::Read);
   appendUnique(dependencyBuffers_, dependencyBufferModes_,
                slot.invalidations.get(), RenderGraphAccessMode::Read);
+  uint32_t invalidationOffset = 0u;
   for (uint32_t volumeSlot = 0u;
        volumeSlot < static_cast<uint32_t>(volumes_.size()); ++volumeSlot) {
     const VolumeResource &volume = volumes_[volumeSlot];
-    if (!volume.ready) {
+    const uint32_t firstInvalidation = invalidationOffset;
+    while (invalidationOffset < scrollInvalidations_.size() &&
+           scrollInvalidations_[invalidationOffset].volumeStableId ==
+               volumeSlot) {
+      ++invalidationOffset;
+    }
+    const uint32_t volumeInvalidationCount =
+        invalidationOffset - firstInvalidation;
+    if (!volume.ready || volumeInvalidationCount == 0u) {
       continue;
     }
     const std::array outputs{volume.irradiance.get(), volume.distance.get()};
@@ -994,23 +1130,22 @@ Result<bool, std::string> DDGIFeature::appendScrollPass(FrameBuildContext &ctx,
       blendPushConstants_.push_back(BlendPushConstants{
           .frame = gpu_.getBufferDeviceAddress(slot.frameData.get()),
           .updates = gpu_.getBufferDeviceAddress(slot.invalidations.get()),
-          .updateCount = static_cast<uint32_t>(scrollInvalidations_.size()),
+          .updateCount = volumeInvalidationCount,
+          .updateOffset = firstInvalidation,
           .volumeSlot = volumeSlot,
           .outputTextureId = gpu_.getTextureBindlessIndex(outputs[type]),
           .clearMode = 2u,
       });
       dispatches_.push_back(ComputeDispatchItem{
           .pipeline = pipelines_[pipelineIndices[type]].get(),
-          .dispatch = {.x = static_cast<uint32_t>(scrollInvalidations_.size()),
-                       .y = 1u,
-                       .z = 1u},
+          .dispatch = {.x = volumeInvalidationCount, .y = 1u, .z = 1u},
           .pushConstants = bytesOf(blendPushConstants_.back()),
           .debugLabel =
               type == 0u ? "DDGI Scroll Irradiance" : "DDGI Scroll Distance",
           .debugColor = 0xffcc9955u,
       });
       appendUnique(dependencyTextures_, dependencyTextureModes_, outputs[type],
-                   RenderGraphAccessMode::Write);
+                   RenderGraphAccessMode::Read | RenderGraphAccessMode::Write);
     }
   }
 
@@ -1029,7 +1164,7 @@ Result<bool, std::string> DDGIFeature::appendScrollPass(FrameBuildContext &ctx,
             : 0u;
     appendUnique(dependencyBuffers_, dependencyBufferModes_,
                  volumes_[index].probeState.get(),
-                 RenderGraphAccessMode::Write);
+                 RenderGraphAccessMode::Read | RenderGraphAccessMode::Write);
   }
   dispatches_.push_back(ComputeDispatchItem{
       .pipeline = pipelines_[UpdateProbeState].get(),
@@ -1062,8 +1197,27 @@ Result<bool, std::string> DDGIFeature::appendScrollPass(FrameBuildContext &ctx,
 }
 
 Result<DDGIScheduleResult, std::string>
-DDGIFeature::buildSchedule(const RenderSettings::DDGISettings &settings) {
+DDGIFeature::buildSchedule(const RenderSettings::DDGISettings &settings,
+                           bool conservativeSecondaryBudget) {
   ScopedScratch scoped(scratch_);
+  secondaryQueriesPer1024Primary_ = secondaryLightingPossible_ ? 1024u : 0u;
+  if (!conservativeSecondaryBudget && secondaryLightingPossible_ &&
+      latestTraceCountersAvailable_ &&
+      latestTraceCounters_.primaryQueriesIssued != 0u) {
+    const uint64_t scaled =
+        static_cast<uint64_t>(latestTraceCounters_.secondaryQueries) * 1024u;
+    const uint32_t observed = static_cast<uint32_t>(std::min<uint64_t>(
+        (scaled + latestTraceCounters_.primaryQueriesIssued - 1u) /
+            latestTraceCounters_.primaryQueriesIssued,
+        1024u));
+    const uint32_t margin = std::max(1u, (observed + 49u) / 50u);
+    secondaryQueriesPer1024Primary_ = std::min(1024u, observed + margin);
+    if (latestTraceCounters_.secondaryQueryBudgetOverflows != 0u) {
+      secondaryQueriesPer1024Primary_ =
+          std::min(1024u, std::max(secondaryQueriesPer1024Primary_ + 1u,
+                                   2u * secondaryQueriesPer1024Primary_));
+    }
+  }
   const bool sceneFitBootstrap =
       coverageSettings_.mode == DDGICoverageMode::Hybrid &&
       std::ranges::any_of(volumes_, [](const VolumeResource &volume) {
@@ -1133,8 +1287,10 @@ DDGIFeature::buildSchedule(const RenderSettings::DDGISettings &settings) {
       candidates, tiers,
       DDGISchedulerLimits{
           .raysPerProbe = settings.raysPerProbe,
+          .classificationRaysPerProbe = settings.classificationRaysPerProbe,
           .maxProbeUpdates = settings.maxProbeUpdatesPerFrame,
           .maxRayQueries = settings.maxRayQueriesPerFrame,
+          .secondaryQueriesPer1024Primary = secondaryQueriesPer1024Primary_,
           .forceFullUpdate = ddgiEpochIsPending(
               settings.requestedEpochs.forceFullUpdate, consumedForceEpoch_),
       },
@@ -1154,8 +1310,10 @@ DDGIFeature::buildSchedule(const RenderSettings::DDGISettings &settings) {
   std::ranges::sort(selected, {}, [](const DDGIProbeUpdateEntry &entry) {
     return std::pair(entry.volumeStableId, entry.rayBase);
   });
-  for (uint32_t index = 0u; index < selected.size(); ++index) {
-    selected[index].rayBase = index * settings.raysPerProbe;
+  uint32_t rayBase = 0u;
+  for (DDGIProbeUpdateEntry &entry : selected) {
+    entry.rayBase = rayBase;
+    rayBase += entry.rayCount;
   }
   scheduledEntries_.assign(
       output.begin(), output.begin() + schedule.value().schedule.updatedProbes);
@@ -1167,6 +1325,17 @@ Result<bool, std::string>
 DDGIFeature::appendUpdatePasses(FrameBuildContext &ctx, FrameSlot &slot,
                                 const DDGIScheduleResult &schedule) {
   DDGITraceCountersGpuData initialCounters{};
+  // Primary dispatch cardinality is known exactly from the CPU schedule. Seed
+  // it here instead of paying one diagnostic atomic per primary ray; the
+  // adaptive secondary-query reservation remains valid with diagnostics off.
+  initialCounters.primaryQueriesIssued = schedule.primaryQueries;
+  for (const DDGIProbeUpdateEntry &entry : scheduledEntries_) {
+    if (entry.volumeStableId <
+        initialCounters.primaryQueriesIssuedByVolume.size()) {
+      initialCounters.primaryQueriesIssuedByVolume[entry.volumeStableId] +=
+          entry.rayCount;
+    }
+  }
   initialCounters.secondaryQueriesReserved = schedule.secondaryQueriesReserved;
   initialCounters.sourceFrame = static_cast<uint32_t>(ctx.frame.frameIndex);
   auto counterUpload =
@@ -1204,23 +1373,41 @@ DDGIFeature::appendUpdatePasses(FrameBuildContext &ctx, FrameSlot &slot,
   const MaterialTableGpuData &materials = *ctx.shared.materialTableGpuData;
   const std::span<const DirectionalLightGpuData> directionalLights =
       scene.packedDirectionalLights();
-  const std::span<const LightId> directionalLightIds =
-      scene.packedDirectionalLightIds();
-  uint32_t directionalLightIndex = 0u;
-  if (ctx.shared.selectedShadowLightId.has_value()) {
-    const auto selected = std::ranges::find(directionalLightIds,
-                                            *ctx.shared.selectedShadowLightId);
-    if (selected != directionalLightIds.end()) {
-      directionalLightIndex =
-          static_cast<uint32_t>(selected - directionalLightIds.begin());
-    }
-  }
+  const uint32_t directionalLightCount = static_cast<uint32_t>(std::min<size_t>(
+      directionalLights.size(), std::numeric_limits<uint16_t>::max()));
+  const uint32_t directionalLightIndex =
+      directionalLightCount == 0u
+          ? 0u
+          : static_cast<uint32_t>(ctx.frame.frameIndex % directionalLightCount);
   const DirectionalLightGpuData *directionalLight =
       directionalLightIndex < directionalLights.size()
           ? &directionalLights[directionalLightIndex]
           : nullptr;
-  const std::span<const LocalLightGpuData> localLights =
-      scene.packedLocalLights();
+  float directionalTraceExtent = 1.0f;
+  if (rt.staticCoverageBounds.valid) {
+    directionalTraceExtent =
+        std::max(glm::length(rt.staticCoverageBounds.bounds.max_ -
+                             rt.staticCoverageBounds.bounds.min_),
+                 1.0f);
+  } else {
+    for (const VolumeResource &volume : volumes_) {
+      directionalTraceExtent =
+          std::max(directionalTraceExtent, 4.0f * volume.desc.maxRayDistance);
+    }
+  }
+  const uint32_t packedTraceLimits =
+      (std::min(static_cast<uint32_t>(std::ceil(directionalTraceExtent)),
+                static_cast<uint32_t>(std::numeric_limits<uint16_t>::max()))
+       << 16u) |
+      std::min(renderSettingsOrDefault(ctx.frame)
+                   .ddgi.maxCandidateIntersectionsPerRay,
+               static_cast<uint32_t>(std::numeric_limits<uint16_t>::max()));
+  const uint32_t packedLocalLightCounts =
+      (std::min(totalLocalLightCount_,
+                static_cast<uint32_t>(std::numeric_limits<uint16_t>::max()))
+       << 16u) |
+      std::min(selectedLocalLightCount_,
+               static_cast<uint32_t>(std::numeric_limits<uint16_t>::max()));
   tracePushConstants_ = TracePushConstants{
       .frame = gpu_.getBufferDeviceAddress(slot.frameData.get()),
       .updates = gpu_.getBufferDeviceAddress(slot.updates.get()),
@@ -1240,20 +1427,24 @@ DDGIFeature::appendUpdatePasses(FrameBuildContext &ctx, FrameSlot &slot,
                           renderSettingsOrDefault(ctx.frame)
                               .ddgi.multiBounceLuminanceClamp),
       .localLights = gpu_.getBufferDeviceAddress(slot.localLights.get()),
-      .rayCount = schedule.primaryQueries,
+      .updateCount = schedule.updatedProbes,
       .raysPerProbe = renderSettingsOrDefault(ctx.frame).ddgi.raysPerProbe,
       .skyTextureId = skyTextureId,
       .skySamplerId = gpu_.getCubemapSamplerBindlessIndex(),
-      .maxCandidates = renderSettingsOrDefault(ctx.frame)
-                           .ddgi.maxCandidateIntersectionsPerRay,
+      .maxCandidates = packedTraceLimits,
       .frameSeed = static_cast<uint32_t>(submittedSequence_),
       .materialSamplerId = gpu_.getDefaultSamplerBindlessIndex(),
-      .directionalLightCount = directionalLight != nullptr ? 1u : 0u,
-      .localLightCount = static_cast<uint32_t>(localLights.size()),
+      .directionalLightCount =
+          (directionalLightCount << 16u) |
+          static_cast<uint32_t>(directionalLight != nullptr),
+      .localLightCount = packedLocalLightCounts,
       .maxLocalLights =
           renderSettingsOrDefault(ctx.frame).ddgi.maxLocalLightsPerHit |
           (renderSettingsOrDefault(ctx.frame).ddgi.multiBounce ? 0x80000000u
-                                                               : 0u),
+                                                               : 0u) |
+          (renderSettingsOrDefault(ctx.frame).ddgi.diagnosticCounters
+               ? 0x40000000u
+               : 0u),
   };
   dependencyBuffers_.clear();
   dependencyBufferModes_.clear();
@@ -1291,8 +1482,10 @@ DDGIFeature::appendUpdatePasses(FrameBuildContext &ctx, FrameSlot &slot,
   const std::array traceDispatches{ComputeDispatchItem{
       .pipeline = pipelines_[Trace].get(),
       .rayQueryBinding = traceBinding_.get(),
-      .dispatch = {.x = divRoundUp(schedule.primaryQueries, 64u),
-                   .y = 1u,
+      .dispatch = {.x = schedule.updatedProbes,
+                   .y = divRoundUp(
+                       renderSettingsOrDefault(ctx.frame).ddgi.raysPerProbe,
+                       64u),
                    .z = 1u},
       .pushConstants = bytesOf(tracePushConstants_),
       .debugLabel = "DDGI Trace",
@@ -1382,7 +1575,7 @@ DDGIFeature::appendUpdatePasses(FrameBuildContext &ctx, FrameSlot &slot,
           .debugColor = 0xff55dd88u,
       });
       appendUnique(dependencyTextures_, dependencyTextureModes_, outputs[type],
-                   RenderGraphAccessMode::Write);
+                   RenderGraphAccessMode::Read | RenderGraphAccessMode::Write);
     }
   }
   auto updatePass = ctx.graph.addGraphicsPass(RenderGraphGraphicsPassDesc{
@@ -1438,7 +1631,7 @@ DDGIFeature::appendUpdatePasses(FrameBuildContext &ctx, FrameSlot &slot,
             : 0u;
     appendUnique(dependencyBuffers_, dependencyBufferModes_,
                  volumes_[index].probeState.get(),
-                 RenderGraphAccessMode::Write);
+                 RenderGraphAccessMode::Read | RenderGraphAccessMode::Write);
   }
   const std::array stateDispatches{ComputeDispatchItem{
       .pipeline = pipelines_[UpdateProbeState].get(),
@@ -1497,6 +1690,9 @@ DDGIFeature::appendUpdatePasses(FrameBuildContext &ctx, FrameSlot &slot,
   if (readbackPass.hasError()) {
     return Result<bool, std::string>::makeError(readbackPass.error());
   }
+  slot.byteCount = schedule.updatedProbes * sizeof(DDGIProbeUpdateEntry) +
+                   sizeof(DDGITraceCountersGpuData);
+  scheduledReadbackBytes_ = slot.byteCount;
   updatesScheduled_ = true;
   scheduledFrameIndex_ = ctx.frame.frameIndex;
   pendingForceEpoch_ =
@@ -1688,6 +1884,9 @@ DDGIFeature::appendInspectionPass(FrameBuildContext &ctx, FrameSlot &slot) {
   }
   slot.diagnosticRequest = request;
   slot.diagnosticRequest->rayCount = rayCount;
+  slot.requestId = request.requestId;
+  slot.byteCount += kDDGIDiagnosticBufferBytes;
+  scheduledReadbackBytes_ += kDDGIDiagnosticBufferBytes;
   slot.diagnosticValid = false;
   inspectionScheduled_ = true;
   scheduledFrameIndex_ = ctx.frame.frameIndex;
@@ -1880,10 +2079,19 @@ void DDGIFeature::collectCompletedTraceMetrics(FrameSlot &slot,
         slot.traceCountersReadback.get(), 0u,
         std::as_writable_bytes(std::span(&counters, static_cast<size_t>(1u))));
     if (!read.hasError()) {
+      latestTraceCounters_ = counters;
+      latestTraceCounterSceneId_ = slot.sceneId;
+      latestTraceCounterDeviceEpoch_ = slot.deviceEpoch;
+      latestTraceCounterFeatureGeneration_ = slot.featureGeneration;
+      latestTraceCounterResourceGenerations_ =
+          slot.probeStateResourceGenerations;
+      latestTraceCountersAvailable_ = true;
       metrics.primaryQueriesIssued = counters.primaryQueriesIssued;
       metrics.traceCounterSourceFrame = counters.sourceFrame;
       metrics.secondaryQueriesReserved = counters.secondaryQueriesReserved;
       metrics.secondaryQueries = counters.secondaryQueries;
+      metrics.secondaryQueryBudgetOverflows =
+          counters.secondaryQueryBudgetOverflows;
       metrics.localSecondaryQueries = counters.localSecondaryQueries;
       metrics.directionalSecondaryQueries =
           counters.secondaryQueries -
@@ -1901,6 +2109,12 @@ void DDGIFeature::collectCompletedTraceMetrics(FrameSlot &slot,
           counters.backfaceCandidateRejections;
       metrics.candidateOverflows = counters.candidateOverflows;
       metrics.localLightTruncations = counters.localLightTruncations;
+      metrics.nonFiniteRadianceRejects = counters.nonFiniteRadianceRejects;
+      metrics.emissiveRadianceClamps = counters.emissiveRadianceClamps;
+      metrics.directRadianceClamps = counters.directRadianceClamps;
+      metrics.skyRadianceClamps = counters.skyRadianceClamps;
+      metrics.multiBounceRadianceClamps = counters.multiBounceRadianceClamps;
+      metrics.finalRadianceClamps = counters.finalRadianceClamps;
       for (size_t volumeIndex = 0u; volumeIndex < volumes_.size();
            ++volumeIndex) {
         if (slot.probeStateResourceGenerations[volumeIndex] !=
@@ -1915,6 +2129,171 @@ void DDGIFeature::collectCompletedTraceMetrics(FrameSlot &slot,
     }
   }
   slot.traceCountersValid = false;
+}
+
+void DDGIFeature::collectCompletedReadbacks(FrameBuildContext &ctx) {
+  for (FrameSlot &slot : frameSlots_) {
+    if (slot.state != DDGIReadbackSlotState::Pending ||
+        !isValid(slot.submission) ||
+        !gpu_.isSubmissionComplete(slot.submission)) {
+      continue;
+    }
+    slot.state = DDGIReadbackSlotState::Completed;
+    const bool compatible = ctx.frame.scene != nullptr &&
+                            slot.sceneId == ctx.frame.scene->id() &&
+                            slot.deviceEpoch == deviceEpoch_ &&
+                            slot.featureGeneration == coverageGeneration_ &&
+                            slot.payloadSchema == kDDGIFrameMetricsVersion;
+    if (!compatible) {
+      ++readbackGenerationMismatches_;
+      slot.probeStateResultsValid = false;
+      slot.traceCountersValid = false;
+      slot.diagnosticValid = false;
+      slot.diagnosticRequest.reset();
+      slot.state = DDGIReadbackSlotState::Dropped;
+      continue;
+    }
+  }
+
+  // Submission completion is ordered, but physical ring indices are not.
+  // Consume oldest-to-newest so a recycled low-index slot can never publish
+  // newer probe state and then be overwritten by an older high-index slot.
+  for (;;) {
+    FrameSlot *oldest = nullptr;
+    for (FrameSlot &slot : frameSlots_) {
+      if (slot.state != DDGIReadbackSlotState::Completed ||
+          (oldest != nullptr && slot.sourceFrame >= oldest->sourceFrame)) {
+        continue;
+      }
+      oldest = &slot;
+    }
+    if (oldest == nullptr) {
+      break;
+    }
+    collectCompletedProbeStates(*oldest);
+    collectCompletedTraceMetrics(*oldest, ctx.frame.metrics.ddgi);
+    collectCompletedInspection(ctx, *oldest);
+    oldest->state = DDGIReadbackSlotState::Consumed;
+  }
+}
+
+DDGIFeature::FrameSlot *
+DDGIFeature::acquireFrameSlot(uint64_t frameIndex) noexcept {
+  for (FrameSlot &slot : frameSlots_) {
+    if (slot.state == DDGIReadbackSlotState::Recording &&
+        !isValid(slot.submission)) {
+      slot.state = DDGIReadbackSlotState::Dropped;
+    }
+    if (slot.state == DDGIReadbackSlotState::Free ||
+        slot.state == DDGIReadbackSlotState::Consumed ||
+        slot.state == DDGIReadbackSlotState::Dropped) {
+      slot.state = DDGIReadbackSlotState::Recording;
+      slot.submission = {};
+      slot.sourceFrame = frameIndex;
+      slot.sceneId = sceneId_;
+      slot.deviceEpoch = deviceEpoch_;
+      slot.featureGeneration = coverageGeneration_;
+      slot.payloadSchema = kDDGIFrameMetricsVersion;
+      slot.requestId = 0u;
+      slot.byteCount = 0u;
+      return &slot;
+    }
+  }
+  ++readbackDroppedSamples_;
+  return nullptr;
+}
+
+void DDGIFeature::publishReadbackMetrics(DDGIFrameMetrics &metrics,
+                                         uint64_t frameIndex) const noexcept {
+  uint64_t oldestPendingAge = 0u;
+  uint32_t pendingCount = 0u;
+  uint64_t perSlotBytes = 0u;
+  for (const FrameSlot &slot : frameSlots_) {
+    perSlotBytes =
+        std::max(perSlotBytes,
+                 static_cast<uint64_t>(slot.updateCapacity) *
+                         sizeof(DDGIProbeUpdateEntry) +
+                     sizeof(DDGITraceCountersGpuData) +
+                     (slot.diagnosticReadback.valid()
+                          ? static_cast<uint64_t>(kDDGIDiagnosticBufferBytes)
+                          : 0u));
+    if (slot.state != DDGIReadbackSlotState::Pending) {
+      continue;
+    }
+    ++pendingCount;
+    oldestPendingAge = std::max(
+        oldestPendingAge,
+        frameIndex >= slot.sourceFrame ? frameIndex - slot.sourceFrame : 0u);
+  }
+  metrics.readbackPendingSlots = pendingCount;
+  metrics.readbackDroppedSamples = static_cast<uint32_t>(
+      std::min(readbackDroppedSamples_,
+               static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())));
+  metrics.readbackGenerationMismatches = static_cast<uint32_t>(
+      std::min(readbackGenerationMismatches_,
+               static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())));
+  metrics.readbackEarlyReuseAttempts = static_cast<uint32_t>(
+      std::min(readbackEarlyReuseAttempts_,
+               static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())));
+  metrics.readbackOldestPendingAge = static_cast<uint32_t>(
+      std::min(oldestPendingAge,
+               static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())));
+  metrics.readbackCopyBytes = scheduledReadbackBytes_;
+  metrics.readbackPerSlotBytes = perSlotBytes;
+  metrics.readbackRingBytes =
+      perSlotBytes * static_cast<uint64_t>(frameSlots_.size());
+  metrics.readbackWaits = 0u;
+  metrics.readbackBlockingFallbacks = 0u;
+
+  if (!latestTraceCountersAvailable_ ||
+      latestTraceCounterSceneId_ != sceneId_ ||
+      latestTraceCounterDeviceEpoch_ != deviceEpoch_ ||
+      latestTraceCounterFeatureGeneration_ != coverageGeneration_) {
+    return;
+  }
+  const DDGITraceCountersGpuData &counters = latestTraceCounters_;
+  metrics.primaryQueriesIssued = counters.primaryQueriesIssued;
+  metrics.traceCounterSourceFrame = counters.sourceFrame;
+  metrics.traceCounterStaleFrames = static_cast<uint32_t>(
+      std::min(frameIndex >= counters.sourceFrame
+                   ? frameIndex - static_cast<uint64_t>(counters.sourceFrame)
+                   : 0u,
+               static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())));
+  metrics.secondaryQueriesReserved = counters.secondaryQueriesReserved;
+  metrics.secondaryQueries = counters.secondaryQueries;
+  metrics.secondaryQueryBudgetOverflows =
+      counters.secondaryQueryBudgetOverflows;
+  metrics.localSecondaryQueries = counters.localSecondaryQueries;
+  metrics.directionalSecondaryQueries =
+      counters.secondaryQueries -
+      std::min(counters.secondaryQueries, counters.localSecondaryQueries);
+  metrics.secondaryQueriesUnused =
+      counters.secondaryQueriesReserved -
+      std::min(counters.secondaryQueriesReserved, counters.secondaryQueries);
+  metrics.primaryCandidateIntersections =
+      counters.primaryCandidateIntersections;
+  metrics.secondaryCandidateIntersections =
+      counters.secondaryCandidateIntersections;
+  metrics.alphaCandidateRejections = counters.alphaCandidateRejections;
+  metrics.backfaceCandidateRejections = counters.backfaceCandidateRejections;
+  metrics.candidateOverflows = counters.candidateOverflows;
+  metrics.localLightTruncations = counters.localLightTruncations;
+  metrics.nonFiniteRadianceRejects = counters.nonFiniteRadianceRejects;
+  metrics.emissiveRadianceClamps = counters.emissiveRadianceClamps;
+  metrics.directRadianceClamps = counters.directRadianceClamps;
+  metrics.skyRadianceClamps = counters.skyRadianceClamps;
+  metrics.multiBounceRadianceClamps = counters.multiBounceRadianceClamps;
+  metrics.finalRadianceClamps = counters.finalRadianceClamps;
+  for (size_t volumeIndex = 0u; volumeIndex < volumes_.size(); ++volumeIndex) {
+    if (latestTraceCounterResourceGenerations_[volumeIndex] !=
+        volumes_[volumeIndex].resourceGeneration) {
+      continue;
+    }
+    metrics.volumes[volumeIndex].primaryQueriesIssued =
+        counters.primaryQueriesIssuedByVolume[volumeIndex];
+    metrics.volumes[volumeIndex].secondaryQueries =
+        counters.secondaryQueriesByVolume[volumeIndex];
+  }
 }
 
 void DDGIFeature::collectCompletedInspection(FrameBuildContext &ctx,
@@ -2082,6 +2461,24 @@ void DDGIFeature::publishFrameData(FrameBuildContext &ctx, FrameSlot &slot,
     metrics.relocateClassifyGpuTimingAvailable = 1u;
   }
   metrics.activeVolumes = static_cast<uint32_t>(volumes_.size());
+  metrics.diagnosticCountersEnabled =
+      renderSettingsOrDefault(ctx.frame).ddgi.diagnosticCounters ? 1u : 0u;
+  metrics.surfaceGatherArchitecture =
+      DDGISurfaceGatherArchitecture::ForwardFragment;
+  if (nuri::isValid(ctx.shared.sceneColorTexture)) {
+    const TextureDimensions dimensions =
+        gpu_.getTextureDimensions(ctx.shared.sceneColorTexture);
+    metrics.surfaceGatherWidth = dimensions.width;
+    metrics.surfaceGatherHeight = dimensions.height;
+  }
+  metrics.surfaceGatherMaxCandidateVolumes = metrics.activeVolumes;
+  metrics.surfaceGatherMaxSampledVolumes =
+      std::min(metrics.activeVolumes, kMaxDDGIVolumesSampledPerSurface);
+  metrics.surfaceGatherMaxStateLoadsPerPixel =
+      8u * (metrics.surfaceGatherMaxCandidateVolumes +
+            metrics.surfaceGatherMaxSampledVolumes);
+  metrics.surfaceGatherMaxAtlasSamplesPerPixel =
+      16u * metrics.surfaceGatherMaxSampledVolumes;
   metrics.readyVolumes = readyCount;
   metrics.failedVolumes =
       replacementPending_ ? pendingFailedVolumeCount_ : failedVolumeCount_;
@@ -2106,6 +2503,10 @@ void DDGIFeature::publishFrameData(FrameBuildContext &ctx, FrameSlot &slot,
     metrics.inspectionEventOverflows = inspection.diagnosticEventOverflowCount;
   }
   uint64_t committedAtlasBytes = 0u;
+  const auto sceneFitVolume =
+      std::ranges::find_if(volumes_, [](const VolumeResource &volume) {
+        return volume.effective.key.kind == DDGIEffectiveVolumeKind::SceneFit;
+      });
   for (size_t volumeIndex = 0u; volumeIndex < volumes_.size(); ++volumeIndex) {
     const VolumeResource &volume = volumes_[volumeIndex];
     DDGIVolumeFrameMetrics &volumeMetrics = metrics.volumes[volumeIndex];
@@ -2126,12 +2527,6 @@ void DDGIFeature::publishFrameData(FrameBuildContext &ctx, FrameSlot &slot,
     volumeMetrics.cameraCell = volume.layout.cameraCell;
     volumeMetrics.deficit = volume.schedulerDeficit;
     volumeMetrics.starvationFrames = volume.schedulerStarvationFrames;
-    for (const uint64_t lastUpdate : volume.lastSubmittedUpdates) {
-      volumeMetrics.initializedProbes += lastUpdate != 0u ? 1u : 0u;
-    }
-    volumeMetrics.invalidProbes =
-        volumeMetrics.totalProbes - volumeMetrics.initializedProbes;
-    volumeMetrics.shadingEnabledProbes = volumeMetrics.initializedProbes;
     for (const DDGIProbeUpdateEntry &entry : scrollInvalidations_) {
       volumeMetrics.newlyExposedProbes +=
           entry.volumeStableId == volumeIndex ? 1u : 0u;
@@ -2164,26 +2559,31 @@ void DDGIFeature::publishFrameData(FrameBuildContext &ctx, FrameSlot &slot,
       for (const uint64_t lastUpdate : volume.lastSubmittedUpdates) {
         ages.push_back(saturatingAge(submittedSequence_, lastUpdate));
       }
-      std::ranges::sort(ages);
-      volumeMetrics.updateAgeMedian = ages[(ages.size() - 1u) / 2u];
+      const size_t medianIndex = (ages.size() - 1u) / 2u;
       const size_t p95Index =
           std::min((ages.size() * 95u + 99u) / 100u, ages.size()) - 1u;
+      volumeMetrics.updateAgeMaximum = *std::ranges::max_element(ages);
+      std::ranges::nth_element(ages, ages.begin() + medianIndex);
+      volumeMetrics.updateAgeMedian = ages[medianIndex];
+      std::ranges::nth_element(ages, ages.begin() + p95Index);
       volumeMetrics.updateAgeP95 = ages[p95Index];
-      volumeMetrics.updateAgeMaximum = ages.back();
     }
     volumeMetrics.estimatedFullRefreshFrames =
         volumeMetrics.usedQuota == 0u
             ? 0u
             : divRoundUp(volumeMetrics.totalProbes, volumeMetrics.usedQuota);
-    const float initializedRatio =
-        volumeMetrics.totalProbes == 0u
-            ? 0.0f
-            : static_cast<float>(volumeMetrics.initializedProbes) /
-                  static_cast<float>(volumeMetrics.totalProbes);
-    volumeMetrics.historyReadyPercentage = initializedRatio * 100.0f;
-    volumeMetrics.coverageReadyPercentage =
-        volume.ready ? initializedRatio * 100.0f : 0.0f;
-    volumeMetrics.confidence = volume.ready ? initializedRatio : 0.0f;
+    volumeMetrics.persistentBytes = volume.persistentBytes;
+    const bool redundant =
+        sceneFitVolume != volumes_.end() &&
+        analyzeDDGIVolumeRedundancy(volume.effective, sceneFitVolume->effective)
+            .fullyRedundant;
+    volumeMetrics.redundantCoverage = redundant ? 1u : 0u;
+    volumeMetrics.uniqueCoveragePercentage = redundant ? 0.0f : 100.0f;
+    if (redundant) {
+      ++metrics.redundantAuthoredVolumes;
+      metrics.redundantAuthoredProbes += volumeMetrics.totalProbes;
+      metrics.redundantAuthoredBytes += volume.persistentBytes;
+    }
     metrics.layoutGeneration =
         std::max(metrics.layoutGeneration, volume.layout.generation);
     metrics.resourceGeneration =
@@ -2219,10 +2619,7 @@ void DDGIFeature::publishFrameData(FrameBuildContext &ctx, FrameSlot &slot,
     const DDGIVolumeFrameMetrics &volumeMetrics = metrics.volumes[volumeIndex];
     const bool volumeHistoryReady =
         volumes_[volumeIndex].ready && volumeMetrics.totalProbes != 0u &&
-        std::ranges::all_of(volumes_[volumeIndex].submittedProbeStates,
-                            [](const DDGIProbeStateGpuData &state) {
-                              return historyReadyState(state.stateAgeFlags.x);
-                            });
+        volumeMetrics.historyReadyPercentage >= 100.0f;
     allHistoriesReady = allHistoriesReady && volumeHistoryReady;
     if (volumes_[volumeIndex].effective.key.kind ==
         DDGIEffectiveVolumeKind::SceneFit) {
@@ -2246,27 +2643,120 @@ void DDGIFeature::publishFrameData(FrameBuildContext &ctx, FrameSlot &slot,
         (ctx.shared.rayTracingScene->staticSurfaceBoundsAvailable ? 0u : 1u) +
         (ctx.shared.rayTracingScene->dynamicSurfaceBoundsAvailable ? 0u : 1u);
   }
-  const bool diagnosticMetricsRequested =
-      ctx.frame.captureRequests.contains("ddgi_coverage_debug_preview") ||
-      ctx.frame.captureRequests.contains("ddgi_classification_debug_preview") ||
-      ctx.frame.captureRequests.contains("ddgi_dirty_region_debug_preview");
-  if (diagnosticMetricsRequested) {
+  {
     constexpr glm::uvec3 kLatticeDimensions{5u, 3u, 5u};
-    const glm::vec3 latticeHalfExtents =
+    const auto spatialCoverageAndHistory =
+        [](const VolumeResource &volume,
+           const glm::vec3 &worldPoint) noexcept -> glm::vec2 {
+      const glm::uvec3 counts = volume.layout.probeCounts;
+      const uint32_t probeCount = ddgiProbeCount(counts);
+      if (!volume.ready || glm::any(glm::lessThan(counts, glm::uvec3(2u))) ||
+          probeCount == 0u || volume.submittedProbeStates.size() < probeCount) {
+        return glm::vec2(0.0f);
+      }
+
+      const glm::vec3 localPoint =
+          glm::vec3(volume.layout.localFromWorld * glm::vec4(worldPoint, 1.0f));
+      const glm::vec3 trackedCenter =
+          glm::vec3(volume.layout.cameraCell) * volume.layout.probeSpacing;
+      float coverage = 0.0f;
+      if (volume.effective.key.kind ==
+          DDGIEffectiveVolumeKind::ClipmapCascade) {
+        const glm::vec3 fadeWidth =
+            glm::max(volume.effective.fadeEndHalfExtents -
+                         volume.effective.fadeStartHalfExtents,
+                     glm::vec3(1.0e-6f));
+        const glm::vec3 axisCoverage =
+            glm::vec3(1.0f) -
+            glm::clamp(
+                (glm::abs(localPoint - volume.effective.continuousCameraLocal) -
+                 volume.effective.fadeStartHalfExtents) /
+                    fadeWidth,
+                glm::vec3(0.0f), glm::vec3(1.0f));
+        coverage = std::min({axisCoverage.x, axisCoverage.y, axisCoverage.z});
+      } else {
+        const glm::vec3 distanceToFace = volume.layout.probeCenterHalfExtents -
+                                         glm::abs(localPoint - trackedCenter);
+        if (!glm::any(glm::lessThan(distanceToFace, glm::vec3(0.0f)))) {
+          coverage =
+              volume.desc.blendDistance <= 1.0e-6f
+                  ? 1.0f
+                  : glm::clamp(std::min({distanceToFace.x, distanceToFace.y,
+                                         distanceToFace.z}) /
+                                   volume.desc.blendDistance,
+                               0.0f, 1.0f);
+        }
+      }
+      if (coverage <= 0.0f) {
+        return glm::vec2(0.0f);
+      }
+
+      const glm::vec3 grid =
+          glm::clamp((localPoint - trackedCenter) / volume.layout.probeSpacing +
+                         0.5f * glm::vec3(counts - glm::uvec3(1u)),
+                     glm::vec3(0.0f), glm::vec3(counts - glm::uvec3(1u)));
+      const glm::uvec3 base = glm::uvec3(
+          glm::min(glm::floor(grid), glm::vec3(counts - glm::uvec3(2u))));
+      const glm::vec3 fraction = grid - glm::vec3(base);
+      float history = 0.0f;
+      for (uint32_t neighbor = 0u; neighbor < 8u; ++neighbor) {
+        const glm::uvec3 offset(neighbor & 1u, (neighbor >> 1u) & 1u,
+                                (neighbor >> 2u) & 1u);
+        const glm::vec3 trilinearAxis(
+            offset.x != 0u ? fraction.x : 1.0f - fraction.x,
+            offset.y != 0u ? fraction.y : 1.0f - fraction.y,
+            offset.z != 0u ? fraction.z : 1.0f - fraction.z);
+        const glm::uvec3 physical = ddgiPhysicalProbeCoordinate(
+            base + offset, volume.layout.ringOrigin, counts);
+        const uint32_t probe = ddgiProbeIndex(physical, counts);
+        const uint32_t state =
+            probe < volume.submittedProbeStates.size()
+                ? volume.submittedProbeStates[probe].stateAgeFlags.x
+                : static_cast<uint32_t>(DDGIProbeState::Uninitialized);
+        if (state == static_cast<uint32_t>(DDGIProbeState::Awake) ||
+            state == static_cast<uint32_t>(DDGIProbeState::Vigilant)) {
+          history += trilinearAxis.x * trilinearAxis.y * trilinearAxis.z;
+        }
+      }
+      return glm::vec2(coverage, glm::clamp(history, 0.0f, 1.0f));
+    };
+    glm::vec3 latticeHalfExtents =
         glm::max(metrics.requestedCoverageHalfExtents, glm::vec3(1.0f));
-    const glm::vec3 latticeCenter = glm::vec3(ctx.frame.camera.cameraPos);
+    glm::vec3 latticeCenter{0.0f};
+    const DDGISceneCoverageBounds &activationBounds =
+        ctx.frame.scene->ddgiActivationCoverageBounds();
+    if (activationBounds.valid) {
+      latticeCenter =
+          0.5f * (activationBounds.bounds.min_ + activationBounds.bounds.max_);
+      latticeHalfExtents = glm::max(
+          0.5f * (activationBounds.bounds.max_ - activationBounds.bounds.min_),
+          glm::vec3(1.0f));
+    } else {
+      const auto sceneFit =
+          std::ranges::find_if(volumes_, [](const VolumeResource &volume) {
+            return volume.effective.key.kind ==
+                   DDGIEffectiveVolumeKind::SceneFit;
+          });
+      if (sceneFit != volumes_.end()) {
+        latticeCenter = glm::vec3(sceneFit->layout.worldFromLocal[3]);
+        latticeHalfExtents =
+            glm::max(sceneFit->effective.fadeEndHalfExtents, glm::vec3(1.0f));
+      }
+    }
     for (uint32_t z = 0u; z < kLatticeDimensions.z; ++z) {
       for (uint32_t y = 0u; y < kLatticeDimensions.y; ++y) {
         for (uint32_t x = 0u; x < kLatticeDimensions.x; ++x) {
+          // Sample cell centers, not the exact sealed-bounds faces where a
+          // volume's intentional blend-to-sky reaches zero measure.
           const glm::vec3 unit(
-              2.0f * static_cast<float>(x) /
-                      static_cast<float>(kLatticeDimensions.x - 1u) -
+              2.0f * (static_cast<float>(x) + 0.5f) /
+                      static_cast<float>(kLatticeDimensions.x) -
                   1.0f,
-              2.0f * static_cast<float>(y) /
-                      static_cast<float>(kLatticeDimensions.y - 1u) -
+              2.0f * (static_cast<float>(y) + 0.5f) /
+                      static_cast<float>(kLatticeDimensions.y) -
                   1.0f,
-              2.0f * static_cast<float>(z) /
-                      static_cast<float>(kLatticeDimensions.z - 1u) -
+              2.0f * (static_cast<float>(z) + 0.5f) /
+                      static_cast<float>(kLatticeDimensions.z) -
                   1.0f);
           const glm::vec3 worldPoint =
               latticeCenter + unit * latticeHalfExtents;
@@ -2275,19 +2765,15 @@ void DDGIFeature::publishFrameData(FrameBuildContext &ctx, FrameSlot &slot,
           for (size_t volumeIndex = 0u; volumeIndex < volumes_.size();
                ++volumeIndex) {
             const VolumeResource &volume = volumes_[volumeIndex];
-            const glm::vec3 localPoint = glm::vec3(
-                volume.layout.localFromWorld * glm::vec4(worldPoint, 1.0f));
-            const glm::vec3 halfExtents =
-                glm::max(volume.effective.fadeEndHalfExtents,
-                         volume.effective.probeCenterHalfExtents -
-                             volume.effective.probeSpacing);
-            if (glm::any(glm::greaterThan(glm::abs(localPoint), halfExtents))) {
+            const glm::vec2 coverageAndHistory =
+                spatialCoverageAndHistory(volume, worldPoint);
+            if (coverageAndHistory.x <= 0.0f) {
               continue;
             }
             covered = true;
             skyRemainder *=
-                1.0f -
-                glm::clamp(metrics.volumes[volumeIndex].confidence, 0.0f, 1.0f);
+                1.0f - glm::clamp(coverageAndHistory.x * coverageAndHistory.y,
+                                  0.0f, 1.0f);
           }
           ++metrics.diagnosticSampleCount;
           metrics.uncoveredDiagnosticSamples += covered ? 0u : 1u;
@@ -2299,16 +2785,48 @@ void DDGIFeature::publishFrameData(FrameBuildContext &ctx, FrameSlot &slot,
   }
   const bool automaticCoverage =
       metrics.coverageMode != static_cast<uint32_t>(DDGICoverageMode::Manual);
+  const bool coarseCoverageReady = metrics.diagnosticSampleCount != 0u &&
+                                   metrics.uncoveredDiagnosticSamples == 0u &&
+                                   metrics.skyRemainderSamples == 0u;
   if (metrics.sceneCoverageRatio >= 1.0f && allHistoriesReady) {
     metrics.coverageStatus = DDGICoverageStatus::FullCoverageReady;
   } else if (metrics.sceneCoverageRatio >= 1.0f &&
-             ((hybridCoverage && requiredHistoryReady) ||
+             ((hybridCoverage && coarseCoverageReady) ||
               (!hybridCoverage && automaticCoverage))) {
     metrics.coverageStatus = DDGICoverageStatus::FullCoverageWarmingDetail;
   } else if (metrics.activeVolumes != 0u) {
     metrics.coverageStatus = DDGICoverageStatus::PartialCoverage;
   } else {
     metrics.coverageStatus = DDGICoverageStatus::SkyFallbackOnly;
+  }
+  metrics.skyRemainderOverThresholdPercentage =
+      metrics.diagnosticSampleCount == 0u
+          ? 1.0f
+          : static_cast<float>(metrics.skyRemainderSamples) /
+                static_cast<float>(metrics.diagnosticSampleCount);
+  const bool anyIrradianceReady = std::ranges::any_of(
+      std::span(metrics.volumes).first(metrics.activeVolumes),
+      [](const DDGIVolumeFrameMetrics &volume) {
+        return volume.initializedProbes != 0u &&
+               volume.shadingEnabledProbes != 0u;
+      });
+  if (metrics.failedVolumes != 0u) {
+    metrics.startupPhase = metrics.readyVolumes != 0u
+                               ? DDGIStartupPhase::Degraded
+                               : DDGIStartupPhase::Failed;
+  } else if (metrics.coverageStatus == DDGICoverageStatus::FullCoverageReady) {
+    metrics.startupPhase = DDGIStartupPhase::FullCoverageReady;
+  } else if (metrics.coverageStatus ==
+             DDGICoverageStatus::FullCoverageWarmingDetail) {
+    metrics.startupPhase = DDGIStartupPhase::FullCoverageWarmingDetail;
+  } else if (hybridCoverage && coarseCoverageReady) {
+    metrics.startupPhase = DDGIStartupPhase::CoarseCoverageReady;
+  } else if (anyIrradianceReady) {
+    metrics.startupPhase = DDGIStartupPhase::FirstIrradianceReady;
+  } else if (metrics.readyVolumes != 0u) {
+    metrics.startupPhase = DDGIStartupPhase::ResourcesReadyNoHistory;
+  } else {
+    metrics.startupPhase = DDGIStartupPhase::ResourcesPending;
   }
   metrics.frameBatchBytes =
       slot.updateCapacity * sizeof(DDGIProbeUpdateEntry) +
@@ -2330,6 +2848,8 @@ Result<bool, std::string> DDGIFeature::prepare(FrameBuildContext &ctx) {
   ctx.frame.metrics.ddgi.consumedForceUpdateEpoch = consumedForceEpoch_;
   ctx.frame.metrics.ddgi.debugView =
       renderSettingsOrDefault(ctx.frame).ddgi.debugView;
+  activeFrameSlotIndex_ = std::numeric_limits<size_t>::max();
+  scheduledReadbackBytes_ = 0u;
   initializationScheduled_ = false;
   scrollScheduled_ = false;
   updatesScheduled_ = false;
@@ -2433,7 +2953,8 @@ Result<bool, std::string> DDGIFeature::prepare(FrameBuildContext &ctx) {
       .settings = coverageSettings,
       .limits = {.maxTextureExtent = glm::uvec2(
                      std::max(gpu_.getDeviceCaps().maxTextureDimension2D, 1u)),
-                 .maxPersistentBytes = config_.persistentMemoryLimitBytes,
+                 .maxPersistentBytes = ddgiPresetPersistentBudget(
+                     settings.preset, config_.persistentMemoryLimitBytes),
                  .maxReplacementPeakBytes = config_.peakMemoryLimitBytes,
                  .retainedReplacementBytes =
                      saturatingAdd(retainedBytes, frameBatchBytes),
@@ -2508,7 +3029,8 @@ Result<bool, std::string> DDGIFeature::prepare(FrameBuildContext &ctx) {
     coverageMetrics.coverageError = resolved.error().limit;
     coverageMetrics.limitingConstraint = resolved.error().limit;
     coverageMetrics.coverageStatus = DDGICoverageStatus::SkyFallbackOnly;
-    coverageMetrics.fallbackReason = DDGIFallbackReason::AllocationFailed;
+    coverageMetrics.fallbackReason =
+        coverageFallbackReason(resolved.error().limit);
   }
 
   const auto compatibleWith = [&plan](const auto &resources) {
@@ -2532,7 +3054,9 @@ Result<bool, std::string> DDGIFeature::prepare(FrameBuildContext &ctx) {
   if (!coverageSolveFailed &&
       (!activeCompatible || resetRequested || runtimeModeChanged) &&
       !pendingCompatible) {
-    auto rebuild = rebuildVolumes(ctx, plan, coverageSettings);
+    auto rebuild = rebuildVolumes(ctx, plan, coverageSettings,
+                                  !resetRequested && !runtimeModeChanged &&
+                                      sceneId_ == scene.id());
     if (rebuild.hasError()) {
       ctx.frame.metrics.ddgi.fallbackReason =
           DDGIFallbackReason::AllocationFailed;
@@ -2554,22 +3078,30 @@ Result<bool, std::string> DDGIFeature::prepare(FrameBuildContext &ctx) {
     pendingScrollLayouts_.clear();
     scrollInvalidations_.clear();
   }
-  auto slots = ensureFrameSlots(settings, scene.packedLocalLights().size(),
+  collectCompletedReadbacks(ctx);
+  const size_t boundedLocalLightCount = std::min<size_t>(
+      scene.packedLocalLights().size(), settings.maxLocalLightsPerHit);
+  auto slots = ensureFrameSlots(settings, boundedLocalLightCount,
                                 scrollInvalidations_.size());
   if (slots.hasError()) {
     ctx.frame.metrics.ddgi.fallbackReason =
         DDGIFallbackReason::AllocationFailed;
     return Result<bool, std::string>::makeResult(true);
   }
-  FrameSlot &slot = frameSlots_[static_cast<size_t>(ctx.frame.frameIndex %
-                                                    frameSlots_.size())];
-  const bool readbackComplete =
-      !isValid(slot.submission) || gpu_.isSubmissionComplete(slot.submission);
-  if (readbackComplete) {
-    collectCompletedProbeStates(slot);
-    collectCompletedTraceMetrics(slot, ctx.frame.metrics.ddgi);
-    collectCompletedInspection(ctx, slot);
+  FrameSlot *acquiredSlot = acquireFrameSlot(ctx.frame.frameIndex);
+  if (acquiredSlot == nullptr) {
+    ctx.frame.metrics.ddgi.fallbackReason =
+        DDGIFallbackReason::ReadbackRingSaturated;
+    ctx.frame.metrics.ddgi.startupPhase = DDGIStartupPhase::Degraded;
+    publishReadbackMetrics(ctx.frame.metrics.ddgi, ctx.frame.frameIndex);
+    return Result<bool, std::string>::makeResult(true);
   }
+  FrameSlot &slot = *acquiredSlot;
+  activeFrameSlotIndex_ =
+      static_cast<size_t>(acquiredSlot - frameSlots_.data());
+  slot.sceneId = scene.id();
+  slot.featureGeneration =
+      replacementPending_ ? pendingCoverageGeneration_ : coverageGeneration_;
   auto frameUpload = updateFrameData(ctx, slot);
   if (frameUpload.hasError()) {
     return frameUpload;
@@ -2584,16 +3116,23 @@ Result<bool, std::string> DDGIFeature::prepare(FrameBuildContext &ctx) {
     publishFrameData(ctx, slot, rtReady);
     ctx.frame.metrics.ddgi.fallbackReason =
         DDGIFallbackReason::VolumeResourcesWarming;
+    ctx.frame.metrics.ddgi.startupPhase = DDGIStartupPhase::ResourcesPending;
     ++ctx.frame.metrics.ddgi.resetCount;
+    publishReadbackMetrics(ctx.frame.metrics.ddgi, ctx.frame.frameIndex);
     return Result<bool, std::string>::makeResult(true);
   }
   if (volumes_.empty()) {
     ctx.frame.metrics.ddgi.failedVolumes = failedVolumeCount_;
     ctx.frame.metrics.ddgi.volumeFailureReason = volumeFailureReason_;
     ctx.frame.metrics.ddgi.fallbackReason =
+        coverageSolveFailed ? coverageFallbackReason(resolved.error().limit)
+        : failedVolumeCount_ != 0u ? DDGIFallbackReason::AllocationFailed
+                                   : DDGIFallbackReason::NoVolumes;
+    ctx.frame.metrics.ddgi.startupPhase =
         coverageSolveFailed || failedVolumeCount_ != 0u
-            ? DDGIFallbackReason::AllocationFailed
-            : DDGIFallbackReason::NoVolumes;
+            ? DDGIStartupPhase::Failed
+            : DDGIStartupPhase::ResourcesPending;
+    publishReadbackMetrics(ctx.frame.metrics.ddgi, ctx.frame.frameIndex);
     return Result<bool, std::string>::makeResult(true);
   }
   if (!scrollInvalidations_.empty()) {
@@ -2651,7 +3190,7 @@ Result<bool, std::string> DDGIFeature::prepare(FrameBuildContext &ctx) {
             .probeCounts = layout.probeCounts,
             .probeSpacing = layout.probeSpacing,
             .cameraCell = layout.cameraCell,
-            .queryBias = 0.75f * minimumSpacing * settings.selfShadowBias,
+            .queryBias = 0.75f * minimumSpacing * settings.classificationBias,
             .tier = volume.effective.tier,
             .effectiveIndex = index,
         };
@@ -2742,7 +3281,8 @@ Result<bool, std::string> DDGIFeature::prepare(FrameBuildContext &ctx) {
       }
     }
     (void)dirtyRegions_.prepareConsumption(ctx.frame.frameIndex);
-    auto schedule = buildSchedule(settings);
+    auto schedule =
+        buildSchedule(settings, directionalChanged || localLightsChanged);
     if (schedule.hasError()) {
       return Result<bool, std::string>::makeError(schedule.error());
     }
@@ -2754,6 +3294,12 @@ Result<bool, std::string> DDGIFeature::prepare(FrameBuildContext &ctx) {
     }
     ctx.frame.metrics.ddgi.updatedProbes = schedule.value().updatedProbes;
     ctx.frame.metrics.ddgi.primaryQueries = schedule.value().primaryQueries;
+    ctx.frame.metrics.ddgi.classificationProbeUpdates =
+        schedule.value().classificationProbeUpdates;
+    ctx.frame.metrics.ddgi.classificationPrimaryQueries =
+        schedule.value().classificationPrimaryQueries;
+    ctx.frame.metrics.ddgi.irradiancePrimaryQueries =
+        schedule.value().irradiancePrimaryQueries;
     dirtyConsumptionScheduled_ =
         !dirtyRegions_.pendingRegions().empty() && updatesScheduled_;
   }
@@ -2765,15 +3311,32 @@ Result<bool, std::string> DDGIFeature::prepare(FrameBuildContext &ctx) {
   }
   ctx.frame.metrics.ddgi.probeUpdateCapacity = settings.maxProbeUpdatesPerFrame;
   ctx.frame.metrics.ddgi.rayQueryCapacity = settings.maxRayQueriesPerFrame;
+  ctx.frame.metrics.ddgi.requestedProbeUpdateCapacity =
+      settings.maxProbeUpdatesPerFrame;
+  uint32_t effectiveProbeCapacity = 0u;
+  while (effectiveProbeCapacity < settings.maxProbeUpdatesPerFrame) {
+    const uint64_t primary =
+        static_cast<uint64_t>(effectiveProbeCapacity + 1u) *
+        settings.raysPerProbe;
+    const uint64_t secondary =
+        (primary * secondaryQueriesPer1024Primary_ + 1023u) / 1024u;
+    if (primary + secondary > settings.maxRayQueriesPerFrame) {
+      break;
+    }
+    ++effectiveProbeCapacity;
+  }
+  ctx.frame.metrics.ddgi.effectiveProbeUpdateCapacity = effectiveProbeCapacity;
   publishFrameData(ctx, slot, rtReady);
   if (!dirtyConsumptionScheduled_ && dirtyRegions_.hasPendingConsumption()) {
     dirtyRegions_.abandonConsumption(ctx.frame.frameIndex);
   }
   ctx.frame.metrics.ddgi.fallbackReason =
-      coverageSolveFailed || failedVolumeCount_ != 0u
+      coverageSolveFailed ? coverageFallbackReason(resolved.error().limit)
+      : failedVolumeCount_ != 0u
           ? DDGIFallbackReason::AllocationFailed
           : (rtReady ? DDGIFallbackReason::None
                      : DDGIFallbackReason::RayTracingSceneWarming);
+  publishReadbackMetrics(ctx.frame.metrics.ddgi, ctx.frame.frameIndex);
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -2785,12 +3348,29 @@ void DDGIFeature::onFrameSubmitted(const RenderFrameContext &frame) noexcept {
       initializationScheduled_ || scrollScheduled_ || updatesScheduled_;
   const uint64_t committedSequence =
       submittedSequence_ + (submittedWork ? 1u : 0u);
-  if ((updatesScheduled_ || inspectionScheduled_) && !frameSlots_.empty()) {
-    FrameSlot &slot =
-        frameSlots_[static_cast<size_t>(frame.frameIndex % frameSlots_.size())];
+  if ((updatesScheduled_ || inspectionScheduled_) &&
+      activeFrameSlotIndex_ < frameSlots_.size()) {
+    FrameSlot &slot = frameSlots_[activeFrameSlotIndex_];
     slot.submission = frame.submission;
+    slot.state = DDGIReadbackSlotState::Pending;
   }
   if (initializationScheduled_) {
+    for (size_t index = 0u; index < pendingVolumes_.size(); ++index) {
+      const uint32_t sourceIndex = pendingRetainedSourceIndices_[index];
+      if (sourceIndex == UINT32_MAX || sourceIndex >= volumes_.size()) {
+        continue;
+      }
+      const DDGIEffectiveVolume effective = pendingVolumes_[index].effective;
+      const glm::vec3 requested =
+          pendingVolumes_[index].requestedCoverageHalfExtents;
+      const glm::vec3 achieved =
+          pendingVolumes_[index].achievedCoverageHalfExtents;
+      pendingVolumes_[index] = std::move(volumes_[sourceIndex]);
+      pendingVolumes_[index].id = legacyVolumeId(effective);
+      pendingVolumes_[index].effective = effective;
+      pendingVolumes_[index].requestedCoverageHalfExtents = requested;
+      pendingVolumes_[index].achievedCoverageHalfExtents = achieved;
+    }
     for (VolumeResource &volume : pendingVolumes_) {
       volume.ready = volume.allocated;
     }
@@ -2828,7 +3408,6 @@ void DDGIFeature::onFrameSubmitted(const RenderFrameContext &frame) noexcept {
              pendingEffectiveVolumeCount_ == volumes_.size()) {
     for (size_t index = 0u; index < volumes_.size(); ++index) {
       volumes_[index].effective = pendingEffectiveVolumes_[index];
-      volumes_[index].desc = toDesc(pendingEffectiveVolumes_[index]);
       volumes_[index].requestedCoverageHalfExtents =
           pendingRequestedCoverageHalfExtents_[index];
       volumes_[index].achievedCoverageHalfExtents =
@@ -2897,9 +3476,8 @@ void DDGIFeature::onFrameSubmitted(const RenderFrameContext &frame) noexcept {
       }
     }
     consumedForceEpoch_ = std::max(consumedForceEpoch_, pendingForceEpoch_);
-    if (!frameSlots_.empty()) {
-      FrameSlot &slot = frameSlots_[static_cast<size_t>(frame.frameIndex %
-                                                        frameSlots_.size())];
+    if (activeFrameSlotIndex_ < frameSlots_.size()) {
+      FrameSlot &slot = frameSlots_[activeFrameSlotIndex_];
       slot.traceCountersValid = true;
       slot.probeStateResultCount =
           static_cast<uint32_t>(scheduledEntries_.size());
@@ -2931,10 +3509,13 @@ void DDGIFeature::onFrameSubmitted(const RenderFrameContext &frame) noexcept {
       commitRadiometricSnapshot(*frame.scene);
     }
   }
-  if (inspectionScheduled_ && !frameSlots_.empty()) {
-    FrameSlot &slot =
-        frameSlots_[static_cast<size_t>(frame.frameIndex % frameSlots_.size())];
+  if (inspectionScheduled_ && activeFrameSlotIndex_ < frameSlots_.size()) {
+    FrameSlot &slot = frameSlots_[activeFrameSlotIndex_];
     slot.diagnosticValid = slot.diagnosticRequest.has_value();
+  }
+  if (!updatesScheduled_ && !inspectionScheduled_ &&
+      activeFrameSlotIndex_ < frameSlots_.size()) {
+    frameSlots_[activeFrameSlotIndex_].state = DDGIReadbackSlotState::Consumed;
   }
   if (dirtyConsumptionScheduled_) {
     (void)dirtyRegions_.commitConsumption(frame.frameIndex);
@@ -2951,15 +3532,15 @@ void DDGIFeature::onFrameSubmitted(const RenderFrameContext &frame) noexcept {
   pendingScrollLayouts_.clear();
   pendingTierSchedule_ = {};
   dirtyConsumptionScheduled_ = false;
+  activeFrameSlotIndex_ = std::numeric_limits<size_t>::max();
 }
 
 void DDGIFeature::onFrameAbandoned(const RenderFrameContext &frame) noexcept {
   if (scheduledFrameIndex_ != frame.frameIndex) {
     return;
   }
-  if (!frameSlots_.empty()) {
-    FrameSlot &slot =
-        frameSlots_[static_cast<size_t>(frame.frameIndex % frameSlots_.size())];
+  if (activeFrameSlotIndex_ < frameSlots_.size()) {
+    FrameSlot &slot = frameSlots_[activeFrameSlotIndex_];
     slot.traceCountersValid = false;
     slot.probeStateResultsValid = false;
     slot.probeStateResultCount = 0u;
@@ -2967,6 +3548,7 @@ void DDGIFeature::onFrameAbandoned(const RenderFrameContext &frame) noexcept {
       slot.diagnosticValid = false;
       slot.diagnosticRequest.reset();
     }
+    slot.state = DDGIReadbackSlotState::Dropped;
   }
   initializationScheduled_ = false;
   scrollScheduled_ = false;
@@ -2983,6 +3565,7 @@ void DDGIFeature::onFrameAbandoned(const RenderFrameContext &frame) noexcept {
   }
   dirtyConsumptionScheduled_ = false;
   clearPendingVolumes();
+  activeFrameSlotIndex_ = std::numeric_limits<size_t>::max();
 }
 
 } // namespace nuri

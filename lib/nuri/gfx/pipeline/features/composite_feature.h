@@ -9,6 +9,7 @@
 #include <array>
 #include <cstdint>
 #include <filesystem>
+#include <limits>
 #include <memory>
 #include <span>
 #include <vector>
@@ -115,8 +116,28 @@ public:
   Result<bool, std::string> publishFrameData(FrameBuildContext &ctx);
   Result<bool, std::string> prepare(FrameBuildContext &ctx);
   Result<bool, std::string> build(FrameBuildContext &ctx);
+  void onFrameSubmitted(const RenderFrameContext &frame) noexcept;
+  void onFrameAbandoned(const RenderFrameContext &frame) noexcept;
 
 private:
+  enum class TelemetrySlotState : uint8_t {
+    Free = 0,
+    Recording,
+    Pending,
+    Consumed,
+    Dropped,
+  };
+  struct TelemetrySlot {
+    OwnedBufferHandle device{};
+    OwnedBufferHandle readback{};
+    SubmissionHandle submission{};
+    TelemetrySlotState state = TelemetrySlotState::Free;
+    uint64_t sceneId = 0u;
+    uint64_t sourceFrame = 0u;
+  };
+  Result<bool, std::string> ensureTelemetryRing();
+  void collectCompletedTelemetry(FrameBuildContext &ctx);
+  TelemetrySlot *acquireTelemetrySlot(FrameBuildContext &ctx);
   Result<bool, std::string> ensureLuminanceTextures();
   void destroyLuminanceTextures();
   FullscreenPassResources luminanceResources_{};
@@ -125,6 +146,19 @@ private:
   uint32_t luminanceHeight_ = 0u;
   uint32_t luminanceRingCount_ = 0u;
   uint32_t luminanceMipCount_ = 0u;
+  std::vector<TelemetrySlot> telemetrySlots_{};
+  uint64_t latestTelemetrySourceFrame_ = 0u;
+  uint64_t latestTelemetrySceneId_ = 0u;
+  float latestAdaptedExposureEv_ = 0.0f;
+  float latestAutomaticExposureEv_ = 0.0f;
+  float latestTargetExposureEv_ = 0.0f;
+  float latestMeteredLuminance_ = 0.0f;
+  float latestInvalidFraction_ = 0.0f;
+  uint32_t telemetryDroppedSamples_ = 0u;
+  size_t activeTelemetrySlot_ = std::numeric_limits<size_t>::max();
+  bool latestTelemetryAvailable_ = false;
+  bool telemetryRingReady_ = false;
+  bool telemetryScheduled_ = false;
 };
 
 class NURI_API HDRBloomCompositePass final : public FullscreenRenderPass {

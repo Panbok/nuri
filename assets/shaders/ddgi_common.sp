@@ -5,6 +5,26 @@ const float kDDGIProbeWeightCrushThreshold = 0.2;
 const float kDDGIIrradianceChangeThreshold = 0.25;
 const float kDDGIIrradianceResetThreshold = 0.80;
 const float kDDGIIrradianceHysteresisReduction = 0.15;
+const float kDDGIMaxHalfFloat = 65504.0;
+
+bool ddgiFinite(vec2 value) {
+  return !any(isnan(value)) && !any(isinf(value));
+}
+
+bool ddgiFinite(vec3 value) {
+  return !any(isnan(value)) && !any(isinf(value));
+}
+
+vec2 ddgiFiniteUnitMoments(vec2 value) {
+  return ddgiFinite(value) ? clamp(value, vec2(0.0), vec2(1.0))
+                           : vec2(0.0);
+}
+
+vec3 ddgiFiniteNonNegative(vec3 value) {
+  return ddgiFinite(value)
+             ? clamp(value, vec3(0.0), vec3(kDDGIMaxHalfFloat))
+             : vec3(0.0);
+}
 struct DDGIVolumeSample {
   vec3 irradiance;
   float confidence;
@@ -112,9 +132,11 @@ bool ddgiProbeShades(uint state) {
   return state == kDDGIProbeStateAwake || state == kDDGIProbeStateVigilant;
 }
 
-float ddgiProbeRayTMin(vec3 probeSpacing) {
-  return max(1.0e-4 * min(min(probeSpacing.x, probeSpacing.y), probeSpacing.z),
-             1.0e-4);
+float ddgiProbeRayTMin(DDGIVolumeGpuData volume) {
+  const float minSpacing =
+      min(min(volume.probeSpacingAndBias.x, volume.probeSpacingAndBias.y),
+          volume.probeSpacingAndBias.z);
+  return clamp(volume.rayBiases.x, 1.0e-4, max(0.25 * minSpacing, 1.0e-4));
 }
 
 vec2 ddgiAtlasUv(uvec4 atlas, uint probeIndex, vec3 direction,
@@ -306,8 +328,8 @@ DDGIVolumeSample ddgiSampleVolume(DDGIVolumeGpuData volume,
                     0.2);
     const vec2 distanceUv = ddgiAtlasUv(volume.distanceAtlas, probe,
                                         -directionToProbe, 16.0);
-    const vec2 moments = textureBindless2DLod(
-        volume.distanceAtlas.x, samplerId, distanceUv, 0.0).rg;
+    const vec2 moments = ddgiFiniteUnitMoments(textureBindless2DLod(
+        volume.distanceAtlas.x, samplerId, distanceUv, 0.0).rg);
     const float normalizedReceiver = receiverDistance /
         max(volume.centerHalfExtentsAndMaxDistance.w, 1.0e-6);
     float visibility = 1.0;
@@ -327,8 +349,8 @@ DDGIVolumeSample ddgiSampleVolume(DDGIVolumeGpuData volume,
     }
     const vec2 irradianceUv = ddgiAtlasUv(volume.irradianceAtlas, probe,
                                           surfaceNormal, 8.0);
-    const vec3 encoded = textureBindless2DLod(
-        volume.irradianceAtlas.x, samplerId, irradianceUv, 0.0).rgb;
+    const vec3 encoded = ddgiFiniteNonNegative(textureBindless2DLod(
+        volume.irradianceAtlas.x, samplerId, irradianceUv, 0.0).rgb);
     encodedAccumulation +=
         pow(max(encoded, vec3(0.0)), vec3(kDDGIIrradianceGamma * 0.5)) *
         weight;
@@ -350,7 +372,7 @@ DDGIVolumeSample ddgiSampleVolume(DDGIVolumeGpuData volume,
   }
   if (weightSum > 1.0e-6) {
     const vec3 filtered = encodedAccumulation / weightSum;
-    result.irradiance = filtered * filtered;
+    result.irradiance = ddgiFiniteNonNegative(filtered * filtered);
     result.visibility = visibilitySum / weightSum;
     result.distanceMean = distanceMeanSum / weightSum;
     result.distanceVariance = distanceVarianceSum / weightSum;
@@ -445,6 +467,7 @@ DDGIQueryResult queryDDGI(DDGIFrameBuffer frame, vec3 worldPoint,
     }
     remaining *= 1.0 - candidateCoverage;
   }
+  result.irradiance = ddgiFiniteNonNegative(result.irradiance);
   result.skyWeight = remaining;
   return result;
 }

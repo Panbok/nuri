@@ -88,15 +88,16 @@ void main() {
                            ? 0.2 * abs(result.radianceAndDistance.w)
                            : max(result.radianceAndDistance.w, 0.0)) /
                           max(volume.centerHalfExtentsAndMaxDistance.w, 1.0e-6);
-      d = clamp(d, 0.0, 1.0);
+      d = isnan(d) || isinf(d) ? 0.0 : clamp(d, 0.0, 1.0);
       first += d * w;
       second += d * d * w;
       weight += w;
     }
-    const vec2 moments = vec2(first, second) / max(weight, 1.0e-6);
+    const vec2 moments =
+        ddgiFiniteUnitMoments(vec2(first, second) / max(weight, 1.0e-6));
     const ivec2 pixel = ivec2(tile * 18u + tilePixel);
-    const vec2 oldValue =
-        imageLoad(kImagesRG16F[nonuniformEXT(pc.outputTextureId)], pixel).rg;
+    const vec2 oldValue = ddgiFiniteUnitMoments(
+        imageLoad(kImagesRG16F[nonuniformEXT(pc.outputTextureId)], pixel).rg);
     const bool probeHistoryValid =
         volume.probeStates.values[update.probeId].stateAgeFlags.y != 0u &&
         probeState != kDDGIProbeStateNewlyAwake &&
@@ -105,8 +106,9 @@ void main() {
     if ((update.flags & (1u << 3u)) != 0u) {
       h *= pc.responseHysteresisScale;
     }
-    imageStore(kImagesRG16F[nonuniformEXT(pc.outputTextureId)], pixel,
-               vec4(mix(moments, oldValue, h), 0.0, 0.0));
+    imageStore(
+        kImagesRG16F[nonuniformEXT(pc.outputTextureId)], pixel,
+        vec4(ddgiFiniteUnitMoments(mix(moments, oldValue, h)), 0.0, 0.0));
   }
   memoryBarrierImage();
   barrier();
@@ -121,6 +123,10 @@ void main() {
         ivec2(tile * 18u + ddgiBorderCopyCoordinate(tilePixel, 16u));
     imageStore(
         kImagesRG16F[nonuniformEXT(pc.outputTextureId)], outputPixel,
-        imageLoad(kImagesRG16F[nonuniformEXT(pc.outputTextureId)], copyPixel));
+        vec4(ddgiFiniteUnitMoments(
+                 imageLoad(kImagesRG16F[nonuniformEXT(pc.outputTextureId)],
+                           copyPixel)
+                     .rg),
+             0.0, 0.0));
   }
 }

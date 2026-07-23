@@ -698,7 +698,7 @@ populateShadowPlanesScene(const ToolRuntimeDesc &runtime, Renderer &renderer,
     auto guard = scene.graph().addDDGIVolume(
         guardNode.value(),
         DDGIVolumeDesc{.name = "DDGI Replacement Budget Guard",
-                       .probeCounts = {64u, 16u, 64u},
+                       .probeCounts = {32u, 8u, 32u},
                        .probeSpacing = {0.1f, 0.1f, 0.1f},
                        .blendDistance = 0.1f,
                        .maxRayDistance = 12.0f,

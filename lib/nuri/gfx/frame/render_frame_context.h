@@ -206,6 +206,11 @@ enum class HDRPostProcessDebugView : uint8_t {
   AdaptedExposure = 4,
 };
 
+enum class HDRExposureMeteringMode : uint8_t {
+  FullFrame = 0,
+  CenterWeighted = 1,
+};
+
 enum class AmbientOcclusionDisabledReason : uint8_t {
   None = 0,
   ModeDisabled = 1,
@@ -354,10 +359,19 @@ static constexpr float kDefaultHDRBloomStrength = 0.08f;
 static constexpr float kDefaultHDRBloomThreshold = 1.0f;
 static constexpr float kDefaultHDRBloomSoftKnee = 0.5f;
 static constexpr uint32_t kDefaultHDRBloomMaxMipCount = 6u;
-static constexpr float kDefaultHDRAdaptationTargetGray = 0.18f;
+// The percentile meter sees scene-linear luminance rather than an 18% chart
+// patch. A calibrated 10% target avoids lifting dark-dominant outdoor frames
+// by roughly one stop while retaining explicit 0.18 overrides for test charts.
+static constexpr float kDefaultHDRAdaptationTargetGray = 0.10f;
 static constexpr float kDefaultHDRAdaptationSpeed = 3.0f;
+static constexpr float kDefaultHDRAdaptationMaxEvChange = 1.0f;
+static constexpr float kDefaultHDRHistogramLowPercentile = 0.01f;
+static constexpr float kDefaultHDRHistogramHighPercentile = 0.99f;
+static constexpr float kDefaultHDRHistogramMinLogLuminance = -12.0f;
+static constexpr float kDefaultHDRHistogramMaxLogLuminance = 12.0f;
 static constexpr float kDefaultHDRAdaptationMinEv = -8.0f;
 static constexpr float kDefaultHDRAdaptationMaxEv = 8.0f;
+static constexpr float kMaxDDGIPersistedRadianceLuminance = 4096.0f;
 
 static constexpr uint32_t kMaxSceneDepthPyramidLevels = 16u;
 static constexpr uint32_t kSceneDepthPyramidTexIdPackWidth = 4u;
@@ -688,10 +702,21 @@ struct RenderSettings {
     float bloomSoftKnee = kDefaultHDRBloomSoftKnee;
     uint32_t bloomMaxMipCount = kDefaultHDRBloomMaxMipCount;
     bool adaptationEnabled = false;
+    HDRExposureMeteringMode meteringMode =
+        HDRExposureMeteringMode::CenterWeighted;
     float adaptationTargetGray = kDefaultHDRAdaptationTargetGray;
+    // Retained as the legacy/profile seed. Runtime adaptation uses the two
+    // directional speeds below.
     float adaptationSpeed = kDefaultHDRAdaptationSpeed;
+    float adaptationBrightenSpeed = kDefaultHDRAdaptationSpeed;
+    float adaptationDarkenSpeed = kDefaultHDRAdaptationSpeed;
+    float adaptationMaxEvChange = kDefaultHDRAdaptationMaxEvChange;
     float adaptationMinEv = kDefaultHDRAdaptationMinEv;
     float adaptationMaxEv = kDefaultHDRAdaptationMaxEv;
+    float histogramLowPercentile = kDefaultHDRHistogramLowPercentile;
+    float histogramHighPercentile = kDefaultHDRHistogramHighPercentile;
+    float histogramMinLogLuminance = kDefaultHDRHistogramMinLogLuminance;
+    float histogramMaxLogLuminance = kDefaultHDRHistogramMaxLogLuminance;
     HDRPostProcessDebugView debugView = HDRPostProcessDebugView::None;
   };
   struct AntiAliasingDebugSettings {
@@ -742,6 +767,7 @@ struct RenderSettings {
     bool enabled = false;
     DDGIQualityPreset preset = DDGIQualityPreset::Balanced;
     uint32_t raysPerProbe = 128u;
+    uint32_t classificationRaysPerProbe = 16u;
     uint32_t maxProbeUpdatesPerFrame = 512u;
     uint32_t maxRayQueriesPerFrame = 65'536u;
     uint32_t maxLocalLightsPerHit = 8u;
@@ -750,11 +776,17 @@ struct RenderSettings {
     float distanceHysteresis = 0.98f;
     float changeIrradianceHysteresisScale = 0.50f;
     float changeDistanceHysteresisScale = 0.50f;
+    // Receiver reconstruction bias remains separate from ray-origin domains.
     float selfShadowBias = 0.30f;
+    float primaryProbeBias = 0.0001f;
+    float localShadowBias = 0.30f;
+    float directionalShadowBias = 0.30f;
+    float classificationBias = 0.30f;
     float multiBounceLuminanceClamp = 32.0f;
     bool relocation = true;
     bool classification = true;
     bool multiBounce = true;
+    bool diagnosticCounters = true;
     bool freezeUpdates = false;
     DDGIDebugView debugView = DDGIDebugView::None;
     bool showVolumes = false;
@@ -811,18 +843,20 @@ inline void applyDDGIQualityPreset(RenderSettings::DDGISettings &settings,
   }
   struct Preset {
     uint32_t raysPerProbe;
+    uint32_t classificationRaysPerProbe;
     uint32_t maxProbeUpdatesPerFrame;
     uint32_t maxRayQueriesPerFrame;
     float irradianceHysteresis;
     float distanceHysteresis;
   };
   static constexpr std::array presets{
-      Preset{64u, 512u, 32'768u, 0.98f, 0.99f},
-      Preset{128u, 512u, 65'536u, 0.97f, 0.98f},
-      Preset{256u, 512u, 131'072u, 0.95f, 0.98f},
+      Preset{64u, 16u, 512u, 32'768u, 0.98f, 0.99f},
+      Preset{128u, 24u, 512u, 65'536u, 0.97f, 0.98f},
+      Preset{256u, 32u, 512u, 131'072u, 0.95f, 0.98f},
   };
   const Preset &values = presets[static_cast<uint8_t>(settings.preset)];
   settings.raysPerProbe = values.raysPerProbe;
+  settings.classificationRaysPerProbe = values.classificationRaysPerProbe;
   settings.maxProbeUpdatesPerFrame = values.maxProbeUpdatesPerFrame;
   settings.maxRayQueriesPerFrame = values.maxRayQueriesPerFrame;
   settings.irradianceHysteresis = values.irradianceHysteresis;
@@ -838,6 +872,8 @@ sanitizeDDGISettings(RenderSettings::DDGISettings &settings,
   settings.debugView = sanitizeDDGIDebugView(settings.debugView);
   sanitizeDDGICoverageSettings(settings.coverage);
   settings.raysPerProbe = std::clamp(settings.raysPerProbe, 16u, 1024u);
+  settings.classificationRaysPerProbe = std::clamp(
+      settings.classificationRaysPerProbe, 8u, settings.raysPerProbe);
   settings.maxProbeUpdatesPerFrame =
       std::clamp(settings.maxProbeUpdatesPerFrame, 1u, 65'536u);
   const uint32_t minimumQueries = 2u * settings.raysPerProbe;
@@ -859,9 +895,20 @@ sanitizeDDGISettings(RenderSettings::DDGISettings &settings,
       finiteClamp(settings.changeDistanceHysteresisScale, 0.0f, 1.0f, 0.50f);
   settings.selfShadowBias =
       finiteClamp(settings.selfShadowBias, 0.0f, 2.0f, 0.30f);
+  settings.primaryProbeBias =
+      finiteClamp(settings.primaryProbeBias, 0.0f, 0.25f, 0.0001f);
+  settings.localShadowBias =
+      finiteClamp(settings.localShadowBias, 0.0f, 2.0f, 0.30f);
+  settings.directionalShadowBias =
+      finiteClamp(settings.directionalShadowBias, 0.0f, 2.0f, 0.30f);
+  settings.classificationBias =
+      finiteClamp(settings.classificationBias, 0.0f, 2.0f, 0.30f);
   if (!std::isfinite(settings.multiBounceLuminanceClamp) ||
       settings.multiBounceLuminanceClamp <= 0.0f) {
     settings.multiBounceLuminanceClamp = 32.0f;
+  } else {
+    settings.multiBounceLuminanceClamp = std::min(
+        settings.multiBounceLuminanceClamp, kMaxDDGIPersistedRadianceLuminance);
   }
 }
 
@@ -954,6 +1001,14 @@ inline void sanitizeHDRPostProcessSettings(
                   kDefaultHDRAdaptationTargetGray);
   settings.adaptationSpeed = finiteClamp(settings.adaptationSpeed, 0.0f, 64.0f,
                                          kDefaultHDRAdaptationSpeed);
+  settings.adaptationBrightenSpeed =
+      finiteClamp(settings.adaptationBrightenSpeed, 0.0f, 64.0f,
+                  kDefaultHDRAdaptationSpeed);
+  settings.adaptationDarkenSpeed = finiteClamp(
+      settings.adaptationDarkenSpeed, 0.0f, 64.0f, kDefaultHDRAdaptationSpeed);
+  settings.adaptationMaxEvChange =
+      finiteClamp(settings.adaptationMaxEvChange, 0.0f, 16.0f,
+                  kDefaultHDRAdaptationMaxEvChange);
   settings.adaptationMinEv = finiteClamp(settings.adaptationMinEv, -32.0f,
                                          32.0f, kDefaultHDRAdaptationMinEv);
   settings.adaptationMaxEv = finiteClamp(settings.adaptationMaxEv, -32.0f,
@@ -961,6 +1016,25 @@ inline void sanitizeHDRPostProcessSettings(
   if (settings.adaptationMinEv > settings.adaptationMaxEv) {
     std::swap(settings.adaptationMinEv, settings.adaptationMaxEv);
   }
+  settings.histogramLowPercentile =
+      finiteClamp(settings.histogramLowPercentile, 0.0f, 0.49f,
+                  kDefaultHDRHistogramLowPercentile);
+  settings.histogramHighPercentile =
+      finiteClamp(settings.histogramHighPercentile, 0.51f, 1.0f,
+                  kDefaultHDRHistogramHighPercentile);
+  settings.histogramMinLogLuminance =
+      finiteClamp(settings.histogramMinLogLuminance, -32.0f, 31.0f,
+                  kDefaultHDRHistogramMinLogLuminance);
+  settings.histogramMaxLogLuminance =
+      finiteClamp(settings.histogramMaxLogLuminance, -31.0f, 32.0f,
+                  kDefaultHDRHistogramMaxLogLuminance);
+  if (settings.histogramMinLogLuminance >= settings.histogramMaxLogLuminance) {
+    settings.histogramMinLogLuminance = kDefaultHDRHistogramMinLogLuminance;
+    settings.histogramMaxLogLuminance = kDefaultHDRHistogramMaxLogLuminance;
+  }
+  settings.meteringMode = sanitizeContiguousEnum(
+      settings.meteringMode, HDRExposureMeteringMode::CenterWeighted,
+      HDRExposureMeteringMode::CenterWeighted);
   settings.debugView = sanitizeHDRPostProcessDebugView(settings.debugView);
 }
 
@@ -2315,14 +2389,24 @@ struct HDRPostProcessFrameMetrics {
   uint32_t gpuTimingAvailable = 0u;
   uint64_t textureBytes = 0u;
   uint64_t gpuTimingSourceFrameIndex = std::numeric_limits<uint64_t>::max();
+  uint64_t exposureTelemetrySourceFrameIndex =
+      std::numeric_limits<uint64_t>::max();
   float adaptedExposureEv = 0.0f;
+  float automaticExposureEv = 0.0f;
+  float exposureTargetEv = 0.0f;
+  float exposureMeteredLuminance = 0.0f;
   float effectiveExposureEv = 0.0f;
+  float exposureInvalidSampleFraction = 0.0f;
   float gpuTimeMs = 0.0f;
+  uint32_t exposureTelemetryStaleFrames = 0u;
+  uint32_t exposureTelemetryPendingSlots = 0u;
+  uint32_t exposureTelemetryDroppedSamples = 0u;
   bool bloomEnabled = false;
   bool bloomActive = false;
   bool adaptationEnabled = false;
   bool adaptationActive = false;
   bool exposureHistoryValid = false;
+  bool exposureTelemetryAvailable = false;
 };
 
 [[nodiscard]] inline AntiAliasingFrameMetrics

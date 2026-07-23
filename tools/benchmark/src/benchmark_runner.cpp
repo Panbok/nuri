@@ -2671,6 +2671,43 @@ void addRendererFrameMetrics(BenchmarkFrameMeasurements &measurements,
   addIfNonzero(measurements, "renderer.hdr.adaptation_passes",
                hdr.adaptationPassCount);
   addIfNonzero(measurements, "renderer.hdr.texture_count", hdr.textureCount);
+  appendValue(
+      measurements,
+      NURI_BENCHMARK_METRIC("renderer.hdr.exposure_telemetry_available"),
+      static_cast<uint32_t>(hdr.exposureTelemetryAvailable));
+  addIfNonzero(measurements, "renderer.hdr.exposure_telemetry_source_frame",
+               hdr.exposureTelemetrySourceFrameIndex ==
+                       std::numeric_limits<uint64_t>::max()
+                   ? 0u
+                   : hdr.exposureTelemetrySourceFrameIndex);
+  appendValue(
+      measurements,
+      NURI_BENCHMARK_METRIC("renderer.hdr.exposure_telemetry_stale_frames"),
+      hdr.exposureTelemetryStaleFrames);
+  appendValue(
+      measurements,
+      NURI_BENCHMARK_METRIC("renderer.hdr.exposure_telemetry_pending_slots"),
+      hdr.exposureTelemetryPendingSlots);
+  appendValue(
+      measurements,
+      NURI_BENCHMARK_METRIC("renderer.hdr.exposure_telemetry_dropped_samples"),
+      hdr.exposureTelemetryDroppedSamples);
+  appendValue(measurements,
+              NURI_BENCHMARK_METRIC("renderer.hdr.automatic_exposure_ev"),
+              hdr.automaticExposureEv);
+  appendValue(measurements,
+              NURI_BENCHMARK_METRIC("renderer.hdr.exposure_target_ev"),
+              hdr.exposureTargetEv);
+  appendValue(measurements,
+              NURI_BENCHMARK_METRIC("renderer.hdr.exposure_metered_luminance"),
+              hdr.exposureMeteredLuminance);
+  appendValue(measurements,
+              NURI_BENCHMARK_METRIC("renderer.hdr.effective_exposure_ev"),
+              hdr.effectiveExposureEv);
+  appendValue(
+      measurements,
+      NURI_BENCHMARK_METRIC("renderer.hdr.exposure_invalid_sample_fraction"),
+      hdr.exposureInvalidSampleFraction);
   addBytesAsMiB(measurements, "gpu.memory.hdr.texture_mb", hdr.textureBytes);
 
   addIfNonzero(measurements, "renderer.transparent.mesh_draws",
@@ -2761,14 +2798,52 @@ void addRendererFrameMetrics(BenchmarkFrameMeasurements &measurements,
                ddgi.updatedProbes);
   addIfNonzero(measurements, "renderer.ddgi.primary_queries",
                ddgi.primaryQueries);
+  addIfNonzero(measurements, "renderer.ddgi.classification_probe_updates",
+               ddgi.classificationProbeUpdates);
+  addIfNonzero(measurements, "renderer.ddgi.classification_primary_queries",
+               ddgi.classificationPrimaryQueries);
+  addIfNonzero(measurements, "renderer.ddgi.irradiance_primary_queries",
+               ddgi.irradiancePrimaryQueries);
   addIfNonzero(measurements, "renderer.ddgi.primary_queries_issued",
                ddgi.primaryQueriesIssued);
   addIfNonzero(measurements, "renderer.ddgi.trace_counter_source_frame",
                ddgi.traceCounterSourceFrame);
+  addIfNonzero(measurements, "renderer.ddgi.trace_counter_stale_frames",
+               ddgi.traceCounterStaleFrames);
+  appendValue(measurements,
+              NURI_BENCHMARK_METRIC("renderer.ddgi.readback_waits"),
+              ddgi.readbackWaits);
+  appendValue(measurements,
+              NURI_BENCHMARK_METRIC("renderer.ddgi.readback_copy_bytes"),
+              ddgi.readbackCopyBytes);
+  appendValue(measurements,
+              NURI_BENCHMARK_METRIC("renderer.ddgi.readback_pending_slots"),
+              ddgi.readbackPendingSlots);
+  appendValue(measurements,
+              NURI_BENCHMARK_METRIC("renderer.ddgi.readback_dropped_samples"),
+              ddgi.readbackDroppedSamples);
+  appendValue(
+      measurements,
+      NURI_BENCHMARK_METRIC("renderer.ddgi.readback_oldest_pending_age"),
+      ddgi.readbackOldestPendingAge);
+  appendValue(
+      measurements,
+      NURI_BENCHMARK_METRIC("renderer.ddgi.readback_blocking_fallbacks"),
+      ddgi.readbackBlockingFallbacks);
+  appendValue(
+      measurements,
+      NURI_BENCHMARK_METRIC("renderer.ddgi.readback_generation_mismatches"),
+      ddgi.readbackGenerationMismatches);
+  appendValue(
+      measurements,
+      NURI_BENCHMARK_METRIC("renderer.ddgi.readback_early_reuse_attempts"),
+      ddgi.readbackEarlyReuseAttempts);
   addIfNonzero(measurements, "renderer.ddgi.secondary_queries_reserved",
                ddgi.secondaryQueriesReserved);
   addIfNonzero(measurements, "renderer.ddgi.secondary_queries_unused",
                ddgi.secondaryQueriesUnused);
+  addIfNonzero(measurements, "renderer.ddgi.secondary_query_budget_overflows",
+               ddgi.secondaryQueryBudgetOverflows);
   addIfNonzero(measurements, "renderer.ddgi.secondary_queries",
                ddgi.secondaryQueries);
   addIfNonzero(measurements, "renderer.ddgi.directional_secondary_queries",
@@ -2790,10 +2865,60 @@ void addRendererFrameMetrics(BenchmarkFrameMeasurements &measurements,
                ddgi.candidateOverflows);
   addIfNonzero(measurements, "renderer.ddgi.local_light_truncations",
                ddgi.localLightTruncations);
+  addIfNonzero(measurements, "renderer.ddgi.non_finite_radiance_rejects",
+               ddgi.nonFiniteRadianceRejects);
+  addIfNonzero(measurements, "renderer.ddgi.emissive_radiance_clamps",
+               ddgi.emissiveRadianceClamps);
+  addIfNonzero(measurements, "renderer.ddgi.direct_radiance_clamps",
+               ddgi.directRadianceClamps);
+  addIfNonzero(measurements, "renderer.ddgi.sky_radiance_clamps",
+               ddgi.skyRadianceClamps);
+  addIfNonzero(measurements, "renderer.ddgi.multi_bounce_radiance_clamps",
+               ddgi.multiBounceRadianceClamps);
+  addIfNonzero(measurements, "renderer.ddgi.final_radiance_clamps",
+               ddgi.finalRadianceClamps);
+  appendValue(
+      measurements,
+      NURI_BENCHMARK_METRIC("renderer.ddgi.diagnostic_counters_enabled"),
+      ddgi.diagnosticCountersEnabled);
+  appendValue(
+      measurements,
+      NURI_BENCHMARK_METRIC("renderer.ddgi.surface_gather_architecture"),
+      static_cast<uint32_t>(ddgi.surfaceGatherArchitecture));
+  addIfNonzero(measurements, "renderer.ddgi.surface_gather_width",
+               ddgi.surfaceGatherWidth);
+  addIfNonzero(measurements, "renderer.ddgi.surface_gather_height",
+               ddgi.surfaceGatherHeight);
+  addIfNonzero(measurements,
+               "renderer.ddgi.surface_gather_max_candidate_volumes",
+               ddgi.surfaceGatherMaxCandidateVolumes);
+  addIfNonzero(measurements, "renderer.ddgi.surface_gather_max_sampled_volumes",
+               ddgi.surfaceGatherMaxSampledVolumes);
+  addIfNonzero(measurements,
+               "renderer.ddgi.surface_gather_max_state_loads_per_pixel",
+               ddgi.surfaceGatherMaxStateLoadsPerPixel);
+  addIfNonzero(measurements,
+               "renderer.ddgi.surface_gather_max_atlas_samples_per_pixel",
+               ddgi.surfaceGatherMaxAtlasSamplesPerPixel);
   addIfNonzero(measurements, "renderer.ddgi.ray_query_capacity",
                ddgi.rayQueryCapacity);
   addIfNonzero(measurements, "renderer.ddgi.probe_update_capacity",
                ddgi.probeUpdateCapacity);
+  appendValue(
+      measurements,
+      NURI_BENCHMARK_METRIC("renderer.ddgi.requested_probe_update_capacity"),
+      ddgi.requestedProbeUpdateCapacity);
+  appendValue(
+      measurements,
+      NURI_BENCHMARK_METRIC("renderer.ddgi.effective_probe_update_capacity"),
+      ddgi.effectiveProbeUpdateCapacity);
+  appendValue(measurements,
+              NURI_BENCHMARK_METRIC("renderer.ddgi.startup_phase"),
+              static_cast<uint32_t>(ddgi.startupPhase));
+  appendValue(measurements,
+              NURI_BENCHMARK_METRIC(
+                  "renderer.ddgi.sky_remainder_over_threshold_percentage"),
+              ddgi.skyRemainderOverThresholdPercentage);
   addIfNonzero(measurements, "renderer.ddgi.reset_count", ddgi.resetCount);
   addIfNonzero(measurements, "renderer.ddgi.scroll_count", ddgi.scrollCount);
   addIfNonzero(measurements, "renderer.ddgi.invalidated_probes",
@@ -2806,6 +2931,12 @@ void addRendererFrameMetrics(BenchmarkFrameMeasurements &measurements,
                ddgi.authoredVolumes);
   addIfNonzero(measurements, "renderer.ddgi.generated_volumes",
                ddgi.generatedVolumes);
+  addIfNonzero(measurements, "renderer.ddgi.redundant_authored_volumes",
+               ddgi.redundantAuthoredVolumes);
+  addIfNonzero(measurements, "renderer.ddgi.redundant_authored_probes",
+               ddgi.redundantAuthoredProbes);
+  addBytesAsMiB(measurements, "gpu.memory.ddgi.redundant_authored_mb",
+                ddgi.redundantAuthoredBytes);
   addIfNonzero(measurements, "renderer.ddgi.coverage_mode", ddgi.coverageMode);
   addIfNonzero(measurements, "renderer.ddgi.coverage_status",
                static_cast<uint32_t>(ddgi.coverageStatus));
@@ -2936,6 +3067,12 @@ void addRendererFrameMetrics(BenchmarkFrameMeasurements &measurements,
     addVolumeMetric("starvation_frames", volume.starvationFrames);
     addVolumeMetric("estimated_full_refresh_frames",
                     volume.estimatedFullRefreshFrames);
+    addVolumeMetric("persistent_mb",
+                    static_cast<double>(volume.persistentBytes) /
+                        (1024.0 * 1024.0));
+    addVolumeMetric("unique_coverage_percentage",
+                    volume.uniqueCoveragePercentage);
+    addVolumeMetric("redundant_coverage", volume.redundantCoverage);
     addVolumeMetric("history_ready_percentage", volume.historyReadyPercentage);
     addVolumeMetric("coverage_ready_percentage",
                     volume.coverageReadyPercentage);

@@ -320,6 +320,48 @@ ddgiEffectiveVolumeKeyHash(const DDGIEffectiveVolumeKey &key) noexcept {
   return hash;
 }
 
+DDGIRedundancyAnalysis
+analyzeDDGIVolumeRedundancy(const DDGIEffectiveVolume &authored,
+                            const DDGIEffectiveVolume &generated) noexcept {
+  DDGIRedundancyAnalysis result{};
+  if (authored.key.kind != DDGIEffectiveVolumeKind::Authored ||
+      generated.key.kind == DDGIEffectiveVolumeKind::Authored) {
+    return result;
+  }
+  const auto worldCellVolume = [](const DDGIEffectiveVolume &volume) {
+    const float localCellVolume =
+        volume.probeSpacing.x * volume.probeSpacing.y * volume.probeSpacing.z;
+    return std::abs(glm::determinant(glm::mat3(volume.worldFromLocal))) *
+           localCellVolume;
+  };
+  result.densityRedundant =
+      worldCellVolume(authored) + 1.0e-5f >= worldCellVolume(generated);
+
+  const glm::mat4 generatedLocalFromWorld =
+      glm::inverse(generated.worldFromLocal);
+  const glm::vec3 authoredHalfExtents =
+      glm::max(authored.fadeEndHalfExtents, authored.probeCenterHalfExtents);
+  const glm::vec3 generatedHalfExtents =
+      glm::max(generated.fadeEndHalfExtents, generated.probeCenterHalfExtents);
+  result.fullyCovered = true;
+  for (uint32_t corner = 0u; corner < 8u; ++corner) {
+    const glm::vec3 sign((corner & 1u) != 0u ? 1.0f : -1.0f,
+                         (corner & 2u) != 0u ? 1.0f : -1.0f,
+                         (corner & 4u) != 0u ? 1.0f : -1.0f);
+    const glm::vec3 worldCorner = glm::vec3(
+        authored.worldFromLocal * glm::vec4(sign * authoredHalfExtents, 1.0f));
+    const glm::vec3 generatedCorner =
+        glm::vec3(generatedLocalFromWorld * glm::vec4(worldCorner, 1.0f));
+    if (glm::any(glm::greaterThan(glm::abs(generatedCorner),
+                                  generatedHalfExtents + glm::vec3(1.0e-4f)))) {
+      result.fullyCovered = false;
+      break;
+    }
+  }
+  result.fullyRedundant = result.fullyCovered && result.densityRedundant;
+  return result;
+}
+
 void sanitizeDDGICoverageSettings(DDGICoverageSettings &settings) noexcept {
   if (!enumInRange(settings.mode, DDGICoverageMode::Hybrid)) {
     settings.mode = DDGICoverageMode::Manual;
@@ -675,6 +717,7 @@ resolveDDGIEffectiveVolumePlan(const DDGICoverageResolveInput &input,
       const DDGIEffectiveVolumeKey key{
           .kind = DDGIEffectiveVolumeKind::Authored,
           .authoredId = volume.id,
+          .sceneId = input.sceneId,
       };
       if (!isRigidDDGITransform(volume.worldFromLocal)) {
         noteFailure(key, {DDGICoverageLimit::InvalidSettings, 0u});
