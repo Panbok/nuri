@@ -99,6 +99,7 @@ computePassPayloadLayoutHash(const std::pmr::vector<RenderPass> &passes,
             ? 0u
             : quantizeToNextPow2(static_cast<uint64_t>(pass.draws.size())));
     mix(static_cast<uint64_t>(pass.meshDispatches.size()));
+    mix(static_cast<uint64_t>(pass.bufferCopies.size()));
     mix(static_cast<uint64_t>(pass.textureCopies.size()));
     mix(quantizeToNextPow2(
         static_cast<uint64_t>(pass.accelerationStructureBuilds.size())));
@@ -162,7 +163,7 @@ validatePassExecutionMode(const RenderGraphGraphicsPassDesc &desc,
   if (isCopyOnlyExecutionMode(desc.executionMode)) {
     return Result<bool, std::string>::makeError(std::string(caller) +
                                                 ": copy-only pass must use "
-                                                "addTextureCopyPass");
+                                                "a dedicated copy-pass API");
   }
   const bool computeOnly = isComputeOnlyExecutionMode(desc.executionMode);
   const bool externalTemporal =
@@ -402,7 +403,8 @@ RenderGraphBuilder::RenderGraphBuilder(std::pmr::memory_resource *memory)
       preDispatchDependencyBindings_(memory_),
       preDispatchDependencyBindingResourceIndices_(memory_),
       drawBindings_(memory_), meshDispatchBindings_(memory_),
-      textureCopyBindings_(memory_), importedTextureIndicesByHandle_(memory_),
+      bufferCopyBindings_(memory_), textureCopyBindings_(memory_),
+      importedTextureIndicesByHandle_(memory_),
       importedBufferIndicesByHandle_(memory_),
       importedAccelerationStructureIndicesByHandle_(memory_),
       explicitTextureAccessIndicesByPassResource_(memory_),
@@ -431,6 +433,7 @@ void RenderGraphBuilder::beginFrame(uint64_t frameIndex) {
   preDispatchDependencyBindingResourceIndices_.clear();
   drawBindings_.clear();
   meshDispatchBindings_.clear();
+  bufferCopyBindings_.clear();
   textureCopyBindings_.clear();
   importedTextureIndicesByHandle_.clear();
   importedBufferIndicesByHandle_.clear();
@@ -645,6 +648,8 @@ RenderGraphBuilder::computeGraphFingerprint() const noexcept {
     mixStructure(bindings.draws.count);
     mixStructure(bindings.meshDispatches.offset);
     mixStructure(bindings.meshDispatches.count);
+    mixStructure(bindings.bufferCopies.offset);
+    mixStructure(bindings.bufferCopies.count);
     mixStructure(bindings.textureCopies.offset);
     mixStructure(bindings.textureCopies.count);
   }
@@ -667,6 +672,11 @@ RenderGraphBuilder::computeGraphFingerprint() const noexcept {
   for (const MeshDispatchBindings &binding : meshDispatchBindings_) {
     mixStructure(binding.indirect);
     mixStructure(binding.indirectCount);
+  }
+  mixStructure(bufferCopyBindings_.size());
+  for (const BufferCopyBindings &binding : bufferCopyBindings_) {
+    mixStructure(binding.source);
+    mixStructure(binding.destination);
   }
   mixStructure(textureCopyBindings_.size());
   for (const TextureCopyBindings &binding : textureCopyBindings_) {
@@ -899,6 +909,26 @@ void RenderGraphBuilder::refreshHandlesInCompileResult(
           actualDispatchCount);
     } else {
       refreshedPass.meshDispatches = sourcePass.meshDispatches;
+    }
+    const auto bufferCopyRange = result.bufferCopyRangesByPass[i];
+    if (bufferCopyRange.count > 0u) {
+      const uint32_t actualCopyCount =
+          static_cast<uint32_t>(sourcePass.bufferCopies.size());
+      const uint32_t bindingOffset =
+          passBindings_[passIndex].bufferCopies.offset;
+      for (uint32_t copyIndex = 0; copyIndex < actualCopyCount; ++copyIndex) {
+        BufferCopyRegion copy = sourcePass.bufferCopies[copyIndex];
+        const BufferCopyBindings binding =
+            bufferCopyBindings_[bindingOffset + copyIndex];
+        copy.srcBuffer = buffers_[binding.source].importedHandle;
+        copy.dstBuffer = buffers_[binding.destination].importedHandle;
+        result.ownedBufferCopyItems[bufferCopyRange.offset + copyIndex] = copy;
+      }
+      refreshedPass.bufferCopies = std::span<const BufferCopyRegion>(
+          result.ownedBufferCopyItems.data() + bufferCopyRange.offset,
+          actualCopyCount);
+    } else {
+      refreshedPass.bufferCopies = sourcePass.bufferCopies;
     }
     const auto textureCopyRange = result.textureCopyRangesByPass[i];
     if (textureCopyRange.count > 0u) {
@@ -2134,6 +2164,96 @@ Result<RenderGraphPassId, std::string> RenderGraphBuilder::addTextureCopyPass(
   return Result<RenderGraphPassId, std::string>::makeResult(passId);
 }
 
+Result<RenderGraphPassId, std::string> RenderGraphBuilder::addBufferCopyPass(
+    const RenderGraphBufferCopyPassDesc &desc) {
+  if (desc.copies.empty()) {
+    return Result<RenderGraphPassId, std::string>::makeError(
+        "RenderGraphBuilder::addBufferCopyPass: copy list is empty");
+  }
+  OwnedPassPayload ownedPayload(memory_);
+  ownedPayload.debugLabel.assign(desc.debugLabel.data(),
+                                 desc.debugLabel.size());
+  ownedPayload.bufferCopies.reserve(desc.copies.size());
+  bool hasImportedDestination = false;
+  for (const RenderGraphBufferCopyItem &copy : desc.copies) {
+    if (!isValid(copy.sourceBuffer) || !isValid(copy.destinationBuffer)) {
+      return Result<RenderGraphPassId, std::string>::makeError(
+          "RenderGraphBuilder::addBufferCopyPass: copy buffer id is invalid");
+    }
+    if (!isValidBufferIndex(copy.sourceBuffer.value) ||
+        !isValidBufferIndex(copy.destinationBuffer.value)) {
+      return Result<RenderGraphPassId, std::string>::makeError(
+          "RenderGraphBuilder::addBufferCopyPass: copy buffer id is out of "
+          "range");
+    }
+    if (copy.sourceBuffer.value == copy.destinationBuffer.value) {
+      return Result<RenderGraphPassId, std::string>::makeError(
+          "RenderGraphBuilder::addBufferCopyPass: source and destination "
+          "buffers must differ");
+    }
+    if (copy.size == 0u) {
+      return Result<RenderGraphPassId, std::string>::makeError(
+          "RenderGraphBuilder::addBufferCopyPass: copy region is empty");
+    }
+    hasImportedDestination = hasImportedDestination ||
+                             buffers_[copy.destinationBuffer.value].imported;
+    ownedPayload.bufferCopies.push_back(BufferCopyRegion{
+        .srcBuffer = {},
+        .dstBuffer = {},
+        .srcOffset = copy.sourceOffset,
+        .dstOffset = copy.destinationOffset,
+        .size = copy.size,
+    });
+  }
+  allPassesBorrowPayload_ = false;
+  ownedPassPayloads_.push_back(std::move(ownedPayload));
+  OwnedPassPayload &storedPayload = ownedPassPayloads_.back();
+  RenderPass pass{};
+  pass.executionMode = RenderPassExecutionMode::CopyOnly;
+  pass.hasColorAttachment = false;
+  pass.payloadBorrowed = false;
+  pass.bufferCopies = std::span<const BufferCopyRegion>(
+      storedPayload.bufferCopies.data(), storedPayload.bufferCopies.size());
+  pass.gpuTimingScope = desc.gpuTimingScope;
+  pass.debugColor = desc.debugColor;
+  pass.debugLabel = std::string_view(storedPayload.debugLabel.data(),
+                                     storedPayload.debugLabel.size());
+  auto addResult = addPassRecord(pass, desc.debugLabel);
+  if (addResult.hasError()) {
+    return Result<RenderGraphPassId, std::string>::makeError(addResult.error());
+  }
+  const RenderGraphPassId passId = addResult.value();
+  const uint32_t bindingOffset =
+      passBindings_[passId.value].bufferCopies.offset;
+  for (uint32_t copyIndex = 0u; copyIndex < desc.copies.size(); ++copyIndex) {
+    const RenderGraphBufferCopyItem &copy = desc.copies[copyIndex];
+    BufferCopyBindings &binding =
+        bufferCopyBindings_[bindingOffset + copyIndex];
+    binding.source = copy.sourceBuffer.value;
+    binding.destination = copy.destinationBuffer.value;
+    auto readResult =
+        addBufferAccess(passId, copy.sourceBuffer, RenderGraphAccessMode::Read);
+    if (readResult.hasError()) {
+      return Result<RenderGraphPassId, std::string>::makeError(
+          readResult.error());
+    }
+    auto writeResult = addBufferAccess(passId, copy.destinationBuffer,
+                                       RenderGraphAccessMode::Write);
+    if (writeResult.hasError()) {
+      return Result<RenderGraphPassId, std::string>::makeError(
+          writeResult.error());
+    }
+  }
+  if (desc.markImplicitOutputSideEffect && hasImportedDestination) {
+    auto sideEffectResult = markPassSideEffect(passId);
+    if (sideEffectResult.hasError()) {
+      return Result<RenderGraphPassId, std::string>::makeError(
+          sideEffectResult.error());
+    }
+  }
+  return Result<RenderGraphPassId, std::string>::makeResult(passId);
+}
+
 Result<RenderGraphPassId, std::string>
 RenderGraphBuilder::addPassRecord(RenderPass pass, std::string_view debugName) {
   const RenderGraphPassId passId{.value =
@@ -2147,6 +2267,8 @@ RenderGraphBuilder::addPassRecord(RenderPass pass, std::string_view debugName) {
   const uint32_t drawOffset = static_cast<uint32_t>(drawBindings_.size());
   const uint32_t meshDispatchOffset =
       static_cast<uint32_t>(meshDispatchBindings_.size());
+  const uint32_t bufferCopyOffset =
+      static_cast<uint32_t>(bufferCopyBindings_.size());
   const uint32_t textureCopyOffset =
       static_cast<uint32_t>(textureCopyBindings_.size());
   const uint32_t drawCount = pass.drawBuffersPreResolved
@@ -2166,6 +2288,9 @@ RenderGraphBuilder::addPassRecord(RenderPass pass, std::string_view debugName) {
       .meshDispatches = {.offset = meshDispatchOffset,
                          .count =
                              static_cast<uint32_t>(pass.meshDispatches.size())},
+      .bufferCopies = {.offset = bufferCopyOffset,
+                       .count =
+                           static_cast<uint32_t>(pass.bufferCopies.size())},
       .textureCopies = {.offset = textureCopyOffset,
                         .count =
                             static_cast<uint32_t>(pass.textureCopies.size())},
@@ -2185,6 +2310,7 @@ RenderGraphBuilder::addPassRecord(RenderPass pass, std::string_view debugName) {
   }
   drawBindings_.resize(drawOffset + drawCount);
   meshDispatchBindings_.resize(meshDispatchOffset + pass.meshDispatches.size());
+  bufferCopyBindings_.resize(bufferCopyOffset + pass.bufferCopies.size());
   textureCopyBindings_.resize(textureCopyOffset + pass.textureCopies.size());
   passes_.push_back(pass);
   const std::string_view name = debugName.empty() ? pass.debugLabel : debugName;
@@ -2932,6 +3058,9 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
     uint32_t meshDispatchCount = 0u;
     uint32_t meshDispatchBindingOffset = 0u;
     uint32_t meshDispatchOutputOffset = 0u;
+    uint32_t bufferCopyCount = 0u;
+    uint32_t bufferCopyBindingOffset = 0u;
+    uint32_t bufferCopyOutputOffset = 0u;
     uint32_t textureCopyCount = 0u;
     uint32_t textureCopyBindingOffset = 0u;
     uint32_t textureCopyOutputOffset = 0u;
@@ -2947,6 +3076,8 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
     uint32_t unresolvedDrawCount = 0u;
     uint32_t unresolvedMeshDispatchOffset = 0u;
     uint32_t unresolvedMeshDispatchCount = 0u;
+    uint32_t unresolvedBufferCopyOffset = 0u;
+    uint32_t unresolvedBufferCopyCount = 0u;
     uint32_t unresolvedTextureCopyOffset = 0u;
     uint32_t unresolvedTextureCopyCount = 0u;
   };
@@ -2990,6 +3121,9 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
           static_cast<uint32_t>(pass.meshDispatches.size());
       plan.meshDispatchBindingOffset =
           passBindings_[passIndex].meshDispatches.offset;
+      plan.bufferCopyCount = static_cast<uint32_t>(pass.bufferCopies.size());
+      plan.bufferCopyBindingOffset =
+          passBindings_[passIndex].bufferCopies.offset;
       plan.textureCopyCount = static_cast<uint32_t>(pass.textureCopies.size());
       plan.textureCopyBindingOffset =
           passBindings_[passIndex].textureCopies.offset;
@@ -3041,6 +3175,13 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
             (binding.indirectCount != UINT32_MAX &&
              !buffers_[binding.indirectCount].imported);
       }
+      for (uint32_t i = 0; i < plan.bufferCopyCount; ++i) {
+        const BufferCopyBindings binding =
+            bufferCopyBindings_[plan.bufferCopyBindingOffset + i];
+        plan.unresolvedBufferCopyCount += !buffers_[binding.source].imported;
+        plan.unresolvedBufferCopyCount +=
+            !buffers_[binding.destination].imported;
+      }
       for (uint32_t i = 0; i < plan.textureCopyCount; ++i) {
         const TextureCopyBindings binding =
             textureCopyBindings_[plan.textureCopyBindingOffset + i];
@@ -3071,6 +3212,7 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
   size_t totalPreDispatchDependencySlots = 0u;
   size_t totalDrawItems = 0u;
   size_t totalMeshDispatchItems = 0u;
+  size_t totalBufferCopyItems = 0u;
   size_t totalTextureCopyItems = 0u;
   size_t totalUnresolvedTextureBindings = 0u;
   size_t totalUnresolvedDependencyBufferBindings = 0u;
@@ -3078,6 +3220,7 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
   size_t totalUnresolvedPreDispatchDependencyBufferBindings = 0u;
   size_t totalUnresolvedDrawBufferBindings = 0u;
   size_t totalUnresolvedMeshDispatchBufferBindings = 0u;
+  size_t totalUnresolvedBufferCopyBindings = 0u;
   size_t totalUnresolvedTextureCopyBindings = 0u;
   for (uint32_t orderedPassIndex = 0u; orderedPassIndex < passPlans.size();
        ++orderedPassIndex) {
@@ -3140,6 +3283,19 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
           "RenderGraphBuilder::compile: total mesh dispatch count overflow");
     }
     totalMeshDispatchItems += plan.meshDispatchCount;
+    if (totalBufferCopyItems > UINT32_MAX) {
+      return Result<bool, std::string>::makeError(
+          "RenderGraphBuilder::compile: buffer copy output offset exceeds "
+          "uint32_t range");
+    }
+    plan.bufferCopyOutputOffset = static_cast<uint32_t>(totalBufferCopyItems);
+    if (plan.bufferCopyCount >
+        static_cast<uint64_t>(std::numeric_limits<size_t>::max() -
+                              totalBufferCopyItems)) {
+      return Result<bool, std::string>::makeError(
+          "RenderGraphBuilder::compile: total buffer copy count overflow");
+    }
+    totalBufferCopyItems += plan.bufferCopyCount;
     if (totalTextureCopyItems > UINT32_MAX) {
       return Result<bool, std::string>::makeError(
           "RenderGraphBuilder::compile: texture copy output offset exceeds "
@@ -3174,6 +3330,9 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
         static_cast<uint32_t>(totalUnresolvedMeshDispatchBufferBindings);
     totalUnresolvedMeshDispatchBufferBindings +=
         plan.unresolvedMeshDispatchCount;
+    plan.unresolvedBufferCopyOffset =
+        static_cast<uint32_t>(totalUnresolvedBufferCopyBindings);
+    totalUnresolvedBufferCopyBindings += plan.unresolvedBufferCopyCount;
     plan.unresolvedTextureCopyOffset =
         static_cast<uint32_t>(totalUnresolvedTextureCopyBindings);
     totalUnresolvedTextureCopyBindings += plan.unresolvedTextureCopyCount;
@@ -3196,6 +3355,7 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
   compiled.ownedDrawItems.resize(totalDrawItems);
   compiled.drawRangesByPass.resize(work.order.size());
   compiled.ownedMeshDispatchItems.resize(totalMeshDispatchItems);
+  compiled.ownedBufferCopyItems.resize(totalBufferCopyItems);
   compiled.ownedTextureCopyItems.resize(totalTextureCopyItems);
   {
     compiled.ownedMeshDispatchDebugLabels.clear();
@@ -3215,6 +3375,7 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
     }
   }
   compiled.meshDispatchRangesByPass.resize(work.order.size());
+  compiled.bufferCopyRangesByPass.resize(work.order.size());
   compiled.textureCopyRangesByPass.resize(work.order.size());
   compiled.orderedPasses.resize(work.order.size());
   compiled.orderedPassIndices.resize(work.order.size());
@@ -3231,6 +3392,8 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
       totalUnresolvedDrawBufferBindings);
   compiled.unresolvedMeshDispatchBufferBindings.resize(
       totalUnresolvedMeshDispatchBufferBindings);
+  compiled.unresolvedBufferCopyBindings.resize(
+      totalUnresolvedBufferCopyBindings);
   compiled.unresolvedTextureCopyBindings.resize(
       totalUnresolvedTextureCopyBindings);
   const auto fillPassRange = [&](uint32_t, RenderGraphContiguousRange range) {
@@ -3593,6 +3756,55 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
             plan.meshDispatchCount);
       } else {
         resolvedPass.meshDispatches = {};
+      }
+      compiled.bufferCopyRangesByPass[orderedPassIndex] = {
+          .offset = plan.bufferCopyOutputOffset, .count = plan.bufferCopyCount};
+      if (plan.bufferCopyCount > 0u) {
+        uint32_t unresolvedBufferCopyWriteOffset =
+            plan.unresolvedBufferCopyOffset;
+        for (uint32_t copyIndex = 0; copyIndex < plan.bufferCopyCount;
+             ++copyIndex) {
+          BufferCopyRegion resolvedCopy = sourcePass.bufferCopies[copyIndex];
+          const uint32_t globalCopyIndex =
+              plan.bufferCopyBindingOffset + copyIndex;
+          const auto resolveBufferCopyBinding =
+              [&](uint32_t resourceIndex,
+                  RenderGraphCompileResult::BufferCopyBindingTarget target,
+                  BufferHandle &slotHandle) {
+                if (resourceIndex == UINT32_MAX) {
+                  slotHandle = {};
+                  return;
+                }
+                const BufferResource &resource = buffers_[resourceIndex];
+                if (resource.imported) {
+                  slotHandle = resource.importedHandle;
+                  return;
+                }
+                slotHandle = {};
+                compiled.unresolvedBufferCopyBindings
+                    [unresolvedBufferCopyWriteOffset++] = {
+                    .orderedPassIndex = orderedPassIndex,
+                    .bufferCopyIndex = copyIndex,
+                    .target = target,
+                    .bufferResourceIndex = resourceIndex};
+              };
+          resolveBufferCopyBinding(
+              bufferCopyBindings_[globalCopyIndex].source,
+              RenderGraphCompileResult::BufferCopyBindingTarget::Source,
+              resolvedCopy.srcBuffer);
+          resolveBufferCopyBinding(
+              bufferCopyBindings_[globalCopyIndex].destination,
+              RenderGraphCompileResult::BufferCopyBindingTarget::Destination,
+              resolvedCopy.dstBuffer);
+          compiled
+              .ownedBufferCopyItems[plan.bufferCopyOutputOffset + copyIndex] =
+              resolvedCopy;
+        }
+        resolvedPass.bufferCopies = std::span<const BufferCopyRegion>(
+            compiled.ownedBufferCopyItems.data() + plan.bufferCopyOutputOffset,
+            plan.bufferCopyCount);
+      } else {
+        resolvedPass.bufferCopies = {};
       }
       compiled.textureCopyRangesByPass[orderedPassIndex] = {
           .offset = plan.textureCopyOutputOffset,
@@ -4489,6 +4701,7 @@ RenderGraphExecutor::executeInternal(RenderGraphRuntime *runtime,
   std::pmr::vector<ComputeDispatchItem> executablePreDispatches(memory_);
   std::pmr::vector<DrawItem> executableDrawItems(memory_);
   std::pmr::vector<MeshDispatchItem> executableMeshDispatches(memory_);
+  std::pmr::vector<BufferCopyRegion> executableBufferCopies(memory_);
   std::pmr::vector<TextureCopyItem> executableTextureCopies(memory_);
   std::pmr::vector<BufferHandle> executablePreDispatchDependencyBuffers(
       memory_);
@@ -4501,6 +4714,8 @@ RenderGraphExecutor::executeInternal(RenderGraphRuntime *runtime,
         !compiled.unresolvedDependencyTextureBindings.empty();
     const bool needsMutableDrawItems =
         !compiled.unresolvedDrawBufferBindings.empty();
+    const bool needsMutableBufferCopies =
+        !compiled.unresolvedBufferCopyBindings.empty();
     const bool needsMutableTextureCopies =
         !compiled.unresolvedTextureCopyBindings.empty();
     executablePasses = compiled.orderedPasses;
@@ -4515,6 +4730,9 @@ RenderGraphExecutor::executeInternal(RenderGraphRuntime *runtime,
       executableDrawItems = compiled.ownedDrawItems;
     }
     executableMeshDispatches = compiled.ownedMeshDispatchItems;
+    if (needsMutableBufferCopies) {
+      executableBufferCopies = compiled.ownedBufferCopyItems;
+    }
     if (needsMutableTextureCopies) {
       executableTextureCopies = compiled.ownedTextureCopyItems;
     }
@@ -4559,6 +4777,12 @@ RenderGraphExecutor::executeInternal(RenderGraphRuntime *runtime,
       pass.meshDispatches =
           std::span<const MeshDispatchItem>(executableMeshDispatches)
               .subspan(meshRange.offset, meshRange.count);
+      const auto &bufferCopyRange = compiled.bufferCopyRangesByPass[passIndex];
+      if (needsMutableBufferCopies) {
+        pass.bufferCopies =
+            std::span<const BufferCopyRegion>(executableBufferCopies)
+                .subspan(bufferCopyRange.offset, bufferCopyRange.count);
+      }
       const auto &copyRange = compiled.textureCopyRangesByPass[passIndex];
       if (needsMutableTextureCopies) {
         pass.textureCopies =
@@ -4611,6 +4835,21 @@ RenderGraphExecutor::executeInternal(RenderGraphRuntime *runtime,
       executableDependencyTextures[range.offset +
                                    binding.dependencyTextureIndex] =
           transientTexture(binding.textureResourceIndex);
+    }
+    for (const auto &binding : compiled.unresolvedBufferCopyBindings) {
+      const auto &range =
+          compiled.bufferCopyRangesByPass[binding.orderedPassIndex];
+      BufferCopyRegion &copy =
+          executableBufferCopies[range.offset + binding.bufferCopyIndex];
+      const BufferHandle buffer = transientBuffer(binding.bufferResourceIndex);
+      switch (binding.target) {
+      case RenderGraphCompileResult::BufferCopyBindingTarget::Source:
+        copy.srcBuffer = buffer;
+        break;
+      case RenderGraphCompileResult::BufferCopyBindingTarget::Destination:
+        copy.dstBuffer = buffer;
+        break;
+      }
     }
     for (const auto &binding : compiled.unresolvedTextureCopyBindings) {
       const auto &range =

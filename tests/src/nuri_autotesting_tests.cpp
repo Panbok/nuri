@@ -327,6 +327,97 @@ TEST(NuriAutotestingTest, ManifestRejectsUnknownKeys) {
   std::filesystem::remove(path, ec);
 }
 
+TEST(NuriAutotestingTest, ManifestParsesStrictVersionedDDGICoverage) {
+  const std::filesystem::path path =
+      makeTempPath("autotest_ddgi_coverage", ".json");
+  const std::string manifest = R"json({
+    "schemaVersion": 1,
+    "id": "ddgi.coverage",
+    "suite": "ddgi",
+    "settings": {"ddgi": {"coverage": {
+      "schemaVersion": 1,
+      "mode": "Hybrid",
+      "constraintPolicy": "PreserveNearSpacing",
+      "sceneBoundsSource": "Authored",
+      "authoredBounds": {"min": [-4, -2, -6], "max": [8, 10, 12]},
+      "cascadeCount": 4,
+      "cascadeProbeCounts": [24, 14, 20],
+      "requestedNearSpacing": [1, 1.25, 1.5],
+      "spacingRatio": 2.5,
+      "requestedCoverageHalfExtents": [60, 35, 55],
+      "scenePaddingCells": 3,
+      "transitionCells": 2,
+      "includeAuthoredVolumes": false
+    }}}
+  })json";
+  writeFile(path, manifest);
+
+  auto loaded = loadAutotestCaseManifest(path);
+  ASSERT_FALSE(loaded.hasError()) << loaded.error();
+  const DDGICoverageSettings &coverage = loaded.value().settings.ddgi.coverage;
+  EXPECT_EQ(coverage.mode, DDGICoverageMode::Hybrid);
+  EXPECT_EQ(coverage.constraintPolicy,
+            DDGICoverageConstraintPolicy::PreserveNearSpacing);
+  EXPECT_EQ(coverage.sceneBoundsSource, DDGISceneBoundsSource::Authored);
+  EXPECT_TRUE(coverage.authoredBounds.valid);
+  EXPECT_TRUE(coverage.authoredBounds.complete);
+  EXPECT_FLOAT_EQ(coverage.authoredBounds.bounds.min_.x, -4.0f);
+  EXPECT_FLOAT_EQ(coverage.authoredBounds.bounds.min_.y, -2.0f);
+  EXPECT_FLOAT_EQ(coverage.authoredBounds.bounds.min_.z, -6.0f);
+  EXPECT_FLOAT_EQ(coverage.authoredBounds.bounds.max_.x, 8.0f);
+  EXPECT_FLOAT_EQ(coverage.authoredBounds.bounds.max_.y, 10.0f);
+  EXPECT_FLOAT_EQ(coverage.authoredBounds.bounds.max_.z, 12.0f);
+  EXPECT_EQ(coverage.cascadeCount, 4u);
+  EXPECT_EQ(coverage.cascadeProbeCounts.x, 24u);
+  EXPECT_EQ(coverage.cascadeProbeCounts.y, 14u);
+  EXPECT_EQ(coverage.cascadeProbeCounts.z, 20u);
+  EXPECT_FLOAT_EQ(coverage.requestedNearSpacing.x, 1.0f);
+  EXPECT_FLOAT_EQ(coverage.requestedNearSpacing.y, 1.25f);
+  EXPECT_FLOAT_EQ(coverage.requestedNearSpacing.z, 1.5f);
+  EXPECT_FLOAT_EQ(coverage.spacingRatio, 2.5f);
+  EXPECT_FLOAT_EQ(coverage.requestedCoverageHalfExtents.x, 60.0f);
+  EXPECT_FLOAT_EQ(coverage.requestedCoverageHalfExtents.y, 35.0f);
+  EXPECT_FLOAT_EQ(coverage.requestedCoverageHalfExtents.z, 55.0f);
+  EXPECT_EQ(coverage.scenePaddingCells, 3u);
+  EXPECT_EQ(coverage.transitionCells, 2u);
+  EXPECT_FALSE(coverage.includeAuthoredVolumes);
+
+  writeFile(path,
+            R"json({
+              "schemaVersion": 1,
+              "id": "ddgi.coverage.default",
+              "suite": "ddgi",
+              "settings": {"ddgi": {"enabled": true}}
+            })json");
+  loaded = loadAutotestCaseManifest(path);
+  ASSERT_FALSE(loaded.hasError()) << loaded.error();
+  EXPECT_EQ(loaded.value().settings.ddgi.coverage.mode,
+            DDGICoverageMode::Manual);
+  EXPECT_FALSE(loaded.value().settings.ddgi.coverage.authoredBounds.valid);
+
+  const std::array invalidManifests{
+      replaceFirst(manifest, "\"schemaVersion\": 1,\n      \"mode\"",
+                   "\"schemaVersion\": 2,\n      \"mode\""),
+      replaceFirst(manifest, "\"includeAuthoredVolumes\": false",
+                   "\"includeAuthoredVolumes\": false, \"unexpected\": true"),
+      replaceFirst(
+          manifest,
+          "\"authoredBounds\": {\"min\": [-4, -2, -6], \"max\": [8, 10, 12]}",
+          "\"authoredBounds\": {\"min\": [-4, -2, -6]}")};
+  for (const std::string &invalidManifest : invalidManifests) {
+    writeFile(path, invalidManifest);
+    auto invalid = loadAutotestCaseManifest(path);
+    EXPECT_TRUE(invalid.hasError());
+    if (invalid.hasError()) {
+      EXPECT_NE(invalid.error().find("settings.ddgi.coverage"),
+                std::string::npos);
+    }
+  }
+
+  std::error_code ec;
+  std::filesystem::remove(path, ec);
+}
+
 TEST(NuriAutotestingTest, ManifestRejectsRemovedBackends) {
   const std::filesystem::path path =
       makeTempPath("autotest_removed_backend", ".json");

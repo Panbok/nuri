@@ -476,8 +476,8 @@ layout(push_constant) uniform MeshletCompactionPushConstants {
   uint sourceFrameIndex;
   uint meshletCounterFlags;
   uint flags;
-  uint reserved0;
-  uint reserved1;
+  uint currentDepthVerificationTexId;
+  uint currentDepthVerificationExtentPacked;
 } pc;
 #else
 layout(push_constant) uniform MeshletPushConstants {
@@ -500,6 +500,8 @@ layout(push_constant) uniform MeshletPushConstants {
   uint candidateOffset;
   uint sourceFrameIndex;
   uint meshletCounterFlags;
+  uint currentDepthVerificationTexId;
+  uint currentDepthVerificationExtentPacked;
 } pc;
 #endif
 #else

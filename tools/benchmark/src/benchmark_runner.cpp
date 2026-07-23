@@ -2721,6 +2721,15 @@ void addRendererFrameMetrics(BenchmarkFrameMeasurements &measurements,
                 rt.decodedPositionBytes);
   addBytesAsMiB(measurements, "gpu.memory.ray_tracing.tables_mb",
                 rt.tableBytes);
+  addBytesAsMiB(measurements, "gpu.memory.ray_tracing.blas_mb",
+                rt.blasAllocationBytes);
+  addBytesAsMiB(measurements, "gpu.memory.ray_tracing.tlas_mb",
+                rt.tlasAllocationBytes);
+  addBytesAsMiB(measurements, "gpu.memory.ray_tracing.as_scratch_high_water_mb",
+                rt.asScratchHighWaterBytes);
+  addIfNonzero(measurements,
+               "renderer.ray_tracing.direct_binding_pool_high_water",
+               rt.directBindingPoolHighWater);
   const DDGIFrameMetrics &ddgi = metrics.ddgi;
   addIfNonzero(measurements, "renderer.ddgi.active_volumes",
                ddgi.activeVolumes);
@@ -2742,18 +2751,33 @@ void addRendererFrameMetrics(BenchmarkFrameMeasurements &measurements,
                ddgi.relocatedProbes);
   addIfNonzero(measurements, "renderer.ddgi.probe_state_readback_available",
                ddgi.probeStateReadbackAvailable);
+  addIfNonzero(measurements, "renderer.ddgi.probe_state_readback_source_frame",
+               ddgi.probeStateReadbackSourceFrame);
+  addIfNonzero(measurements, "renderer.ddgi.probe_state_readback_stale_frames",
+               ddgi.probeStateReadbackStaleFrames);
   addIfNonzero(measurements, "renderer.ddgi.max_relocation",
                ddgi.maxRelocation);
   addIfNonzero(measurements, "renderer.ddgi.updated_probes",
                ddgi.updatedProbes);
   addIfNonzero(measurements, "renderer.ddgi.primary_queries",
                ddgi.primaryQueries);
+  addIfNonzero(measurements, "renderer.ddgi.primary_queries_issued",
+               ddgi.primaryQueriesIssued);
+  addIfNonzero(measurements, "renderer.ddgi.trace_counter_source_frame",
+               ddgi.traceCounterSourceFrame);
   addIfNonzero(measurements, "renderer.ddgi.secondary_queries_reserved",
                ddgi.secondaryQueriesReserved);
   addIfNonzero(measurements, "renderer.ddgi.secondary_queries_unused",
                ddgi.secondaryQueriesUnused);
   addIfNonzero(measurements, "renderer.ddgi.secondary_queries",
                ddgi.secondaryQueries);
+  addIfNonzero(measurements, "renderer.ddgi.directional_secondary_queries",
+               ddgi.directionalSecondaryQueries);
+  addIfNonzero(measurements, "renderer.ddgi.local_secondary_queries",
+               ddgi.localSecondaryQueries);
+  addIfNonzero(measurements, "renderer.ddgi.total_queries_issued",
+               static_cast<uint64_t>(ddgi.primaryQueriesIssued) +
+                   ddgi.secondaryQueries);
   addIfNonzero(measurements, "renderer.ddgi.primary_candidate_intersections",
                ddgi.primaryCandidateIntersections);
   addIfNonzero(measurements, "renderer.ddgi.secondary_candidate_intersections",
@@ -2776,6 +2800,65 @@ void addRendererFrameMetrics(BenchmarkFrameMeasurements &measurements,
                ddgi.invalidatedProbes);
   addIfNonzero(measurements, "renderer.ddgi.failed_volumes",
                ddgi.failedVolumes);
+  addIfNonzero(measurements, "renderer.ddgi.effective_volumes",
+               ddgi.effectiveVolumes);
+  addIfNonzero(measurements, "renderer.ddgi.authored_volumes",
+               ddgi.authoredVolumes);
+  addIfNonzero(measurements, "renderer.ddgi.generated_volumes",
+               ddgi.generatedVolumes);
+  addIfNonzero(measurements, "renderer.ddgi.coverage_mode", ddgi.coverageMode);
+  addIfNonzero(measurements, "renderer.ddgi.coverage_status",
+               static_cast<uint32_t>(ddgi.coverageStatus));
+  addIfNonzero(measurements, "renderer.ddgi.coverage_error",
+               static_cast<uint32_t>(ddgi.coverageError));
+  addIfNonzero(measurements, "renderer.ddgi.limiting_constraint",
+               static_cast<uint32_t>(ddgi.limitingConstraint));
+  appendValue(measurements,
+              NURI_BENCHMARK_METRIC("renderer.ddgi.requested_half_extent_x"),
+              ddgi.requestedCoverageHalfExtents.x);
+  appendValue(measurements,
+              NURI_BENCHMARK_METRIC("renderer.ddgi.requested_half_extent_y"),
+              ddgi.requestedCoverageHalfExtents.y);
+  appendValue(measurements,
+              NURI_BENCHMARK_METRIC("renderer.ddgi.requested_half_extent_z"),
+              ddgi.requestedCoverageHalfExtents.z);
+  appendValue(measurements,
+              NURI_BENCHMARK_METRIC("renderer.ddgi.achieved_half_extent_x"),
+              ddgi.achievedCoverageHalfExtents.x);
+  appendValue(measurements,
+              NURI_BENCHMARK_METRIC("renderer.ddgi.achieved_half_extent_y"),
+              ddgi.achievedCoverageHalfExtents.y);
+  appendValue(measurements,
+              NURI_BENCHMARK_METRIC("renderer.ddgi.achieved_half_extent_z"),
+              ddgi.achievedCoverageHalfExtents.z);
+  appendValue(measurements,
+              NURI_BENCHMARK_METRIC("renderer.ddgi.scene_coverage_ratio"),
+              ddgi.sceneCoverageRatio);
+  appendValue(measurements,
+              NURI_BENCHMARK_METRIC("renderer.ddgi.coverage_resolve_cpu_ms"),
+              ddgi.coverageResolveCpuTimeMs);
+  addIfNonzero(measurements, "renderer.ddgi.diagnostic_sample_count",
+               ddgi.diagnosticSampleCount);
+  addIfNonzero(measurements, "renderer.ddgi.uncovered_diagnostic_samples",
+               ddgi.uncoveredDiagnosticSamples);
+  addIfNonzero(measurements, "renderer.ddgi.sky_remainder_samples",
+               ddgi.skyRemainderSamples);
+  addIfNonzero(measurements, "renderer.ddgi.diagnostic_samples_available",
+               ddgi.diagnosticSamplesAvailable);
+  addIfNonzero(measurements, "renderer.ddgi.dirty_regions_produced",
+               ddgi.dirtyRegionsProduced);
+  addIfNonzero(measurements, "renderer.ddgi.dirty_regions_merged",
+               ddgi.dirtyRegionsMerged);
+  addIfNonzero(measurements, "renderer.ddgi.dirty_regions_overflowed",
+               ddgi.dirtyRegionsOverflowed);
+  addIfNonzero(measurements, "renderer.ddgi.dirty_regions_pending",
+               ddgi.dirtyRegionsPending);
+  addIfNonzero(measurements, "renderer.ddgi.dirty_probes_affected",
+               ddgi.dirtyProbesAffected);
+  addIfNonzero(measurements, "renderer.ddgi.classification_fallbacks",
+               ddgi.classificationFallbacks);
+  addIfNonzero(measurements, "renderer.ddgi.classification_overflows",
+               ddgi.classificationOverflows);
   addIfNonzero(measurements, "renderer.ddgi.volume_failure_reason",
                static_cast<uint32_t>(ddgi.volumeFailureReason));
   addIfNonzero(measurements, "renderer.ddgi.history_ready", ddgi.historyReady);
@@ -2816,6 +2899,48 @@ void addRendererFrameMetrics(BenchmarkFrameMeasurements &measurements,
                 ddgi.persistentBytes);
   addBytesAsMiB(measurements, "gpu.memory.ddgi.frame_batch_mb",
                 ddgi.frameBatchBytes);
+  addBytesAsMiB(measurements, "gpu.memory.ddgi.committed_atlas_mb",
+                ddgi.committedAtlasBytes);
+  addBytesAsMiB(measurements, "gpu.memory.ddgi.pending_atlas_mb",
+                ddgi.pendingAtlasBytes);
+  addBytesAsMiB(measurements, "gpu.memory.ddgi.peak_atlas_mb",
+                ddgi.peakAtlasBytes);
+  for (size_t volumeIndex = 0u; volumeIndex < ddgi.volumes.size();
+       ++volumeIndex) {
+    const DDGIVolumeFrameMetrics &volume = ddgi.volumes[volumeIndex];
+    const std::string prefix =
+        "renderer.ddgi.volume" + std::to_string(volumeIndex) + ".";
+    const auto addVolumeMetric = [&](std::string_view suffix, double value) {
+      appendValue(measurements,
+                  registeredMetricIndex(prefix + std::string(suffix)), value);
+    };
+    addVolumeMetric("active", volume.active);
+    addVolumeMetric("effective_kind", volume.effectiveKind);
+    addVolumeMetric("tier", volume.tier);
+    addVolumeMetric("cascade_index", volume.cascadeIndex);
+    addVolumeMetric("total_probes", volume.totalProbes);
+    addVolumeMetric("initialized_probes", volume.initializedProbes);
+    addVolumeMetric("shading_enabled_probes", volume.shadingEnabledProbes);
+    addVolumeMetric("invalid_probes", volume.invalidProbes);
+    addVolumeMetric("newly_exposed_probes", volume.newlyExposedProbes);
+    addVolumeMetric("updates", volume.updates);
+    addVolumeMetric("primary_queries", volume.primaryQueries);
+    addVolumeMetric("primary_queries_issued", volume.primaryQueriesIssued);
+    addVolumeMetric("secondary_queries", volume.secondaryQueries);
+    addVolumeMetric("update_age_median", volume.updateAgeMedian);
+    addVolumeMetric("update_age_p95", volume.updateAgeP95);
+    addVolumeMetric("update_age_maximum", volume.updateAgeMaximum);
+    addVolumeMetric("scheduled_quota", volume.scheduledQuota);
+    addVolumeMetric("used_quota", volume.usedQuota);
+    addVolumeMetric("deficit", static_cast<double>(volume.deficit));
+    addVolumeMetric("starvation_frames", volume.starvationFrames);
+    addVolumeMetric("estimated_full_refresh_frames",
+                    volume.estimatedFullRefreshFrames);
+    addVolumeMetric("history_ready_percentage", volume.historyReadyPercentage);
+    addVolumeMetric("coverage_ready_percentage",
+                    volume.coverageReadyPercentage);
+    addVolumeMetric("confidence", volume.confidence);
+  }
   const uint64_t estimatedFrameTextureBytes =
       shadow.cascadeTextureBytes + aa.motionVectorTotalBytes +
       aa.reactiveMaskTotalBytes + aa.motionClassTotalBytes +
@@ -3358,15 +3483,19 @@ populateScene(const BenchmarkCase &benchmarkCase, Renderer &renderer,
         }
       }
     }
-    const uint32_t volumeCount =
-        benchmarkCase.scene.generator ==
-                "nuri.procedural.ddgi_benchmark_four_volume.v1"
-            ? 4u
-            : 1u;
+    uint32_t volumeCount = 1u;
+    if (benchmarkCase.scene.generator ==
+        "nuri.procedural.ddgi_benchmark_four_volume.v1") {
+      volumeCount = 4u;
+    } else if (benchmarkCase.scene.generator ==
+               "nuri.procedural.ddgi_benchmark_eight_volume.v1") {
+      volumeCount = 8u;
+    }
     for (uint32_t index = 0u; index < volumeCount; ++index) {
       const glm::vec3 offset =
           volumeCount == 1u ? glm::vec3(0.0f)
-                            : glm::vec3((index & 1u) != 0u ? 1.4f : -1.4f, 0.0f,
+                            : glm::vec3((index & 1u) != 0u ? 1.4f : -1.4f,
+                                        (index & 4u) != 0u ? 0.5f : -0.5f,
                                         (index & 2u) != 0u ? 1.0f : -1.0f);
       auto node = scene.graph().createNode(
           scene.graph().rootNode(), "DDGI Benchmark Volume",

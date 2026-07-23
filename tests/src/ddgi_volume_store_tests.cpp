@@ -15,7 +15,8 @@ TEST(DDGIVolumeStoreTests, RejectsInvalidDescriptorsWithoutAllocatingAHandle) {
   nuri::DDGIVolumeDesc desc{};
   desc.probeCounts.x = 1u;
 
-  const auto result = scene.graph().addDDGIVolume(scene.graph().rootNode(), desc);
+  const auto result =
+      scene.graph().addDDGIVolume(scene.graph().rootNode(), desc);
 
   EXPECT_TRUE(result.hasError());
   uint32_t volumeCount = 0u;

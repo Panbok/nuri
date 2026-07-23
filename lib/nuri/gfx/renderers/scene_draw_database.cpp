@@ -3,21 +3,10 @@
 #include "nuri/gfx/pipeline/render_pipeline.h"
 #include "nuri/pch.h"
 #include "nuri/resources/gpu/resource_manager.h"
+#include "nuri/resources/gpu/scene_material_resolution.h"
 #include "nuri/scene/render_scene.h"
 namespace nuri {
 namespace {
-MaterialRef resolveMaterial(const Renderable &renderable,
-                            const ModelRecord &model, uint32_t submesh) {
-  if (isValid(renderable.materialOverride)) {
-    return renderable.materialOverride;
-  }
-  MaterialRef material = model.materialForSubmesh(submesh);
-  if (!isValid(material)) {
-    material = model.materialForSource(submesh);
-  }
-  return isValid(material) ? material : renderable.material;
-}
-
 void appendUniqueTexture(std::pmr::vector<TextureHandle> &textures,
                          TextureHandle texture) {
   if (nuri::isValid(texture) &&
@@ -111,8 +100,9 @@ SceneDrawDatabase::update(const RenderScene &scene,
     for (uint32_t submeshIndex = 0;
          submeshIndex < static_cast<uint32_t>(submeshes.size());
          ++submeshIndex) {
-      const MaterialRef material =
-          resolveMaterial(renderable, *modelRecord, submeshIndex);
+      const MaterialRef material = resolveSceneSubmeshMaterial(
+          *modelRecord, submeshIndex, renderable.material,
+          renderable.materialOverride);
       const MaterialRecord *materialRecord = resources.tryGet(material);
       const bool alphaMasked =
           materialRecord &&

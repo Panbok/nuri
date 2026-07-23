@@ -154,6 +154,7 @@ enum class BufferUsage : uint8_t {
   Indirect = 1u << 4u,
   AccelerationStructureBuildInput = 1u << 5u,
   AccelerationStructureStorage = 1u << 6u,
+  Copy = 1u << 7u,
 };
 
 constexpr BufferUsage operator|(BufferUsage lhs, BufferUsage rhs) {
@@ -185,7 +186,13 @@ enum class TextureUsage : uint8_t {
   Count
 };
 
-enum class Storage : uint8_t { Device, HostVisible, Memoryless, Count };
+enum class Storage : uint8_t {
+  Device,
+  HostVisible,
+  Readback,
+  Memoryless,
+  Count
+};
 
 enum class TextureType : uint8_t { Texture2D, Texture3D, TextureCube, Count };
 
@@ -329,6 +336,13 @@ struct AccelerationStructureFacts {
   uint32_t geometryCount = 0u;
   uint32_t maxInstanceCount = 0u;
   uint64_t deviceAddress = 0u;
+  uint64_t allocationBytes = 0u;
+  uint64_t buildScratchBytes = 0u;
+  uint64_t updateScratchBytes = 0u;
+};
+
+struct RayTracingBackendTelemetry {
+  uint32_t directBindingPoolHighWater = 0u;
 };
 
 struct GpuMultisampleCapabilities {

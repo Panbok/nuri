@@ -490,6 +490,61 @@ TEST(RenderGraphCompileBehaviorTest, TextureCopyPassCompilesNativePayload) {
 }
 
 TEST(RenderGraphCompileBehaviorTest,
+     BufferCopyPassCompilesAndRefreshesImportedHandles) {
+  RenderGraphBuilder builder;
+  auto recordFrame = [&](uint64_t frameIndex, BufferHandle source,
+                         BufferHandle destination) {
+    builder.beginFrame(frameIndex);
+    auto sourceResult = builder.importBuffer(source, "buffer_copy_source");
+    auto destinationResult =
+        builder.importBuffer(destination, "buffer_copy_destination");
+    EXPECT_FALSE(sourceResult.hasError());
+    EXPECT_FALSE(destinationResult.hasError());
+    const std::array<RenderGraphBufferCopyItem, 1u> copies{{
+        {.sourceBuffer = sourceResult.value(),
+         .destinationBuffer = destinationResult.value(),
+         .sourceOffset = 4u,
+         .destinationOffset = 8u,
+         .size = 16u},
+    }};
+    auto passResult = builder.addBufferCopyPass(RenderGraphBufferCopyPassDesc{
+        .copies = copies,
+        .debugLabel = "buffer_copy_pass",
+    });
+    EXPECT_FALSE(passResult.hasError());
+    return builder.computeGraphFingerprint();
+  };
+
+  const BufferHandle sourceA{.index = 321u, .generation = 1u};
+  const BufferHandle destinationA{.index = 322u, .generation = 1u};
+  const auto fingerprintA = recordFrame(273u, sourceA, destinationA);
+  auto compileResult = compileBuilder(builder);
+  ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
+  RenderGraphCompileResult compiled = std::move(compileResult.value());
+  ASSERT_EQ(compiled.orderedPasses.size(), 1u);
+  const RenderPass &pass = compiled.orderedPasses[0u];
+  EXPECT_EQ(pass.executionMode, RenderPassExecutionMode::CopyOnly);
+  ASSERT_EQ(pass.bufferCopies.size(), 1u);
+  EXPECT_TRUE(sameBuffer(pass.bufferCopies[0u].srcBuffer, sourceA));
+  EXPECT_TRUE(sameBuffer(pass.bufferCopies[0u].dstBuffer, destinationA));
+  EXPECT_EQ(pass.bufferCopies[0u].srcOffset, 4u);
+  EXPECT_EQ(pass.bufferCopies[0u].dstOffset, 8u);
+  EXPECT_EQ(pass.bufferCopies[0u].size, 16u);
+  EXPECT_TRUE(compiled.unresolvedBufferCopyBindings.empty());
+
+  const BufferHandle sourceB{.index = 323u, .generation = 2u};
+  const BufferHandle destinationB{.index = 324u, .generation = 2u};
+  const auto fingerprintB = recordFrame(274u, sourceB, destinationB);
+  ASSERT_TRUE(fingerprintA == fingerprintB);
+  builder.refreshHandlesInCompileResult(compiled);
+  ASSERT_EQ(compiled.orderedPasses[0u].bufferCopies.size(), 1u);
+  EXPECT_TRUE(sameBuffer(compiled.orderedPasses[0u].bufferCopies[0u].srcBuffer,
+                         sourceB));
+  EXPECT_TRUE(sameBuffer(compiled.orderedPasses[0u].bufferCopies[0u].dstBuffer,
+                         destinationB));
+}
+
+TEST(RenderGraphCompileBehaviorTest,
      RefreshHandlesUpdatesTextureCopyImportedHandles) {
   RenderGraphBuilder builder;
 

@@ -1,6 +1,7 @@
 #pragma once
 #include "nuri/core/log.h"
 #include "nuri/core/result.h"
+#include "nuri/gfx/ddgi/ddgi_coverage.h"
 #include "nuri/gfx/ddgi/ddgi_types.h"
 #include "nuri/gfx/gpu_render_types.h"
 #include "nuri/gfx/gpu_types.h"
@@ -760,6 +761,7 @@ struct RenderSettings {
     bool showProbes = false;
     bool showSelectedProbeRays = false;
     DDGICommandEpochs requestedEpochs{};
+    DDGICoverageSettings coverage{};
   };
   SkyboxSettings skybox{};
   OpaqueSettings opaque{};
@@ -834,6 +836,7 @@ sanitizeDDGISettings(RenderSettings::DDGISettings &settings,
   settings.preset = sanitizeDDGIQualityPreset(settings.preset);
   applyDDGIQualityPreset(settings, settings.preset);
   settings.debugView = sanitizeDDGIDebugView(settings.debugView);
+  sanitizeDDGICoverageSettings(settings.coverage);
   settings.raysPerProbe = std::clamp(settings.raysPerProbe, 16u, 1024u);
   settings.maxProbeUpdatesPerFrame =
       std::clamp(settings.maxProbeUpdatesPerFrame, 1u, 65'536u);
@@ -1808,9 +1811,13 @@ struct DDGIFrameGpuDataHandle {
   uint32_t activeVolumeCount = 0u;
   uint32_t flags = 0u;
   DDGIDebugView debugView = DDGIDebugView::None;
+  std::array<DDGIEffectiveVolumeKey, kMaxDDGIVolumes> volumeKeys{};
   std::array<DDGIVolumeId, kMaxDDGIVolumes> volumeIds{};
   std::array<uint32_t, kMaxDDGIVolumes> probeCounts{};
   std::array<float, kMaxDDGIVolumes> minimumProbeSpacing{};
+  std::array<DDGICaptureMetadata, kMaxDDGIVolumes> captureMetadata{};
+  uint64_t coverageGeneration = 0u;
+  uint64_t sceneBoundsGeneration = 0u;
   BufferHandle diagnosticBuffer{};
   uint64_t diagnosticRayAddress = 0u;
   uint32_t diagnosticRayCount = 0u;
@@ -2557,6 +2564,7 @@ struct RenderCapturePoint {
   std::string_view defaultCompareProfile{};
   std::string_view producerPassLabel{};
   std::string_view debugLabel{};
+  DDGICaptureMetadata ddgiMetadata{};
 };
 
 class RenderCaptureRequest {
@@ -2848,6 +2856,7 @@ struct RenderFrameContext {
   double timeSeconds = 0.0;
   double deltaSeconds = 1.0 / 60.0;
   uint64_t frameIndex = 0;
+  SubmissionHandle submission{};
 };
 
 [[nodiscard]] inline RenderSettings

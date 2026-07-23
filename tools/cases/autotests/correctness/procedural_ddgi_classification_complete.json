@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "correctness.procedural.ddgi_classification_complete",
+  "suite": "correctness",
+  "description": "Conservative surface relevance completes relocation/classification and exposes Off, Sleeping, wake, Awake, and Vigilant state facts without camera-distance heuristics",
+  "scene": {"kind": "procedural", "generator": "nuri.procedural.ddgi_classification_complete.v1", "seed": 1, "contentHash": "nuri.procedural.ddgi_classification_complete.v1:1"},
+  "backend": "default", "resolution": [640, 360], "fixedDeltaSeconds": 0.016666667, "warmupFrames": 6, "endFrame": 20, "authoritative": false, "presentMode": "immediate", "windowMode": "visible",
+  "renderGraph": {"workerCount": 1, "parallelCompile": false, "parallelRecording": false},
+  "camera": {"position": [0.0, 0.75, 4.2], "target": [0.0, 0.25, 0.0], "verticalFovDegrees": 60.0, "nearPlane": 0.05, "farPlane": 100.0},
+  "settings": {"ddgi": {"enabled": true, "preset": "Custom", "raysPerProbe": 64, "maxProbeUpdatesPerFrame": 144, "maxRayQueriesPerFrame": 18432, "relocation": true, "classification": true, "showProbes": true, "debugView": "Classification"}, "opaque": {"enableInstanceAnimation": false}, "antiAliasing": {"mode": "None"}, "ambientOcclusion": {"mode": "Disabled"}, "shadow": {"enabled": false}},
+  "timeline": {"events": [{"frame": 10, "type": "setNodeTranslation", "target": "ShadowBlueCaster", "translation": [0.9, 0.34, 0.0], "eventReason": "wake intersecting sleeping probes"}]},
+  "checkpoints": [
+    {"id": "static_states_complete", "frame": 8, "captures": [{"target": "frame_color_hdr", "profile": "hdr_color", "required": true, "compare": false}, {"target": "ddgi_classification_debug_preview", "profile": "debug_preview", "required": true, "compare": false}], "assertions": [{"id": "readback_ready", "metric": "renderer.ddgi.probe_state_readback_available", "equals": 1}, {"id": "classification_initialized", "metric": "renderer.ddgi.uninitialized_probes", "equals": 0}, {"id": "sleeping_or_off_present", "metric": "renderer.ddgi.sleeping_probes", "greaterOrEqual": 1}]},
+    {"id": "dynamic_wake_submitted", "frame": 11, "captures": [{"target": "frame_color_hdr", "profile": "hdr_color", "required": true, "compare": false}], "assertions": [{"id": "tlas_wake_order", "metric": "renderer.ray_tracing.tlas_updates", "lessOrEqual": 1}, {"id": "classification_no_reset", "metric": "renderer.ddgi.reset_count", "equals": 0}]},
+    {"id": "states_recommitted", "frame": 20, "assertions": [{"id": "readback_still_ready", "metric": "renderer.ddgi.probe_state_readback_available", "equals": 1}, {"id": "no_uninitialized_probe", "metric": "renderer.ddgi.uninitialized_probes", "equals": 0}]}
+  ],
+  "requirements": {"assets": ["modelsRoot:common/flat_plane.obj"], "backends": [], "allowVisibleWindow": true, "accelerationStructure": true, "rayQuery": true}
+}

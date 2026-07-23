@@ -31,8 +31,7 @@ struct DDGIMemoryEstimate {
 packDDGIAtlas(uint32_t probeCount, glm::uvec2 tileExtent,
               glm::uvec2 maxTextureExtent) noexcept;
 [[nodiscard]] NURI_API Result<DDGIMemoryEstimate, DDGIAtlasError>
-estimateDDGIMemory(uint32_t probeCount,
-                   const DDGIAtlasLayout &irradianceAtlas,
+estimateDDGIMemory(uint32_t probeCount, const DDGIAtlasLayout &irradianceAtlas,
                    const DDGIAtlasLayout &distanceAtlas) noexcept;
 [[nodiscard]] NURI_API glm::uvec2
 ddgiAtlasTileCoordinate(uint32_t probeIndex,

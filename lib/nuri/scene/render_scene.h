@@ -2,6 +2,7 @@
 #include "nuri/core/result.h"
 #include "nuri/defines.h"
 #include "nuri/resources/gpu/resource_handles.h"
+#include "nuri/scene/ddgi_coverage_bounds.h"
 #include "nuri/scene/light.h"
 #include "nuri/scene/scene_graph.h"
 #include <cstdint>
@@ -78,6 +79,31 @@ public:
   [[nodiscard]] std::span<const RenderDDGIVolume> ddgiVolumes() const noexcept {
     return ddgiVolumes_;
   }
+  [[nodiscard]] const DDGISceneCoverageBounds &
+  ddgiCurrentCoverageBounds() const noexcept {
+    return ddgiCurrentCoverageBounds_;
+  }
+  [[nodiscard]] const DDGISceneCoverageBounds &
+  ddgiActivationCoverageBounds() const noexcept {
+    return ddgiActivationCoverageBounds_;
+  }
+  [[nodiscard]] const DDGISceneCoverageBounds &
+  ddgiStaticCoverageBounds() const noexcept {
+    return ddgiStaticCoverageBounds_;
+  }
+  [[nodiscard]] const DDGISceneCoverageBounds &
+  ddgiPendingStaticCoverageBounds() const noexcept {
+    return ddgiPendingStaticCoverageBounds_;
+  }
+  [[nodiscard]] bool ddgiActivationCoverageBoundsSealed() const noexcept {
+    return ddgiActivationCoverageBoundsSealed_;
+  }
+  [[nodiscard]] bool sealDDGIActivationCoverageBounds() noexcept;
+  [[nodiscard]] bool refitDDGIActivationCoverageBounds() noexcept;
+  [[nodiscard]] bool resetDDGIActivationCoverageBounds() noexcept;
+  [[nodiscard]] bool
+  stageDDGIStaticCoverageBounds(const DDGISceneCoverageBounds &bounds) noexcept;
+  [[nodiscard]] bool refitDDGIStaticCoverageBounds() noexcept;
   [[nodiscard]] uint64_t topologyVersion() const noexcept {
     return topologyVersion_;
   }
@@ -139,6 +165,7 @@ private:
   void rebuildPackedLocalLights();
   bool commitPackedLights();
   bool commitDDGIVolumes();
+  bool commitDDGICoverageBounds(bool renderableFactsChanged) noexcept;
   void rebuildDDGIVolumes();
   void sanitizeGraphRenderableRefs();
   void noteLightTopologyChanged() noexcept;
@@ -173,9 +200,18 @@ private:
   uint64_t ddgiVolumeTransformVersion_ = 0u;
   uint64_t ddgiVolumeSettingsVersion_ = 0u;
   uint64_t environmentVersion_ = 0u;
+  DDGISceneCoverageBounds ddgiCurrentCoverageBounds_{};
+  DDGISceneCoverageBounds ddgiActivationCoverageBounds_{};
+  DDGISceneCoverageBounds ddgiStaticCoverageBounds_{};
+  DDGISceneCoverageBounds ddgiPendingStaticCoverageBounds_{};
+  uint64_t ddgiCoverageBoundsGeneration_ = 0u;
+  uint64_t ddgiCoverageMaterialVersion_ = UINT64_MAX;
+  uint64_t ddgiCoverageModelMaterialBindingVersion_ = UINT64_MAX;
   std::shared_ptr<IncrementalCommitState> incrementalCommit_{};
   uint32_t retirementCursor_ = 0u;
   bool retirementEnvironmentReleased_ = false;
+  bool ddgiCoverageFactsDirty_ = true;
+  bool ddgiActivationCoverageBoundsSealed_ = false;
 };
 
 } // namespace nuri

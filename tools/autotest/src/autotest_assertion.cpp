@@ -403,6 +403,14 @@ void flattenAutotestRendererMetrics(std::map<std::string, double> &out,
   addBytesAsMiB(out, "gpu.memory.ray_tracing.decoded_positions_mb",
                 rayTracing.decodedPositionBytes);
   addBytesAsMiB(out, "gpu.memory.ray_tracing.tables_mb", rayTracing.tableBytes);
+  addBytesAsMiB(out, "gpu.memory.ray_tracing.blas_mb",
+                rayTracing.blasAllocationBytes);
+  addBytesAsMiB(out, "gpu.memory.ray_tracing.tlas_mb",
+                rayTracing.tlasAllocationBytes);
+  addBytesAsMiB(out, "gpu.memory.ray_tracing.as_scratch_high_water_mb",
+                rayTracing.asScratchHighWaterBytes);
+  addMetric(out, "renderer.ray_tracing.direct_binding_pool_high_water",
+            rayTracing.directBindingPoolHighWater);
   addMetric(out, "gpu.scopes.ray_tracing_scene_ms", rayTracing.gpuTimeMs);
   addMetric(out, "gpu.scopes.ray_tracing_blas_ms", rayTracing.blasGpuTimeMs);
   addMetric(out, "gpu.scopes.ray_tracing_tlas_ms", rayTracing.tlasGpuTimeMs);
@@ -425,14 +433,29 @@ void flattenAutotestRendererMetrics(std::map<std::string, double> &out,
   addMetric(out, "renderer.ddgi.relocated_probes", ddgi.relocatedProbes);
   addMetric(out, "renderer.ddgi.probe_state_readback_available",
             ddgi.probeStateReadbackAvailable);
+  addMetric(out, "renderer.ddgi.probe_state_readback_source_frame",
+            ddgi.probeStateReadbackSourceFrame);
+  addMetric(out, "renderer.ddgi.probe_state_readback_stale_frames",
+            ddgi.probeStateReadbackStaleFrames);
   addMetric(out, "renderer.ddgi.max_relocation", ddgi.maxRelocation);
   addMetric(out, "renderer.ddgi.updated_probes", ddgi.updatedProbes);
   addMetric(out, "renderer.ddgi.primary_queries", ddgi.primaryQueries);
+  addMetric(out, "renderer.ddgi.primary_queries_issued",
+            ddgi.primaryQueriesIssued);
+  addMetric(out, "renderer.ddgi.trace_counter_source_frame",
+            ddgi.traceCounterSourceFrame);
   addMetric(out, "renderer.ddgi.secondary_queries_reserved",
             ddgi.secondaryQueriesReserved);
   addMetric(out, "renderer.ddgi.secondary_queries_unused",
             ddgi.secondaryQueriesUnused);
   addMetric(out, "renderer.ddgi.secondary_queries", ddgi.secondaryQueries);
+  addMetric(out, "renderer.ddgi.directional_secondary_queries",
+            ddgi.directionalSecondaryQueries);
+  addMetric(out, "renderer.ddgi.local_secondary_queries",
+            ddgi.localSecondaryQueries);
+  addMetric(out, "renderer.ddgi.total_queries_issued",
+            static_cast<uint64_t>(ddgi.primaryQueriesIssued) +
+                ddgi.secondaryQueries);
   addMetric(out, "renderer.ddgi.primary_candidate_intersections",
             ddgi.primaryCandidateIntersections);
   addMetric(out, "renderer.ddgi.secondary_candidate_intersections",
@@ -451,6 +474,52 @@ void flattenAutotestRendererMetrics(std::map<std::string, double> &out,
   addMetric(out, "renderer.ddgi.scroll_count", ddgi.scrollCount);
   addMetric(out, "renderer.ddgi.invalidated_probes", ddgi.invalidatedProbes);
   addMetric(out, "renderer.ddgi.failed_volumes", ddgi.failedVolumes);
+  addMetric(out, "renderer.ddgi.effective_volumes", ddgi.effectiveVolumes);
+  addMetric(out, "renderer.ddgi.authored_volumes", ddgi.authoredVolumes);
+  addMetric(out, "renderer.ddgi.generated_volumes", ddgi.generatedVolumes);
+  addMetric(out, "renderer.ddgi.coverage_mode", ddgi.coverageMode);
+  addMetric(out, "renderer.ddgi.coverage_status",
+            static_cast<uint32_t>(ddgi.coverageStatus));
+  addMetric(out, "renderer.ddgi.coverage_error",
+            static_cast<uint32_t>(ddgi.coverageError));
+  addMetric(out, "renderer.ddgi.limiting_constraint",
+            static_cast<uint32_t>(ddgi.limitingConstraint));
+  addMetric(out, "renderer.ddgi.requested_half_extent_x",
+            ddgi.requestedCoverageHalfExtents.x);
+  addMetric(out, "renderer.ddgi.requested_half_extent_y",
+            ddgi.requestedCoverageHalfExtents.y);
+  addMetric(out, "renderer.ddgi.requested_half_extent_z",
+            ddgi.requestedCoverageHalfExtents.z);
+  addMetric(out, "renderer.ddgi.achieved_half_extent_x",
+            ddgi.achievedCoverageHalfExtents.x);
+  addMetric(out, "renderer.ddgi.achieved_half_extent_y",
+            ddgi.achievedCoverageHalfExtents.y);
+  addMetric(out, "renderer.ddgi.achieved_half_extent_z",
+            ddgi.achievedCoverageHalfExtents.z);
+  addMetric(out, "renderer.ddgi.scene_coverage_ratio", ddgi.sceneCoverageRatio);
+  addMetric(out, "renderer.ddgi.coverage_resolve_cpu_ms",
+            ddgi.coverageResolveCpuTimeMs);
+  addMetric(out, "renderer.ddgi.diagnostic_sample_count",
+            ddgi.diagnosticSampleCount);
+  addMetric(out, "renderer.ddgi.uncovered_diagnostic_samples",
+            ddgi.uncoveredDiagnosticSamples);
+  addMetric(out, "renderer.ddgi.sky_remainder_samples",
+            ddgi.skyRemainderSamples);
+  addMetric(out, "renderer.ddgi.diagnostic_samples_available",
+            ddgi.diagnosticSamplesAvailable);
+  addMetric(out, "renderer.ddgi.dirty_regions_produced",
+            ddgi.dirtyRegionsProduced);
+  addMetric(out, "renderer.ddgi.dirty_regions_merged", ddgi.dirtyRegionsMerged);
+  addMetric(out, "renderer.ddgi.dirty_regions_overflowed",
+            ddgi.dirtyRegionsOverflowed);
+  addMetric(out, "renderer.ddgi.dirty_regions_pending",
+            ddgi.dirtyRegionsPending);
+  addMetric(out, "renderer.ddgi.dirty_probes_affected",
+            ddgi.dirtyProbesAffected);
+  addMetric(out, "renderer.ddgi.classification_fallbacks",
+            ddgi.classificationFallbacks);
+  addMetric(out, "renderer.ddgi.classification_overflows",
+            ddgi.classificationOverflows);
   addMetric(out, "renderer.ddgi.volume_failure_reason",
             static_cast<uint32_t>(ddgi.volumeFailureReason));
   addMetric(out, "renderer.ddgi.history_ready", ddgi.historyReady);
@@ -489,6 +558,60 @@ void flattenAutotestRendererMetrics(std::map<std::string, double> &out,
   addMetric(out, "renderer.ddgi.gpu_timing_available", ddgi.gpuTimingAvailable);
   addBytesAsMiB(out, "gpu.memory.ddgi.persistent_mb", ddgi.persistentBytes);
   addBytesAsMiB(out, "gpu.memory.ddgi.frame_batch_mb", ddgi.frameBatchBytes);
+  addBytesAsMiB(out, "gpu.memory.ddgi.committed_atlas_mb",
+                ddgi.committedAtlasBytes);
+  addBytesAsMiB(out, "gpu.memory.ddgi.pending_atlas_mb",
+                ddgi.pendingAtlasBytes);
+  addBytesAsMiB(out, "gpu.memory.ddgi.peak_atlas_mb", ddgi.peakAtlasBytes);
+  for (size_t volumeIndex = 0u; volumeIndex < ddgi.volumes.size();
+       ++volumeIndex) {
+    const DDGIVolumeFrameMetrics &volume = ddgi.volumes[volumeIndex];
+    const std::string prefix =
+        "renderer.ddgi.volume" + std::to_string(volumeIndex) + ".";
+    const auto addVolumeMetric = [&](std::string_view suffix, double value) {
+      out[prefix + std::string(suffix)] = value;
+    };
+    addVolumeMetric("active", volume.active);
+    addVolumeMetric("effective_key_hash",
+                    static_cast<double>(volume.effectiveKeyHash));
+    addVolumeMetric("effective_kind", volume.effectiveKind);
+    addVolumeMetric("tier", volume.tier);
+    addVolumeMetric("cascade_index", volume.cascadeIndex);
+    addVolumeMetric("total_probes", volume.totalProbes);
+    addVolumeMetric("initialized_probes", volume.initializedProbes);
+    addVolumeMetric("shading_enabled_probes", volume.shadingEnabledProbes);
+    addVolumeMetric("invalid_probes", volume.invalidProbes);
+    addVolumeMetric("newly_exposed_probes", volume.newlyExposedProbes);
+    addVolumeMetric("updates", volume.updates);
+    addVolumeMetric("primary_queries", volume.primaryQueries);
+    addVolumeMetric("primary_queries_issued", volume.primaryQueriesIssued);
+    addVolumeMetric("secondary_queries", volume.secondaryQueries);
+    addVolumeMetric("update_age_median", volume.updateAgeMedian);
+    addVolumeMetric("update_age_p95", volume.updateAgeP95);
+    addVolumeMetric("update_age_maximum", volume.updateAgeMaximum);
+    addVolumeMetric("scheduled_quota", volume.scheduledQuota);
+    addVolumeMetric("used_quota", volume.usedQuota);
+    addVolumeMetric("deficit", static_cast<double>(volume.deficit));
+    addVolumeMetric("starvation_frames", volume.starvationFrames);
+    addVolumeMetric("estimated_full_refresh_frames",
+                    volume.estimatedFullRefreshFrames);
+    addVolumeMetric("interior_half_extent_x", volume.interiorHalfExtents.x);
+    addVolumeMetric("interior_half_extent_y", volume.interiorHalfExtents.y);
+    addVolumeMetric("interior_half_extent_z", volume.interiorHalfExtents.z);
+    addVolumeMetric("fade_start_half_extent_x", volume.fadeStartHalfExtents.x);
+    addVolumeMetric("fade_start_half_extent_y", volume.fadeStartHalfExtents.y);
+    addVolumeMetric("fade_start_half_extent_z", volume.fadeStartHalfExtents.z);
+    addVolumeMetric("fade_end_half_extent_x", volume.fadeEndHalfExtents.x);
+    addVolumeMetric("fade_end_half_extent_y", volume.fadeEndHalfExtents.y);
+    addVolumeMetric("fade_end_half_extent_z", volume.fadeEndHalfExtents.z);
+    addVolumeMetric("camera_cell_x", volume.cameraCell.x);
+    addVolumeMetric("camera_cell_y", volume.cameraCell.y);
+    addVolumeMetric("camera_cell_z", volume.cameraCell.z);
+    addVolumeMetric("history_ready_percentage", volume.historyReadyPercentage);
+    addVolumeMetric("coverage_ready_percentage",
+                    volume.coverageReadyPercentage);
+    addVolumeMetric("confidence", volume.confidence);
+  }
 
   const AntiAliasingFrameMetrics &aa = metrics.antiAliasing;
   addBoolMetric(out, "renderer.aa.history_valid", aa.historyValid);

@@ -9,6 +9,8 @@ layout(local_size_x = 32) in;
 layout(set = 0, binding = 0) uniform texture2D kTextures2D[];
 layout(set = 0, binding = 1) uniform sampler kSamplers[];
 
+#include "opaque_meshlet_current_hiz.sp"
+
 taskPayloadSharedEXT MeshletTaskPayload meshletPayload;
 shared uint meshletVisibleMask;
 
@@ -86,9 +88,6 @@ const uint kMeshletOcclusionMaxTexelSpan = 6u;
 const float kMeshletOcclusionTargetTexelSpan = 4.0;
 // Keep same-frame self-occlusion conservative under raster/depth quantization.
 const float kMeshletOcclusionDepthBias = 0.005;
-// Level zero reduces 2x2 source-depth pixels. Half a pyramid texel therefore
-// covers the one-source-pixel raster footprint needed at projected bounds.
-const float kMeshletCurrentFrameOcclusionPaddingTexels = 0.5;
 const uint kMeshletCounterFlagEnabled = 1u << 0u;
 
 vec2 clipNdcToDepthUv(vec2 ndc) {
@@ -156,6 +155,8 @@ bool meshletOcclusionCull(MeshletDescriptorGpuData meshlet, InstanceData inst,
   if (uvMin.x < 0.0 || uvMin.y < 0.0 || uvMax.x > 1.0 || uvMax.y > 1.0) {
     return false;
   }
+  const vec2 projectedUvMin = uvMin;
+  const vec2 projectedUvMax = uvMax;
 
   const vec2 pyramidSize = vec2(pc.frameData.sceneDepthPyramidInfo.xy);
   if (currentFrameDepth) {
@@ -188,6 +189,7 @@ bool meshletOcclusionCull(MeshletDescriptorGpuData meshlet, InstanceData inst,
     return false;
   }
 
+  float occluderMinDepth = 1.0;
   float occluderMaxDepth = 0.0;
   for (uint y = 0u; y < kMeshletOcclusionMaxTexelSpan; ++y) {
     if (y >= uint(texelSpan.y)) {
@@ -203,10 +205,20 @@ bool meshletOcclusionCull(MeshletDescriptorGpuData meshlet, InstanceData inst,
           texture(nonuniformEXT(sampler2D(kTextures2D[nonuniformEXT(texId)],
                                           kSamplers[nonuniformEXT(samplerId)])),
                   uv);
+      occluderMinDepth = min(occluderMinDepth, sampleValue.r);
       occluderMaxDepth = max(occluderMaxDepth, sampleValue.g);
     }
   }
-  return nearestDepth > occluderMaxDepth + kMeshletOcclusionDepthBias;
+  const bool depthCoherent =
+      !currentFrameDepth || occluderMaxDepth - occluderMinDepth <=
+                                kMeshletCurrentFrameOcclusionMaxDepthRange;
+  const bool pyramidOccluded =
+      depthCoherent &&
+      nearestDepth > occluderMaxDepth + kMeshletOcclusionDepthBias;
+  return pyramidOccluded &&
+         (!currentFrameDepth || currentFrameDepthConfirmsOcclusion(
+                                    projectedUvMin, projectedUvMax,
+                                    nearestDepth, kMeshletOcclusionDepthBias));
 }
 
 void markMeshletCounterFrame(uint meshletFlags) {

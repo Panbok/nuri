@@ -73,6 +73,7 @@ writeSnapshotCaptureArtifacts(GPUDevice &gpu,
     capture.mip = point->mip;
     capture.layer = point->layer;
     capture.producerPassLabel = std::string(point->producerPassLabel);
+    capture.ddgiMetadata = point->ddgiMetadata;
     const SnapshotCaptureCatalogEntry *catalog =
         findSnapshotCaptureCatalogEntry(capture.target);
     if (catalog == nullptr || point->version != catalog->version ||

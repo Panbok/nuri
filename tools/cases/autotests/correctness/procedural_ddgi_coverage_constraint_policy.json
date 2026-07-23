@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "correctness.procedural.ddgi_coverage_constraint_policy",
+  "suite": "correctness",
+  "description": "Stages preserve-coverage, preserve-near-spacing, and reject-unsatisfied clipmap plans under deliberately excessive requests without publishing partial resources",
+  "scene": {"kind": "procedural", "generator": "nuri.procedural.ddgi_coverage_constraint_policy.v1", "seed": 1, "contentHash": "nuri.procedural.ddgi_coverage_constraint_policy.v1:1"},
+  "backend": "default", "resolution": [640, 360], "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 4, "endFrame": 14, "authoritative": false, "presentMode": "immediate", "windowMode": "visible",
+  "renderGraph": {"workerCount": 1, "parallelCompile": false, "parallelRecording": false},
+  "camera": {"position": [0.0, 0.75, 4.2], "target": [0.0, 0.25, 0.0], "verticalFovDegrees": 60.0, "nearPlane": 0.05, "farPlane": 100.0},
+  "settings": {"ddgi": {"enabled": true, "preset": "Custom", "raysPerProbe": 32, "maxProbeUpdatesPerFrame": 128, "maxRayQueriesPerFrame": 4096, "coverage": {"schemaVersion": 1, "mode": "CameraClipmaps", "constraintPolicy": "PreserveCoverage", "sceneBoundsSource": "Authored", "authoredBounds": {"min": [-5.0, -2.0, -5.0], "max": [5.0, 2.0, 5.0]}, "cascadeCount": 4, "cascadeProbeCounts": [64, 16, 64], "requestedNearSpacing": [0.1, 0.1, 0.1], "spacingRatio": 2.0, "requestedCoverageHalfExtents": [300.0, 100.0, 300.0], "scenePaddingCells": 2, "transitionCells": 1, "includeAuthoredVolumes": false}}, "opaque": {"enableInstanceAnimation": false}, "antiAliasing": {"mode": "None"}, "ambientOcclusion": {"mode": "Disabled"}, "shadow": {"enabled": false}},
+  "timeline": {"events": [
+    {"frame": 5, "type": "setSettings", "eventReason": "preserve near spacing", "settings": {"ddgi": {"enabled": true, "preset": "Custom", "raysPerProbe": 32, "maxProbeUpdatesPerFrame": 128, "maxRayQueriesPerFrame": 4096, "coverage": {"schemaVersion": 1, "mode": "CameraClipmaps", "constraintPolicy": "PreserveNearSpacing", "sceneBoundsSource": "Authored", "authoredBounds": {"min": [-5.0, -2.0, -5.0], "max": [5.0, 2.0, 5.0]}, "cascadeCount": 4, "cascadeProbeCounts": [64, 16, 64], "requestedNearSpacing": [0.1, 0.1, 0.1], "spacingRatio": 2.0, "requestedCoverageHalfExtents": [300.0, 100.0, 300.0], "scenePaddingCells": 2, "transitionCells": 1, "includeAuthoredVolumes": false}}, "opaque": {"enableInstanceAnimation": false}, "antiAliasing": {"mode": "None"}, "ambientOcclusion": {"mode": "Disabled"}, "shadow": {"enabled": false}}},
+    {"frame": 10, "type": "setSettings", "eventReason": "reject unsatisfied", "settings": {"ddgi": {"enabled": true, "preset": "Custom", "raysPerProbe": 32, "maxProbeUpdatesPerFrame": 128, "maxRayQueriesPerFrame": 4096, "coverage": {"schemaVersion": 1, "mode": "CameraClipmaps", "constraintPolicy": "RejectUnsatisfied", "sceneBoundsSource": "Authored", "authoredBounds": {"min": [-5.0, -2.0, -5.0], "max": [5.0, 2.0, 5.0]}, "cascadeCount": 4, "cascadeProbeCounts": [64, 16, 64], "requestedNearSpacing": [0.1, 0.1, 0.1], "spacingRatio": 2.0, "requestedCoverageHalfExtents": [300.0, 100.0, 300.0], "scenePaddingCells": 2, "transitionCells": 1, "includeAuthoredVolumes": false}}, "opaque": {"enableInstanceAnimation": false}, "antiAliasing": {"mode": "None"}, "ambientOcclusion": {"mode": "Disabled"}, "shadow": {"enabled": false}}}
+  ]},
+  "checkpoints": [
+    {"id": "preserve_coverage", "frame": 4, "assertions": [{"id": "capacity_respected", "metric": "renderer.ddgi.active_volumes", "lessOrEqual": 4}, {"id": "memory_cap_respected", "metric": "gpu.memory.ddgi.persistent_mb", "lessOrEqual": 256}]},
+    {"id": "preserve_near_spacing", "frame": 9, "assertions": [{"id": "capacity_still_respected", "metric": "renderer.ddgi.active_volumes", "lessOrEqual": 4}, {"id": "query_cap_respected", "metric": "renderer.ddgi.primary_queries", "lessOrEqual": 4096}]},
+    {"id": "reject_keeps_committed_plan", "frame": 12, "assertions": [{"id": "no_partial_overflow", "metric": "renderer.ddgi.active_volumes", "lessOrEqual": 4}, {"id": "replacement_peak_bounded", "metric": "gpu.memory.ddgi.peak_atlas_mb", "lessOrEqual": 512}]}
+  ],
+  "requirements": {"assets": ["modelsRoot:common/flat_plane.obj"], "backends": [], "allowVisibleWindow": true, "accelerationStructure": true, "rayQuery": true}
+}

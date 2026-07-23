@@ -550,6 +550,97 @@ TEST(NuriBenchmarkingTest, ManifestRejectsUnknownKeys) {
   std::filesystem::remove(path, ec);
 }
 
+TEST(NuriBenchmarkingTest, ManifestParsesStrictVersionedDDGICoverage) {
+  const std::filesystem::path path =
+      makeTempPath("benchmark_ddgi_coverage", ".json");
+  const std::string manifest = R"json({
+    "schemaVersion": 1,
+    "id": "ddgi.coverage",
+    "suite": "ddgi",
+    "settings": {"ddgi": {"coverage": {
+      "schemaVersion": 1,
+      "mode": "Hybrid",
+      "constraintPolicy": "PreserveNearSpacing",
+      "sceneBoundsSource": "Authored",
+      "authoredBounds": {"min": [-4, -2, -6], "max": [8, 10, 12]},
+      "cascadeCount": 4,
+      "cascadeProbeCounts": [24, 14, 20],
+      "requestedNearSpacing": [1, 1.25, 1.5],
+      "spacingRatio": 2.5,
+      "requestedCoverageHalfExtents": [60, 35, 55],
+      "scenePaddingCells": 3,
+      "transitionCells": 2,
+      "includeAuthoredVolumes": false
+    }}}
+  })json";
+  writeFile(path, manifest);
+
+  auto loaded = loadBenchmarkCaseManifest(path);
+  ASSERT_FALSE(loaded.hasError()) << loaded.error();
+  const DDGICoverageSettings &coverage = loaded.value().settings.ddgi.coverage;
+  EXPECT_EQ(coverage.mode, DDGICoverageMode::Hybrid);
+  EXPECT_EQ(coverage.constraintPolicy,
+            DDGICoverageConstraintPolicy::PreserveNearSpacing);
+  EXPECT_EQ(coverage.sceneBoundsSource, DDGISceneBoundsSource::Authored);
+  EXPECT_TRUE(coverage.authoredBounds.valid);
+  EXPECT_TRUE(coverage.authoredBounds.complete);
+  EXPECT_FLOAT_EQ(coverage.authoredBounds.bounds.min_.x, -4.0f);
+  EXPECT_FLOAT_EQ(coverage.authoredBounds.bounds.min_.y, -2.0f);
+  EXPECT_FLOAT_EQ(coverage.authoredBounds.bounds.min_.z, -6.0f);
+  EXPECT_FLOAT_EQ(coverage.authoredBounds.bounds.max_.x, 8.0f);
+  EXPECT_FLOAT_EQ(coverage.authoredBounds.bounds.max_.y, 10.0f);
+  EXPECT_FLOAT_EQ(coverage.authoredBounds.bounds.max_.z, 12.0f);
+  EXPECT_EQ(coverage.cascadeCount, 4u);
+  EXPECT_EQ(coverage.cascadeProbeCounts.x, 24u);
+  EXPECT_EQ(coverage.cascadeProbeCounts.y, 14u);
+  EXPECT_EQ(coverage.cascadeProbeCounts.z, 20u);
+  EXPECT_FLOAT_EQ(coverage.requestedNearSpacing.x, 1.0f);
+  EXPECT_FLOAT_EQ(coverage.requestedNearSpacing.y, 1.25f);
+  EXPECT_FLOAT_EQ(coverage.requestedNearSpacing.z, 1.5f);
+  EXPECT_FLOAT_EQ(coverage.spacingRatio, 2.5f);
+  EXPECT_FLOAT_EQ(coverage.requestedCoverageHalfExtents.x, 60.0f);
+  EXPECT_FLOAT_EQ(coverage.requestedCoverageHalfExtents.y, 35.0f);
+  EXPECT_FLOAT_EQ(coverage.requestedCoverageHalfExtents.z, 55.0f);
+  EXPECT_EQ(coverage.scenePaddingCells, 3u);
+  EXPECT_EQ(coverage.transitionCells, 2u);
+  EXPECT_FALSE(coverage.includeAuthoredVolumes);
+
+  writeFile(path,
+            R"json({
+              "schemaVersion": 1,
+              "id": "ddgi.coverage.default",
+              "suite": "ddgi",
+              "settings": {"ddgi": {"enabled": true}}
+            })json");
+  loaded = loadBenchmarkCaseManifest(path);
+  ASSERT_FALSE(loaded.hasError()) << loaded.error();
+  EXPECT_EQ(loaded.value().settings.ddgi.coverage.mode,
+            DDGICoverageMode::Manual);
+  EXPECT_FALSE(loaded.value().settings.ddgi.coverage.authoredBounds.valid);
+
+  const std::array invalidManifests{
+      replaceFirst(manifest, "\"schemaVersion\": 1,\n      \"mode\"",
+                   "\"schemaVersion\": 2,\n      \"mode\""),
+      replaceFirst(manifest, "\"includeAuthoredVolumes\": false",
+                   "\"includeAuthoredVolumes\": false, \"unexpected\": true"),
+      replaceFirst(
+          manifest,
+          "\"authoredBounds\": {\"min\": [-4, -2, -6], \"max\": [8, 10, 12]}",
+          "\"authoredBounds\": {\"min\": [-4, -2, -6]}")};
+  for (const std::string &invalidManifest : invalidManifests) {
+    writeFile(path, invalidManifest);
+    auto invalid = loadBenchmarkCaseManifest(path);
+    EXPECT_TRUE(invalid.hasError());
+    if (invalid.hasError()) {
+      EXPECT_NE(invalid.error().find("settings.ddgi.coverage"),
+                std::string::npos);
+    }
+  }
+
+  std::error_code ec;
+  std::filesystem::remove(path, ec);
+}
+
 TEST(NuriBenchmarkingTest, ManifestRejectsRemovedBackends) {
   const std::filesystem::path path =
       makeTempPath("benchmark_removed_backend", ".json");
@@ -1285,6 +1376,29 @@ TEST(NuriBenchmarkingTest, ReportWritesReadsAndComputesMeasuredStats) {
       AmbientOcclusionPreset::Ultra;
   report.benchmarkCase.settings.shadow.qualityPreset =
       ShadowQualityPreset::Ultra;
+  report.benchmarkCase.settings.ddgi.enabled = true;
+  report.benchmarkCase.settings.ddgi.preset = DDGIQualityPreset::Custom;
+  report.benchmarkCase.settings.ddgi.raysPerProbe = 96u;
+  report.benchmarkCase.settings.ddgi.maxProbeUpdatesPerFrame = 321u;
+  report.benchmarkCase.settings.ddgi.maxRayQueriesPerFrame = 30'000u;
+  report.benchmarkCase.settings.ddgi.classification = false;
+  report.benchmarkCase.settings.ddgi.debugView = DDGIDebugView::Confidence;
+  report.benchmarkCase.settings.ddgi.coverage.mode = DDGICoverageMode::Hybrid;
+  report.benchmarkCase.settings.ddgi.coverage.constraintPolicy =
+      DDGICoverageConstraintPolicy::PreserveNearSpacing;
+  report.benchmarkCase.settings.ddgi.coverage.sceneBoundsSource =
+      DDGISceneBoundsSource::Authored;
+  report.benchmarkCase.settings.ddgi.coverage.cascadeCount = 4u;
+  report.benchmarkCase.settings.ddgi.coverage.cascadeProbeCounts = {24u, 14u,
+                                                                    20u};
+  report.benchmarkCase.settings.ddgi.coverage.requestedNearSpacing = {
+      1.0f, 1.25f, 1.5f};
+  report.benchmarkCase.settings.ddgi.coverage.authoredBounds.valid = true;
+  report.benchmarkCase.settings.ddgi.coverage.authoredBounds.complete = true;
+  report.benchmarkCase.settings.ddgi.coverage.authoredBounds.bounds.min_ = {
+      -4.0f, -2.0f, -6.0f};
+  report.benchmarkCase.settings.ddgi.coverage.authoredBounds.bounds.max_ = {
+      8.0f, 10.0f, 12.0f};
   report.benchmarkCase.requiredMetrics = {"cpu.render_submit_ms"};
   report.profile.id = "local-nvrhi-visible";
   report.profile.profileAuthoritative = false;
@@ -1493,6 +1607,8 @@ TEST(NuriBenchmarkingTest, ReportWritesReadsAndComputesMeasuredStats) {
   EXPECT_NE(reportJson.find("\"msaa4x\": true"), std::string::npos);
   EXPECT_NE(reportJson.find("\"meshletMode\": \"Required\""),
             std::string::npos);
+  EXPECT_NE(reportJson.find("\"ddgi\""), std::string::npos);
+  EXPECT_NE(reportJson.find("\"mode\": \"Hybrid\""), std::string::npos);
   EXPECT_NE(reportJson.find("\"cameraPaths\""), std::string::npos);
 
   auto loaded = readBenchmarkReportFile(path);
@@ -1523,12 +1639,34 @@ TEST(NuriBenchmarkingTest, ReportWritesReadsAndComputesMeasuredStats) {
   EXPECT_TRUE(
       loaded.value()
           .benchmarkCase.settings.antiAliasing.debug.spatialPostMsaaCleanup);
+  const RenderSettings::DDGISettings &loadedDDGI =
+      loaded.value().benchmarkCase.settings.ddgi;
+  EXPECT_TRUE(loadedDDGI.enabled);
+  EXPECT_EQ(loadedDDGI.preset, DDGIQualityPreset::Custom);
+  EXPECT_EQ(loadedDDGI.raysPerProbe, 96u);
+  EXPECT_EQ(loadedDDGI.maxProbeUpdatesPerFrame, 321u);
+  EXPECT_EQ(loadedDDGI.maxRayQueriesPerFrame, 30'000u);
+  EXPECT_FALSE(loadedDDGI.classification);
+  EXPECT_EQ(loadedDDGI.debugView, DDGIDebugView::Confidence);
+  EXPECT_EQ(loadedDDGI.coverage.mode, DDGICoverageMode::Hybrid);
+  EXPECT_EQ(loadedDDGI.coverage.constraintPolicy,
+            DDGICoverageConstraintPolicy::PreserveNearSpacing);
+  EXPECT_EQ(loadedDDGI.coverage.sceneBoundsSource,
+            DDGISceneBoundsSource::Authored);
+  EXPECT_TRUE(loadedDDGI.coverage.authoredBounds.valid);
+  EXPECT_EQ(loadedDDGI.coverage.authoredBounds.bounds.max_.z, 12.0f);
   EXPECT_NE(loaded.value().benchmarkCase.settingsSignature.find("aa.quality=3"),
             std::string::npos);
   EXPECT_NE(loaded.value().benchmarkCase.settingsSignature.find(
                 "opaque.meshletMode=2"),
             std::string::npos);
   EXPECT_NE(loaded.value().benchmarkCase.settingsSignature.find("ao.preset=3"),
+            std::string::npos);
+  EXPECT_NE(loaded.value().benchmarkCase.settingsSignature.find(
+                "ddgi.maxRayQueriesPerFrame=30000"),
+            std::string::npos);
+  EXPECT_NE(loaded.value().benchmarkCase.settingsSignature.find(
+                "ddgi.coverage.mode=3"),
             std::string::npos);
   EXPECT_NE(loaded.value().benchmarkCase.configSignature.find(
                 "renderGraph.workerCount=2"),

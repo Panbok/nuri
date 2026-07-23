@@ -30,6 +30,7 @@ void sanitizeBenchmarkRenderSettings(RenderSettings &settings) {
                                    settings.antiAliasing);
   sanitizeShadowSettings(settings.shadow);
   sanitizeVisibilitySettings(settings.visibility);
+  sanitizeDDGISettings(settings.ddgi);
 }
 
 } // namespace nuri::tools::benchmark

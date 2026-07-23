@@ -944,9 +944,12 @@ void OpaqueRenderer::publishFrameData(RenderFrameContext &frame) {
   if (!settings.opaque.enabled) {
     return;
   }
+  const bool currentFrameVerificationRequired =
+      settings.visibility.occlusionMode ==
+      VisibilityOcclusionMode::CurrentFrameHiZExperimental;
   if (!requiresDepthPyramid(settings) || ensureInitialized().hasError() ||
       !nuri::isValid(depthPyramidPipelineHandle_) ||
-      ensureDepthPyramidTextures().hasError()) {
+      ensureDepthPyramidTextures(currentFrameVerificationRequired).hasError()) {
     return;
   }
   frame.sharedResources.sceneDepthSamplerId =
@@ -4140,6 +4143,22 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
           VisibilityOcclusionMode::CurrentFrameHiZExperimental &&
       animationSceneData == nullptr &&
       !settings.opaque.enableInstanceAnimation && !hasDeformedRenderable;
+  const bool currentDepthVerificationExtentFits =
+      sceneDepthPyramidWidth_ > 0u && sceneDepthPyramidWidth_ <= 0xffffu &&
+      sceneDepthPyramidHeight_ > 0u && sceneDepthPyramidHeight_ <= 0xffffu;
+  const bool currentDepthVerificationAvailable =
+      meshletCurrentFrameOcclusionRequested &&
+      currentDepthVerificationExtentFits &&
+      nuri::isValid(currentFrameDepthVerificationPipelineHandle_) &&
+      nuri::isValid(currentFrameDepthVerificationTexture_);
+  const uint32_t currentDepthVerificationTexId =
+      currentDepthVerificationAvailable
+          ? gpu_.getTextureBindlessIndex(currentFrameDepthVerificationTexture_)
+          : kInvalidTextureBindlessIndex;
+  const uint32_t currentDepthVerificationExtentPacked =
+      currentDepthVerificationTexId != kInvalidTextureBindlessIndex
+          ? sceneDepthPyramidWidth_ | (sceneDepthPyramidHeight_ << 16u)
+          : 0u;
   bool meshletCurrentFrameOcclusionAvailable = false;
   BufferHandle meshletVisibilityCounterBuffer{};
   uint64_t meshletVisibilityCounterBufferAddress = 0u;
@@ -4576,6 +4595,14 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
                   constants.sourceFrameIndex =
                       static_cast<uint32_t>(frame.frameIndex);
                   constants.meshletCounterFlags = meshletCounterFlagsForPass;
+                  constants.currentDepthVerificationTexId =
+                      occlusionSource == MeshletOcclusionSource::CurrentFrame
+                          ? currentDepthVerificationTexId
+                          : kInvalidTextureBindlessIndex;
+                  constants.currentDepthVerificationExtentPacked =
+                      occlusionSource == MeshletOcclusionSource::CurrentFrame
+                          ? currentDepthVerificationExtentPacked
+                          : 0u;
                   pushConstants.push_back(constants);
                   MeshDispatchItem dispatch{};
                   dispatch.command = MeshDispatchCommandType::Direct;
@@ -4654,6 +4681,14 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
               constants.sourceFrameIndex =
                   static_cast<uint32_t>(frame.frameIndex);
               constants.meshletCounterFlags = meshletCounterFlagsForPass;
+              constants.currentDepthVerificationTexId =
+                  occlusionSource == MeshletOcclusionSource::CurrentFrame
+                      ? currentDepthVerificationTexId
+                      : kInvalidTextureBindlessIndex;
+              constants.currentDepthVerificationExtentPacked =
+                  occlusionSource == MeshletOcclusionSource::CurrentFrame
+                      ? currentDepthVerificationExtentPacked
+                      : 0u;
               pushConstants.push_back(constants);
               MeshDispatchItem dispatch{};
               dispatch.command = MeshDispatchCommandType::Direct;
@@ -5204,10 +5239,48 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     depthPyramidPushConstants_.clear();
     depthPyramidDrawItems_.clear();
     depthPyramidDependencyTextures_.clear();
-    depthPyramidPushConstants_.reserve(sceneDepthPyramidLevelCount_);
-    depthPyramidDrawItems_.reserve(sceneDepthPyramidLevelCount_);
-    depthPyramidDependencyTextures_.reserve(sceneDepthPyramidLevelCount_);
+    depthPyramidPushConstants_.reserve(sceneDepthPyramidLevelCount_ + 1u);
+    depthPyramidDrawItems_.reserve(sceneDepthPyramidLevelCount_ + 1u);
+    depthPyramidDependencyTextures_.reserve(sceneDepthPyramidLevelCount_ + 1u);
     const uint32_t samplerId = gpu_.getSamplerBindlessIndex(sceneDepthSampler_);
+    bool currentDepthVerificationBuilt = false;
+    if (meshletCurrentFrameOcclusionRequested &&
+        currentDepthVerificationTexId != kInvalidTextureBindlessIndex) {
+      const uint32_t sourceTexId =
+          gpu_.getTextureBindlessIndex(sceneDepthTexture);
+      depthPyramidDependencyTextures_.push_back(sceneDepthTexture);
+      depthPyramidPushConstants_.push_back(
+          glm::uvec4(sourceTexId, samplerId, 2u, 0u));
+      DrawItem draw{};
+      draw.pipeline = currentFrameDepthVerificationPipelineHandle_;
+      draw.vertexCount = 3u;
+      draw.pushConstants =
+          std::span<const std::byte>(reinterpret_cast<const std::byte *>(
+                                         &depthPyramidPushConstants_.back()),
+                                     sizeof(glm::uvec4));
+      draw.debugLabel = "OpaqueCurrentFrameDepthVerification";
+      draw.debugColor = kOpaquePassDebugColor;
+      depthPyramidDrawItems_.push_back(draw);
+      PreparedGraphPass &verificationPass =
+          out.emplace_back(drawItems_.get_allocator().resource());
+      verificationPass.desc.color = {.loadOp = LoadOp::Clear,
+                                     .storeOp = StoreOp::Store,
+                                     .clearColor = {1.0f, 1.0f, 0.0f, 0.0f}};
+      verificationPass.colorTextureHandle =
+          currentFrameDepthVerificationTexture_;
+      verificationPass.desc.dependencyTextures = std::span<const TextureHandle>(
+          &depthPyramidDependencyTextures_.back(), 1u);
+      verificationPass.desc.draws =
+          std::span<const DrawItem>(&depthPyramidDrawItems_.back(), 1u);
+      verificationPass.desc.drawBuffersPreResolved = true;
+      verificationPass.desc.gpuTimingScope = GpuTimingScope::Opaque;
+      verificationPass.desc.debugLabel =
+          "Opaque Current-Frame Depth Verification";
+      verificationPass.desc.debugColor = kOpaquePassDebugColor;
+      verificationPass.desc.borrowPayload = true;
+      verificationPass.phase = PreparedPassPhase::PreLighting;
+      currentDepthVerificationBuilt = true;
+    }
     for (uint32_t level = 0u; level < sceneDepthPyramidLevelCount_; ++level) {
       const TextureHandle sourceTexture =
           level == 0u ? sceneDepthTexture
@@ -5247,12 +5320,11 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       pyramidPass.kind = PreparedPassKind::DepthPyramid;
       pyramidPass.depthPyramidLevel = level;
     }
-    frame.metrics.opaque.depthPyramidLevels =
-        saturateToU32(depthPyramidDrawItems_.size());
+    frame.metrics.opaque.depthPyramidLevels = sceneDepthPyramidLevelCount_;
     sceneDepthPyramidSourceFrameIndex_ = frame.frameIndex;
     sceneDepthPyramidSourceViewProj_ = frame.camera.currentUnjitteredViewProj;
     meshletCurrentFrameOcclusionAvailable =
-        meshletCurrentFrameOcclusionRequested;
+        meshletCurrentFrameOcclusionRequested && currentDepthVerificationBuilt;
     if (settings.shadow.enabled &&
         frame.sharedResources.shadowSdsmGpuReduceTarget.has_value() &&
         nuri::isValid(frame.sharedResources.shadowSdsmGpuReducePipeline)) {
@@ -5394,6 +5466,16 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       const size_t oldTextureDependencyCount =
           mainPassDependencyTextures_.size();
       appendUniqueDependency(mainPassDependencyTextures_, texture);
+      if (mainPassDependencyTextures_.size() != oldTextureDependencyCount) {
+        mainPassDependencyTextureAccessModes_.push_back(
+            RenderGraphAccessMode::Read);
+      }
+    }
+    if (meshletOcclusion.usesCurrentFrame()) {
+      const size_t oldTextureDependencyCount =
+          mainPassDependencyTextures_.size();
+      appendUniqueDependency(mainPassDependencyTextures_,
+                             currentFrameDepthVerificationTexture_);
       if (mainPassDependencyTextures_.size() != oldTextureDependencyCount) {
         mainPassDependencyTextureAccessModes_.push_back(
             RenderGraphAccessMode::Read);
@@ -5585,6 +5667,9 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
                 .sourceFrameIndex = static_cast<uint32_t>(frame.frameIndex),
                 .meshletCounterFlags = meshletCounterFlags,
                 .flags = 1u,
+                .currentDepthVerificationTexId = currentDepthVerificationTexId,
+                .currentDepthVerificationExtentPacked =
+                    currentDepthVerificationExtentPacked,
             };
             meshletCompactionPushConstants_.push_back(compactionConstants);
             MeshletCompactionPushConstants finalizeConstants =
@@ -5638,6 +5723,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
                   meshletCompactionDependencyTextures_,
                   frame.sharedResources.sceneDepthPyramidTextures[level]);
             }
+            appendUniqueDependency(meshletCompactionDependencyTextures_,
+                                   currentFrameDepthVerificationTexture_);
             ComputeDispatchItem compactionDispatch{};
             compactionDispatch.pipeline =
                 meshletCompactionComputePipeline_.get();
@@ -7296,7 +7383,8 @@ Result<bool, std::string> OpaqueRenderer::ensureSceneDepthSampler() {
   return Result<bool, std::string>::makeResult(true);
 }
 
-Result<bool, std::string> OpaqueRenderer::ensureDepthPyramidTextures() {
+Result<bool, std::string> OpaqueRenderer::ensureDepthPyramidTextures(
+    bool currentFrameVerificationRequired) {
   int32_t framebufferWidth = 0;
   int32_t framebufferHeight = 0;
   gpu_.getFramebufferSize(framebufferWidth, framebufferHeight);
@@ -7312,12 +7400,44 @@ Result<bool, std::string> OpaqueRenderer::ensureDepthPyramidTextures() {
   if (samplerResult.hasError()) {
     return samplerResult;
   }
-  const bool recreate = sceneDepthPyramidLevelCount_ != levelCount ||
-                        sceneDepthPyramidWidth_ != safeWidth ||
-                        sceneDepthPyramidHeight_ != safeHeight;
-  if (!recreate)
+  const bool recreatePyramid = sceneDepthPyramidLevelCount_ != levelCount ||
+                               sceneDepthPyramidWidth_ != safeWidth ||
+                               sceneDepthPyramidHeight_ != safeHeight;
+  const bool recreateVerification =
+      currentFrameVerificationRequired !=
+      nuri::isValid(currentFrameDepthVerificationTexture_);
+  if (!recreatePyramid && !recreateVerification)
     return Result<bool, std::string>::makeResult(true);
-  destroyDepthPyramidTextures();
+  if (recreatePyramid) {
+    destroyDepthPyramidTextures();
+  } else if (nuri::isValid(currentFrameDepthVerificationTexture_)) {
+    gpu_.destroyTexture(currentFrameDepthVerificationTexture_);
+    currentFrameDepthVerificationTexture_ = {};
+  }
+  if (currentFrameVerificationRequired) {
+    const TextureDesc verificationDesc{
+        .type = TextureType::Texture2D,
+        .format = Format::R32_FLOAT,
+        .dimensions = {safeWidth, safeHeight, 1u},
+        .usage = TextureUsage::AttachmentSampled,
+        .storage = Storage::Device,
+        .numLayers = 1u,
+        .numSamples = 1u,
+        .numMipLevels = 1u,
+        .data = {},
+        .dataNumMipLevels = 1u,
+        .generateMipmaps = false,
+    };
+    auto verificationResult = gpu_.createTexture(
+        verificationDesc, "opaque_current_frame_depth_verification");
+    if (verificationResult.hasError()) {
+      return Result<bool, std::string>::makeError(verificationResult.error());
+    }
+    currentFrameDepthVerificationTexture_ = verificationResult.value();
+  }
+  if (!recreatePyramid) {
+    return Result<bool, std::string>::makeResult(true);
+  }
   uint32_t width = pyramidWidth;
   uint32_t height = pyramidHeight;
   for (uint32_t level = 0u; level < levelCount; ++level) {
@@ -8459,6 +8579,9 @@ Result<bool, std::string> OpaqueRenderer::createPipelines() {
     };
     createOptional(pyramidDesc, "opaque_depth_minmax_pyramid",
                    depthPyramidPipelineHandle_);
+    pyramidDesc.colorFormats[0] = Format::R32_FLOAT;
+    createOptional(pyramidDesc, "opaque_current_frame_depth_verification",
+                   currentFrameDepthVerificationPipelineHandle_);
   }
   if (nuri::isValid(shaders_[DepthMotionVectorVertex]) &&
       nuri::isValid(shaders_[DepthMotionVectorFragment])) {
@@ -8981,7 +9104,9 @@ void OpaqueRenderer::destroyMeshPipelineState() {
   destroy(meshNormalPipelines_);
   destroy(meshDepthPipelines_);
   for (RenderPipelineHandle *handle :
-       {&depthMotionVectorPipelineHandle_, &depthPyramidPipelineHandle_}) {
+       {&depthMotionVectorPipelineHandle_,
+        &currentFrameDepthVerificationPipelineHandle_,
+        &depthPyramidPipelineHandle_}) {
     destroyPipelineHandle(gpu_, *handle);
   }
   resetMeshPipelineState();
@@ -9031,6 +9156,7 @@ void OpaqueRenderer::resetMeshPipelineState() {
   meshReactiveMaskPipelines_.fill({});
   meshNormalPipelines_.fill({});
   meshDepthPipelines_.fill({});
+  currentFrameDepthVerificationPipelineHandle_ = {};
   depthPyramidPipelineHandle_ = {};
   depthMotionVectorPipelineHandle_ = {};
   depthMotionVectorDrawItem_ = {};
@@ -9038,6 +9164,10 @@ void OpaqueRenderer::resetMeshPipelineState() {
 }
 
 void OpaqueRenderer::destroyDepthPyramidTextures() {
+  if (nuri::isValid(currentFrameDepthVerificationTexture_)) {
+    gpu_.destroyTexture(currentFrameDepthVerificationTexture_);
+    currentFrameDepthVerificationTexture_ = {};
+  }
   for (TextureHandle &texture : sceneDepthPyramidTextures_) {
     if (nuri::isValid(texture)) {
       gpu_.destroyTexture(texture);

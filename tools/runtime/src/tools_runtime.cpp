@@ -624,6 +624,49 @@ populateShadowPlanesScene(const ToolRuntimeDesc &runtime, Renderer &renderer,
   if (volume.hasError()) {
     return Result<bool, std::string>::makeError(volume.error());
   }
+  if (runtime.scene.generator ==
+      "nuri.procedural.ddgi_eight_volume_selection.v1") {
+    for (uint32_t index = 1u; index < 8u; ++index) {
+      const glm::vec3 offset{
+          (index & 1u) != 0u ? 0.18f : -0.18f,
+          (index & 2u) != 0u ? 0.12f : -0.12f,
+          (index & 4u) != 0u ? 0.16f : -0.16f,
+      };
+      auto overlapNode = scene.graph().createNode(
+          scene.graph().rootNode(), "DDGI Eight-Way Overlap Volume",
+          glm::translate(glm::mat4(1.0f), offset));
+      if (overlapNode.hasError()) {
+        return Result<bool, std::string>::makeError(overlapNode.error());
+      }
+      auto overlap = scene.graph().addDDGIVolume(
+          overlapNode.value(), DDGIVolumeDesc{
+                                   .name = "DDGI Eight-Way Overlap Volume",
+                                   .probeCounts = {3u, 2u, 3u},
+                                   .probeSpacing = {1.1f, 1.1f, 1.1f},
+                                   .blendDistance = 0.5f,
+                                   .maxRayDistance = 12.0f,
+                                   .priority = static_cast<int32_t>(index),
+                               });
+      if (overlap.hasError()) {
+        return Result<bool, std::string>::makeError(overlap.error());
+      }
+    }
+  }
+  if (runtime.scene.generator == "nuri.procedural.ddgi_dirty_light_region.v1") {
+    auto localLight = scene.graph().addLight(
+        scene.graph().rootNode(), LightDesc{
+                                      .type = LightType::Point,
+                                      .name = "DDGI Local Dirty Light",
+                                      .position = glm::vec3(-1.1f, 0.7f, 0.15f),
+                                      .color = glm::vec3(1.0f, 0.32f, 0.12f),
+                                      .intensity = 2.0f,
+                                      .range = 0.35f,
+                                      .enabled = true,
+                                  });
+    if (localLight.hasError()) {
+      return Result<bool, std::string>::makeError(localLight.error());
+    }
+  }
   if (runtime.scene.generator == "nuri.procedural.ddgi_failure_isolation.v1") {
     for (uint32_t index = 0u; index < 2u; ++index) {
       auto largeNode = scene.graph().createNode(

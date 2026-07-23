@@ -60,10 +60,11 @@ Result<GraphIds, std::string> buildGraph(RenderGraphBuilder &builder,
       .flags = AccelerationStructureGeometryFlags::Opaque,
   }};
   const std::array blasBuilds{AccelerationStructureBuildItem{
-      .command = BuildBlasItem{
-          .destination = inputs.blas,
-          .geometries = geometries,
-      },
+      .command =
+          BuildBlasItem{
+              .destination = inputs.blas,
+              .geometries = geometries,
+          },
   }};
   const std::array blasBuffers{
       RenderGraphBufferUse{.buffer = vertices.value(),
@@ -91,10 +92,11 @@ Result<GraphIds, std::string> buildGraph(RenderGraphBuilder &builder,
   instance.bottomLevel = inputs.blas;
   const std::array instances{instance};
   const std::array tlasBuilds{AccelerationStructureBuildItem{
-      .command = BuildTlasItem{
-          .destination = inputs.tlas,
-          .instances = instances,
-      },
+      .command =
+          BuildTlasItem{
+              .destination = inputs.tlas,
+              .instances = instances,
+          },
   }};
   const std::array tlasUses{
       RenderGraphAccelerationStructureUse{
@@ -130,8 +132,7 @@ Result<GraphIds, std::string> buildGraph(RenderGraphBuilder &builder,
       RenderGraphAccelerationStructureAccess::RayQueryRead);
   auto root = builder.markPassSideEffect(queryPass.value());
   if (queryRead.hasError() || root.hasError()) {
-    return Result<GraphIds, std::string>::makeError(
-        "query declaration failed");
+    return Result<GraphIds, std::string>::makeError("query declaration failed");
   }
   return Result<GraphIds, std::string>::makeResult(GraphIds{
       .vertices = vertices.value(),
@@ -159,8 +160,7 @@ TEST(RenderGraphAccelerationStructureTest,
       .indexCount = 3u,
   }};
   const std::array builds{AccelerationStructureBuildItem{
-      .command = BuildBlasItem{.destination = blas,
-                               .geometries = geometries},
+      .command = BuildBlasItem{.destination = blas, .geometries = geometries},
   }};
   const std::array uses{RenderGraphAccelerationStructureUse{
       .accelerationStructure = graphBlas.value(),
@@ -201,14 +201,12 @@ TEST(RenderGraphAccelerationStructureTest,
   bool sawBuildInput = false;
   bool sawBlasWriteToRead = false;
   bool sawTlasWriteToQuery = false;
-  for (const RenderGraphBarrierRecord &barrier :
-       compiled.passBarrierRecords) {
-    sawBuildInput = sawBuildInput ||
-                    (barrier.resourceKind ==
-                         RenderGraphBarrierResourceKind::Buffer &&
-                     barrier.afterState ==
-                         RenderGraphResourceState::
-                             AccelerationStructureBuildInput);
+  for (const RenderGraphBarrierRecord &barrier : compiled.passBarrierRecords) {
+    sawBuildInput =
+        sawBuildInput ||
+        (barrier.resourceKind == RenderGraphBarrierResourceKind::Buffer &&
+         barrier.afterState ==
+             RenderGraphResourceState::AccelerationStructureBuildInput);
     sawBlasWriteToRead =
         sawBlasWriteToRead ||
         (barrier.resourceKind ==

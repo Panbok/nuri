@@ -549,6 +549,61 @@ TEST_F(RenderGraphExecutorTest, TextureCopyPassPatchesTransientDestination) {
   EXPECT_EQ(destinationBytes, expected);
 }
 
+TEST_F(RenderGraphExecutorTest, BufferCopyPassPatchesTransientDestination) {
+  FakeGPUDevice gpu;
+  std::array<std::byte, 32u> sourceBytes{};
+  for (size_t index = 0u; index < sourceBytes.size(); ++index) {
+    sourceBytes[index] = static_cast<std::byte>(index + 1u);
+  }
+  auto sourceResult = gpu.createBuffer(BufferDesc{.usage = BufferUsage::Storage,
+                                                  .storage = Storage::Device,
+                                                  .size = sourceBytes.size(),
+                                                  .data = sourceBytes},
+                                       "buffer_copy_source");
+  ASSERT_FALSE(sourceResult.hasError());
+
+  RenderGraphBuilder builder;
+  builder.beginFrame(152u);
+  auto sourceImport =
+      builder.importBuffer(sourceResult.value(), "buffer_copy_source");
+  auto destinationResult =
+      builder.createTransientBuffer(makeTransientBufferDesc(sourceBytes.size()),
+                                    "buffer_copy_transient_destination");
+  ASSERT_FALSE(sourceImport.hasError());
+  ASSERT_FALSE(destinationResult.hasError());
+  const std::array<RenderGraphBufferCopyItem, 1u> copies{{
+      {.sourceBuffer = sourceImport.value(),
+       .destinationBuffer = destinationResult.value(),
+       .sourceOffset = 4u,
+       .destinationOffset = 8u,
+       .size = 16u},
+  }};
+  auto passResult = builder.addBufferCopyPass(RenderGraphBufferCopyPassDesc{
+      .copies = copies,
+      .debugLabel = "exec_transient_buffer_copy",
+  });
+  ASSERT_FALSE(passResult.hasError()) << passResult.error();
+  ASSERT_FALSE(builder.markPassSideEffect(passResult.value()).hasError());
+
+  auto compileResult = compileBuilder(builder);
+  ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
+  ASSERT_EQ(compileResult.value().unresolvedBufferCopyBindings.size(), 1u);
+  RenderGraphExecutor executor;
+  auto executeResult = executeCompiled(executor, gpu, compileResult.value());
+  ASSERT_FALSE(executeResult.hasError()) << executeResult.error();
+  ASSERT_EQ(gpu.recordedPasses.size(), 1u);
+  ASSERT_EQ(gpu.recordedPasses[0u].bufferCopies.size(), 1u);
+  const BufferHandle materializedDestination =
+      gpu.recordedPasses[0u].bufferCopies[0u].dstBuffer;
+  ASSERT_TRUE(nuri::isValid(materializedDestination));
+  std::array<std::byte, 32u> destinationBytes{};
+  auto readResult =
+      gpu.readBuffer(materializedDestination, 0u, std::span(destinationBytes));
+  ASSERT_FALSE(readResult.hasError()) << readResult.error();
+  EXPECT_TRUE(std::equal(sourceBytes.begin() + 4u, sourceBytes.begin() + 20u,
+                         destinationBytes.begin() + 8u));
+}
+
 TEST_F(RenderGraphExecutorTest,
        ExecutorMaterializesRewritesAndRetiresTransients) {
   auto compileResult = buildExecutorCompiledFrame(100u);

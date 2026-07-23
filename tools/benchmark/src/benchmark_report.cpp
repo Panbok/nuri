@@ -260,6 +260,7 @@ validateBenchmarkReportV1(yyjson_val *root) {
       JsonField{"transmission", JsonType::Object},
       JsonField{"transparent", JsonType::Object},
       JsonField{"textureFiltering", JsonType::Object},
+      JsonField{"ddgi", JsonType::Object, false},
   };
   valid = validateObject(yyjson_obj_get(caseObject, "settings"), settingsFields,
                          "$.case.settings");
@@ -601,6 +602,11 @@ void appendSignatureVec3(std::ostringstream &out, std::string_view key,
   out << '|' << key << '=' << value.x << ',' << value.y << ',' << value.z;
 }
 
+void appendSignatureUVec3(std::ostringstream &out, std::string_view key,
+                          const glm::uvec3 &value) {
+  out << '|' << key << '=' << value.x << ',' << value.y << ',' << value.z;
+}
+
 template <typename Enum> [[nodiscard]] uint32_t enumValue(Enum value) {
   return static_cast<uint32_t>(value);
 }
@@ -746,6 +752,92 @@ visibilityOcclusionModeName(VisibilityOcclusionMode mode) {
   return "Unknown";
 }
 
+[[nodiscard]] const char *ddgiQualityPresetName(DDGIQualityPreset preset) {
+  switch (preset) {
+  case DDGIQualityPreset::Low:
+    return "Low";
+  case DDGIQualityPreset::Balanced:
+    return "Balanced";
+  case DDGIQualityPreset::High:
+    return "High";
+  case DDGIQualityPreset::Custom:
+    return "Custom";
+  }
+  return "Unknown";
+}
+
+[[nodiscard]] const char *ddgiDebugViewName(DDGIDebugView view) {
+  switch (view) {
+  case DDGIDebugView::None:
+    return "None";
+  case DDGIDebugView::DiffuseIndirect:
+    return "DiffuseIndirect";
+  case DDGIDebugView::VolumeId:
+    return "VolumeId";
+  case DDGIDebugView::ProbeWeights:
+    return "ProbeWeights";
+  case DDGIDebugView::Confidence:
+    return "Confidence";
+  case DDGIDebugView::Visibility:
+    return "Visibility";
+  case DDGIDebugView::Irradiance:
+    return "Irradiance";
+  case DDGIDebugView::DistanceMean:
+    return "DistanceMean";
+  case DDGIDebugView::DistanceVariance:
+    return "DistanceVariance";
+  case DDGIDebugView::Classification:
+    return "Classification";
+  case DDGIDebugView::RelocationOffset:
+    return "RelocationOffset";
+  case DDGIDebugView::UpdateAge:
+    return "UpdateAge";
+  case DDGIDebugView::LeakRisk:
+    return "LeakRisk";
+  }
+  return "Unknown";
+}
+
+[[nodiscard]] const char *ddgiCoverageModeName(DDGICoverageMode mode) {
+  switch (mode) {
+  case DDGICoverageMode::Manual:
+    return "Manual";
+  case DDGICoverageMode::SceneFit:
+    return "SceneFit";
+  case DDGICoverageMode::CameraClipmaps:
+    return "CameraClipmaps";
+  case DDGICoverageMode::Hybrid:
+    return "Hybrid";
+  }
+  return "Unknown";
+}
+
+[[nodiscard]] const char *
+ddgiCoverageConstraintPolicyName(DDGICoverageConstraintPolicy policy) {
+  switch (policy) {
+  case DDGICoverageConstraintPolicy::PreserveCoverage:
+    return "PreserveCoverage";
+  case DDGICoverageConstraintPolicy::PreserveNearSpacing:
+    return "PreserveNearSpacing";
+  case DDGICoverageConstraintPolicy::RejectUnsatisfied:
+    return "RejectUnsatisfied";
+  }
+  return "Unknown";
+}
+
+[[nodiscard]] const char *
+ddgiSceneBoundsSourceName(DDGISceneBoundsSource source) {
+  switch (source) {
+  case DDGISceneBoundsSource::ActivationSnapshot:
+    return "ActivationSnapshot";
+  case DDGISceneBoundsSource::StaticRayTracingGeometry:
+    return "StaticRayTracingGeometry";
+  case DDGISceneBoundsSource::Authored:
+    return "Authored";
+  }
+  return "Unknown";
+}
+
 [[nodiscard]] std::string
 makeSettingsSignature(const RenderSettings &sourceSettings) {
   RenderSettings settings = sourceSettings;
@@ -831,6 +923,78 @@ makeSettingsSignature(const RenderSettings &sourceSettings) {
   appendSignatureField(
       out, "texture.anisotropy",
       static_cast<uint32_t>(settings.textureFiltering.anisotropy));
+  if (settings.ddgi.enabled) {
+    const RenderSettings::DDGISettings &ddgi = settings.ddgi;
+    const DDGICoverageSettings &coverage = ddgi.coverage;
+    appendSignatureField(out, "ddgi.enabled", true);
+    appendSignatureField(out, "ddgi.preset", enumValue(ddgi.preset));
+    appendSignatureField(out, "ddgi.raysPerProbe", ddgi.raysPerProbe);
+    appendSignatureField(out, "ddgi.maxProbeUpdatesPerFrame",
+                         ddgi.maxProbeUpdatesPerFrame);
+    appendSignatureField(out, "ddgi.maxRayQueriesPerFrame",
+                         ddgi.maxRayQueriesPerFrame);
+    appendSignatureField(out, "ddgi.maxLocalLightsPerHit",
+                         ddgi.maxLocalLightsPerHit);
+    appendSignatureField(out, "ddgi.maxCandidateIntersectionsPerRay",
+                         ddgi.maxCandidateIntersectionsPerRay);
+    appendSignatureField(out, "ddgi.irradianceHysteresis",
+                         ddgi.irradianceHysteresis);
+    appendSignatureField(out, "ddgi.distanceHysteresis",
+                         ddgi.distanceHysteresis);
+    appendSignatureField(out, "ddgi.changeIrradianceHysteresisScale",
+                         ddgi.changeIrradianceHysteresisScale);
+    appendSignatureField(out, "ddgi.changeDistanceHysteresisScale",
+                         ddgi.changeDistanceHysteresisScale);
+    appendSignatureField(out, "ddgi.selfShadowBias", ddgi.selfShadowBias);
+    appendSignatureField(out, "ddgi.multiBounceLuminanceClamp",
+                         ddgi.multiBounceLuminanceClamp);
+    appendSignatureField(out, "ddgi.relocation", ddgi.relocation);
+    appendSignatureField(out, "ddgi.classification", ddgi.classification);
+    appendSignatureField(out, "ddgi.multiBounce", ddgi.multiBounce);
+    appendSignatureField(out, "ddgi.freezeUpdates", ddgi.freezeUpdates);
+    appendSignatureField(out, "ddgi.debugView", enumValue(ddgi.debugView));
+    appendSignatureField(out, "ddgi.showVolumes", ddgi.showVolumes);
+    appendSignatureField(out, "ddgi.showProbes", ddgi.showProbes);
+    appendSignatureField(out, "ddgi.showSelectedProbeRays",
+                         ddgi.showSelectedProbeRays);
+    appendSignatureField(out, "ddgi.coverage.schemaVersion",
+                         kDDGICoverageSchemaVersion);
+    appendSignatureField(out, "ddgi.coverage.mode", enumValue(coverage.mode));
+    appendSignatureField(out, "ddgi.coverage.constraintPolicy",
+                         enumValue(coverage.constraintPolicy));
+    appendSignatureField(out, "ddgi.coverage.sceneBoundsSource",
+                         enumValue(coverage.sceneBoundsSource));
+    appendSignatureField(out, "ddgi.coverage.cascadeCount",
+                         coverage.cascadeCount);
+    appendSignatureUVec3(out, "ddgi.coverage.cascadeProbeCounts",
+                         coverage.cascadeProbeCounts);
+    appendSignatureVec3(out, "ddgi.coverage.requestedNearSpacing",
+                        coverage.requestedNearSpacing);
+    appendSignatureField(out, "ddgi.coverage.spacingRatio",
+                         coverage.spacingRatio);
+    appendSignatureVec3(out, "ddgi.coverage.requestedCoverageHalfExtents",
+                        coverage.requestedCoverageHalfExtents);
+    appendSignatureField(out, "ddgi.coverage.scenePaddingCells",
+                         coverage.scenePaddingCells);
+    appendSignatureField(out, "ddgi.coverage.transitionCells",
+                         coverage.transitionCells);
+    appendSignatureField(out, "ddgi.coverage.generatedPriority",
+                         coverage.generatedPriority);
+    appendSignatureField(out, "ddgi.coverage.includeAuthoredVolumes",
+                         coverage.includeAuthoredVolumes);
+    appendSignatureField(out, "ddgi.coverage.autoRefitOnTopologyChange",
+                         coverage.autoRefitOnTopologyChange);
+    appendSignatureField(out, "ddgi.coverage.authoredBounds.valid",
+                         coverage.authoredBounds.valid);
+    appendSignatureField(out, "ddgi.coverage.authoredBounds.complete",
+                         coverage.authoredBounds.complete);
+    if (coverage.authoredBounds.valid) {
+      appendSignatureVec3(out, "ddgi.coverage.authoredBounds.min",
+                          coverage.authoredBounds.bounds.min_);
+      appendSignatureVec3(out, "ddgi.coverage.authoredBounds.max",
+                          coverage.authoredBounds.bounds.max_);
+    }
+  }
   return out.str();
 }
 
@@ -936,6 +1100,14 @@ yyjson_mut_val *makeVec3Array(yyjson_mut_doc *doc, const glm::vec3 &value) {
   yyjson_mut_arr_add_real(doc, array, value.x);
   yyjson_mut_arr_add_real(doc, array, value.y);
   yyjson_mut_arr_add_real(doc, array, value.z);
+  return array;
+}
+
+yyjson_mut_val *makeUVec3Array(yyjson_mut_doc *doc, const glm::uvec3 &value) {
+  yyjson_mut_val *array = yyjson_mut_arr(doc);
+  yyjson_mut_arr_add_uint(doc, array, value.x);
+  yyjson_mut_arr_add_uint(doc, array, value.y);
+  yyjson_mut_arr_add_uint(doc, array, value.z);
   return array;
 }
 
@@ -1081,6 +1253,91 @@ yyjson_mut_val *makeSettingsObject(yyjson_mut_doc *doc,
   yyjson_mut_obj_add_uint(doc, textureFiltering, "anisotropy",
                           settings.textureFiltering.anisotropy);
   yyjson_mut_obj_add_val(doc, object, "textureFiltering", textureFiltering);
+
+  const RenderSettings::DDGISettings &ddgiSettings = settings.ddgi;
+  yyjson_mut_val *ddgi = yyjson_mut_obj(doc);
+  yyjson_mut_obj_add_bool(doc, ddgi, "enabled", ddgiSettings.enabled);
+  addString(doc, ddgi, "preset", ddgiQualityPresetName(ddgiSettings.preset));
+  yyjson_mut_obj_add_uint(doc, ddgi, "raysPerProbe", ddgiSettings.raysPerProbe);
+  yyjson_mut_obj_add_uint(doc, ddgi, "maxProbeUpdatesPerFrame",
+                          ddgiSettings.maxProbeUpdatesPerFrame);
+  yyjson_mut_obj_add_uint(doc, ddgi, "maxRayQueriesPerFrame",
+                          ddgiSettings.maxRayQueriesPerFrame);
+  yyjson_mut_obj_add_uint(doc, ddgi, "maxLocalLightsPerHit",
+                          ddgiSettings.maxLocalLightsPerHit);
+  yyjson_mut_obj_add_uint(doc, ddgi, "maxCandidateIntersectionsPerRay",
+                          ddgiSettings.maxCandidateIntersectionsPerRay);
+  yyjson_mut_obj_add_real(doc, ddgi, "irradianceHysteresis",
+                          ddgiSettings.irradianceHysteresis);
+  yyjson_mut_obj_add_real(doc, ddgi, "distanceHysteresis",
+                          ddgiSettings.distanceHysteresis);
+  yyjson_mut_obj_add_real(doc, ddgi, "changeIrradianceHysteresisScale",
+                          ddgiSettings.changeIrradianceHysteresisScale);
+  yyjson_mut_obj_add_real(doc, ddgi, "changeDistanceHysteresisScale",
+                          ddgiSettings.changeDistanceHysteresisScale);
+  yyjson_mut_obj_add_real(doc, ddgi, "selfShadowBias",
+                          ddgiSettings.selfShadowBias);
+  yyjson_mut_obj_add_real(doc, ddgi, "multiBounceLuminanceClamp",
+                          ddgiSettings.multiBounceLuminanceClamp);
+  yyjson_mut_obj_add_bool(doc, ddgi, "relocation", ddgiSettings.relocation);
+  yyjson_mut_obj_add_bool(doc, ddgi, "classification",
+                          ddgiSettings.classification);
+  yyjson_mut_obj_add_bool(doc, ddgi, "multiBounce", ddgiSettings.multiBounce);
+  yyjson_mut_obj_add_bool(doc, ddgi, "freezeUpdates",
+                          ddgiSettings.freezeUpdates);
+  addString(doc, ddgi, "debugView", ddgiDebugViewName(ddgiSettings.debugView));
+  yyjson_mut_obj_add_bool(doc, ddgi, "showVolumes", ddgiSettings.showVolumes);
+  yyjson_mut_obj_add_bool(doc, ddgi, "showProbes", ddgiSettings.showProbes);
+  yyjson_mut_obj_add_bool(doc, ddgi, "showSelectedProbeRays",
+                          ddgiSettings.showSelectedProbeRays);
+
+  const DDGICoverageSettings &coverageSettings = ddgiSettings.coverage;
+  yyjson_mut_val *coverage = yyjson_mut_obj(doc);
+  yyjson_mut_obj_add_uint(doc, coverage, "schemaVersion",
+                          kDDGICoverageSchemaVersion);
+  addString(doc, coverage, "mode", ddgiCoverageModeName(coverageSettings.mode));
+  addString(
+      doc, coverage, "constraintPolicy",
+      ddgiCoverageConstraintPolicyName(coverageSettings.constraintPolicy));
+  addString(doc, coverage, "sceneBoundsSource",
+            ddgiSceneBoundsSourceName(coverageSettings.sceneBoundsSource));
+  yyjson_mut_obj_add_uint(doc, coverage, "cascadeCount",
+                          coverageSettings.cascadeCount);
+  yyjson_mut_obj_add_val(
+      doc, coverage, "cascadeProbeCounts",
+      makeUVec3Array(doc, coverageSettings.cascadeProbeCounts));
+  yyjson_mut_obj_add_val(
+      doc, coverage, "requestedNearSpacing",
+      makeVec3Array(doc, coverageSettings.requestedNearSpacing));
+  yyjson_mut_obj_add_real(doc, coverage, "spacingRatio",
+                          coverageSettings.spacingRatio);
+  yyjson_mut_obj_add_val(
+      doc, coverage, "requestedCoverageHalfExtents",
+      makeVec3Array(doc, coverageSettings.requestedCoverageHalfExtents));
+  yyjson_mut_obj_add_uint(doc, coverage, "scenePaddingCells",
+                          coverageSettings.scenePaddingCells);
+  yyjson_mut_obj_add_uint(doc, coverage, "transitionCells",
+                          coverageSettings.transitionCells);
+  yyjson_mut_obj_add_sint(doc, coverage, "generatedPriority",
+                          coverageSettings.generatedPriority);
+  yyjson_mut_obj_add_bool(doc, coverage, "includeAuthoredVolumes",
+                          coverageSettings.includeAuthoredVolumes);
+  yyjson_mut_obj_add_bool(doc, coverage, "autoRefitOnTopologyChange",
+                          coverageSettings.autoRefitOnTopologyChange);
+  yyjson_mut_val *authoredBounds = yyjson_mut_obj(doc);
+  yyjson_mut_obj_add_bool(doc, authoredBounds, "valid",
+                          coverageSettings.authoredBounds.valid);
+  yyjson_mut_obj_add_bool(doc, authoredBounds, "complete",
+                          coverageSettings.authoredBounds.complete);
+  yyjson_mut_obj_add_val(
+      doc, authoredBounds, "min",
+      makeVec3Array(doc, coverageSettings.authoredBounds.bounds.min_));
+  yyjson_mut_obj_add_val(
+      doc, authoredBounds, "max",
+      makeVec3Array(doc, coverageSettings.authoredBounds.bounds.max_));
+  yyjson_mut_obj_add_val(doc, coverage, "authoredBounds", authoredBounds);
+  yyjson_mut_obj_add_val(doc, ddgi, "coverage", coverage);
+  yyjson_mut_obj_add_val(doc, object, "ddgi", ddgi);
   return object;
 }
 
@@ -1573,6 +1830,40 @@ readEnumValue(yyjson_val *object, const char *key, Enum defaultValue,
   return defaultValue;
 }
 
+[[nodiscard]] glm::vec3 readVec3(yyjson_val *object, const char *key,
+                                 glm::vec3 defaultValue = {}) {
+  yyjson_val *value = yyjson_obj_get(object, key);
+  if (!yyjson_is_arr(value) || yyjson_arr_size(value) != 3u) {
+    return defaultValue;
+  }
+  glm::vec3 out{};
+  for (uint32_t i = 0u; i < 3u; ++i) {
+    yyjson_val *entry = yyjson_arr_get(value, i);
+    if (!yyjson_is_num(entry)) {
+      return defaultValue;
+    }
+    out[i] = static_cast<float>(yyjson_get_num(entry));
+  }
+  return out;
+}
+
+[[nodiscard]] glm::uvec3 readUVec3(yyjson_val *object, const char *key,
+                                   glm::uvec3 defaultValue = {}) {
+  yyjson_val *value = yyjson_obj_get(object, key);
+  if (!yyjson_is_arr(value) || yyjson_arr_size(value) != 3u) {
+    return defaultValue;
+  }
+  glm::uvec3 out{};
+  for (uint32_t i = 0u; i < 3u; ++i) {
+    yyjson_val *entry = yyjson_arr_get(value, i);
+    if (!yyjson_is_uint(entry)) {
+      return defaultValue;
+    }
+    out[i] = static_cast<uint32_t>(yyjson_get_uint(entry));
+  }
+  return out;
+}
+
 [[nodiscard]] RenderSettings readSettingsObject(yyjson_val *object) {
   RenderSettings settings{};
   if (!yyjson_is_obj(object)) {
@@ -1758,25 +2049,134 @@ readEnumValue(yyjson_val *object, const char *key, Enum defaultValue,
     settings.textureFiltering.anisotropy = static_cast<uint8_t>(readU32(
         textureFiltering, "anisotropy", settings.textureFiltering.anisotropy));
   }
+  yyjson_val *ddgi = yyjson_obj_get(object, "ddgi");
+  if (yyjson_is_obj(ddgi)) {
+    RenderSettings::DDGISettings &ddgiSettings = settings.ddgi;
+    ddgiSettings.enabled = readBool(ddgi, "enabled", ddgiSettings.enabled);
+    ddgiSettings.preset =
+        readEnumValue(ddgi, "preset", ddgiSettings.preset,
+                      {{"Low", DDGIQualityPreset::Low},
+                       {"Balanced", DDGIQualityPreset::Balanced},
+                       {"High", DDGIQualityPreset::High},
+                       {"Custom", DDGIQualityPreset::Custom}});
+    ddgiSettings.raysPerProbe =
+        readU32(ddgi, "raysPerProbe", ddgiSettings.raysPerProbe);
+    ddgiSettings.maxProbeUpdatesPerFrame = readU32(
+        ddgi, "maxProbeUpdatesPerFrame", ddgiSettings.maxProbeUpdatesPerFrame);
+    ddgiSettings.maxRayQueriesPerFrame = readU32(
+        ddgi, "maxRayQueriesPerFrame", ddgiSettings.maxRayQueriesPerFrame);
+    ddgiSettings.maxLocalLightsPerHit = readU32(
+        ddgi, "maxLocalLightsPerHit", ddgiSettings.maxLocalLightsPerHit);
+    ddgiSettings.maxCandidateIntersectionsPerRay =
+        readU32(ddgi, "maxCandidateIntersectionsPerRay",
+                ddgiSettings.maxCandidateIntersectionsPerRay);
+    ddgiSettings.irradianceHysteresis = static_cast<float>(readReal(
+        ddgi, "irradianceHysteresis", ddgiSettings.irradianceHysteresis));
+    ddgiSettings.distanceHysteresis = static_cast<float>(
+        readReal(ddgi, "distanceHysteresis", ddgiSettings.distanceHysteresis));
+    ddgiSettings.changeIrradianceHysteresisScale = static_cast<float>(
+        readReal(ddgi, "changeIrradianceHysteresisScale",
+                 ddgiSettings.changeIrradianceHysteresisScale));
+    ddgiSettings.changeDistanceHysteresisScale = static_cast<float>(
+        readReal(ddgi, "changeDistanceHysteresisScale",
+                 ddgiSettings.changeDistanceHysteresisScale));
+    ddgiSettings.selfShadowBias = static_cast<float>(
+        readReal(ddgi, "selfShadowBias", ddgiSettings.selfShadowBias));
+    ddgiSettings.multiBounceLuminanceClamp =
+        static_cast<float>(readReal(ddgi, "multiBounceLuminanceClamp",
+                                    ddgiSettings.multiBounceLuminanceClamp));
+    ddgiSettings.relocation =
+        readBool(ddgi, "relocation", ddgiSettings.relocation);
+    ddgiSettings.classification =
+        readBool(ddgi, "classification", ddgiSettings.classification);
+    ddgiSettings.multiBounce =
+        readBool(ddgi, "multiBounce", ddgiSettings.multiBounce);
+    ddgiSettings.freezeUpdates =
+        readBool(ddgi, "freezeUpdates", ddgiSettings.freezeUpdates);
+    ddgiSettings.debugView =
+        readEnumValue(ddgi, "debugView", ddgiSettings.debugView,
+                      {{"None", DDGIDebugView::None},
+                       {"DiffuseIndirect", DDGIDebugView::DiffuseIndirect},
+                       {"VolumeId", DDGIDebugView::VolumeId},
+                       {"ProbeWeights", DDGIDebugView::ProbeWeights},
+                       {"Confidence", DDGIDebugView::Confidence},
+                       {"Visibility", DDGIDebugView::Visibility},
+                       {"Irradiance", DDGIDebugView::Irradiance},
+                       {"DistanceMean", DDGIDebugView::DistanceMean},
+                       {"DistanceVariance", DDGIDebugView::DistanceVariance},
+                       {"Classification", DDGIDebugView::Classification},
+                       {"RelocationOffset", DDGIDebugView::RelocationOffset},
+                       {"UpdateAge", DDGIDebugView::UpdateAge},
+                       {"LeakRisk", DDGIDebugView::LeakRisk}});
+    ddgiSettings.showVolumes =
+        readBool(ddgi, "showVolumes", ddgiSettings.showVolumes);
+    ddgiSettings.showProbes =
+        readBool(ddgi, "showProbes", ddgiSettings.showProbes);
+    ddgiSettings.showSelectedProbeRays = readBool(
+        ddgi, "showSelectedProbeRays", ddgiSettings.showSelectedProbeRays);
+
+    yyjson_val *coverage = yyjson_obj_get(ddgi, "coverage");
+    if (yyjson_is_obj(coverage)) {
+      DDGICoverageSettings &coverageSettings = ddgiSettings.coverage;
+      coverageSettings.mode =
+          readEnumValue(coverage, "mode", coverageSettings.mode,
+                        {{"Manual", DDGICoverageMode::Manual},
+                         {"SceneFit", DDGICoverageMode::SceneFit},
+                         {"CameraClipmaps", DDGICoverageMode::CameraClipmaps},
+                         {"Hybrid", DDGICoverageMode::Hybrid}});
+      coverageSettings.constraintPolicy = readEnumValue(
+          coverage, "constraintPolicy", coverageSettings.constraintPolicy,
+          {{"PreserveCoverage", DDGICoverageConstraintPolicy::PreserveCoverage},
+           {"PreserveNearSpacing",
+            DDGICoverageConstraintPolicy::PreserveNearSpacing},
+           {"RejectUnsatisfied",
+            DDGICoverageConstraintPolicy::RejectUnsatisfied}});
+      coverageSettings.sceneBoundsSource = readEnumValue(
+          coverage, "sceneBoundsSource", coverageSettings.sceneBoundsSource,
+          {{"ActivationSnapshot", DDGISceneBoundsSource::ActivationSnapshot},
+           {"StaticRayTracingGeometry",
+            DDGISceneBoundsSource::StaticRayTracingGeometry},
+           {"Authored", DDGISceneBoundsSource::Authored}});
+      coverageSettings.cascadeCount =
+          readU32(coverage, "cascadeCount", coverageSettings.cascadeCount);
+      coverageSettings.cascadeProbeCounts = readUVec3(
+          coverage, "cascadeProbeCounts", coverageSettings.cascadeProbeCounts);
+      coverageSettings.requestedNearSpacing =
+          readVec3(coverage, "requestedNearSpacing",
+                   coverageSettings.requestedNearSpacing);
+      coverageSettings.spacingRatio = static_cast<float>(
+          readReal(coverage, "spacingRatio", coverageSettings.spacingRatio));
+      coverageSettings.requestedCoverageHalfExtents =
+          readVec3(coverage, "requestedCoverageHalfExtents",
+                   coverageSettings.requestedCoverageHalfExtents);
+      coverageSettings.scenePaddingCells = readU32(
+          coverage, "scenePaddingCells", coverageSettings.scenePaddingCells);
+      coverageSettings.transitionCells = readU32(
+          coverage, "transitionCells", coverageSettings.transitionCells);
+      coverageSettings.generatedPriority = readS32(
+          coverage, "generatedPriority", coverageSettings.generatedPriority);
+      coverageSettings.includeAuthoredVolumes =
+          readBool(coverage, "includeAuthoredVolumes",
+                   coverageSettings.includeAuthoredVolumes);
+      coverageSettings.autoRefitOnTopologyChange =
+          readBool(coverage, "autoRefitOnTopologyChange",
+                   coverageSettings.autoRefitOnTopologyChange);
+      yyjson_val *authoredBounds = yyjson_obj_get(coverage, "authoredBounds");
+      if (yyjson_is_obj(authoredBounds)) {
+        coverageSettings.authoredBounds.valid = readBool(
+            authoredBounds, "valid", coverageSettings.authoredBounds.valid);
+        coverageSettings.authoredBounds.complete =
+            readBool(authoredBounds, "complete",
+                     coverageSettings.authoredBounds.complete);
+        coverageSettings.authoredBounds.bounds.min_ = readVec3(
+            authoredBounds, "min", coverageSettings.authoredBounds.bounds.min_);
+        coverageSettings.authoredBounds.bounds.max_ = readVec3(
+            authoredBounds, "max", coverageSettings.authoredBounds.bounds.max_);
+      }
+    }
+  }
   sanitizeBenchmarkRenderSettings(settings);
   return settings;
-}
-
-[[nodiscard]] glm::vec3 readVec3(yyjson_val *object, const char *key,
-                                 glm::vec3 defaultValue = {}) {
-  yyjson_val *value = yyjson_obj_get(object, key);
-  if (!yyjson_is_arr(value) || yyjson_arr_size(value) != 3u) {
-    return defaultValue;
-  }
-  glm::vec3 out{};
-  for (uint32_t i = 0u; i < 3u; ++i) {
-    yyjson_val *entry = yyjson_arr_get(value, i);
-    if (!yyjson_is_num(entry)) {
-      return defaultValue;
-    }
-    out[i] = static_cast<float>(yyjson_get_num(entry));
-  }
-  return out;
 }
 
 [[nodiscard]] std::vector<std::string> readStringArray(yyjson_val *array) {

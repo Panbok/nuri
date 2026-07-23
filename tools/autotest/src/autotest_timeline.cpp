@@ -138,6 +138,7 @@ compileAutotestTimeline(const AutotestCase &testCase) {
       }
       plan.settings = event.settings;
     } else if (event.type == "setDirectionalLightIntensity" ||
+               event.type == "setLocalLightIntensity" ||
                event.type == "setNodeTranslation" ||
                event.type == "setDDGIVolumeProbeCounts") {
       plan.sceneEvents.push_back(&event);

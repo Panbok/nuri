@@ -2,9 +2,9 @@
 
 #include "nuri/core/result.h"
 #include "nuri/defines.h"
+#include "nuri/gfx/gpu_types.h"
 #include "nuri/scene/ddgi_volume.h"
 #include "nuri/scene/scene_handles.h"
-#include "nuri/gfx/gpu_types.h"
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -13,7 +13,13 @@
 namespace nuri {
 
 inline constexpr uint32_t kDDGILayoutVersion = 1u;
-inline constexpr uint32_t kMaxDDGIVolumes = 4u;
+inline constexpr uint32_t kDDGIFrameGpuDataVersion = 2u;
+inline constexpr uint32_t kDDGICaptureSemanticsVersion = 2u;
+inline constexpr uint32_t kDDGIFrameMetricsVersion = 4u;
+inline constexpr uint32_t kMaxDDGIEffectiveVolumes = 8u;
+inline constexpr uint32_t kMaxDDGIClipmapCascades = 4u;
+inline constexpr uint32_t kMaxDDGIVolumesSampledPerSurface = 2u;
+inline constexpr uint32_t kMaxDDGIVolumes = kMaxDDGIEffectiveVolumes;
 inline constexpr float kDDGIIrradianceGamma = 5.0f;
 inline constexpr float kDDGIVisibilityFloor = 0.05f;
 inline constexpr float kDDGIChebyshevExponent = 3.0f;
@@ -107,7 +113,83 @@ enum class DDGIVolumeFailureReason : uint8_t {
   ProbeStateAllocation,
 };
 
+enum class DDGICoverageLimit : uint8_t {
+  None = 0,
+  InvalidSettings,
+  SceneBoundsUnavailable,
+  SceneBoundsIncomplete,
+  ProbeCountAxis,
+  TotalProbeCount,
+  AtlasDimensions,
+  PersistentMemory,
+  ReplacementPeakMemory,
+  ProbeSpacing,
+  CoverageExtents,
+  EffectiveVolumeCapacity,
+  ArithmeticOverflow,
+};
+
+enum class DDGICoverageStatus : uint8_t {
+  SkyFallbackOnly = 0,
+  PartialCoverage,
+  FullCoverageWarmingDetail,
+  FullCoverageReady,
+};
+
+struct DDGIVolumeFrameMetrics {
+  uint64_t effectiveKeyHash = 0u;
+  uint64_t layoutGeneration = 0u;
+  uint64_t resourceGeneration = 0u;
+  uint32_t effectiveKind = 0u;
+  uint32_t tier = 0u;
+  uint32_t cascadeIndex = UINT32_MAX;
+  uint32_t totalProbes = 0u;
+  uint32_t initializedProbes = 0u;
+  uint32_t shadingEnabledProbes = 0u;
+  uint32_t invalidProbes = 0u;
+  uint32_t newlyExposedProbes = 0u;
+  uint32_t updates = 0u;
+  uint32_t primaryQueries = 0u;
+  uint32_t primaryQueriesIssued = 0u;
+  uint32_t secondaryQueries = 0u;
+  uint32_t updateAgeMedian = 0u;
+  uint32_t updateAgeP95 = 0u;
+  uint32_t updateAgeMaximum = 0u;
+  uint32_t scheduledQuota = 0u;
+  uint32_t usedQuota = 0u;
+  int64_t deficit = 0;
+  uint32_t starvationFrames = 0u;
+  uint32_t estimatedFullRefreshFrames = 0u;
+  glm::vec3 interiorHalfExtents{0.0f};
+  glm::vec3 fadeStartHalfExtents{0.0f};
+  glm::vec3 fadeEndHalfExtents{0.0f};
+  glm::ivec3 cameraCell{0};
+  float historyReadyPercentage = 0.0f;
+  float coverageReadyPercentage = 0.0f;
+  float confidence = 0.0f;
+  uint32_t active = 0u;
+};
+
+struct DDGICaptureMetadata {
+  uint64_t effectiveKeyHash = 0u;
+  uint64_t coverageGeneration = 0u;
+  uint64_t layoutGeneration = 0u;
+  uint64_t resourceGeneration = 0u;
+  uint64_t sceneBoundsGeneration = 0u;
+  uint32_t effectiveKind = 0u;
+  uint32_t cascadeIndex = UINT32_MAX;
+  glm::uvec3 ringOrigin{0u};
+  glm::ivec3 cameraCell{0};
+  glm::vec3 requestedHalfExtents{0.0f};
+  glm::vec3 achievedHalfExtents{0.0f};
+  glm::vec3 fadeStartHalfExtents{0.0f};
+  glm::vec3 fadeEndHalfExtents{0.0f};
+  uint32_t transitionCells = 0u;
+  uint32_t valid = 0u;
+};
+
 struct DDGIFrameMetrics {
+  uint32_t version = kDDGIFrameMetricsVersion;
   uint32_t activeVolumes = 0u;
   uint32_t readyVolumes = 0u;
   uint32_t totalProbes = 0u;
@@ -120,11 +202,17 @@ struct DDGIFrameMetrics {
   uint32_t newlyVigilantProbes = 0u;
   uint32_t relocatedProbes = 0u;
   uint32_t probeStateReadbackAvailable = 0u;
+  uint32_t probeStateReadbackSourceFrame = 0u;
+  uint32_t probeStateReadbackStaleFrames = 0u;
   uint32_t updatedProbes = 0u;
   uint32_t primaryQueries = 0u;
+  uint32_t primaryQueriesIssued = 0u;
+  uint32_t traceCounterSourceFrame = 0u;
   uint32_t secondaryQueriesReserved = 0u;
   uint32_t secondaryQueriesUnused = 0u;
   uint32_t secondaryQueries = 0u;
+  uint32_t directionalSecondaryQueries = 0u;
+  uint32_t localSecondaryQueries = 0u;
   uint32_t primaryCandidateIntersections = 0u;
   uint32_t secondaryCandidateIntersections = 0u;
   uint32_t alphaCandidateRejections = 0u;
@@ -137,6 +225,13 @@ struct DDGIFrameMetrics {
   uint32_t scrollCount = 0u;
   uint32_t invalidatedProbes = 0u;
   uint32_t failedVolumes = 0u;
+  uint32_t effectiveVolumes = 0u;
+  uint32_t authoredVolumes = 0u;
+  uint32_t generatedVolumes = 0u;
+  uint32_t coverageMode = 0u;
+  DDGICoverageStatus coverageStatus = DDGICoverageStatus::SkyFallbackOnly;
+  DDGICoverageLimit coverageError = DDGICoverageLimit::None;
+  DDGICoverageLimit limitingConstraint = DDGICoverageLimit::None;
   uint32_t historyReady = 0u;
   uint32_t irradianceResponseRemaining = 0u;
   uint32_t distanceResponseRemaining = 0u;
@@ -148,8 +243,22 @@ struct DDGIFrameMetrics {
   uint32_t inspectionCandidateOverflows = 0u;
   uint32_t inspectionEventOverflows = 0u;
   uint32_t skyFallbackActive = 1u;
+  uint32_t diagnosticSampleCount = 0u;
+  uint32_t uncoveredDiagnosticSamples = 0u;
+  uint32_t skyRemainderSamples = 0u;
+  uint32_t diagnosticSamplesAvailable = 0u;
+  uint32_t dirtyRegionsPending = 0u;
+  uint32_t dirtyProbesAffected = 0u;
+  uint32_t classificationFallbacks = 0u;
+  uint32_t classificationOverflows = 0u;
+  uint64_t dirtyRegionsProduced = 0u;
+  uint64_t dirtyRegionsMerged = 0u;
+  uint64_t dirtyRegionsOverflowed = 0u;
   uint64_t persistentBytes = 0u;
   uint64_t frameBatchBytes = 0u;
+  uint64_t committedAtlasBytes = 0u;
+  uint64_t pendingAtlasBytes = 0u;
+  uint64_t peakAtlasBytes = 0u;
   uint64_t submittedSequence = 0u;
   uint64_t layoutGeneration = 0u;
   uint64_t resourceGeneration = 0u;
@@ -166,10 +275,14 @@ struct DDGIFrameMetrics {
   uint32_t updateGpuTimingAvailable = 0u;
   uint32_t relocateClassifyGpuTimingAvailable = 0u;
   float maxRelocation = 0.0f;
+  glm::vec3 requestedCoverageHalfExtents{0.0f};
+  glm::vec3 achievedCoverageHalfExtents{0.0f};
+  float sceneCoverageRatio = 0.0f;
+  float coverageResolveCpuTimeMs = 0.0f;
   DDGIFallbackReason fallbackReason = DDGIFallbackReason::Disabled;
-  DDGIVolumeFailureReason volumeFailureReason =
-      DDGIVolumeFailureReason::None;
+  DDGIVolumeFailureReason volumeFailureReason = DDGIVolumeFailureReason::None;
   DDGIDebugView debugView = DDGIDebugView::None;
+  std::array<DDGIVolumeFrameMetrics, kMaxDDGIEffectiveVolumes> volumes{};
 };
 
 struct DDGIVolumeBlendWeights {
@@ -180,8 +293,8 @@ struct DDGIVolumeBlendWeights {
 
 struct alignas(16) DDGIProbeStateGpuData {
   glm::vec4 relocation{0.0f};
-  glm::uvec4 stateAgeFlags{static_cast<uint32_t>(DDGIProbeState::Vigilant),
-                           0u, 0u, 0u};
+  glm::uvec4 stateAgeFlags{static_cast<uint32_t>(DDGIProbeState::Vigilant), 0u,
+                           0u, 0u};
 };
 
 struct alignas(16) DDGIVolumeGpuData {
@@ -197,9 +310,15 @@ struct alignas(16) DDGIVolumeGpuData {
   glm::uvec4 distanceAtlas{kInvalidTextureBindlessIndex, 0u, 0u, 0u};
   glm::uvec4 ringOriginAndFlags{0u};
   glm::uvec4 generations{0u};
+  glm::uvec4 effectiveIdentity{0u};
+  glm::uvec4 tierTransitionCoverageFlags{0u};
+  glm::vec4 continuousCameraLocal{0.0f};
+  glm::vec4 fadeStartHalfExtents{0.0f};
+  glm::vec4 fadeEndHalfExtents{0.0f};
 };
 
 struct alignas(16) DDGIFrameGpuData {
+  // x: active count, y: debug view, z: record version, w: sampler index.
   glm::uvec4 activeCountDebugFlagsSampler{0u};
   std::array<DDGIVolumeGpuData, kMaxDDGIVolumes> volumes{};
 };
@@ -217,7 +336,12 @@ struct alignas(16) DDGITraceCountersGpuData {
   uint32_t backfaceCandidateRejections = 0u;
   uint32_t candidateOverflows = 0u;
   uint32_t localLightTruncations = 0u;
-  uint32_t reserved = 0u;
+  uint32_t primaryQueriesIssued = 0u;
+  uint32_t secondaryQueriesReserved = 0u;
+  uint32_t sourceFrame = 0u;
+  uint32_t localSecondaryQueries = 0u;
+  std::array<uint32_t, kMaxDDGIVolumes> primaryQueriesIssuedByVolume{};
+  std::array<uint32_t, kMaxDDGIVolumes> secondaryQueriesByVolume{};
 };
 
 struct alignas(16) DDGIDiagnosticHeaderGpuData {
@@ -246,15 +370,14 @@ struct alignas(16) DDGIDiagnosticEventGpuData {
 inline constexpr size_t kDDGIDiagnosticBufferBytes =
     sizeof(DDGIDiagnosticHeaderGpuData) +
     kDDGIMaxDiagnosticRays * sizeof(DDGIDiagnosticRayGpuData) +
-    kDDGIMaxDiagnosticRays *
-        (kDDGIMaxDiagnosticCandidateEventsPerRay + 1u) *
+    kDDGIMaxDiagnosticRays * (kDDGIMaxDiagnosticCandidateEventsPerRay + 1u) *
         sizeof(DDGIDiagnosticEventGpuData);
 
 static_assert(sizeof(DDGIProbeStateGpuData) == 32u);
-static_assert(sizeof(DDGIVolumeGpuData) == 256u);
-static_assert(sizeof(DDGIFrameGpuData) == 1040u);
+static_assert(sizeof(DDGIVolumeGpuData) == 336u);
+static_assert(sizeof(DDGIFrameGpuData) == 2704u);
 static_assert(sizeof(DDGIRayResultGpuData) == 32u);
-static_assert(sizeof(DDGITraceCountersGpuData) == 32u);
+static_assert(sizeof(DDGITraceCountersGpuData) == 112u);
 static_assert(sizeof(DDGIDiagnosticHeaderGpuData) == 160u);
 static_assert(sizeof(DDGIDiagnosticRayGpuData) == 32u);
 static_assert(sizeof(DDGIDiagnosticEventGpuData) == 32u);
@@ -262,11 +385,9 @@ static_assert(sizeof(DDGIDiagnosticEventGpuData) == 32u);
 [[nodiscard]] NURI_API uint32_t
 ddgiProbeCount(const glm::uvec3 &counts) noexcept;
 [[nodiscard]] NURI_API uint32_t
-ddgiProbeIndex(const glm::uvec3 &coordinate,
-               const glm::uvec3 &counts) noexcept;
+ddgiProbeIndex(const glm::uvec3 &coordinate, const glm::uvec3 &counts) noexcept;
 [[nodiscard]] NURI_API glm::uvec3
-ddgiProbeCoordinate(uint32_t probeIndex,
-                    const glm::uvec3 &counts) noexcept;
+ddgiProbeCoordinate(uint32_t probeIndex, const glm::uvec3 &counts) noexcept;
 [[nodiscard]] NURI_API glm::uvec3
 ddgiPhysicalProbeCoordinate(const glm::uvec3 &logicalCoordinate,
                             const glm::uvec3 &ringOrigin,
@@ -275,13 +396,10 @@ ddgiPhysicalProbeCoordinate(const glm::uvec3 &logicalCoordinate,
 ddgiLocalProbePosition(const DDGIVolumeLayout &layout,
                        const glm::uvec3 &coordinate) noexcept;
 [[nodiscard]] NURI_API glm::ivec3
-ddgiCameraCell(const glm::vec3 &cameraLocal,
-               const glm::vec3 &spacing) noexcept;
-[[nodiscard]] NURI_API DDGIScrollPlan
-makeDDGIScrollPlan(const glm::ivec3 &cameraCell,
-                   const glm::uvec3 &ringOrigin,
-                   const glm::ivec3 &targetCameraCell,
-                   const glm::uvec3 &probeCounts) noexcept;
+ddgiCameraCell(const glm::vec3 &cameraLocal, const glm::vec3 &spacing) noexcept;
+[[nodiscard]] NURI_API DDGIScrollPlan makeDDGIScrollPlan(
+    const glm::ivec3 &cameraCell, const glm::uvec3 &ringOrigin,
+    const glm::ivec3 &targetCameraCell, const glm::uvec3 &probeCounts) noexcept;
 [[nodiscard]] NURI_API bool
 isDDGINewlyExposedCoordinate(const glm::uvec3 &logicalCoordinate,
                              const DDGIScrollPlan &plan,

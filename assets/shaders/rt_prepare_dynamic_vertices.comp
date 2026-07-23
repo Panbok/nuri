@@ -33,9 +33,8 @@ pc;
 
 vec2 rtDynamicEncodeOct(vec3 direction) {
   const float lengthSq = dot(direction, direction);
-  direction = lengthSq > 1.0e-10
-                  ? direction * inversesqrt(lengthSq)
-                  : vec3(0.0, 1.0, 0.0);
+  direction = lengthSq > 1.0e-10 ? direction * inversesqrt(lengthSq)
+                                 : vec3(0.0, 1.0, 0.0);
   direction /= abs(direction.x) + abs(direction.y) + abs(direction.z);
   vec2 encoded = direction.xy;
   if (direction.z < 0.0) {
@@ -63,9 +62,9 @@ void main() {
       pc.sourceVertices, pc.packedVertexFormat, vertexIndex);
   const vec4 localTangent = decodePackedTangentFrom(
       pc.sourceVertices, pc.packedVertexFormat, vertexIndex);
-  const mat3 normalMatrix = mat3(instance.normalMatCol0.xyz,
-                                 instance.normalMatCol1.xyz,
-                                 instance.normalMatCol2.xyz);
+  const mat3 normalMatrix =
+      mat3(instance.normalMatCol0.xyz, instance.normalMatCol1.xyz,
+           instance.normalMatCol2.xyz);
   const vec3 worldPosition =
       (instance.modelMatrix * vec4(localPosition, 1.0)).xyz;
   const vec3 worldNormal = rtDynamicNormalizeOrZero(normalMatrix * localNormal);
@@ -80,8 +79,7 @@ void main() {
   outputVertex.word3 = packSnorm2x16(rtDynamicEncodeOct(worldNormal));
   if (dot(worldTangent, worldTangent) > 1.0e-10) {
     outputVertex.word4 = packSnorm2x16(rtDynamicEncodeOct(worldTangent));
-    outputVertex.word5 =
-        floatBitsToUint(localTangent.w >= 0.0 ? 1.0 : -1.0);
+    outputVertex.word5 = floatBitsToUint(localTangent.w >= 0.0 ? 1.0 : -1.0);
   } else {
     outputVertex.word4 = 0u;
     outputVertex.word5 = 0u;

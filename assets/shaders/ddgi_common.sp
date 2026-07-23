@@ -18,6 +18,12 @@ struct DDGIVolumeSample {
   float leakRisk;
 };
 
+struct DDGIVolumeCandidate {
+  float coverage;
+  float historyConfidence;
+  float confidence;
+};
+
 struct DDGIQueryResult {
   vec3 irradiance;
   float historyConfidence;
@@ -123,7 +129,7 @@ vec2 ddgiAtlasUv(uvec4 atlas, uint probeIndex, vec3 direction,
   return texel / (vec2(columns, rows) * tileExtent);
 }
 
-float ddgiVolumeCoverage(DDGIVolumeGpuData volume, vec3 localPoint) {
+float ddgiStaticVolumeCoverage(DDGIVolumeGpuData volume, vec3 localPoint) {
   const vec3 halfExtents = volume.centerHalfExtentsAndMaxDistance.xyz;
   const float blend = uintBitsToFloat(volume.ringOriginAndFlags.w);
   const vec3 distanceToFace = halfExtents - abs(localPoint);
@@ -138,10 +144,91 @@ float ddgiVolumeCoverage(DDGIVolumeGpuData volume, vec3 localPoint) {
                0.0, 1.0);
 }
 
+float ddgiVolumeCoverage(DDGIVolumeGpuData volume, vec3 localPoint,
+                         vec3 trackedCenter) {
+  if (volume.effectiveIdentity.x != kDDGIEffectiveKindClipmapCascade) {
+    return ddgiStaticVolumeCoverage(volume, localPoint - trackedCenter);
+  }
+
+  const vec3 distanceFromCamera =
+      abs(localPoint - volume.continuousCameraLocal.xyz);
+  const vec3 fadeStart = volume.fadeStartHalfExtents.xyz;
+  const vec3 fadeEnd = volume.fadeEndHalfExtents.xyz;
+  const vec3 fadeWidth = max(fadeEnd - fadeStart, vec3(1.0e-6));
+  const vec3 axisCoverage =
+      vec3(1.0) - clamp((distanceFromCamera - fadeStart) / fadeWidth,
+                        vec3(0.0), vec3(1.0));
+  return min(min(axisCoverage.x, axisCoverage.y), axisCoverage.z);
+}
+
+DDGIVolumeCandidate ddgiEvaluateVolumeCandidate(
+    DDGIVolumeGpuData volume, vec3 worldPoint, vec3 surfaceNormal,
+    vec3 viewDirection) {
+  DDGIVolumeCandidate result;
+  result.coverage = 0.0;
+  result.historyConfidence = 0.0;
+  result.confidence = 0.0;
+  if ((volume.resourceFlagsReserved.x & 1u) == 0u ||
+      volume.irradianceAtlas.x == 0xffffffffu ||
+      volume.distanceAtlas.x == 0xffffffffu) {
+    return result;
+  }
+
+  const vec3 localPoint =
+      (volume.localFromWorld * vec4(worldPoint, 1.0)).xyz;
+  const ivec3 cameraCell = ivec3(volume.generations.x,
+                                 volume.generations.y,
+                                 volume.generations.w);
+  const vec3 trackedCenter =
+      vec3(cameraCell) * volume.probeSpacingAndBias.xyz;
+  result.coverage = ddgiVolumeCoverage(volume, localPoint, trackedCenter);
+  if (result.coverage <= 0.0) {
+    return result;
+  }
+
+  const float minSpacing = min(min(volume.probeSpacingAndBias.x,
+                                   volume.probeSpacingAndBias.y),
+                               volume.probeSpacingAndBias.z);
+  const vec3 safeNormal = normalize(surfaceNormal);
+  const vec3 safeView = normalize(viewDirection);
+  const vec3 biasedWorldPoint =
+      worldPoint + (0.2 * safeNormal + 0.8 * safeView) *
+                       (0.75 * minSpacing) * volume.probeSpacingAndBias.w;
+  const vec3 biasedLocalPoint =
+      (volume.localFromWorld * vec4(biasedWorldPoint, 1.0)).xyz;
+  const uvec3 counts = volume.probeCountsAndCount.xyz;
+  const vec3 grid = clamp((biasedLocalPoint - trackedCenter) /
+                                  volume.probeSpacingAndBias.xyz +
+                              0.5 * vec3(counts - 1u),
+                          vec3(0.0), vec3(counts - 1u));
+  const uvec3 base = uvec3(min(floor(grid), vec3(counts - 2u)));
+  const vec3 fraction = grid - vec3(base);
+  for (uint neighbor = 0u; neighbor < 8u; ++neighbor) {
+    const uvec3 offset = uvec3(neighbor & 1u, (neighbor >> 1u) & 1u,
+                               (neighbor >> 2u) & 1u);
+    const vec3 trilinearAxis =
+        mix(vec3(1.0) - fraction, fraction, vec3(offset));
+    const float trilinear =
+        trilinearAxis.x * trilinearAxis.y * trilinearAxis.z;
+    const uvec3 physical = ddgiPhysicalCoordinate(
+        base + offset, volume.ringOriginAndFlags.xyz, counts);
+    const uint probe = ddgiProbeIndex(physical, counts);
+    if (ddgiProbeShades(
+            volume.probeStates.values[probe].stateAgeFlags.x)) {
+      result.historyConfidence += trilinear;
+    }
+  }
+  result.historyConfidence = clamp(result.historyConfidence, 0.0, 1.0);
+  result.confidence =
+      clamp(result.coverage * result.historyConfidence, 0.0, 1.0);
+  return result;
+}
+
 DDGIVolumeSample ddgiSampleVolume(DDGIVolumeGpuData volume,
                                   vec3 worldPoint, vec3 surfaceNormal,
                                   vec3 viewDirection,
-                                  uint samplerId) {
+                                  uint samplerId,
+                                  DDGIVolumeCandidate candidate) {
   DDGIVolumeSample result;
   result.irradiance = vec3(0.0);
   result.confidence = 0.0;
@@ -153,17 +240,14 @@ DDGIVolumeSample ddgiSampleVolume(DDGIVolumeGpuData volume,
   result.relocation = 0.0;
   result.updateAge = 0.0;
   result.leakRisk = 0.0;
-  const vec3 localPoint = (volume.localFromWorld * vec4(worldPoint, 1.0)).xyz;
   const ivec3 cameraCell = ivec3(volume.generations.x,
                                  volume.generations.y,
                                  volume.generations.w);
   const vec3 trackedCenter = vec3(cameraCell) *
                              volume.probeSpacingAndBias.xyz;
-  result.coverage = ddgiVolumeCoverage(volume, localPoint - trackedCenter);
-  if (result.coverage <= 0.0 ||
-      (volume.resourceFlagsReserved.x & 1u) == 0u ||
-      volume.irradianceAtlas.x == 0xffffffffu ||
-      volume.distanceAtlas.x == 0xffffffffu) {
+  result.coverage = candidate.coverage;
+  result.confidence = candidate.historyConfidence;
+  if (candidate.confidence <= 0.0) {
     return result;
   }
   const float minSpacing = min(min(volume.probeSpacingAndBias.x,
@@ -296,19 +380,50 @@ DDGIQueryResult queryDDGI(DDGIFrameBuffer frame, vec3 worldPoint,
   result.relocation = 0.0;
   result.updateAge = 0.0;
   result.leakRisk = 0.0;
+  if (frame.activeCountDebugFlagsSampler.z != kDDGIFrameGpuDataVersion) {
+    return result;
+  }
+
   float remaining = 1.0;
   const uint count = min(frame.activeCountDebugFlagsSampler.x,
                          kDDGIMaxVolumes);
   const uint samplerId = frame.activeCountDebugFlagsSampler.w;
-  uint accepted = 0u;
-  for (uint volumeIndex = 0u; volumeIndex < count && accepted < 2u;
-       ++volumeIndex) {
-    const DDGIVolumeSample volumeSample = ddgiSampleVolume(
-        frame.volumes[volumeIndex], worldPoint, surfaceNormal, viewDirection,
-        samplerId);
-    if (volumeSample.coverage <= 0.0) {
+  uint first = 0xffffffffu;
+  uint second = 0xffffffffu;
+  DDGIVolumeCandidate firstCandidate;
+  firstCandidate.coverage = 0.0;
+  firstCandidate.historyConfidence = 0.0;
+  firstCandidate.confidence = 0.0;
+  DDGIVolumeCandidate secondCandidate = firstCandidate;
+  for (uint volumeIndex = 0u; volumeIndex < count; ++volumeIndex) {
+    const DDGIVolumeCandidate candidate = ddgiEvaluateVolumeCandidate(
+        frame.volumes[volumeIndex], worldPoint, surfaceNormal, viewDirection);
+    if (candidate.confidence <= 0.0) {
       continue;
     }
+    if (first == 0xffffffffu) {
+      first = volumeIndex;
+      firstCandidate = candidate;
+      if (candidate.confidence >= 1.0) {
+        break;
+      }
+    } else if (candidate.confidence > secondCandidate.confidence) {
+      second = volumeIndex;
+      secondCandidate = candidate;
+    }
+  }
+
+  const uint selectedVolumes[kDDGIMaxSampledVolumes] = uint[2](first, second);
+  const DDGIVolumeCandidate selectedCandidates[kDDGIMaxSampledVolumes] =
+      DDGIVolumeCandidate[2](firstCandidate, secondCandidate);
+  for (uint selected = 0u; selected < kDDGIMaxSampledVolumes; ++selected) {
+    const uint volumeIndex = selectedVolumes[selected];
+    if (volumeIndex == 0xffffffffu || remaining <= 0.0) {
+      continue;
+    }
+    const DDGIVolumeSample volumeSample = ddgiSampleVolume(
+        frame.volumes[volumeIndex], worldPoint, surfaceNormal, viewDirection,
+        samplerId, selectedCandidates[selected]);
     const float candidateCoverage = clamp(
         volumeSample.coverage * volumeSample.confidence, 0.0, 1.0);
     const float blendWeight = remaining * candidateCoverage;
@@ -321,7 +436,7 @@ DDGIQueryResult queryDDGI(DDGIFrameBuffer frame, vec3 worldPoint,
     result.relocation += volumeSample.relocation * blendWeight;
     result.updateAge += volumeSample.updateAge * blendWeight;
     result.leakRisk += volumeSample.leakRisk * blendWeight;
-    if (accepted == 0u) {
+    if (selected == 0u) {
       result.firstVolume = volumeIndex;
       result.firstWeight = blendWeight;
     } else {
@@ -329,7 +444,6 @@ DDGIQueryResult queryDDGI(DDGIFrameBuffer frame, vec3 worldPoint,
       result.secondWeight = blendWeight;
     }
     remaining *= 1.0 - candidateCoverage;
-    ++accepted;
   }
   result.skyWeight = remaining;
   return result;

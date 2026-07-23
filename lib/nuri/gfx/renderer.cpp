@@ -116,6 +116,8 @@ Result<bool, std::string> Renderer::render(RenderPipeline &pipeline,
   }
   Result<bool, std::string> submitResult =
       endFrameSequence(frameContext.frameIndex);
+  frameContext.submission =
+      submitResult.hasError() ? SubmissionHandle{} : lastFrameSubmission_;
   if (frameContext.temporalFrameService != nullptr) {
     if (submitResult.hasError()) {
       pipeline.onFrameAbandoned(frameContext);
@@ -187,6 +189,7 @@ Result<bool, std::string> Renderer::endFrameSequence(uint64_t frameIndex) {
 Result<bool, std::string>
 Renderer::compileAndExecuteRenderGraph(uint64_t frameIndex) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_SUBMIT);
+  lastFrameSubmission_ = {};
   const RenderGraphBuilder::GraphFingerprint fingerprint =
       renderGraphBuilder_.computeGraphFingerprint();
   if (cachedCompileResult_.has_value() && fingerprint == cachedFingerprint_) {
@@ -231,6 +234,7 @@ Renderer::compileAndExecuteRenderGraph(uint64_t frameIndex) {
     cachedCompileResult_.reset();
     return Result<bool, std::string>::makeError(executeResult.error());
   }
+  lastFrameSubmission_ = executeResult.value().submission;
   if (telemetryLevel != RenderGraphTelemetryLevel::None) {
     NURI_PROFILER_ZONE("Renderer.render_graph_telemetry",
                        NURI_PROFILER_COLOR_CMD_COPY);

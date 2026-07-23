@@ -84,23 +84,21 @@ TEST(DDGISettingsTests, ConvertingNamedPresetToCustomCopiesResolvedSeed) {
 }
 
 TEST(DDGISettingsTests, RequestedEpochRemainsPendingUntilConsumedSubmission) {
-  nuri::DDGICommandEpochs requested{.resetHistory = 3u,
-                                    .forceFullUpdate = 7u,
-                                    .rebuildRayTracingScene = 11u};
-  nuri::DDGICommandEpochs consumed{.resetHistory = 2u,
-                                   .forceFullUpdate = 7u,
-                                   .rebuildRayTracingScene = 10u};
+  nuri::DDGICommandEpochs requested{
+      .resetHistory = 3u, .forceFullUpdate = 7u, .rebuildRayTracingScene = 11u};
+  nuri::DDGICommandEpochs consumed{
+      .resetHistory = 2u, .forceFullUpdate = 7u, .rebuildRayTracingScene = 10u};
 
-  EXPECT_TRUE(nuri::ddgiEpochIsPending(requested.resetHistory,
-                                       consumed.resetHistory));
+  EXPECT_TRUE(
+      nuri::ddgiEpochIsPending(requested.resetHistory, consumed.resetHistory));
   EXPECT_FALSE(nuri::ddgiEpochIsPending(requested.forceFullUpdate,
                                         consumed.forceFullUpdate));
   EXPECT_TRUE(nuri::ddgiEpochIsPending(requested.rebuildRayTracingScene,
                                        consumed.rebuildRayTracingScene));
 
   consumed.resetHistory = requested.resetHistory;
-  EXPECT_FALSE(nuri::ddgiEpochIsPending(requested.resetHistory,
-                                        consumed.resetHistory));
+  EXPECT_FALSE(
+      nuri::ddgiEpochIsPending(requested.resetHistory, consumed.resetHistory));
 }
 
 } // namespace

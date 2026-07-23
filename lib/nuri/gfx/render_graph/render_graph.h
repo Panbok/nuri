@@ -127,6 +127,20 @@ struct NURI_API RenderGraphTextureCopyPassDesc {
   uint32_t debugColor = 0xffffffffu;
   bool markImplicitOutputSideEffect = true;
 };
+struct NURI_API RenderGraphBufferCopyItem {
+  RenderGraphBufferId sourceBuffer{};
+  RenderGraphBufferId destinationBuffer{};
+  uint64_t sourceOffset = 0u;
+  uint64_t destinationOffset = 0u;
+  uint64_t size = 0u;
+};
+struct NURI_API RenderGraphBufferCopyPassDesc {
+  std::span<const RenderGraphBufferCopyItem> copies{};
+  GpuTimingScope gpuTimingScope = GpuTimingScope::None;
+  std::string_view debugLabel{};
+  uint32_t debugColor = 0xffffffffu;
+  bool markImplicitOutputSideEffect = true;
+};
 struct NURI_API RecordedGraphicsPassMeta {
   uint32_t orderedPassIndex = UINT32_MAX, declaredPassIndex = UINT32_MAX;
 };
@@ -244,6 +258,7 @@ struct NURI_API RenderGraphCompileResult {
   using PassDependencyTextureRange = Range;
   using PassDispatchRange = Range;
   using PassDrawRange = Range;
+  using PassBufferCopyRange = Range;
   using PassTextureCopyRange = Range;
   using DispatchDependencyBufferRange = Range;
   struct UnresolvedDependencyBufferBinding {
@@ -278,6 +293,12 @@ struct NURI_API RenderGraphCompileResult {
     uint32_t orderedPassIndex = UINT32_MAX, textureCopyIndex = UINT32_MAX;
     TextureCopyBindingTarget target = TextureCopyBindingTarget::Source;
     uint32_t textureResourceIndex = UINT32_MAX;
+  };
+  enum class BufferCopyBindingTarget : uint8_t { Source, Destination };
+  struct UnresolvedBufferCopyBinding {
+    uint32_t orderedPassIndex = UINT32_MAX, bufferCopyIndex = UINT32_MAX;
+    BufferCopyBindingTarget target = BufferCopyBindingTarget::Source;
+    uint32_t bufferResourceIndex = UINT32_MAX;
   };
   uint64_t frameIndex = 0;
   uint32_t declaredPassCount = 0, culledPassCount = 0, rootPassCount = 0;
@@ -321,6 +342,7 @@ struct NURI_API RenderGraphCompileResult {
   std::pmr::vector<ComputeDispatchItem> ownedPreDispatches;
   std::pmr::vector<DrawItem> ownedDrawItems;
   std::pmr::vector<MeshDispatchItem> ownedMeshDispatchItems;
+  std::pmr::vector<BufferCopyRegion> ownedBufferCopyItems;
   std::pmr::vector<TextureCopyItem> ownedTextureCopyItems;
   std::pmr::vector<std::pmr::string> ownedMeshDispatchDebugLabels;
   std::pmr::vector<std::pmr::vector<std::byte>> ownedMeshDispatchPushConstants;
@@ -331,6 +353,7 @@ struct NURI_API RenderGraphCompileResult {
   std::pmr::vector<PassDispatchRange> preDispatchRangesByPass;
   std::pmr::vector<PassDrawRange> drawRangesByPass;
   std::pmr::vector<PassDispatchRange> meshDispatchRangesByPass;
+  std::pmr::vector<PassBufferCopyRange> bufferCopyRangesByPass;
   std::pmr::vector<PassTextureCopyRange> textureCopyRangesByPass;
   std::pmr::vector<BufferHandle> resolvedPreDispatchDependencyBuffers;
   std::pmr::vector<uint32_t> resolvedPreDispatchDependencyBufferResourceIndices;
@@ -340,6 +363,7 @@ struct NURI_API RenderGraphCompileResult {
   std::pmr::vector<UnresolvedDrawBufferBinding> unresolvedDrawBufferBindings;
   std::pmr::vector<UnresolvedMeshDispatchBufferBinding>
       unresolvedMeshDispatchBufferBindings;
+  std::pmr::vector<UnresolvedBufferCopyBinding> unresolvedBufferCopyBindings;
   std::pmr::vector<UnresolvedTextureCopyBinding> unresolvedTextureCopyBindings;
   explicit RenderGraphCompileResult(
       std::pmr::memory_resource *memory = std::pmr::get_default_resource())
@@ -372,6 +396,7 @@ struct NURI_API RenderGraphCompileResult {
         ownedPreDispatches(ensureMemory(memory)),
         ownedDrawItems(ensureMemory(memory)),
         ownedMeshDispatchItems(ensureMemory(memory)),
+        ownedBufferCopyItems(ensureMemory(memory)),
         ownedTextureCopyItems(ensureMemory(memory)),
         ownedMeshDispatchDebugLabels(ensureMemory(memory)),
         ownedMeshDispatchPushConstants(ensureMemory(memory)),
@@ -380,6 +405,7 @@ struct NURI_API RenderGraphCompileResult {
         preDispatchRangesByPass(ensureMemory(memory)),
         drawRangesByPass(ensureMemory(memory)),
         meshDispatchRangesByPass(ensureMemory(memory)),
+        bufferCopyRangesByPass(ensureMemory(memory)),
         textureCopyRangesByPass(ensureMemory(memory)),
         resolvedPreDispatchDependencyBuffers(ensureMemory(memory)),
         resolvedPreDispatchDependencyBufferResourceIndices(
@@ -388,6 +414,7 @@ struct NURI_API RenderGraphCompileResult {
         unresolvedPreDispatchDependencyBufferBindings(ensureMemory(memory)),
         unresolvedDrawBufferBindings(ensureMemory(memory)),
         unresolvedMeshDispatchBufferBindings(ensureMemory(memory)),
+        unresolvedBufferCopyBindings(ensureMemory(memory)),
         unresolvedTextureCopyBindings(ensureMemory(memory)) {}
 
 private:
@@ -435,6 +462,8 @@ public:
   addGraphicsPass(const RenderGraphGraphicsPassDesc &desc);
   [[nodiscard]] Result<RenderGraphPassId, std::string>
   addTextureCopyPass(const RenderGraphTextureCopyPassDesc &desc);
+  [[nodiscard]] Result<RenderGraphPassId, std::string>
+  addBufferCopyPass(const RenderGraphBufferCopyPassDesc &desc);
   [[nodiscard]] Result<RenderGraphPassId, std::string>
   addAccelerationStructurePass(
       const RenderGraphAccelerationStructurePassDesc &desc);
@@ -571,6 +600,7 @@ private:
     std::pmr::vector<std::pmr::string> drawDebugLabels;
     std::pmr::vector<std::pmr::vector<std::byte>> drawPushConstants;
     std::pmr::vector<MeshDispatchItem> meshDispatches;
+    std::pmr::vector<BufferCopyRegion> bufferCopies;
     std::pmr::vector<TextureCopyItem> textureCopies;
     std::pmr::vector<AccelerationStructureBuildItem>
         accelerationStructureBuilds;
@@ -594,7 +624,8 @@ private:
           preDispatchDependencyTextures(memory), dependencyBuffers(memory),
           dependencyTextures(memory), draws(memory), drawDebugLabels(memory),
           drawPushConstants(memory), meshDispatches(memory),
-          textureCopies(memory), accelerationStructureBuilds(memory),
+          bufferCopies(memory), textureCopies(memory),
+          accelerationStructureBuilds(memory),
           accelerationStructureGeometries(memory),
           accelerationStructureInstances(memory),
           meshDispatchDebugLabels(memory), meshDispatchPushConstants(memory),
@@ -619,7 +650,7 @@ private:
     uint32_t color = UINT32_MAX, colorResolve = UINT32_MAX;
     uint32_t depth = UINT32_MAX, depthResolve = UINT32_MAX;
     BindingRange dependencyBuffers{}, dependencyTextures{}, preDispatches{};
-    BindingRange draws{}, meshDispatches{}, textureCopies{};
+    BindingRange draws{}, meshDispatches{}, bufferCopies{}, textureCopies{};
   };
   struct DrawBindings {
     uint32_t vertex = UINT32_MAX, index = UINT32_MAX;
@@ -629,6 +660,9 @@ private:
     uint32_t indirect = UINT32_MAX, indirectCount = UINT32_MAX;
   };
   struct TextureCopyBindings {
+    uint32_t source = UINT32_MAX, destination = UINT32_MAX;
+  };
+  struct BufferCopyBindings {
     uint32_t source = UINT32_MAX, destination = UINT32_MAX;
   };
   [[nodiscard]] bool isValidPassIndex(uint32_t passIndex) const {
@@ -716,6 +750,7 @@ private:
   std::pmr::vector<uint32_t> preDispatchDependencyBindingResourceIndices_;
   std::pmr::vector<DrawBindings> drawBindings_;
   std::pmr::vector<MeshDispatchBindings> meshDispatchBindings_;
+  std::pmr::vector<BufferCopyBindings> bufferCopyBindings_;
   std::pmr::vector<TextureCopyBindings> textureCopyBindings_;
   PmrHashMap<uint64_t, uint32_t> importedTextureIndicesByHandle_;
   PmrHashMap<uint64_t, uint32_t> importedBufferIndicesByHandle_;

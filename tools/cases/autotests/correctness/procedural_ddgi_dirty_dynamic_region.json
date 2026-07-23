@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "id": "correctness.procedural.ddgi_dirty_dynamic_region",
+  "suite": "correctness",
+  "description": "A bounded rigid occluder move reclassifies and refreshes only intersecting probes after submission; the strict localized-count assertion intentionally exposes any global fallback",
+  "scene": {"kind": "procedural", "generator": "nuri.procedural.ddgi_dirty_dynamic_region.v1", "seed": 1, "contentHash": "nuri.procedural.ddgi_dirty_dynamic_region.v1:1"},
+  "backend": "default", "resolution": [640, 360], "fixedDeltaSeconds": 0.016666667, "warmupFrames": 6, "endFrame": 16, "authoritative": false, "presentMode": "immediate", "windowMode": "visible",
+  "renderGraph": {"workerCount": 1, "parallelCompile": false, "parallelRecording": false},
+  "camera": {"position": [0.0, 0.75, 4.2], "target": [0.0, 0.25, 0.0], "verticalFovDegrees": 60.0, "nearPlane": 0.05, "farPlane": 100.0},
+  "settings": {"ddgi": {"enabled": true, "preset": "Custom", "raysPerProbe": 64, "maxProbeUpdatesPerFrame": 144, "maxRayQueriesPerFrame": 18432, "classification": true, "debugView": "UpdateAge"}, "opaque": {"enableInstanceAnimation": false}, "antiAliasing": {"mode": "None"}, "ambientOcclusion": {"mode": "Disabled"}, "shadow": {"enabled": false}},
+  "timeline": {"events": [{"frame": 8, "type": "setNodeTranslation", "target": "ShadowBlueCaster", "translation": [0.9, 0.34, 0.0], "eventReason": "bounded dynamic dirty region"}]},
+  "checkpoints": [
+    {"id": "dynamic_region_submitted", "frame": 8, "captures": [{"target": "frame_color_hdr", "profile": "hdr_color", "required": true, "compare": false}, {"target": "ddgi_dirty_region_debug_preview", "profile": "debug_preview", "required": true, "compare": false}], "assertions": [{"id": "tlas_updated", "metric": "renderer.ray_tracing.tlas_updates", "equals": 1}, {"id": "localized_response_present", "metric": "renderer.ddgi.dirty_probes_affected", "greaterOrEqual": 1}, {"id": "localized_response_not_global", "metric": "renderer.ddgi.dirty_probes_affected", "lessThan": 144}, {"id": "query_cap_respected", "metric": "renderer.ddgi.total_queries_issued", "lessOrEqual": 18432}]},
+    {"id": "dynamic_region_response", "frame": 10, "captures": [{"target": "frame_color_hdr", "profile": "hdr_color", "required": true, "compare": false}], "assertions": [{"id": "history_remains_initialized", "metric": "renderer.ddgi.history_ready", "equals": 1}, {"id": "no_global_reset", "metric": "renderer.ddgi.reset_count", "equals": 0}]}
+  ],
+  "requirements": {"assets": ["modelsRoot:common/flat_plane.obj"], "backends": [], "allowVisibleWindow": true, "accelerationStructure": true, "rayQuery": true}
+}

@@ -3,6 +3,8 @@
 #include "nuri/core/pmr_scratch.h"
 #include "nuri/core/runtime_config.h"
 #include "nuri/gfx/ddgi/ddgi_atlas.h"
+#include "nuri/gfx/ddgi/ddgi_coverage.h"
+#include "nuri/gfx/ddgi/ddgi_dirty_regions.h"
 #include "nuri/gfx/ddgi/ddgi_scheduler.h"
 #include "nuri/gfx/owned_gpu_resource.h"
 #include "nuri/gfx/pipeline/render_pipeline.h"
@@ -17,6 +19,7 @@
 namespace nuri {
 
 class GPUDevice;
+class RenderScene;
 
 class NURI_API DDGIFeature final {
 public:
@@ -42,31 +45,55 @@ private:
   struct VolumeResource {
     explicit VolumeResource(
         std::pmr::memory_resource *memory = std::pmr::get_default_resource())
-        : lastSubmittedUpdates(memory) {}
+        : lastSubmittedUpdates(memory), submittedProbeStates(memory),
+          pendingDirtyFlags(memory), irradianceResponseFrames(memory),
+          distanceResponseFrames(memory) {}
     DDGIVolumeId id = kInvalidDDGIVolumeId;
+    DDGIEffectiveVolume effective{};
     DDGIVolumeLayout layout{};
     DDGIVolumeDesc desc{};
+    glm::vec3 requestedCoverageHalfExtents{0.0f};
+    glm::vec3 achievedCoverageHalfExtents{0.0f};
     OwnedTextureHandle irradiance{};
     OwnedTextureHandle distance{};
     OwnedBufferHandle probeState{};
     std::pmr::vector<uint64_t> lastSubmittedUpdates;
+    std::pmr::vector<DDGIProbeStateGpuData> submittedProbeStates;
+    std::pmr::vector<uint32_t> pendingDirtyFlags;
+    std::pmr::vector<uint8_t> irradianceResponseFrames;
+    std::pmr::vector<uint8_t> distanceResponseFrames;
     uint64_t persistentBytes = 0u;
     uint64_t resourceGeneration = 0u;
     uint32_t irradianceResponseRemaining = 0u;
     uint32_t distanceResponseRemaining = 0u;
+    int64_t schedulerDeficit = 0;
+    uint32_t schedulerStarvationFrames = 0u;
+    bool allocated = false;
     bool ready = false;
+  };
+  struct LocalLightSnapshot {
+    LightId id = kInvalidLightId;
+    LocalLightGpuData data{};
   };
   struct FrameSlot {
     OwnedBufferHandle frameData{};
     OwnedBufferHandle updates{};
+    OwnedBufferHandle updatesReadback{};
     OwnedBufferHandle invalidations{};
     OwnedBufferHandle rayResults{};
     OwnedBufferHandle localLights{};
+    OwnedBufferHandle traceCountersReadback{};
     OwnedBufferHandle diagnostic{};
+    OwnedBufferHandle diagnosticReadback{};
+    SubmissionHandle submission{};
     size_t updateCapacity = 0u;
     size_t invalidationCapacity = 0u;
     size_t rayCapacity = 0u;
     size_t localLightCapacity = 0u;
+    std::array<uint64_t, kMaxDDGIVolumes> probeStateResourceGenerations{};
+    uint64_t probeStateSourceFrame = 0u;
+    uint32_t probeStateResultCount = 0u;
+    bool probeStateResultsValid = false;
     bool traceCountersValid = false;
     std::optional<DDGIProbeInspectRequest> diagnosticRequest{};
     bool diagnosticValid = false;
@@ -98,6 +125,7 @@ private:
     uint64_t updates = 0u;
     uint64_t results = 0u;
     uint32_t updateCount = 0u;
+    uint32_t updateOffset = 0u;
     uint32_t volumeSlot = 0u;
     uint32_t outputTextureId = kInvalidTextureBindlessIndex;
     uint32_t raysPerProbe = 0u;
@@ -105,13 +133,15 @@ private:
     uint32_t clearMode = 0u;
     uint32_t historyValid = 0u;
     uint32_t frameSeed = 0u;
+    float responseHysteresisScale = 1.0f;
   };
-  static_assert(sizeof(BlendPushConstants) == 56u);
+  static_assert(sizeof(BlendPushConstants) == 64u);
   struct ProbeStatePushConstants {
     uint64_t updates = 0u;
     uint64_t results = 0u;
     uint64_t frame = 0u;
     std::array<uint64_t, kMaxDDGIVolumes> states{};
+    uint64_t surfaceBounds = 0u;
     uint32_t updateCount = 0u;
     uint32_t submittedSequence = 0u;
     uint32_t clearMode = 0u;
@@ -119,9 +149,9 @@ private:
     uint32_t frameSeed = 0u;
     uint32_t relocationEnabled = 0u;
     uint32_t classificationEnabled = 0u;
-    uint32_t reserved = 0u;
+    uint32_t surfaceBoundsCountsFlags = 0u;
   };
-  static_assert(sizeof(ProbeStatePushConstants) == 88u);
+  static_assert(sizeof(ProbeStatePushConstants) == 128u);
   struct InspectPushConstants {
     uint64_t frame = 0u;
     uint64_t header = 0u;
@@ -148,7 +178,8 @@ private:
 
   [[nodiscard]] Result<bool, std::string> initialize();
   [[nodiscard]] Result<bool, std::string>
-  rebuildVolumes(FrameBuildContext &ctx);
+  rebuildVolumes(FrameBuildContext &ctx, const DDGIEffectiveVolumePlan &plan,
+                 const DDGICoverageSettings &coverageSettings);
   [[nodiscard]] Result<bool, std::string>
   ensureFrameSlots(const RenderSettings::DDGISettings &settings,
                    size_t localLightCount, size_t invalidationCapacity);
@@ -167,10 +198,20 @@ private:
   [[nodiscard]] Result<DDGIScheduleResult, std::string>
   buildSchedule(const RenderSettings::DDGISettings &settings);
   void publishFrameData(FrameBuildContext &ctx, FrameSlot &slot, bool rtReady);
+  void collectCompletedProbeStates(FrameSlot &slot);
   void collectCompletedTraceMetrics(FrameSlot &slot, DDGIFrameMetrics &metrics);
   void collectCompletedInspection(FrameBuildContext &ctx, FrameSlot &slot);
   void collectDebugProbeStateMetrics(FrameBuildContext &ctx);
   void publishCapturePoints(RenderFrameContext &frame) const;
+  [[nodiscard]] uint32_t dirtyFlagsForProbe(uint32_t slot,
+                                            uint32_t probe) const noexcept;
+  [[nodiscard]] uint32_t
+  dirtyRegionFlagsForProbe(uint32_t slot, uint32_t probe) const noexcept;
+  void stageCompatiblePlan(const DDGIEffectiveVolumePlan &plan,
+                           const DDGICoverageSettings &coverageSettings,
+                           const RenderScene &scene) noexcept;
+  void commitDirtyResponses() noexcept;
+  void commitRadiometricSnapshot(const RenderScene &scene) noexcept;
   void clearVolumes() noexcept;
   void clearPendingVolumes() noexcept;
   void clearFrameSlots() noexcept;
@@ -201,7 +242,11 @@ private:
   std::pmr::vector<RenderGraphAccessMode> dependencyTextureModes_;
   std::pmr::vector<BufferHandle> forwardDependencyBuffers_;
   std::pmr::vector<TextureHandle> forwardDependencyTextures_;
+  std::pmr::vector<LocalLightSnapshot> submittedLocalLights_;
+  std::pmr::vector<DirectionalLightGpuData> submittedDirectionalLights_;
   DDGIFrameGpuData frameData_{};
+  DDGITieredScheduleResult pendingTierSchedule_{};
+  DDGIDirtyRegionRing dirtyRegions_{};
   TracePushConstants tracePushConstants_{};
   ProbeStatePushConstants statePushConstants_{};
   InspectPushConstants inspectPushConstants_{};
@@ -221,10 +266,24 @@ private:
   uint64_t pendingVolumeTopologyVersion_ = UINT64_MAX;
   uint64_t pendingVolumeTransformVersion_ = UINT64_MAX;
   uint64_t pendingVolumeSettingsVersion_ = UINT64_MAX;
+  DDGICoverageSettings coverageSettings_{};
+  DDGICoverageSettings pendingCoverageSettings_{};
+  uint64_t coverageGeneration_ = 0u;
+  uint64_t pendingCoverageGeneration_ = 0u;
+  uint64_t sceneBoundsGeneration_ = 0u;
+  uint64_t pendingSceneBoundsGeneration_ = 0u;
+  std::array<DDGIEffectiveVolume, kMaxDDGIEffectiveVolumes>
+      pendingEffectiveVolumes_{};
+  std::array<glm::vec3, kMaxDDGIEffectiveVolumes>
+      pendingRequestedCoverageHalfExtents_{};
+  std::array<glm::vec3, kMaxDDGIEffectiveVolumes>
+      pendingAchievedCoverageHalfExtents_{};
+  uint32_t pendingEffectiveVolumeCount_ = 0u;
   uint64_t submittedSequence_ = 0u;
   uint64_t nextResourceGeneration_ = 0u;
   uint64_t deviceEpoch_ = 0u;
   uint64_t latestInspectionRequestId_ = 0u;
+  uint64_t probeStateMirrorSourceFrame_ = 0u;
   uint64_t consumedResetEpoch_ = 0u;
   uint64_t consumedForceEpoch_ = 0u;
   uint64_t pendingResetEpoch_ = 0u;
@@ -241,12 +300,15 @@ private:
   bool pendingClassificationEnabled_ = true;
   bool initialized_ = false;
   bool replacementPending_ = false;
+  bool compatiblePlanPending_ = false;
   bool initializationScheduled_ = false;
   bool scrollScheduled_ = false;
   bool updatesScheduled_ = false;
   bool radiometricResponseScheduled_ = false;
   bool geometryResponseScheduled_ = false;
   bool inspectionScheduled_ = false;
+  bool dirtyConsumptionScheduled_ = false;
+  bool probeStateMirrorAvailable_ = false;
 };
 
 } // namespace nuri

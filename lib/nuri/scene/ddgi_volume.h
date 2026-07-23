@@ -10,7 +10,6 @@ namespace nuri {
 inline constexpr uint32_t kDDGIMinProbeCountPerAxis = 2u;
 inline constexpr uint32_t kDDGIMaxProbeCountPerAxis = 64u;
 inline constexpr uint64_t kDDGIMaxProbeCount = 65'536u;
-inline constexpr uint32_t kDDGIMaxActiveVolumes = 4u;
 inline constexpr float kDDGIMinProbeSpacing = 0.1f;
 inline constexpr float kDDGIMaxProbeSpacing = 100.0f;
 inline constexpr float kDDGIMaxRayDistance = 10'000.0f;

@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "correctness.procedural.ddgi_scene_fit_complete",
+  "suite": "correctness",
+  "description": "Scene-fit DDGI contains deterministic authored coverage bounds and preserves explicit sky outside them; unrelated effects are disabled to isolate diffuse GI",
+  "scene": {"kind": "procedural", "generator": "nuri.procedural.ddgi_scene_fit_complete.v1", "seed": 1, "contentHash": "nuri.procedural.ddgi_scene_fit_complete.v1:1"},
+  "backend": "default", "resolution": [640, 360], "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 8, "endFrame": 58, "authoritative": false, "presentMode": "immediate", "windowMode": "visible",
+  "renderGraph": {"workerCount": 1, "parallelCompile": false, "parallelRecording": false},
+  "camera": {"position": [-4.5, 1.0, 3.5], "target": [0.0, 0.0, 0.0], "verticalFovDegrees": 60.0, "nearPlane": 0.05, "farPlane": 100.0},
+  "settings": {
+    "ddgi": {"enabled": true, "preset": "Custom", "raysPerProbe": 64, "maxProbeUpdatesPerFrame": 256, "maxRayQueriesPerFrame": 16384, "debugView": "Confidence", "coverage": {"schemaVersion": 1, "mode": "SceneFit", "constraintPolicy": "PreserveCoverage", "sceneBoundsSource": "Authored", "authoredBounds": {"min": [-5.0, -1.5, -4.0], "max": [5.0, 2.0, 4.0]}, "cascadeCount": 1, "cascadeProbeCounts": [8, 4, 8], "requestedNearSpacing": [1.0, 1.0, 1.0], "spacingRatio": 2.0, "requestedCoverageHalfExtents": [6.0, 3.0, 5.0], "scenePaddingCells": 1, "transitionCells": 1, "includeAuthoredVolumes": false}},
+    "opaque": {"enableInstanceAnimation": false}, "antiAliasing": {"mode": "None"}, "ambientOcclusion": {"mode": "Disabled"}, "shadow": {"enabled": false}
+  },
+  "timeline": {"events": [{"frame": 54, "type": "setCamera", "camera": {"position": [10.0, 1.0, 3.5], "target": [11.0, 1.0, 3.5], "verticalFovDegrees": 60.0, "nearPlane": 0.05, "farPlane": 100.0}, "preserveHistory": true, "eventReason": "outside requested bounds"}]},
+  "checkpoints": [
+    {"id": "opposite_corner_contained", "frame": 52, "captures": [{"target": "frame_color_hdr", "profile": "hdr_color", "required": true, "compare": false}, {"target": "ddgi_coverage_debug_preview", "profile": "debug_preview", "required": true, "compare": false}, {"target": "ddgi_volume0_irradiance_atlas", "profile": "hdr_color", "required": true, "compare": false}], "assertions": [{"id": "scene_fit_active", "metric": "renderer.ddgi.active_volumes", "equals": 1}, {"id": "scene_fit_resource_ready", "metric": "renderer.ddgi.ready_volumes", "equals": 1}, {"id": "scene_fit_history_ready", "metric": "renderer.ddgi.history_ready", "equals": 1}, {"id": "complete_scene_containment", "metric": "renderer.ddgi.scene_coverage_ratio", "equals": 1}, {"id": "coverage_diagnostics_available", "metric": "renderer.ddgi.diagnostic_samples_available", "equals": 1}, {"id": "query_cap_respected", "metric": "renderer.ddgi.total_queries_issued", "lessOrEqual": 16384}]},
+    {"id": "outside_keeps_sky", "frame": 56, "captures": [{"target": "frame_color_hdr", "profile": "hdr_color", "required": true, "compare": false}, {"target": "ddgi_coverage_debug_preview", "profile": "debug_preview", "required": true, "compare": false}], "assertions": [{"id": "scene_fit_resource_retained", "metric": "renderer.ddgi.active_volumes", "equals": 1}, {"id": "settled_history_retained", "metric": "renderer.ddgi.history_ready", "equals": 1}, {"id": "outside_has_uncovered_samples", "metric": "renderer.ddgi.uncovered_diagnostic_samples", "greaterOrEqual": 1}, {"id": "outside_preserves_sky_remainder", "metric": "renderer.ddgi.sky_remainder_samples", "greaterOrEqual": 1}, {"id": "no_resource_replacement_for_view_change", "metric": "renderer.ddgi.failed_volumes", "equals": 0}]}
+  ],
+  "requirements": {"assets": ["modelsRoot:common/flat_plane.obj"], "backends": [], "allowVisibleWindow": true, "accelerationStructure": true, "rayQuery": true}
+}

@@ -42,13 +42,13 @@ namespace {
 }
 
 [[nodiscard]] bool atlasBytes(const DDGIAtlasLayout &atlas,
-                              uint32_t bytesPerTexel,
-                              uint64_t &out) noexcept {
+                              uint32_t bytesPerTexel, uint64_t &out) noexcept {
   uint64_t texels = 0u;
   return atlas.columns != 0u && atlas.rows != 0u &&
-         atlas.textureExtent == atlas.tileExtent * glm::uvec2(atlas.columns,
-                                                               atlas.rows) &&
-         checkedMultiply(atlas.textureExtent.x, atlas.textureExtent.y, texels) &&
+         atlas.textureExtent ==
+             atlas.tileExtent * glm::uvec2(atlas.columns, atlas.rows) &&
+         checkedMultiply(atlas.textureExtent.x, atlas.textureExtent.y,
+                         texels) &&
          checkedMultiply(texels, bytesPerTexel, out);
 }
 
@@ -89,14 +89,13 @@ packDDGIAtlas(uint32_t probeCount, glm::uvec2 tileExtent,
       .tileExtent = tileExtent,
       .columns = static_cast<uint32_t>(columns),
       .rows = static_cast<uint32_t>(rows),
-      .textureExtent =
-          glm::uvec2(static_cast<uint32_t>(width), static_cast<uint32_t>(height)),
+      .textureExtent = glm::uvec2(static_cast<uint32_t>(width),
+                                  static_cast<uint32_t>(height)),
   });
 }
 
 Result<DDGIMemoryEstimate, DDGIAtlasError>
-estimateDDGIMemory(uint32_t probeCount,
-                   const DDGIAtlasLayout &irradianceAtlas,
+estimateDDGIMemory(uint32_t probeCount, const DDGIAtlasLayout &irradianceAtlas,
                    const DDGIAtlasLayout &distanceAtlas) noexcept {
   using MemoryResult = Result<DDGIMemoryEstimate, DDGIAtlasError>;
   if (probeCount == 0u) {
@@ -133,9 +132,8 @@ glm::uvec2 ddgiAtlasTileCoordinate(uint32_t probeIndex,
 glm::uvec2 ddgiAtlasBorderCopyCoordinate(glm::uvec2 tilePixel,
                                          uint32_t interiorExtent) noexcept {
   const uint32_t tileExtent = interiorExtent + 2u;
-  const bool corner =
-      (tilePixel.x == 0u || tilePixel.x == tileExtent - 1u) &&
-      (tilePixel.y == 0u || tilePixel.y == tileExtent - 1u);
+  const bool corner = (tilePixel.x == 0u || tilePixel.x == tileExtent - 1u) &&
+                      (tilePixel.y == 0u || tilePixel.y == tileExtent - 1u);
   const bool row = tilePixel.x > 0u && tilePixel.x < tileExtent - 1u;
   if (corner) {
     return glm::uvec2(tilePixel.x > 0u ? 1u : interiorExtent,
@@ -143,11 +141,9 @@ glm::uvec2 ddgiAtlasBorderCopyCoordinate(glm::uvec2 tilePixel,
   }
   if (row) {
     return glm::uvec2(tileExtent - 1u - tilePixel.x,
-                      tilePixel.y > 0u ? tilePixel.y - 1u
-                                       : tilePixel.y + 1u);
+                      tilePixel.y > 0u ? tilePixel.y - 1u : tilePixel.y + 1u);
   }
-  return glm::uvec2(tilePixel.x > 0u ? tilePixel.x - 1u
-                                    : tilePixel.x + 1u,
+  return glm::uvec2(tilePixel.x > 0u ? tilePixel.x - 1u : tilePixel.x + 1u,
                     tileExtent - 1u - tilePixel.y);
 }
 

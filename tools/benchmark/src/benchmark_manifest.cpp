@@ -249,6 +249,29 @@ readStringArray(yyjson_val *object, std::string_view key,
   return Result<glm::vec3, std::string>::makeResult(out);
 }
 
+[[nodiscard]] Result<glm::uvec3, std::string>
+readUVec3(yyjson_val *object, std::string_view key, std::string_view path,
+          glm::uvec3 defaultValue) {
+  yyjson_val *value = optionalObject(object, key);
+  if (value == nullptr) {
+    return Result<glm::uvec3, std::string>::makeResult(defaultValue);
+  }
+  if (!yyjson_is_arr(value) || yyjson_arr_size(value) != 3u) {
+    return Result<glm::uvec3, std::string>::makeError(jsonPath(path, key) +
+                                                      " must be a uvec3 array");
+  }
+  glm::uvec3 out{};
+  for (uint32_t i = 0u; i < 3u; ++i) {
+    yyjson_val *entry = yyjson_arr_get(value, i);
+    if (!yyjson_is_uint(entry) || yyjson_get_uint(entry) > UINT32_MAX) {
+      return Result<glm::uvec3, std::string>::makeError(
+          jsonPath(path, key) + " entries must be uint32 values");
+    }
+    out[i] = static_cast<uint32_t>(yyjson_get_uint(entry));
+  }
+  return Result<glm::uvec3, std::string>::makeResult(out);
+}
+
 template <typename Enum>
 [[nodiscard]] Result<Enum, std::string>
 parseEnum(std::string_view text,
@@ -283,6 +306,145 @@ readEnumField(yyjson_val *object, std::string_view key, std::string_view path,
     return Result<bool, std::string>::makeError(parsed.error());
   }
   out = parsed.value();
+  return Result<bool, std::string>::makeResult(true);
+}
+
+[[nodiscard]] Result<bool, std::string>
+parseDDGICoverageSettings(yyjson_val *object, DDGICoverageSettings &settings,
+                          std::string_view path) {
+  static constexpr std::array keys{
+      std::string_view("schemaVersion"),
+      std::string_view("mode"),
+      std::string_view("constraintPolicy"),
+      std::string_view("sceneBoundsSource"),
+      std::string_view("authoredBounds"),
+      std::string_view("cascadeCount"),
+      std::string_view("cascadeProbeCounts"),
+      std::string_view("requestedNearSpacing"),
+      std::string_view("spacingRatio"),
+      std::string_view("requestedCoverageHalfExtents"),
+      std::string_view("scenePaddingCells"),
+      std::string_view("transitionCells"),
+      std::string_view("includeAuthoredVolumes")};
+  auto result = rejectUnknownKeys(object, keys, path);
+  if (result.hasError()) {
+    return result;
+  }
+  auto schema = readU32(object, "schemaVersion", path);
+  if (schema.hasError()) {
+    return Result<bool, std::string>::makeError(schema.error());
+  }
+  if (schema.value() != kDDGICoverageSchemaVersion) {
+    return Result<bool, std::string>::makeError(
+        jsonPath(path, "schemaVersion") + " must be 1");
+  }
+  result = readEnumField(object, "mode", path, settings.mode,
+                         {{"Manual", DDGICoverageMode::Manual},
+                          {"SceneFit", DDGICoverageMode::SceneFit},
+                          {"CameraClipmaps", DDGICoverageMode::CameraClipmaps},
+                          {"Hybrid", DDGICoverageMode::Hybrid}});
+  if (result.hasError()) {
+    return result;
+  }
+  result = readEnumField(
+      object, "constraintPolicy", path, settings.constraintPolicy,
+      {{"PreserveCoverage", DDGICoverageConstraintPolicy::PreserveCoverage},
+       {"PreserveNearSpacing",
+        DDGICoverageConstraintPolicy::PreserveNearSpacing},
+       {"RejectUnsatisfied", DDGICoverageConstraintPolicy::RejectUnsatisfied}});
+  if (result.hasError()) {
+    return result;
+  }
+  result = readEnumField(
+      object, "sceneBoundsSource", path, settings.sceneBoundsSource,
+      {{"ActivationSnapshot", DDGISceneBoundsSource::ActivationSnapshot},
+       {"StaticRayTracingGeometry",
+        DDGISceneBoundsSource::StaticRayTracingGeometry},
+       {"Authored", DDGISceneBoundsSource::Authored}});
+  if (result.hasError()) {
+    return result;
+  }
+  if (yyjson_val *bounds = optionalObject(object, "authoredBounds")) {
+    static constexpr std::array boundsKeys{std::string_view("min"),
+                                           std::string_view("max")};
+    const std::string boundsPath = jsonPath(path, "authoredBounds");
+    result = rejectUnknownKeys(bounds, boundsKeys, boundsPath);
+    if (result.hasError()) {
+      return result;
+    }
+    if (optionalObject(bounds, "min") == nullptr ||
+        optionalObject(bounds, "max") == nullptr) {
+      return Result<bool, std::string>::makeError(boundsPath +
+                                                  " must contain min and max");
+    }
+    auto minimum = readVec3(bounds, "min", boundsPath, glm::vec3(0.0f));
+    if (minimum.hasError()) {
+      return Result<bool, std::string>::makeError(minimum.error());
+    }
+    auto maximum = readVec3(bounds, "max", boundsPath, glm::vec3(0.0f));
+    if (maximum.hasError()) {
+      return Result<bool, std::string>::makeError(maximum.error());
+    }
+    for (uint32_t axis = 0u; axis < 3u; ++axis) {
+      if (!std::isfinite(minimum.value()[axis]) ||
+          !std::isfinite(maximum.value()[axis]) ||
+          minimum.value()[axis] > maximum.value()[axis]) {
+        return Result<bool, std::string>::makeError(
+            boundsPath +
+            " must contain finite min values not greater than max values");
+      }
+    }
+    settings.authoredBounds = DDGISceneCoverageBounds{
+        .bounds = BoundingBox(minimum.value(), maximum.value()),
+        .valid = true,
+        .complete = true,
+    };
+  }
+  auto count = readU32(object, "cascadeCount", path, settings.cascadeCount);
+  if (count.hasError()) {
+    return Result<bool, std::string>::makeError(count.error());
+  }
+  settings.cascadeCount = count.value();
+  auto probeCounts = readUVec3(object, "cascadeProbeCounts", path,
+                               settings.cascadeProbeCounts);
+  if (probeCounts.hasError()) {
+    return Result<bool, std::string>::makeError(probeCounts.error());
+  }
+  settings.cascadeProbeCounts = probeCounts.value();
+  auto vector = readVec3(object, "requestedNearSpacing", path,
+                         settings.requestedNearSpacing);
+  if (vector.hasError()) {
+    return Result<bool, std::string>::makeError(vector.error());
+  }
+  settings.requestedNearSpacing = vector.value();
+  vector = readVec3(object, "requestedCoverageHalfExtents", path,
+                    settings.requestedCoverageHalfExtents);
+  if (vector.hasError()) {
+    return Result<bool, std::string>::makeError(vector.error());
+  }
+  settings.requestedCoverageHalfExtents = vector.value();
+  auto real = readDouble(object, "spacingRatio", path, settings.spacingRatio);
+  if (real.hasError()) {
+    return Result<bool, std::string>::makeError(real.error());
+  }
+  settings.spacingRatio = static_cast<float>(real.value());
+  count =
+      readU32(object, "scenePaddingCells", path, settings.scenePaddingCells);
+  if (count.hasError()) {
+    return Result<bool, std::string>::makeError(count.error());
+  }
+  settings.scenePaddingCells = count.value();
+  count = readU32(object, "transitionCells", path, settings.transitionCells);
+  if (count.hasError()) {
+    return Result<bool, std::string>::makeError(count.error());
+  }
+  settings.transitionCells = count.value();
+  auto boolean = readBool(object, "includeAuthoredVolumes", path,
+                          settings.includeAuthoredVolumes);
+  if (boolean.hasError()) {
+    return Result<bool, std::string>::makeError(boolean.error());
+  }
+  settings.includeAuthoredVolumes = boolean.value();
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -753,7 +915,8 @@ parseDDGISettings(yyjson_val *object, RenderSettings &settings,
       std::string_view("showVolumes"),
       std::string_view("showProbes"),
       std::string_view("showSelectedProbeRays"),
-      std::string_view("debugView")};
+      std::string_view("debugView"),
+      std::string_view("coverage")};
   auto result = rejectUnknownKeys(object, keys, path);
   if (result.hasError()) {
     return result;
@@ -817,20 +980,31 @@ parseDDGISettings(yyjson_val *object, RenderSettings &settings,
     }
     *output = value.value();
   }
-  return readEnumField(object, "debugView", path, settings.ddgi.debugView,
-                       {{"None", DDGIDebugView::None},
-                        {"DiffuseIndirect", DDGIDebugView::DiffuseIndirect},
-                        {"VolumeId", DDGIDebugView::VolumeId},
-                        {"ProbeWeights", DDGIDebugView::ProbeWeights},
-                        {"Confidence", DDGIDebugView::Confidence},
-                        {"Visibility", DDGIDebugView::Visibility},
-                        {"Irradiance", DDGIDebugView::Irradiance},
-                        {"DistanceMean", DDGIDebugView::DistanceMean},
-                        {"DistanceVariance", DDGIDebugView::DistanceVariance},
-                        {"Classification", DDGIDebugView::Classification},
-                        {"RelocationOffset", DDGIDebugView::RelocationOffset},
-                        {"UpdateAge", DDGIDebugView::UpdateAge},
-                        {"LeakRisk", DDGIDebugView::LeakRisk}});
+  result = readEnumField(object, "debugView", path, settings.ddgi.debugView,
+                         {{"None", DDGIDebugView::None},
+                          {"DiffuseIndirect", DDGIDebugView::DiffuseIndirect},
+                          {"VolumeId", DDGIDebugView::VolumeId},
+                          {"ProbeWeights", DDGIDebugView::ProbeWeights},
+                          {"Confidence", DDGIDebugView::Confidence},
+                          {"Visibility", DDGIDebugView::Visibility},
+                          {"Irradiance", DDGIDebugView::Irradiance},
+                          {"DistanceMean", DDGIDebugView::DistanceMean},
+                          {"DistanceVariance", DDGIDebugView::DistanceVariance},
+                          {"Classification", DDGIDebugView::Classification},
+                          {"RelocationOffset", DDGIDebugView::RelocationOffset},
+                          {"UpdateAge", DDGIDebugView::UpdateAge},
+                          {"LeakRisk", DDGIDebugView::LeakRisk}});
+  if (result.hasError()) {
+    return result;
+  }
+  if (yyjson_val *coverage = optionalObject(object, "coverage")) {
+    result = parseDDGICoverageSettings(coverage, settings.ddgi.coverage,
+                                       jsonPath(path, "coverage"));
+    if (result.hasError()) {
+      return result;
+    }
+  }
+  return Result<bool, std::string>::makeResult(true);
 }
 
 [[nodiscard]] Result<bool, std::string>

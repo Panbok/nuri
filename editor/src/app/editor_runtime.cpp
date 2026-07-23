@@ -751,9 +751,10 @@ Result<bool, std::string> EditorRuntime::finalizeStagingSceneDocument() {
 }
 
 bool EditorRuntime::activateStagingSceneDocument() {
-  if (stagingDocument_ == nullptr) {
+  if (stagingDocument_ == nullptr || !stagingDocument_->renderSceneFinalized) {
     return false;
   }
+  (void)stagingDocument_->scene.sealDDGIActivationCoverageBounds();
 
   std::unique_ptr<EditorSceneDocument> previous = std::move(activeDocument_);
   activeDocument_ = std::move(stagingDocument_);

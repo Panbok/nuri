@@ -178,8 +178,10 @@ private:
     uint32_t candidateOffset = 0;
     uint32_t sourceFrameIndex = 0;
     uint32_t meshletCounterFlags = 0;
+    uint32_t currentDepthVerificationTexId = kInvalidTextureBindlessIndex;
+    uint32_t currentDepthVerificationExtentPacked = 0u;
   };
-  static_assert(sizeof(MeshletPushConstants) == 104,
+  static_assert(sizeof(MeshletPushConstants) == 112,
                 "OpaqueRenderer::MeshletPushConstants must match shader "
                 "layout");
   static_assert(offsetof(MeshletPushConstants, lodThresholds) == 32u);
@@ -194,6 +196,10 @@ private:
   static_assert(offsetof(MeshletPushConstants, velocityFrameDataAddress) ==
                 80u);
   static_assert(offsetof(MeshletPushConstants, batchBase) == 88u);
+  static_assert(offsetof(MeshletPushConstants, currentDepthVerificationTexId) ==
+                104u);
+  static_assert(offsetof(MeshletPushConstants,
+                         currentDepthVerificationExtentPacked) == 108u);
   struct alignas(16) MeshletCompactionWorkItemGpuData {
     glm::uvec4 data{0u};
   };
@@ -220,12 +226,16 @@ private:
     uint32_t sourceFrameIndex = 0;
     uint32_t meshletCounterFlags = 0;
     uint32_t flags = 0;
-    uint32_t reserved0 = 0;
-    uint32_t reserved1 = 0;
+    uint32_t currentDepthVerificationTexId = kInvalidTextureBindlessIndex;
+    uint32_t currentDepthVerificationExtentPacked = 0u;
   };
   static_assert(sizeof(MeshletCompactionPushConstants) == 128u);
   static_assert(offsetof(MeshletCompactionPushConstants, lodThresholds) == 80u);
   static_assert(offsetof(MeshletCompactionPushConstants, workItemCount) == 96u);
+  static_assert(offsetof(MeshletCompactionPushConstants,
+                         currentDepthVerificationTexId) == 120u);
+  static_assert(offsetof(MeshletCompactionPushConstants,
+                         currentDepthVerificationExtentPacked) == 124u);
   struct alignas(16) MeshletBatchGpuData {
     uint64_t vertexBufferAddress = 0;
     uint64_t vertexDecodeBufferAddress = 0;
@@ -510,7 +520,8 @@ private:
   Result<bool, std::string>
   buildOpaquePasses(RenderFrameContext &frame,
                     std::pmr::vector<PreparedGraphPass> &out);
-  Result<bool, std::string> ensureDepthPyramidTextures();
+  Result<bool, std::string>
+  ensureDepthPyramidTextures(bool currentFrameVerificationRequired);
   [[nodiscard]] bool requiresDepthPyramid(const RenderSettings &settings) const;
   [[nodiscard]] bool
   shouldBuildTransmissionVisibilityDepth(const RenderFrameContext &frame,
@@ -601,6 +612,7 @@ private:
   TextureHandle pickIdTexture_{};
   TextureHandle shadowInspectTexture_{};
   TextureHandle transmissionVisibilityDepthTexture_{};
+  TextureHandle currentFrameDepthVerificationTexture_{};
   std::array<TextureHandle, kMaxSceneDepthPyramidLevels>
       sceneDepthPyramidTextures_{};
   uint32_t sceneDepthPyramidLevelCount_ = 0;
@@ -623,6 +635,7 @@ private:
              static_cast<size_t>(OverlayPipelineKind::Count) *
                  kCoverageModeCount>
       overlayPipelines_{};
+  RenderPipelineHandle currentFrameDepthVerificationPipelineHandle_{};
   RenderPipelineHandle depthPyramidPipelineHandle_{};
   RenderPipelineHandle depthMotionVectorPipelineHandle_{};
   std::array<MeshletPipelineHandle, 4 * kCoverageModeCount>

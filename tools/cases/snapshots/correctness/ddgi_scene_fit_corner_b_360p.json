@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1, "id": "correctness.procedural.ddgi_scene_fit_corner_b_360p", "suite": "correctness",
+  "description": "Candidate scene-fit opposite-corner B; AA, AO, and shadows are intentionally disabled to isolate diffuse-indirect coverage",
+  "scene": {"kind": "procedural", "generator": "nuri.procedural.ddgi_scene_fit_corner_b.v1", "seed": 1, "contentHash": "nuri.procedural.ddgi_scene_fit_corner_b.v1:1"},
+  "backend": "default", "resolution": [640, 360], "fixedDeltaSeconds": 0.016666667, "warmupFrames": 52, "captureFrame": 56, "authoritative": false, "presentMode": "immediate", "windowMode": "visible",
+  "renderGraph": {"workerCount": 1, "parallelCompile": false, "parallelRecording": false},
+  "camera": {"position": [4.5, 1.0, -3.5], "direction": [-0.7, -0.1, 0.7], "verticalFovDegrees": 60.0, "nearPlane": 0.05, "farPlane": 100.0},
+  "settings": {"ddgi": {"enabled": true, "preset": "Custom", "raysPerProbe": 64, "maxProbeUpdatesPerFrame": 256, "maxRayQueriesPerFrame": 16384, "debugView": "Confidence", "coverage": {"schemaVersion": 1, "mode": "SceneFit", "constraintPolicy": "PreserveCoverage", "sceneBoundsSource": "Authored", "authoredBounds": {"min": [-5.0, -1.5, -4.0], "max": [5.0, 2.0, 4.0]}, "cascadeCount": 1, "cascadeProbeCounts": [8, 4, 8], "requestedNearSpacing": [1.0, 1.0, 1.0], "spacingRatio": 2.0, "requestedCoverageHalfExtents": [6.0, 3.0, 5.0], "scenePaddingCells": 1, "transitionCells": 1, "includeAuthoredVolumes": false}}, "opaque": {"enableInstanceAnimation": false}, "antiAliasing": {"mode": "None"}, "ambientOcclusion": {"mode": "Disabled"}, "shadow": {"enabled": false}, "hdrPostProcess": {"bloomEnabled": false, "adaptationEnabled": false}},
+  "requirements": {"assets": ["modelsRoot:common/flat_plane.obj"], "backends": [], "allowVisibleWindow": true, "accelerationStructure": true, "rayQuery": true},
+  "captures": [{"target": "final_color", "profile": "ldr_color", "required": true}, {"target": "ddgi_coverage_debug_preview", "profile": "debug_preview", "required": true}, {"target": "ddgi_volume0_distance_atlas", "profile": "scalar", "required": true}]
+}

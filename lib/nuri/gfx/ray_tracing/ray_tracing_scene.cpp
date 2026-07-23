@@ -76,7 +76,9 @@ RayTracingScene::RayTracingScene(GPUDevice &gpu, RuntimeDDGIShaderConfig config,
       memory_(memory != nullptr ? memory : std::pmr::get_default_resource()),
       staticGeometries_(memory_), dynamicGeometries_(memory_),
       instanceRecords_(memory_), geometryRecords_(memory_),
-      tlasInstances_(memory_), decodeWork_(memory_), decodeDispatches_(memory_),
+      surfaceBoundsRecords_(memory_), currentGeometryBounds_(memory_),
+      committedGeometryBounds_(memory_), tlasInstances_(memory_),
+      decodeWork_(memory_), decodeDispatches_(memory_),
       dynamicPushConstants_(memory_), dynamicDispatches_(memory_),
       dependencyBuffers_(memory_), dependencyBufferModes_(memory_),
       blasBuildItems_(memory_), blasBufferUses_(memory_), blasUses_(memory_),
@@ -119,14 +121,16 @@ Result<bool, std::string> RayTracingScene::initialize() {
   return Result<bool, std::string>::makeResult(true);
 }
 
-void RayTracingScene::clearSceneResources() noexcept {
+void RayTracingScene::clearSceneResources(bool clearChangeTracking) noexcept {
   staticGeometries_.clear();
   dynamicGeometries_.clear();
   instanceTable_.reset();
   geometryTable_.reset();
+  surfaceBounds_.reset();
   tlas_.reset();
   instanceRecords_.clear();
   geometryRecords_.clear();
+  surfaceBoundsRecords_.clear();
   tlasInstances_.clear();
   decodeWork_.clear();
   decodeDispatches_.clear();
@@ -157,7 +161,23 @@ void RayTracingScene::clearSceneResources() noexcept {
   deformationVersion_ = 0u;
   geometryMutationVersion_ = 0u;
   staticInstanceCount_ = 0u;
+  staticSurfaceBoundsCount_ = 0u;
+  dynamicSurfaceBoundsCount_ = 0u;
+  staticSurfaceBoundsAvailable_ = false;
+  dynamicSurfaceBoundsAvailable_ = false;
   excludedDynamicInstances_ = 0u;
+  currentGeometryBounds_.clear();
+  currentStaticCoverageBounds_ = {};
+  if (clearChangeTracking) {
+    committedGeometryBounds_.clear();
+    pendingGeometryChanges_ = {};
+    committedGeometryChanges_ = {};
+    pendingGeometryChangeCount_ = 0u;
+    committedGeometryChangeCount_ = 0u;
+    geometryChangeFrameIndex_ = UINT64_MAX;
+    geometryChangeOverflow_ = false;
+    committedGeometryChangeOverflow_ = false;
+  }
 }
 
 void RayTracingScene::pollCompletion() noexcept {
@@ -171,8 +191,9 @@ void RayTracingScene::pollCompletion() noexcept {
 Result<bool, std::string>
 RayTracingScene::rebuildStaticScene(FrameBuildContext &ctx,
                                     const SceneDrawDatabase &database) {
-  clearSceneResources();
   const RenderScene &scene = *ctx.frame.scene;
+  const bool sceneChanged = sceneId_ != 0u && sceneId_ != scene.id();
+  clearSceneResources(false);
   const std::span<const SceneDrawRecord> draws = database.draws();
   const std::span<const SceneInstanceRecord> instances = database.instances();
   HashMap<uint64_t, uint32_t> geometryIndices;
@@ -524,6 +545,9 @@ RayTracingScene::rebuildStaticScene(FrameBuildContext &ctx,
     ++staticInstanceCount_;
   }
 
+  rebuildSurfaceBounds(database);
+  beginGeometryChanges(ctx.frame.frameIndex, false);
+  prepareTopologyChangeRegions(scene.topologyVersion(), sceneChanged);
   if (tlasInstances_.empty()) {
     sceneId_ = scene.id();
     topologyVersion_ = scene.topologyVersion();
@@ -560,6 +584,292 @@ RayTracingScene::rebuildStaticScene(FrameBuildContext &ctx,
   return appendTopologyBuildPasses(ctx);
 }
 
+void RayTracingScene::rebuildSurfaceBounds(const SceneDrawDatabase &database) {
+  surfaceBoundsRecords_.clear();
+  currentGeometryBounds_.clear();
+  staticSurfaceBoundsCount_ = 0u;
+  dynamicSurfaceBoundsCount_ = 0u;
+  staticSurfaceBoundsAvailable_ = true;
+  dynamicSurfaceBoundsAvailable_ = true;
+  const std::span<const SceneInstanceRecord> instances = database.instances();
+  const auto appendCategory = [&](bool dynamic) {
+    for (const RtInstanceGpuData &record : instanceRecords_) {
+      const bool recordDynamic = record.flags != 0u;
+      if (recordDynamic != dynamic ||
+          record.renderableIndex >= instances.size()) {
+        continue;
+      }
+      const SceneInstanceRecord &instance = instances[record.renderableIndex];
+      if (instance.model == nullptr || instance.renderable == nullptr) {
+        (dynamic ? dynamicSurfaceBoundsAvailable_
+                 : staticSurfaceBoundsAvailable_) = false;
+        continue;
+      }
+      const BoundingBox worldBounds = instance.model->bounds().getTransformed(
+          instance.renderable->modelMatrix);
+      const bool valid =
+          std::isfinite(worldBounds.min_.x) &&
+          std::isfinite(worldBounds.min_.y) &&
+          std::isfinite(worldBounds.min_.z) &&
+          std::isfinite(worldBounds.max_.x) &&
+          std::isfinite(worldBounds.max_.y) &&
+          std::isfinite(worldBounds.max_.z) &&
+          glm::all(glm::lessThanEqual(worldBounds.min_, worldBounds.max_));
+      currentGeometryBounds_.push_back(GeometryBoundsSnapshot{
+          .bounds = worldBounds,
+          .sourceId = instance.renderable->id.value,
+          .dynamic = dynamic,
+          .deforming = dynamic && instance.dynamicCaster,
+          .boundsKnown = valid && !(dynamic && instance.dynamicCaster),
+      });
+      if (dynamic && instance.dynamicCaster) {
+        dynamicSurfaceBoundsAvailable_ = false;
+        continue;
+      }
+      if (!valid) {
+        (dynamic ? dynamicSurfaceBoundsAvailable_
+                 : staticSurfaceBoundsAvailable_) = false;
+        continue;
+      }
+      if (surfaceBoundsRecords_.size() >= kMaxDDGISurfaceBounds) {
+        staticSurfaceBoundsAvailable_ = false;
+        dynamicSurfaceBoundsAvailable_ = false;
+        return;
+      }
+      surfaceBoundsRecords_.push_back(RtSurfaceBoundsGpuData{
+          .minimum = glm::vec4(worldBounds.min_, 0.0f),
+          .maximum = glm::vec4(worldBounds.max_, 0.0f),
+          .metadata =
+              glm::uvec4(dynamic ? 1u : 0u, record.renderableIndex, 0u, 0u),
+      });
+      if (dynamic) {
+        ++dynamicSurfaceBoundsCount_;
+      } else {
+        ++staticSurfaceBoundsCount_;
+      }
+    }
+  };
+  appendCategory(false);
+  appendCategory(true);
+  std::ranges::sort(currentGeometryBounds_,
+                    [](const GeometryBoundsSnapshot &left,
+                       const GeometryBoundsSnapshot &right) {
+                      return left.sourceId < right.sourceId;
+                    });
+  currentStaticCoverageBounds_.complete = staticSurfaceBoundsAvailable_;
+  for (const GeometryBoundsSnapshot &snapshot : currentGeometryBounds_) {
+    if (snapshot.dynamic) {
+      continue;
+    }
+    if (!snapshot.boundsKnown) {
+      currentStaticCoverageBounds_.complete = false;
+      continue;
+    }
+    if (!currentStaticCoverageBounds_.valid) {
+      currentStaticCoverageBounds_.bounds = snapshot.bounds;
+      currentStaticCoverageBounds_.valid = true;
+    } else {
+      currentStaticCoverageBounds_.bounds.combinePoint(snapshot.bounds.min_);
+      currentStaticCoverageBounds_.bounds.combinePoint(snapshot.bounds.max_);
+    }
+  }
+}
+
+void RayTracingScene::beginGeometryChanges(uint64_t frameIndex,
+                                           bool append) noexcept {
+  if (!append || geometryChangeFrameIndex_ != frameIndex) {
+    pendingGeometryChanges_ = {};
+    pendingGeometryChangeCount_ = 0u;
+    geometryChangeOverflow_ = false;
+  }
+  geometryChangeFrameIndex_ = frameIndex;
+}
+
+void RayTracingScene::publishGeometryChange(
+    DDGISceneChangeRegion change) noexcept {
+  if (!change.boundsKnown) {
+    if (pendingGeometryChangeCount_ != 0u) {
+      change.kind = DDGISceneChangeKind::StaticTopology;
+    }
+    pendingGeometryChanges_ = {};
+    pendingGeometryChanges_[0] = change;
+    pendingGeometryChangeCount_ = 1u;
+    geometryChangeOverflow_ = true;
+    return;
+  }
+  if (geometryChangeOverflow_) {
+    return;
+  }
+  if (pendingGeometryChangeCount_ == kMaxDDGIGeometryChangeRegions) {
+    pendingGeometryChanges_ = {};
+    pendingGeometryChanges_[0] = DDGISceneChangeRegion{
+        .kind = DDGISceneChangeKind::StaticTopology,
+        .sourceVersion = change.sourceVersion,
+        .boundsKnown = false,
+    };
+    pendingGeometryChangeCount_ = 1u;
+    geometryChangeOverflow_ = true;
+    return;
+  }
+  pendingGeometryChanges_[pendingGeometryChangeCount_++] = change;
+}
+
+void RayTracingScene::prepareTopologyChangeRegions(uint64_t sourceVersion,
+                                                   bool sceneChanged) noexcept {
+  if (committedGeometryBounds_.empty()) {
+    return;
+  }
+  if (sceneChanged) {
+    publishGeometryChange(DDGISceneChangeRegion{
+        .kind = DDGISceneChangeKind::StaticTopology,
+        .sourceVersion = sourceVersion,
+        .boundsKnown = false,
+    });
+    return;
+  }
+
+  size_t previousIndex = 0u;
+  size_t currentIndex = 0u;
+  while (previousIndex < committedGeometryBounds_.size() ||
+         currentIndex < currentGeometryBounds_.size()) {
+    const GeometryBoundsSnapshot *previous =
+        previousIndex < committedGeometryBounds_.size()
+            ? &committedGeometryBounds_[previousIndex]
+            : nullptr;
+    const GeometryBoundsSnapshot *current =
+        currentIndex < currentGeometryBounds_.size()
+            ? &currentGeometryBounds_[currentIndex]
+            : nullptr;
+    const uint64_t previousId =
+        previous != nullptr ? previous->sourceId : UINT64_MAX;
+    const uint64_t currentId =
+        current != nullptr ? current->sourceId : UINT64_MAX;
+    const GeometryBoundsSnapshot *first = nullptr;
+    const GeometryBoundsSnapshot *second = nullptr;
+    if (previousId <= currentId) {
+      first = previous;
+      ++previousIndex;
+    }
+    if (currentId <= previousId) {
+      second = current;
+      ++currentIndex;
+    }
+    const GeometryBoundsSnapshot *identity = second != nullptr ? second : first;
+    DDGISceneChangeRegion change{
+        .kind = DDGISceneChangeKind::StaticTopology,
+        .sourceId = identity != nullptr ? identity->sourceId : 0u,
+        .sourceVersion = sourceVersion,
+    };
+    if (first != nullptr && second != nullptr && first->boundsKnown &&
+        second->boundsKnown) {
+      change.worldBounds =
+          BoundingBox{glm::min(first->bounds.min_, second->bounds.min_),
+                      glm::max(first->bounds.max_, second->bounds.max_)};
+      change.boundsKnown = true;
+    } else if (identity != nullptr && identity->boundsKnown) {
+      change.worldBounds = identity->bounds;
+      change.boundsKnown = true;
+    }
+    publishGeometryChange(change);
+  }
+}
+
+void RayTracingScene::prepareTransformChangeRegions(
+    uint64_t sourceVersion) noexcept {
+  size_t previousIndex = 0u;
+  size_t currentIndex = 0u;
+  while (previousIndex < committedGeometryBounds_.size() &&
+         currentIndex < currentGeometryBounds_.size()) {
+    const GeometryBoundsSnapshot &previous =
+        committedGeometryBounds_[previousIndex];
+    const GeometryBoundsSnapshot &current =
+        currentGeometryBounds_[currentIndex];
+    if (previous.sourceId < current.sourceId) {
+      ++previousIndex;
+      continue;
+    }
+    if (current.sourceId < previous.sourceId) {
+      ++currentIndex;
+      continue;
+    }
+    ++previousIndex;
+    ++currentIndex;
+    const bool unchanged =
+        previous.boundsKnown && current.boundsKnown &&
+        glm::all(glm::equal(previous.bounds.min_, current.bounds.min_)) &&
+        glm::all(glm::equal(previous.bounds.max_, current.bounds.max_));
+    if (unchanged) {
+      continue;
+    }
+    DDGISceneChangeRegion change{
+        .kind = current.dynamic ? DDGISceneChangeKind::DynamicTransform
+                                : DDGISceneChangeKind::StaticTransform,
+        .sourceId = current.sourceId,
+        .sourceVersion = sourceVersion,
+    };
+    if (previous.boundsKnown && current.boundsKnown) {
+      change.worldBounds =
+          BoundingBox{glm::min(previous.bounds.min_, current.bounds.min_),
+                      glm::max(previous.bounds.max_, current.bounds.max_)};
+      change.boundsKnown = true;
+    }
+    publishGeometryChange(change);
+  }
+}
+
+void RayTracingScene::prepareDeformationChangeRegions(
+    uint64_t sourceVersion) noexcept {
+  for (const GeometryBoundsSnapshot &current : currentGeometryBounds_) {
+    if (!current.dynamic) {
+      continue;
+    }
+    const auto previous =
+        std::ranges::lower_bound(committedGeometryBounds_, current.sourceId, {},
+                                 &GeometryBoundsSnapshot::sourceId);
+    DDGISceneChangeRegion change{
+        .kind = DDGISceneChangeKind::Deformation,
+        .sourceId = current.sourceId,
+        .sourceVersion = sourceVersion,
+    };
+    if (previous != committedGeometryBounds_.end() &&
+        previous->sourceId == current.sourceId && previous->boundsKnown &&
+        current.boundsKnown) {
+      change.worldBounds =
+          BoundingBox{glm::min(previous->bounds.min_, current.bounds.min_),
+                      glm::max(previous->bounds.max_, current.bounds.max_)};
+      change.boundsKnown = true;
+    }
+    publishGeometryChange(change);
+  }
+}
+
+void RayTracingScene::commitGeometryChanges(uint64_t frameIndex) noexcept {
+  if (geometryChangeFrameIndex_ != frameIndex) {
+    return;
+  }
+  committedGeometryBounds_ = currentGeometryBounds_;
+  committedGeometryChanges_ = pendingGeometryChanges_;
+  committedGeometryChangeCount_ = pendingGeometryChangeCount_;
+  committedGeometryChangeOverflow_ = geometryChangeOverflow_;
+  for (uint32_t index = 0u; index < committedGeometryChangeCount_; ++index) {
+    committedGeometryChanges_[index].submissionSequence = frameIndex;
+  }
+  pendingGeometryChanges_ = {};
+  pendingGeometryChangeCount_ = 0u;
+  geometryChangeFrameIndex_ = UINT64_MAX;
+  geometryChangeOverflow_ = false;
+}
+
+void RayTracingScene::abandonGeometryChanges(uint64_t frameIndex) noexcept {
+  if (geometryChangeFrameIndex_ != frameIndex) {
+    return;
+  }
+  pendingGeometryChanges_ = {};
+  pendingGeometryChangeCount_ = 0u;
+  geometryChangeFrameIndex_ = UINT64_MAX;
+  geometryChangeOverflow_ = false;
+}
+
 Result<bool, std::string> RayTracingScene::uploadTables() {
   auto createTable =
       [this](OwnedBufferHandle &destination, std::span<const std::byte> bytes,
@@ -583,8 +893,14 @@ Result<bool, std::string> RayTracingScene::uploadTables() {
   if (instanceResult.hasError()) {
     return instanceResult;
   }
-  return createTable(geometryTable_, bytesOf(std::span(geometryRecords_)),
-                     "rt_geometry_table");
+  auto geometryResult =
+      createTable(geometryTable_, bytesOf(std::span(geometryRecords_)),
+                  "rt_geometry_table");
+  if (geometryResult.hasError()) {
+    return geometryResult;
+  }
+  return createTable(surfaceBounds_, bytesOf(std::span(surfaceBoundsRecords_)),
+                     "rt_ddgi_surface_bounds");
 }
 
 Result<bool, std::string>
@@ -975,6 +1291,14 @@ RayTracingScene::updateTransforms(FrameBuildContext &ctx,
   if (upload.hasError()) {
     return upload;
   }
+  rebuildSurfaceBounds(database);
+  beginGeometryChanges(ctx.frame.frameIndex, false);
+  prepareTransformChangeRegions(ctx.frame.scene->transformVersion());
+  upload = gpu_.updateBuffer(surfaceBounds_.get(),
+                             bytesOf(std::span(surfaceBoundsRecords_)));
+  if (upload.hasError()) {
+    return upload;
+  }
   pendingTransformVersion_ = ctx.frame.scene->transformVersion();
   return Result<bool, std::string>::makeResult(true);
 }
@@ -1038,9 +1362,10 @@ void RayTracingScene::rebuildIndirectReferences(
   const MaterialTableGpuData *material = shared.materialTableGpuData.has_value()
                                              ? &*shared.materialTableGpuData
                                              : nullptr;
-  const std::array<BufferHandle, 7u> inputs{
+  const std::array<BufferHandle, 8u> inputs{
       instanceTable_.get(),
       geometryTable_.get(),
+      surfaceBounds_.get(),
       material != nullptr ? material->headerBuffer : BufferHandle{},
       material != nullptr ? material->clearcoatBuffer : BufferHandle{},
       material != nullptr ? material->sheenBuffer : BufferHandle{},
@@ -1053,6 +1378,7 @@ void RayTracingScene::rebuildIndirectReferences(
   indirectReferences_.clear();
   appendUnique(indirectReferences_, instanceTable_.get());
   appendUnique(indirectReferences_, geometryTable_.get());
+  appendUnique(indirectReferences_, surfaceBounds_.get());
   for (const StaticGeometryEntry &entry : staticGeometries_) {
     appendUnique(indirectReferences_, entry.sourceVertexBuffer);
     appendUnique(indirectReferences_, entry.sourceDecodeBuffer);
@@ -1078,6 +1404,15 @@ void RayTracingScene::rebuildIndirectReferences(
 void RayTracingScene::publish(FrameBuildContext &ctx,
                               RenderGraphAccelerationStructureId graphTlas) {
   rebuildIndirectReferences(ctx.shared);
+  const bool publishesPendingChanges =
+      geometryChangeFrameIndex_ == ctx.frame.frameIndex;
+  const std::span<const DDGISceneChangeRegion> geometryChanges =
+      publishesPendingChanges
+          ? std::span<const DDGISceneChangeRegion>(
+                pendingGeometryChanges_.data(), pendingGeometryChangeCount_)
+          : std::span<const DDGISceneChangeRegion>(
+                committedGeometryChanges_.data(),
+                committedGeometryChangeCount_);
   RayTracingSceneReadiness readiness = RayTracingSceneReadiness::Building;
   if (failed_) {
     readiness = RayTracingSceneReadiness::Failed;
@@ -1095,10 +1430,12 @@ void RayTracingScene::publish(FrameBuildContext &ctx,
       .geometryTable = geometryTable_.get(),
       .materialTable =
           materials != nullptr ? materials->headerBuffer : BufferHandle{},
+      .surfaceBounds = surfaceBounds_.get(),
       .instanceTableAddress = gpu_.getBufferDeviceAddress(instanceTable_.get()),
       .geometryTableAddress = gpu_.getBufferDeviceAddress(geometryTable_.get()),
       .materialTableAddress =
           materials != nullptr ? materials->headerBufferAddress : 0u,
+      .surfaceBoundsAddress = gpu_.getBufferDeviceAddress(surfaceBounds_.get()),
       .indirectSubmissionReferences = indirectReferences_,
       .indirectSubmissionTextureReferences =
           ctx.shared.sceneDrawDatabase->rayTracingMaterialTextures(),
@@ -1111,6 +1448,10 @@ void RayTracingScene::publish(FrameBuildContext &ctx,
       .geometryMutationVersion = geometryMutationVersion_,
       .instanceCount = static_cast<uint32_t>(instanceRecords_.size()),
       .geometryCount = static_cast<uint32_t>(geometryRecords_.size()),
+      .staticSurfaceBoundsCount = staticSurfaceBoundsCount_,
+      .dynamicSurfaceBoundsCount = dynamicSurfaceBoundsCount_,
+      .staticCoverageBounds = currentStaticCoverageBounds_,
+      .geometryChangeRegions = geometryChanges,
       .completedBlasBuilds =
           ready_ ? static_cast<uint32_t>(staticGeometries_.size() +
                                          dynamicGeometries_.size())
@@ -1118,6 +1459,8 @@ void RayTracingScene::publish(FrameBuildContext &ctx,
       .totalBlasBuilds = static_cast<uint32_t>(staticGeometries_.size() +
                                                dynamicGeometries_.size()),
       .readiness = readiness,
+      .staticSurfaceBoundsAvailable = staticSurfaceBoundsAvailable_,
+      .dynamicSurfaceBoundsAvailable = dynamicSurfaceBoundsAvailable_,
       .ready = ready_,
   };
   RayTracingSceneFrameMetrics &metrics = ctx.frame.metrics.rayTracingScene;
@@ -1130,6 +1473,16 @@ void RayTracingScene::publish(FrameBuildContext &ctx,
   metrics.uniqueStaticGeometry =
       static_cast<uint32_t>(staticGeometries_.size());
   metrics.geometryRecords = static_cast<uint32_t>(geometryRecords_.size());
+  metrics.staticSurfaceBounds = staticSurfaceBoundsCount_;
+  metrics.dynamicSurfaceBounds = dynamicSurfaceBoundsCount_;
+  metrics.surfaceBoundsFallbacks = (!staticSurfaceBoundsAvailable_ ? 1u : 0u) +
+                                   (!dynamicSurfaceBoundsAvailable_ ? 1u : 0u);
+  metrics.geometryChangeRegions = static_cast<uint32_t>(geometryChanges.size());
+  metrics.geometryChangeOverflows =
+      (publishesPendingChanges ? geometryChangeOverflow_
+                               : committedGeometryChangeOverflow_)
+          ? 1u
+          : 0u;
   metrics.decodeDispatches = static_cast<uint32_t>(decodeWork_.size());
   metrics.blasBuilds = topologyBuildScheduled_
                            ? static_cast<uint32_t>(staticGeometries_.size() +
@@ -1157,8 +1510,49 @@ void RayTracingScene::publish(FrameBuildContext &ctx,
       metrics.triangles += geometry.indexCount / 3u;
     }
   }
-  metrics.tableBytes = instanceRecords_.size() * sizeof(RtInstanceGpuData) +
-                       geometryRecords_.size() * sizeof(RtGeometryGpuData);
+  uint64_t scheduledScratchBytes = 0u;
+  const auto accumulateFacts =
+      [this, &scheduledScratchBytes](AccelerationStructureHandle handle,
+                                     bool bottomLevel, bool buildScheduled,
+                                     bool updateScheduled,
+                                     RayTracingSceneFrameMetrics &out) {
+        auto facts = gpu_.getAccelerationStructureFacts(handle);
+        if (facts.hasError()) {
+          return;
+        }
+        if (bottomLevel) {
+          out.blasAllocationBytes += facts.value().allocationBytes;
+        } else {
+          out.tlasAllocationBytes += facts.value().allocationBytes;
+        }
+        if (buildScheduled) {
+          scheduledScratchBytes += facts.value().buildScratchBytes;
+        } else if (updateScheduled) {
+          scheduledScratchBytes += facts.value().updateScratchBytes;
+        }
+      };
+  for (const StaticGeometryEntry &entry : staticGeometries_) {
+    accumulateFacts(entry.blas.get(), true, topologyBuildScheduled_, false,
+                    metrics);
+  }
+  for (const DynamicGeometryEntry &entry : dynamicGeometries_) {
+    accumulateFacts(entry.blas.get(), true, topologyBuildScheduled_,
+                    dynamicUpdateScheduled_, metrics);
+  }
+  if (tlas_.valid()) {
+    accumulateFacts(tlas_.get(), false, topologyBuildScheduled_,
+                    dynamicUpdateScheduled_ || transformUpdateScheduled_,
+                    metrics);
+  }
+  asScratchHighWaterBytes_ =
+      std::max(asScratchHighWaterBytes_, scheduledScratchBytes);
+  metrics.asScratchHighWaterBytes = asScratchHighWaterBytes_;
+  metrics.directBindingPoolHighWater =
+      gpu_.getRayTracingBackendTelemetry().directBindingPoolHighWater;
+  metrics.tableBytes =
+      instanceRecords_.size() * sizeof(RtInstanceGpuData) +
+      geometryRecords_.size() * sizeof(RtGeometryGpuData) +
+      surfaceBoundsRecords_.size() * sizeof(RtSurfaceBoundsGpuData);
   if (hasGpuTimingScope(ctx.frame.gpuTiming, GpuTimingScope::RayTracingScene)) {
     metrics.gpuTimeMs = ctx.frame.gpuTiming.rayTracingSceneTimeMs;
     metrics.gpuTimingSourceFrameIndex =
@@ -1264,6 +1658,14 @@ Result<bool, std::string> RayTracingScene::prepare(FrameBuildContext &ctx) {
                               matchingAnimationData &&
                               animationVersion_ != animationData->version;
   if (dynamicChanged) {
+    rebuildSurfaceBounds(*ctx.shared.sceneDrawDatabase);
+    beginGeometryChanges(ctx.frame.frameIndex, transformsChanged);
+    prepareDeformationChangeRegions(animationData->version);
+    auto uploadBounds = gpu_.updateBuffer(
+        surfaceBounds_.get(), bytesOf(std::span(surfaceBoundsRecords_)));
+    if (uploadBounds.hasError()) {
+      return uploadBounds;
+    }
     return appendDynamicUpdatePasses(ctx, *animationData);
   }
   if (transformsChanged) {
@@ -1275,8 +1677,13 @@ Result<bool, std::string> RayTracingScene::prepare(FrameBuildContext &ctx) {
 
 void RayTracingScene::onFrameSubmitted(
     const RenderFrameContext &frame) noexcept {
+  commitGeometryChanges(frame.frameIndex);
   if (scheduledFrameIndex_ != frame.frameIndex) {
     return;
+  }
+  if (frame.scene != nullptr) {
+    (void)frame.scene->stageDDGIStaticCoverageBounds(
+        currentStaticCoverageBounds_);
   }
   if (topologyBuildScheduled_) {
     auto completion = gpu_.captureWorkCompletion();
@@ -1305,6 +1712,7 @@ void RayTracingScene::onFrameSubmitted(
 
 void RayTracingScene::onFrameAbandoned(
     const RenderFrameContext &frame) noexcept {
+  abandonGeometryChanges(frame.frameIndex);
   if (topologyBuildScheduled_ && scheduledFrameIndex_ == frame.frameIndex) {
     failed_ = true;
     topologyBuildScheduled_ = false;

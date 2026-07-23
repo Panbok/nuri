@@ -676,6 +676,7 @@ struct RenderPass {
   std::span<const TextureHandle> dependencyTextures{};
   std::span<const DrawItem> draws{};
   std::span<const MeshDispatchItem> meshDispatches{};
+  std::span<const BufferCopyRegion> bufferCopies{};
   std::span<const TextureCopyItem> textureCopies{};
   std::span<const AccelerationStructureBuildItem> accelerationStructureBuilds{};
   ExternalTemporalDispatchItem externalTemporalDispatch{};

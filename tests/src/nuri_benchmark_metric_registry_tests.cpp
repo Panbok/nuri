@@ -1,5 +1,6 @@
 #include "tests_pch.h"
 
+#include "nuri/gfx/ddgi/ddgi_types.h"
 #include "nuri/tools/benchmark/benchmark_manifest.h"
 #include "nuri/tools/benchmark/benchmark_metric_registry.h"
 #include "nuri/tools/benchmark/benchmark_report.h"
@@ -96,6 +97,34 @@ TEST(NuriBenchmarkMetricRegistryTest, CoreDescriptorsAreTypedAndBounded) {
             BenchmarkMetricAvailability::WhenMotionClassCoverageAvailable);
   EXPECT_EQ(benchmarkMetricAvailabilityName(motionClassRatio->availability),
             "when-motion-class-coverage-available");
+
+  const BenchmarkMetricDescriptor *coverageRatio =
+      findBenchmarkMetricDescriptor("renderer.ddgi.scene_coverage_ratio");
+  ASSERT_NE(coverageRatio, nullptr);
+  EXPECT_EQ(coverageRatio->unit, BenchmarkMetricUnit::Ratio);
+  const BenchmarkMetricDescriptor *coverageResolve =
+      findBenchmarkMetricDescriptor("renderer.ddgi.coverage_resolve_cpu_ms");
+  ASSERT_NE(coverageResolve, nullptr);
+  EXPECT_EQ(coverageResolve->unit, BenchmarkMetricUnit::Milliseconds);
+  for (std::string_view id : {"renderer.ddgi.probe_state_readback_source_frame",
+                              "renderer.ddgi.probe_state_readback_stale_frames",
+                              "renderer.ddgi.primary_queries_issued",
+                              "renderer.ddgi.total_queries_issued",
+                              "renderer.ddgi.trace_counter_source_frame"}) {
+    EXPECT_NE(findBenchmarkMetricDescriptor(id), nullptr) << id;
+  }
+  for (uint32_t slot = 0u; slot < nuri::kMaxDDGIEffectiveVolumes; ++slot) {
+    const std::string prefix =
+        "renderer.ddgi.volume" + std::to_string(slot) + ".";
+    for (std::string_view suffix :
+         {"total_probes", "invalid_probes", "updates", "primary_queries_issued",
+          "update_age_p95", "scheduled_quota", "deficit", "starvation_frames",
+          "confidence"}) {
+      EXPECT_NE(findBenchmarkMetricDescriptor(prefix + std::string(suffix)),
+                nullptr)
+          << prefix << suffix;
+    }
+  }
 }
 
 TEST(NuriBenchmarkMetricRegistryTest,
@@ -119,6 +148,7 @@ TEST(NuriBenchmarkMetricRegistryTest,
   measurements.appendRegistered(*cpuIndex, 1.25);
   measurements.appendRegistered(*counterIndex, 0.0);
   measurements.appendRegistered(*cpuIndex, 1.5);
+  measurements.appendRegistered(BenchmarkMetricIndex{}, 9.0);
 
   EXPECT_EQ(measurements.capacity(), reservedCapacity);
   EXPECT_EQ(measurements.registeredCount(), 3u);

@@ -904,6 +904,22 @@ populateShadowPlanesScene(const SnapshotCase &snapshotCase, Renderer &renderer,
     return Result<bool, std::string>::makeError(volume.error());
   }
   if (snapshotCase.scene.generator ==
+      "nuri.procedural.ddgi_dirty_light_region.v1") {
+    auto localLight = scene.graph().addLight(
+        scene.graph().rootNode(), LightDesc{
+                                      .type = LightType::Point,
+                                      .name = "DDGI Local Dirty Light",
+                                      .position = glm::vec3(-1.1f, 0.7f, 0.15f),
+                                      .color = glm::vec3(1.0f, 0.32f, 0.12f),
+                                      .intensity = 2.0f,
+                                      .range = 2.25f,
+                                      .enabled = true,
+                                  });
+    if (localLight.hasError()) {
+      return Result<bool, std::string>::makeError(localLight.error());
+    }
+  }
+  if (snapshotCase.scene.generator ==
       "nuri.procedural.ddgi_overlap_priority.v1") {
     auto overlapNode = scene.graph().createNode(
         scene.graph().rootNode(), "DDGI Priority Overlap Volume",
@@ -1072,9 +1088,14 @@ waitForSnapshotAssets(Renderer &renderer, RenderScene &scene,
       glm::length(snapshotCase.camera.direction) > 1.0e-6f
           ? glm::normalize(snapshotCase.camera.direction)
           : glm::vec3(0.0f, 0.0f, -1.0f);
-  const glm::vec3 position =
+  glm::vec3 position =
       snapshotCase.camera.position + snapshotCase.camera.positionDeltaPerFrame *
                                          static_cast<float>(frameIndex);
+  if (snapshotCase.scene.generator ==
+          "nuri.procedural.ddgi_hybrid_camera_cut.v1" &&
+      frameIndex >= 8u) {
+    position += glm::vec3(11.0f, 1.5f, -7.0f);
+  }
   camera.setLookAt(position, position + direction, glm::vec3(0.0f, 1.0f, 0.0f));
   return camera;
 }
@@ -1664,6 +1685,29 @@ SnapshotRunResult captureSnapshotCase(SnapshotCase snapshotCase,
               "DDGI replacement snapshot descriptor was rejected");
         }
       }
+      if (snapshotCase.scene.generator ==
+              "nuri.procedural.ddgi_dirty_light_region.v1" &&
+          frameIndex == 8u) {
+        LightId lightId = kInvalidLightId;
+        scene.graph().forEachLightId([&](LightId id) {
+          LightDesc desc{};
+          if (!nuri::isValid(lightId) && scene.graph().getLightDesc(id, desc) &&
+              desc.name == "DDGI Local Dirty Light") {
+            lightId = id;
+          }
+        });
+        LightDesc desc{};
+        if (!nuri::isValid(lightId) ||
+            !scene.graph().getLightDesc(lightId, desc)) {
+          return Result<bool, std::string>::makeError(
+              "DDGI dirty-light snapshot target was not found");
+        }
+        desc.intensity = 12.0f;
+        if (!scene.graph().updateLight(lightId, desc)) {
+          return Result<bool, std::string>::makeError(
+              "DDGI dirty-light snapshot update failed");
+        }
+      }
       auto commitResult = scene.commit();
       if (commitResult.hasError()) {
         return Result<bool, std::string>::makeError(commitResult.error());
@@ -1742,6 +1786,14 @@ SnapshotRunResult captureSnapshotCase(SnapshotCase snapshotCase,
            static_cast<double>(rt.decodedPositionBytes)},
           {"renderer.ray_tracing.table_bytes",
            static_cast<double>(rt.tableBytes)},
+          {"gpu.memory.ray_tracing.blas_mb",
+           static_cast<double>(rt.blasAllocationBytes) / (1024.0 * 1024.0)},
+          {"gpu.memory.ray_tracing.tlas_mb",
+           static_cast<double>(rt.tlasAllocationBytes) / (1024.0 * 1024.0)},
+          {"gpu.memory.ray_tracing.as_scratch_high_water_mb",
+           static_cast<double>(rt.asScratchHighWaterBytes) / (1024.0 * 1024.0)},
+          {"renderer.ray_tracing.direct_binding_pool_high_water",
+           rt.directBindingPoolHighWater},
           {"renderer.ray_tracing.consumed_rebuild_epoch",
            static_cast<double>(rt.consumedRebuildEpoch)},
           {"renderer.ddgi.active_volumes", ddgi.activeVolumes},
@@ -1756,14 +1808,27 @@ SnapshotRunResult captureSnapshotCase(SnapshotCase snapshotCase,
           {"renderer.ddgi.relocated_probes", ddgi.relocatedProbes},
           {"renderer.ddgi.probe_state_readback_available",
            ddgi.probeStateReadbackAvailable},
+          {"renderer.ddgi.probe_state_readback_source_frame",
+           ddgi.probeStateReadbackSourceFrame},
+          {"renderer.ddgi.probe_state_readback_stale_frames",
+           ddgi.probeStateReadbackStaleFrames},
           {"renderer.ddgi.max_relocation", ddgi.maxRelocation},
           {"renderer.ddgi.updated_probes", ddgi.updatedProbes},
           {"renderer.ddgi.primary_queries", ddgi.primaryQueries},
+          {"renderer.ddgi.primary_queries_issued", ddgi.primaryQueriesIssued},
+          {"renderer.ddgi.trace_counter_source_frame",
+           ddgi.traceCounterSourceFrame},
           {"renderer.ddgi.secondary_queries_reserved",
            ddgi.secondaryQueriesReserved},
           {"renderer.ddgi.secondary_queries_unused",
            ddgi.secondaryQueriesUnused},
           {"renderer.ddgi.secondary_queries", ddgi.secondaryQueries},
+          {"renderer.ddgi.directional_secondary_queries",
+           ddgi.directionalSecondaryQueries},
+          {"renderer.ddgi.local_secondary_queries", ddgi.localSecondaryQueries},
+          {"renderer.ddgi.total_queries_issued",
+           static_cast<uint64_t>(ddgi.primaryQueriesIssued) +
+               ddgi.secondaryQueries},
           {"renderer.ddgi.primary_candidate_intersections",
            ddgi.primaryCandidateIntersections},
           {"renderer.ddgi.secondary_candidate_intersections",
@@ -1790,6 +1855,49 @@ SnapshotRunResult captureSnapshotCase(SnapshotCase snapshotCase,
            ddgi.inspectionEventOverflows},
           {"renderer.ddgi.invalidated_probes", ddgi.invalidatedProbes},
           {"renderer.ddgi.failed_volumes", ddgi.failedVolumes},
+          {"renderer.ddgi.effective_volumes", ddgi.effectiveVolumes},
+          {"renderer.ddgi.authored_volumes", ddgi.authoredVolumes},
+          {"renderer.ddgi.generated_volumes", ddgi.generatedVolumes},
+          {"renderer.ddgi.coverage_mode", ddgi.coverageMode},
+          {"renderer.ddgi.coverage_status",
+           static_cast<double>(ddgi.coverageStatus)},
+          {"renderer.ddgi.coverage_error",
+           static_cast<double>(ddgi.coverageError)},
+          {"renderer.ddgi.limiting_constraint",
+           static_cast<double>(ddgi.limitingConstraint)},
+          {"renderer.ddgi.requested_half_extent_x",
+           ddgi.requestedCoverageHalfExtents.x},
+          {"renderer.ddgi.requested_half_extent_y",
+           ddgi.requestedCoverageHalfExtents.y},
+          {"renderer.ddgi.requested_half_extent_z",
+           ddgi.requestedCoverageHalfExtents.z},
+          {"renderer.ddgi.achieved_half_extent_x",
+           ddgi.achievedCoverageHalfExtents.x},
+          {"renderer.ddgi.achieved_half_extent_y",
+           ddgi.achievedCoverageHalfExtents.y},
+          {"renderer.ddgi.achieved_half_extent_z",
+           ddgi.achievedCoverageHalfExtents.z},
+          {"renderer.ddgi.scene_coverage_ratio", ddgi.sceneCoverageRatio},
+          {"renderer.ddgi.coverage_resolve_cpu_ms",
+           ddgi.coverageResolveCpuTimeMs},
+          {"renderer.ddgi.diagnostic_sample_count", ddgi.diagnosticSampleCount},
+          {"renderer.ddgi.uncovered_diagnostic_samples",
+           ddgi.uncoveredDiagnosticSamples},
+          {"renderer.ddgi.sky_remainder_samples", ddgi.skyRemainderSamples},
+          {"renderer.ddgi.diagnostic_samples_available",
+           ddgi.diagnosticSamplesAvailable},
+          {"renderer.ddgi.dirty_regions_produced",
+           static_cast<double>(ddgi.dirtyRegionsProduced)},
+          {"renderer.ddgi.dirty_regions_merged",
+           static_cast<double>(ddgi.dirtyRegionsMerged)},
+          {"renderer.ddgi.dirty_regions_overflowed",
+           static_cast<double>(ddgi.dirtyRegionsOverflowed)},
+          {"renderer.ddgi.dirty_regions_pending", ddgi.dirtyRegionsPending},
+          {"renderer.ddgi.dirty_probes_affected", ddgi.dirtyProbesAffected},
+          {"renderer.ddgi.classification_fallbacks",
+           ddgi.classificationFallbacks},
+          {"renderer.ddgi.classification_overflows",
+           ddgi.classificationOverflows},
           {"renderer.ddgi.volume_failure_reason",
            static_cast<double>(ddgi.volumeFailureReason)},
           {"renderer.ddgi.fallback_reason",
@@ -1798,6 +1906,12 @@ SnapshotRunResult captureSnapshotCase(SnapshotCase snapshotCase,
            static_cast<double>(ddgi.persistentBytes)},
           {"renderer.ddgi.frame_batch_bytes",
            static_cast<double>(ddgi.frameBatchBytes)},
+          {"renderer.ddgi.committed_atlas_bytes",
+           static_cast<double>(ddgi.committedAtlasBytes)},
+          {"renderer.ddgi.pending_atlas_bytes",
+           static_cast<double>(ddgi.pendingAtlasBytes)},
+          {"renderer.ddgi.peak_atlas_bytes",
+           static_cast<double>(ddgi.peakAtlasBytes)},
           {"renderer.ddgi.submitted_sequence",
            static_cast<double>(ddgi.submittedSequence)},
           {"renderer.ddgi.layout_generation",
@@ -1810,6 +1924,45 @@ SnapshotRunResult captureSnapshotCase(SnapshotCase snapshotCase,
           {"renderer.ddgi.consumed_force_update_epoch",
            static_cast<double>(ddgi.consumedForceUpdateEpoch)}}) {
       report.rendererMetricValues.emplace(name, value);
+    }
+    for (size_t volumeIndex = 0u; volumeIndex < ddgi.volumes.size();
+         ++volumeIndex) {
+      const DDGIVolumeFrameMetrics &volume = ddgi.volumes[volumeIndex];
+      const std::string prefix =
+          "renderer.ddgi.volume" + std::to_string(volumeIndex) + ".";
+      const auto addVolumeMetric = [&](std::string_view suffix, double value) {
+        report.rendererMetricValues.emplace(prefix + std::string(suffix),
+                                            value);
+      };
+      addVolumeMetric("active", volume.active);
+      addVolumeMetric("effective_key_hash",
+                      static_cast<double>(volume.effectiveKeyHash));
+      addVolumeMetric("effective_kind", volume.effectiveKind);
+      addVolumeMetric("tier", volume.tier);
+      addVolumeMetric("cascade_index", volume.cascadeIndex);
+      addVolumeMetric("total_probes", volume.totalProbes);
+      addVolumeMetric("initialized_probes", volume.initializedProbes);
+      addVolumeMetric("shading_enabled_probes", volume.shadingEnabledProbes);
+      addVolumeMetric("invalid_probes", volume.invalidProbes);
+      addVolumeMetric("newly_exposed_probes", volume.newlyExposedProbes);
+      addVolumeMetric("updates", volume.updates);
+      addVolumeMetric("primary_queries", volume.primaryQueries);
+      addVolumeMetric("primary_queries_issued", volume.primaryQueriesIssued);
+      addVolumeMetric("secondary_queries", volume.secondaryQueries);
+      addVolumeMetric("update_age_median", volume.updateAgeMedian);
+      addVolumeMetric("update_age_p95", volume.updateAgeP95);
+      addVolumeMetric("update_age_maximum", volume.updateAgeMaximum);
+      addVolumeMetric("scheduled_quota", volume.scheduledQuota);
+      addVolumeMetric("used_quota", volume.usedQuota);
+      addVolumeMetric("deficit", static_cast<double>(volume.deficit));
+      addVolumeMetric("starvation_frames", volume.starvationFrames);
+      addVolumeMetric("estimated_full_refresh_frames",
+                      volume.estimatedFullRefreshFrames);
+      addVolumeMetric("history_ready_percentage",
+                      volume.historyReadyPercentage);
+      addVolumeMetric("coverage_ready_percentage",
+                      volume.coverageReadyPercentage);
+      addVolumeMetric("confidence", volume.confidence);
     }
     auto captures = writeSnapshotCaptureArtifacts(
         *gpu, frameContext, snapshotCase.captures, caseDir, caseDir / "actual");

@@ -41,6 +41,7 @@ struct SnapshotCaptureReport {
   SnapshotSemanticMetrics semanticMetrics{};
   std::vector<std::string> failedThresholds{};
   std::string producerPassLabel{};
+  DDGICaptureMetadata ddgiMetadata{};
   std::string readbackError{};
   std::string status = "captured";
   std::string statusReason = "capture_written";

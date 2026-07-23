@@ -887,10 +887,12 @@ DirectLightingResult evaluateDirectLighting(ShadedMaterial sm, vec3 worldPos) {
 }
 
 vec3 ddgiDebugVolumeColor(uint index) {
-  const vec3 colors[4] = vec3[4](
+  const vec3 colors[8] = vec3[8](
       vec3(0.95, 0.25, 0.15), vec3(0.15, 0.75, 1.0),
-      vec3(0.35, 1.0, 0.25), vec3(0.9, 0.3, 1.0));
-  return colors[int(min(index, 3u))];
+      vec3(0.35, 1.0, 0.25), vec3(0.9, 0.3, 1.0),
+      vec3(1.0, 0.75, 0.15), vec3(0.2, 1.0, 0.75),
+      vec3(0.45, 0.4, 1.0), vec3(1.0, 0.35, 0.65));
+  return colors[int(min(index, 7u))];
 }
 
 bool tryDDGIDebugColor(ShadedMaterial sm, vec3 worldPos,

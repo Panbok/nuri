@@ -251,6 +251,7 @@ protected:
       std::span<const SubmitBatchMeta> batches = {});
 
 private:
+  Result<bool, std::string> copyBufferRegion(const BufferCopyRegion &copy);
   Result<bool, std::string> copyTextureRegion(const TextureCopyItem &copy);
 
   struct RecordingContextState {
@@ -259,6 +260,7 @@ private:
     bool finished = false;
     std::vector<RenderPass> passes{};
     std::vector<std::vector<MeshDispatchItem>> meshDispatchStorage{};
+    std::vector<std::vector<BufferCopyRegion>> bufferCopyStorage{};
     std::vector<std::vector<TextureCopyItem>> textureCopyStorage{};
   };
 
@@ -266,6 +268,7 @@ private:
     RecordedCommandBufferHandle handle{};
     std::vector<RenderPass> passes{};
     std::vector<std::vector<MeshDispatchItem>> meshDispatchStorage{};
+    std::vector<std::vector<BufferCopyRegion>> bufferCopyStorage{};
     std::vector<std::vector<TextureCopyItem>> textureCopyStorage{};
   };
 
@@ -315,6 +318,7 @@ private:
   std::vector<RecordedCommandBufferState> finishedCommandBuffers_{};
   std::vector<SubmissionState> submissions_{};
   std::vector<std::vector<MeshDispatchItem>> recordedMeshDispatchStorage_{};
+  std::vector<std::vector<BufferCopyRegion>> recordedBufferCopyStorage_{};
   std::vector<std::vector<TextureCopyItem>> recordedTextureCopyStorage_{};
   mutable std::mutex recordingStateMutex_{};
 };

@@ -134,6 +134,25 @@ vec3 rtHitNormal(RtGeometryGpuData geometry, RtInstanceGpuData instance,
   return normalize(transpose(mat3(instance.objectFromWorld)) * objectNormal);
 }
 
+vec3 rtHitGeometricNormal(RtGeometryGpuData geometry,
+                          RtInstanceGpuData instance, uint primitive) {
+  const uvec3 indices = rtTriangleIndices(geometry, primitive);
+  const uint format = rtPackedVertexFormat(geometry);
+  const vec3 p0 = (instance.worldFromObject * vec4(decodePackedPositionFrom(
+      geometry.vertexBuffer, geometry.vertexDecodeBuffer, 0u, format,
+      indices.x), 1.0)).xyz;
+  const vec3 p1 = (instance.worldFromObject * vec4(decodePackedPositionFrom(
+      geometry.vertexBuffer, geometry.vertexDecodeBuffer, 0u, format,
+      indices.y), 1.0)).xyz;
+  const vec3 p2 = (instance.worldFromObject * vec4(decodePackedPositionFrom(
+      geometry.vertexBuffer, geometry.vertexDecodeBuffer, 0u, format,
+      indices.z), 1.0)).xyz;
+  const vec3 faceNormal = cross(p1 - p0, p2 - p0);
+  return dot(faceNormal, faceNormal) > 1.0e-12
+             ? normalize(faceNormal)
+             : rtHitNormal(geometry, instance, primitive, vec2(0.0));
+}
+
 vec3 rtHitShadingNormal(RtGeometryGpuData geometry, RtInstanceGpuData instance,
                         uint primitive, vec2 barycentrics,
                         MaterialHeaderGpuData material, uint samplerId,

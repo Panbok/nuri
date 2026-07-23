@@ -538,6 +538,37 @@ toNvrhiGeometryFlags(AccelerationStructureGeometryFlags flags) noexcept {
   }
   return result;
 }
+[[nodiscard]] VkBuildAccelerationStructureFlagsKHR
+toVkBuildFlags(AccelerationStructureBuildFlags flags) noexcept {
+  VkBuildAccelerationStructureFlagsKHR result = 0u;
+  if (hasAccelerationStructureBuildFlag(
+          flags, AccelerationStructureBuildFlags::PreferFastTrace)) {
+    result |= VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+  }
+  if (hasAccelerationStructureBuildFlag(
+          flags, AccelerationStructureBuildFlags::PreferFastBuild)) {
+    result |= VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR;
+  }
+  if (hasAccelerationStructureBuildFlag(
+          flags, AccelerationStructureBuildFlags::AllowUpdate)) {
+    result |= VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
+  }
+  return result;
+}
+[[nodiscard]] VkGeometryFlagsKHR
+toVkGeometryFlags(AccelerationStructureGeometryFlags flags) noexcept {
+  VkGeometryFlagsKHR result = 0u;
+  if (hasAccelerationStructureGeometryFlag(
+          flags, AccelerationStructureGeometryFlags::Opaque)) {
+    result |= VK_GEOMETRY_OPAQUE_BIT_KHR;
+  }
+  if (hasAccelerationStructureGeometryFlag(
+          flags,
+          AccelerationStructureGeometryFlags::NoDuplicateAnyHitInvocation)) {
+    result |= VK_GEOMETRY_NO_DUPLICATE_ANY_HIT_INVOCATION_BIT_KHR;
+  }
+  return result;
+}
 [[nodiscard]] nvrhi::rt::InstanceFlags
 toNvrhiInstanceFlags(AccelerationStructureInstanceFlags flags) noexcept {
   using Source = AccelerationStructureInstanceFlags;
@@ -860,6 +891,7 @@ struct BufferResource {
   std::byte *mapped = nullptr;
   VkDeviceMemory mappedMemory = VK_NULL_HANDLE;
   bool hostVisible = false;
+  bool hostReadable = false;
   bool immutable = false;
   BufferUsage usage = BufferUsage::None;
 };
@@ -1035,6 +1067,7 @@ public:
     }
     return Format::RGBA8_UNORM;
   }
+  [[nodiscard]] size_t capacity() const noexcept { return slots_.size(); }
 
 private:
   std::deque<Resource> slots_;
@@ -1223,6 +1256,8 @@ struct GPUDeviceImpl {
   SwapchainPresentMode activePresentMode = SwapchainPresentMode::Unknown;
   nvrhi::vulkan::DeviceHandle nvrhiDevice{};
   nvrhi::CommandListHandle immediateCommandList{};
+  nvrhi::BufferHandle bufferReadbackStaging{};
+  size_t bufferReadbackStagingCapacity = 0u;
   nvrhi::BindingLayoutHandle bindless2DLayout{};
   nvrhi::BindingLayoutHandle bindless3DLayout{};
   nvrhi::BindingLayoutHandle bindlessCubeLayout{};
@@ -1260,6 +1295,7 @@ struct GPUDeviceImpl {
       accelerationStructures;
   ResourceTable<RayQueryBindingHandle, RayQueryBindingResource>
       rayQueryBindings;
+  uint32_t rayQueryBindingPoolHighWater = 0u;
   std::vector<FramebufferTexture> framebufferTextures;
   std::vector<CachedFramebuffer> cachedFramebuffers;
   uint64_t swapchainGeneration = 1u;
@@ -2993,6 +3029,8 @@ void destroyVulkan(Impl &impl) {
   impl.rayQueryBindings.clear();
   impl.framebufferTextures.clear();
   destroySwapchain(impl);
+  impl.bufferReadbackStaging = nullptr;
+  impl.bufferReadbackStagingCapacity = 0u;
   impl.immediateCommandList = nullptr;
   impl.bindless2DTable = nullptr;
   impl.bindless3DTable = nullptr;
@@ -4254,6 +4292,21 @@ recordRenderPass(Impl &impl,
   }
   const bool copyOnly = pass.executionMode == RenderPassExecutionMode::CopyOnly;
   if (copyOnly) {
+    for (const BufferCopyRegion &copy : pass.bufferCopies) {
+      BufferResource *source = impl.buffers.get(copy.srcBuffer);
+      BufferResource *destination = impl.buffers.get(copy.dstBuffer);
+      if (source == nullptr || destination == nullptr) {
+        return Result<bool, std::string>::makeError(
+            "recordGraphicsPass: buffer copy handle is invalid");
+      }
+      commandList.setBufferState(source->buffer.Get(),
+                                 nvrhi::ResourceStates::CopySource);
+      commandList.setBufferState(destination->buffer.Get(),
+                                 nvrhi::ResourceStates::CopyDest);
+      commandList.commitBarriers();
+      commandList.copyBuffer(destination->buffer.Get(), copy.dstOffset,
+                             source->buffer.Get(), copy.srcOffset, copy.size);
+    }
     for (const TextureCopyItem &copy : pass.textureCopies) {
       TextureResource *source = impl.textures.get(copy.sourceTexture);
       TextureResource *destination = impl.textures.get(copy.destinationTexture);
@@ -4808,6 +4861,10 @@ prepareBufferResource(Impl &impl, const BufferDesc &desc,
     return Result<BufferResource, std::string>::makeError(
         "Immutable buffers require initial data");
   }
+  if (desc.storage == Storage::Readback && !desc.data.empty()) {
+    return Result<BufferResource, std::string>::makeError(
+        "Readback buffers cannot contain initial data");
+  }
   const bool permanentReadState = usesPermanentReadState(desc);
   nvrhi::BufferDesc bufferDesc{};
   bufferDesc.setByteSize(static_cast<uint64_t>(resolvedSize))
@@ -4826,6 +4883,8 @@ prepareBufferResource(Impl &impl, const BufferDesc &desc,
       .setKeepInitialState(true);
   if (desc.storage == Storage::HostVisible) {
     bufferDesc.setCpuAccess(nvrhi::CpuAccessMode::Write);
+  } else if (desc.storage == Storage::Readback) {
+    bufferDesc.setCpuAccess(nvrhi::CpuAccessMode::Read);
   }
   nvrhi::BufferHandle buffer = impl.nvrhiDevice->createBuffer(bufferDesc);
   if (!buffer) {
@@ -4838,6 +4897,7 @@ prepareBufferResource(Impl &impl, const BufferDesc &desc,
                           .mapped = nullptr,
                           .mappedMemory = VK_NULL_HANDLE,
                           .hostVisible = desc.storage == Storage::HostVisible,
+                          .hostReadable = desc.storage == Storage::Readback,
                           .immutable = desc.immutable,
                           .usage = desc.usage};
   if (resource.hostVisible) {
@@ -5261,8 +5321,12 @@ Result<RayQueryBindingHandle, std::string> GPUDevice::createRayQueryBinding(
       .accelerationStructure = topLevelAccelerationStructure,
       .debugName = std::string(debugName),
   };
-  return Result<RayQueryBindingHandle, std::string>::makeResult(
-      impl_->rayQueryBindings.allocate(std::move(resource)));
+  const RayQueryBindingHandle handle =
+      impl_->rayQueryBindings.allocate(std::move(resource));
+  impl_->rayQueryBindingPoolHighWater =
+      std::max(impl_->rayQueryBindingPoolHighWater,
+               static_cast<uint32_t>(impl_->rayQueryBindings.capacity()));
+  return Result<RayQueryBindingHandle, std::string>::makeResult(handle);
 }
 
 Result<MeshletPipelineHandle, std::string>
@@ -5557,6 +5621,10 @@ GPUDevice::createBottomLevelAccelerationStructure(const BlasCreateDesc &desc,
       .setTrackLiveness(true)
       .setIsTopLevel(false);
   nativeDesc.bottomLevelGeometries.reserve(desc.geometries.size());
+  std::vector<VkAccelerationStructureGeometryKHR> vkGeometries;
+  std::vector<uint32_t> primitiveCounts;
+  vkGeometries.reserve(desc.geometries.size());
+  primitiveCounts.reserve(desc.geometries.size());
   for (uint32_t index = 0u; index < desc.geometries.size(); ++index) {
     const AccelerationStructureTriangleGeometryDesc &geometry =
         desc.geometries[index];
@@ -5599,12 +5667,55 @@ GPUDevice::createBottomLevelAccelerationStructure(const BlasCreateDesc &desc,
     nativeDesc.addBottomLevelGeometry(
         nvrhi::rt::GeometryDesc{}.setTriangles(triangles).setFlags(
             toNvrhiGeometryFlags(geometry.flags)));
+    VkAccelerationStructureGeometryKHR vkGeometry{
+        .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR,
+        .geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR,
+        .flags = toVkGeometryFlags(geometry.flags),
+    };
+    vkGeometry.geometry
+        .triangles = VkAccelerationStructureGeometryTrianglesDataKHR{
+        .sType =
+            VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR,
+        .vertexFormat = VK_FORMAT_R32G32B32_SFLOAT,
+        .vertexData = {.deviceAddress =
+                           vertices->buffer->getGpuVirtualAddress() +
+                           geometry.vertexByteOffset},
+        .vertexStride = geometry.vertexStrideBytes,
+        .maxVertex = geometry.vertexCount - 1u,
+        .indexType = geometry.indexFormat == IndexFormat::U16
+                         ? VK_INDEX_TYPE_UINT16
+                         : VK_INDEX_TYPE_UINT32,
+        .indexData = {.deviceAddress = indices->buffer->getGpuVirtualAddress() +
+                                       geometry.indexByteOffset},
+    };
+    vkGeometries.push_back(vkGeometry);
+    primitiveCounts.push_back(geometry.indexCount / 3u);
   }
+  VkAccelerationStructureBuildGeometryInfoKHR vkBuildInfo{
+      .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
+      .type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR,
+      .flags = toVkBuildFlags(desc.buildFlags),
+      .mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR,
+      .geometryCount = static_cast<uint32_t>(vkGeometries.size()),
+      .pGeometries = vkGeometries.data(),
+  };
+  VkAccelerationStructureBuildSizesInfoKHR vkBuildSizes{
+      .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
+  vkGetAccelerationStructureBuildSizesKHR(
+      impl_->device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
+      &vkBuildInfo, primitiveCounts.data(), &vkBuildSizes);
   nvrhi::rt::AccelStructHandle accelerationStructure =
       impl_->nvrhiDevice->createAccelStruct(nativeDesc);
   if (!accelerationStructure) {
     return Result<AccelerationStructureHandle, std::string>::makeError(
         "failed to create NVRHI bottom-level acceleration structure");
+  }
+  VkMemoryRequirements memoryRequirements{};
+  const nvrhi::Object nativeBuffer =
+      accelerationStructure->getNativeObject(nvrhi::ObjectTypes::VK_Buffer);
+  if (nativeBuffer.integer != 0u) {
+    vkGetBufferMemoryRequirements(impl_->device, VkBuffer(nativeBuffer.integer),
+                                  &memoryRequirements);
   }
   AccelerationStructureResource resource{
       .accelerationStructure = accelerationStructure,
@@ -5612,7 +5723,10 @@ GPUDevice::createBottomLevelAccelerationStructure(const BlasCreateDesc &desc,
                 .buildFlags = desc.buildFlags,
                 .geometryCount = static_cast<uint32_t>(desc.geometries.size()),
                 .maxInstanceCount = 0u,
-                .deviceAddress = accelerationStructure->getDeviceAddress()},
+                .deviceAddress = accelerationStructure->getDeviceAddress(),
+                .allocationBytes = memoryRequirements.size,
+                .buildScratchBytes = vkBuildSizes.buildScratchSize,
+                .updateScratchBytes = vkBuildSizes.updateScratchSize},
       .debugName = std::string(debugName),
   };
   return Result<AccelerationStructureHandle, std::string>::makeResult(
@@ -5638,11 +5752,40 @@ GPUDevice::createTopLevelAccelerationStructure(const TlasCreateDesc &desc,
       .setBuildFlags(toNvrhiBuildFlags(desc.buildFlags))
       .setDebugName(std::string(debugName))
       .setTrackLiveness(true);
+  VkAccelerationStructureGeometryKHR vkGeometry{
+      .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR,
+      .geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR,
+  };
+  vkGeometry.geometry
+      .instances = VkAccelerationStructureGeometryInstancesDataKHR{
+      .sType =
+          VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR,
+  };
+  VkAccelerationStructureBuildGeometryInfoKHR vkBuildInfo{
+      .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
+      .type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR,
+      .flags = toVkBuildFlags(desc.buildFlags),
+      .mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR,
+      .geometryCount = 1u,
+      .pGeometries = &vkGeometry,
+  };
+  VkAccelerationStructureBuildSizesInfoKHR vkBuildSizes{
+      .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
+  vkGetAccelerationStructureBuildSizesKHR(
+      impl_->device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
+      &vkBuildInfo, &desc.maxInstanceCount, &vkBuildSizes);
   nvrhi::rt::AccelStructHandle accelerationStructure =
       impl_->nvrhiDevice->createAccelStruct(nativeDesc);
   if (!accelerationStructure) {
     return Result<AccelerationStructureHandle, std::string>::makeError(
         "failed to create NVRHI top-level acceleration structure");
+  }
+  VkMemoryRequirements memoryRequirements{};
+  const nvrhi::Object nativeBuffer =
+      accelerationStructure->getNativeObject(nvrhi::ObjectTypes::VK_Buffer);
+  if (nativeBuffer.integer != 0u) {
+    vkGetBufferMemoryRequirements(impl_->device, VkBuffer(nativeBuffer.integer),
+                                  &memoryRequirements);
   }
   AccelerationStructureResource resource{
       .accelerationStructure = accelerationStructure,
@@ -5650,7 +5793,10 @@ GPUDevice::createTopLevelAccelerationStructure(const TlasCreateDesc &desc,
                 .buildFlags = desc.buildFlags,
                 .geometryCount = 0u,
                 .maxInstanceCount = desc.maxInstanceCount,
-                .deviceAddress = accelerationStructure->getDeviceAddress()},
+                .deviceAddress = accelerationStructure->getDeviceAddress(),
+                .allocationBytes = memoryRequirements.size,
+                .buildScratchBytes = vkBuildSizes.buildScratchSize,
+                .updateScratchBytes = vkBuildSizes.updateScratchSize},
       .debugName = std::string(debugName),
   };
   return Result<AccelerationStructureHandle, std::string>::makeResult(
@@ -5685,6 +5831,14 @@ GPUDevice::getAccelerationStructureFacts(AccelerationStructureHandle h) const {
   AccelerationStructureFacts facts = resource->facts;
   facts.deviceAddress = resource->accelerationStructure->getDeviceAddress();
   return Result<AccelerationStructureFacts, std::string>::makeResult(facts);
+}
+
+RayTracingBackendTelemetry GPUDevice::getRayTracingBackendTelemetry() const {
+  return impl_ != nullptr
+             ? RayTracingBackendTelemetry{.directBindingPoolHighWater =
+                                              impl_
+                                                  ->rayQueryBindingPoolHighWater}
+             : RayTracingBackendTelemetry{};
 }
 
 bool GPUDevice::resolveGeometry(GeometryAllocationHandle h,
@@ -6521,34 +6675,55 @@ Result<bool, std::string> GPUDevice::readBuffer(BufferHandle bufferHandle,
     return Result<bool, std::string>::makeError(
         "GPUDevice::readBuffer: invalid buffer range");
   }
+  if (buffer->hostReadable) {
+    void *mapped = impl_->nvrhiDevice->mapBuffer(buffer->buffer.Get(),
+                                                 nvrhi::CpuAccessMode::Read);
+    if (mapped == nullptr) {
+      return Result<bool, std::string>::makeError(
+          "GPUDevice::readBuffer: failed to map readback buffer");
+    }
+    std::memcpy(outBytes.data(), static_cast<std::byte *>(mapped) + offset,
+                outBytes.size());
+    impl_->nvrhiDevice->unmapBuffer(buffer->buffer.Get());
+    return Result<bool, std::string>::makeResult(true);
+  }
   if (buffer->mapped != nullptr) {
     std::memcpy(outBytes.data(), buffer->mapped + offset, outBytes.size());
     return Result<bool, std::string>::makeResult(true);
   }
-  nvrhi::BufferDesc readbackDesc{};
-  readbackDesc.setByteSize(static_cast<uint64_t>(outBytes.size()))
-      .setCpuAccess(nvrhi::CpuAccessMode::Read)
-      .setDebugName("NVRHI buffer readback");
-  nvrhi::BufferHandle readback = impl_->nvrhiDevice->createBuffer(readbackDesc);
-  if (!readback) {
-    return Result<bool, std::string>::makeError(
-        "GPUDevice::readBuffer: failed to create readback buffer");
-  }
   std::lock_guard lock(impl_->immediateMutex);
+  if (!impl_->bufferReadbackStaging ||
+      impl_->bufferReadbackStagingCapacity < outBytes.size()) {
+    const size_t grownCapacity =
+        std::max(outBytes.size(), impl_->bufferReadbackStagingCapacity * 2u);
+    nvrhi::BufferDesc readbackDesc{};
+    readbackDesc.setByteSize(static_cast<uint64_t>(grownCapacity))
+        .setCpuAccess(nvrhi::CpuAccessMode::Read)
+        .setDebugName("NVRHI reusable buffer readback");
+    nvrhi::BufferHandle readback =
+        impl_->nvrhiDevice->createBuffer(readbackDesc);
+    if (!readback) {
+      return Result<bool, std::string>::makeError(
+          "GPUDevice::readBuffer: failed to grow readback buffer");
+    }
+    impl_->bufferReadbackStaging = std::move(readback);
+    impl_->bufferReadbackStagingCapacity = grownCapacity;
+  }
   flushPendingAsyncUploadCommandList(*impl_);
   impl_->immediateCommandList->open();
-  impl_->immediateCommandList->copyBuffer(
-      readback.Get(), 0u, buffer->buffer.Get(), offset, outBytes.size());
+  impl_->immediateCommandList->copyBuffer(impl_->bufferReadbackStaging.Get(),
+                                          0u, buffer->buffer.Get(), offset,
+                                          outBytes.size());
   impl_->immediateCommandList->close();
   executeCommandListAndWait(*impl_, impl_->immediateCommandList);
-  void *mapped =
-      impl_->nvrhiDevice->mapBuffer(readback.Get(), nvrhi::CpuAccessMode::Read);
+  void *mapped = impl_->nvrhiDevice->mapBuffer(
+      impl_->bufferReadbackStaging.Get(), nvrhi::CpuAccessMode::Read);
   if (mapped == nullptr) {
     return Result<bool, std::string>::makeError(
         "GPUDevice::readBuffer: failed to map readback buffer");
   }
   std::memcpy(outBytes.data(), mapped, outBytes.size());
-  impl_->nvrhiDevice->unmapBuffer(readback.Get());
+  impl_->nvrhiDevice->unmapBuffer(impl_->bufferReadbackStaging.Get());
   return Result<bool, std::string>::makeResult(true);
 }
 

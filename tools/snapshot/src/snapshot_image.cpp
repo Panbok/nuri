@@ -583,7 +583,48 @@ writeSnapshotArtifacts(const SnapshotReadbackImage &image,
          << "\",\n"
          << "  \"payload\": \"" << outPaths.raw.filename().generic_string()
          << "\",\n"
-         << "  \"hash\": \"" << image.hash << "\"\n"
+         << "  \"hash\": \"" << image.hash << "\",\n"
+         << "  \"ddgi\": {\n"
+         << "    \"valid\": " << image.point.ddgiMetadata.valid << ",\n"
+         << "    \"effectiveKind\": " << image.point.ddgiMetadata.effectiveKind
+         << ",\n"
+         << "    \"effectiveKeyHash\": "
+         << image.point.ddgiMetadata.effectiveKeyHash << ",\n"
+         << "    \"cascadeIndex\": " << image.point.ddgiMetadata.cascadeIndex
+         << ",\n"
+         << "    \"coverageGeneration\": "
+         << image.point.ddgiMetadata.coverageGeneration << ",\n"
+         << "    \"layoutGeneration\": "
+         << image.point.ddgiMetadata.layoutGeneration << ",\n"
+         << "    \"resourceGeneration\": "
+         << image.point.ddgiMetadata.resourceGeneration << ",\n"
+         << "    \"sceneBoundsGeneration\": "
+         << image.point.ddgiMetadata.sceneBoundsGeneration << ",\n"
+         << "    \"ringOrigin\": [" << image.point.ddgiMetadata.ringOrigin.x
+         << ", " << image.point.ddgiMetadata.ringOrigin.y << ", "
+         << image.point.ddgiMetadata.ringOrigin.z << "],\n"
+         << "    \"cameraCell\": [" << image.point.ddgiMetadata.cameraCell.x
+         << ", " << image.point.ddgiMetadata.cameraCell.y << ", "
+         << image.point.ddgiMetadata.cameraCell.z << "],\n"
+         << "    \"requestedHalfExtents\": ["
+         << image.point.ddgiMetadata.requestedHalfExtents.x << ", "
+         << image.point.ddgiMetadata.requestedHalfExtents.y << ", "
+         << image.point.ddgiMetadata.requestedHalfExtents.z << "],\n"
+         << "    \"achievedHalfExtents\": ["
+         << image.point.ddgiMetadata.achievedHalfExtents.x << ", "
+         << image.point.ddgiMetadata.achievedHalfExtents.y << ", "
+         << image.point.ddgiMetadata.achievedHalfExtents.z << "],\n"
+         << "    \"fadeStartHalfExtents\": ["
+         << image.point.ddgiMetadata.fadeStartHalfExtents.x << ", "
+         << image.point.ddgiMetadata.fadeStartHalfExtents.y << ", "
+         << image.point.ddgiMetadata.fadeStartHalfExtents.z << "],\n"
+         << "    \"fadeEndHalfExtents\": ["
+         << image.point.ddgiMetadata.fadeEndHalfExtents.x << ", "
+         << image.point.ddgiMetadata.fadeEndHalfExtents.y << ", "
+         << image.point.ddgiMetadata.fadeEndHalfExtents.z << "],\n"
+         << "    \"transitionCells\": "
+         << image.point.ddgiMetadata.transitionCells << "\n"
+         << "  }\n"
          << "}\n";
     file.close();
     if (!file) {
@@ -645,6 +686,78 @@ readSnapshotArtifactMetadata(const std::filesystem::path &path) {
   metadata.profile = stringValue("profile");
   metadata.payload = stringValue("payload");
   metadata.hash = stringValue("hash");
+  if (yyjson_val *ddgi = yyjson_obj_get(root, "ddgi"); yyjson_is_obj(ddgi)) {
+    const auto ddgiU32 = [ddgi](const char *key) {
+      yyjson_val *value = yyjson_obj_get(ddgi, key);
+      return yyjson_is_uint(value) && yyjson_get_uint(value) <= UINT32_MAX
+                 ? static_cast<uint32_t>(yyjson_get_uint(value))
+                 : 0u;
+    };
+    const auto ddgiU64 = [ddgi](const char *key) {
+      yyjson_val *value = yyjson_obj_get(ddgi, key);
+      return yyjson_is_uint(value) ? yyjson_get_uint(value) : 0u;
+    };
+    const auto readUvec3 = [ddgi](const char *key) {
+      glm::uvec3 result{0u};
+      yyjson_val *array = yyjson_obj_get(ddgi, key);
+      if (!yyjson_is_arr(array) || yyjson_arr_size(array) != 3u) {
+        return result;
+      }
+      for (size_t index = 0u; index < 3u; ++index) {
+        yyjson_val *value = yyjson_arr_get(array, index);
+        if (yyjson_is_uint(value) && yyjson_get_uint(value) <= UINT32_MAX) {
+          result[index] = static_cast<uint32_t>(yyjson_get_uint(value));
+        }
+      }
+      return result;
+    };
+    const auto readIvec3 = [ddgi](const char *key) {
+      glm::ivec3 result{0};
+      yyjson_val *array = yyjson_obj_get(ddgi, key);
+      if (!yyjson_is_arr(array) || yyjson_arr_size(array) != 3u) {
+        return result;
+      }
+      for (size_t index = 0u; index < 3u; ++index) {
+        yyjson_val *value = yyjson_arr_get(array, index);
+        if (yyjson_is_int(value) && yyjson_get_sint(value) >= INT32_MIN &&
+            yyjson_get_sint(value) <= INT32_MAX) {
+          result[index] = static_cast<int32_t>(yyjson_get_sint(value));
+        }
+      }
+      return result;
+    };
+    const auto readVec3 = [ddgi](const char *key) {
+      glm::vec3 result{0.0f};
+      yyjson_val *array = yyjson_obj_get(ddgi, key);
+      if (!yyjson_is_arr(array) || yyjson_arr_size(array) != 3u) {
+        return result;
+      }
+      for (size_t index = 0u; index < 3u; ++index) {
+        yyjson_val *value = yyjson_arr_get(array, index);
+        if (yyjson_is_num(value)) {
+          result[index] = static_cast<float>(yyjson_get_num(value));
+        }
+      }
+      return result;
+    };
+    metadata.ddgiMetadata = DDGICaptureMetadata{
+        .effectiveKeyHash = ddgiU64("effectiveKeyHash"),
+        .coverageGeneration = ddgiU64("coverageGeneration"),
+        .layoutGeneration = ddgiU64("layoutGeneration"),
+        .resourceGeneration = ddgiU64("resourceGeneration"),
+        .sceneBoundsGeneration = ddgiU64("sceneBoundsGeneration"),
+        .effectiveKind = ddgiU32("effectiveKind"),
+        .cascadeIndex = ddgiU32("cascadeIndex"),
+        .ringOrigin = readUvec3("ringOrigin"),
+        .cameraCell = readIvec3("cameraCell"),
+        .requestedHalfExtents = readVec3("requestedHalfExtents"),
+        .achievedHalfExtents = readVec3("achievedHalfExtents"),
+        .fadeStartHalfExtents = readVec3("fadeStartHalfExtents"),
+        .fadeEndHalfExtents = readVec3("fadeEndHalfExtents"),
+        .transitionCells = ddgiU32("transitionCells"),
+        .valid = ddgiU32("valid"),
+    };
+  }
   if (metadata.target.empty() || metadata.capturePointVersion == 0u ||
       metadata.kind.empty() || metadata.format.empty() ||
       metadata.width == 0u || metadata.height == 0u ||

@@ -5,9 +5,122 @@
 #include "nuri/math/utils.h"
 #include "nuri/pch.h"
 #include "nuri/resources/gpu/resource_manager.h"
+#include "nuri/resources/gpu/scene_material_resolution.h"
 namespace nuri {
 namespace {
 std::atomic<uint64_t> gNextRenderSceneId{1u};
+
+struct DerivedDDGICoverageBounds {
+  BoundingBox bounds{};
+  bool valid = false;
+  bool complete = true;
+};
+
+[[nodiscard]] bool finiteVec3(const glm::vec3 &value) noexcept {
+  return std::isfinite(value.x) && std::isfinite(value.y) &&
+         std::isfinite(value.z);
+}
+
+[[nodiscard]] bool validCoverageBounds(const BoundingBox &bounds) noexcept {
+  return finiteVec3(bounds.min_) && finiteVec3(bounds.max_) &&
+         glm::all(glm::lessThanEqual(bounds.min_, bounds.max_));
+}
+
+[[nodiscard]] bool
+sameCoverageFact(const DDGISceneCoverageBounds &left,
+                 const DDGISceneCoverageBounds &right) noexcept {
+  if (left.valid != right.valid || left.complete != right.complete) {
+    return false;
+  }
+  if (!left.valid) {
+    return true;
+  }
+  return left.bounds.min_.x == right.bounds.min_.x &&
+         left.bounds.min_.y == right.bounds.min_.y &&
+         left.bounds.min_.z == right.bounds.min_.z &&
+         left.bounds.max_.x == right.bounds.max_.x &&
+         left.bounds.max_.y == right.bounds.max_.y &&
+         left.bounds.max_.z == right.bounds.max_.z;
+}
+
+[[nodiscard]] bool publishCoverageFact(DDGISceneCoverageBounds &target,
+                                       DDGISceneCoverageBounds next,
+                                       uint64_t &generation,
+                                       bool forceGeneration = false) noexcept {
+  if (!forceGeneration && sameCoverageFact(target, next)) {
+    return false;
+  }
+  next.generation = ++generation;
+  target = next;
+  return true;
+}
+
+[[nodiscard]] uint32_t lod0IndexCount(const Submesh &submesh) noexcept {
+  return submesh.lodCount != 0u && submesh.lods[0].indexCount != 0u
+             ? submesh.lods[0].indexCount
+             : submesh.indexCount;
+}
+
+[[nodiscard]] DerivedDDGICoverageBounds
+deriveDDGICoverageBounds(const ResourceManager *resources,
+                         std::span<const Renderable> renderables) noexcept {
+  DerivedDDGICoverageBounds result{};
+  for (const Renderable &renderable : renderables) {
+    if (resources == nullptr) {
+      result.complete = false;
+      continue;
+    }
+    const ModelRecord *modelRecord = resources->tryGet(renderable.model);
+    if (modelRecord == nullptr || modelRecord->model == nullptr) {
+      result.complete = false;
+      continue;
+    }
+
+    bool hasRayTracingGeometry = false;
+    bool rayVisible = false;
+    const std::span<const Submesh> submeshes = modelRecord->model->submeshes();
+    for (uint32_t submeshIndex = 0u;
+         submeshIndex < static_cast<uint32_t>(submeshes.size());
+         ++submeshIndex) {
+      if (lod0IndexCount(submeshes[submeshIndex]) == 0u) {
+        continue;
+      }
+      hasRayTracingGeometry = true;
+      const MaterialRef material = resolveSceneSubmeshMaterial(
+          *modelRecord, submeshIndex, renderable.material,
+          renderable.materialOverride);
+      const MaterialRecord *materialRecord = resources->tryGet(material);
+      if (materialRecord == nullptr) {
+        result.complete = false;
+        continue;
+      }
+      rayVisible |= isDDGIRayVisibleMaterial(*materialRecord);
+    }
+    if (!hasRayTracingGeometry) {
+      result.complete = false;
+      continue;
+    }
+    if (!rayVisible) {
+      continue;
+    }
+
+    const BoundingBox worldBounds =
+        modelRecord->model->bounds().getTransformed(renderable.modelMatrix);
+    if (!validCoverageBounds(worldBounds)) {
+      result.complete = false;
+      continue;
+    }
+    if (!result.valid) {
+      result.bounds = worldBounds;
+      result.valid = true;
+    } else {
+      result.bounds.combinePoint(worldBounds.min_);
+      result.bounds.combinePoint(worldBounds.max_);
+    }
+  }
+  return result;
+}
+
 template <typename Ref>
 [[nodiscard]] bool resourceAlive(ResourceManager *resources, Ref ref) {
   return resources != nullptr && resources->tryGet(ref) != nullptr;
@@ -331,6 +444,113 @@ bool RenderScene::commitDDGIVolumes() {
   return true;
 }
 
+bool RenderScene::commitDDGICoverageBounds(
+    bool renderableFactsChanged) noexcept {
+  const uint64_t materialVersion =
+      resources_ != nullptr ? resources_->materialVersion() : 0u;
+  const uint64_t modelMaterialBindingVersion =
+      resources_ != nullptr ? resources_->modelMaterialBindingVersion() : 0u;
+  if (!ddgiCoverageFactsDirty_ && !renderableFactsChanged &&
+      ddgiCoverageMaterialVersion_ == materialVersion &&
+      ddgiCoverageModelMaterialBindingVersion_ == modelMaterialBindingVersion) {
+    return false;
+  }
+
+  ddgiCoverageFactsDirty_ = false;
+  ddgiCoverageMaterialVersion_ = materialVersion;
+  ddgiCoverageModelMaterialBindingVersion_ = modelMaterialBindingVersion;
+  const DerivedDDGICoverageBounds derived =
+      deriveDDGICoverageBounds(resources_, renderables_);
+  DDGISceneCoverageBounds current{
+      .bounds = derived.valid ? derived.bounds : BoundingBox{},
+      .valid = derived.valid,
+      .complete = derived.complete,
+  };
+  bool changed = publishCoverageFact(ddgiCurrentCoverageBounds_, current,
+                                     ddgiCoverageBoundsGeneration_);
+  return changed;
+}
+
+bool RenderScene::sealDDGIActivationCoverageBounds() noexcept {
+  if (ddgiActivationCoverageBoundsSealed_) {
+    return false;
+  }
+  ddgiActivationCoverageBoundsSealed_ = true;
+  (void)publishCoverageFact(ddgiActivationCoverageBounds_,
+                            ddgiCurrentCoverageBounds_,
+                            ddgiCoverageBoundsGeneration_, true);
+  return true;
+}
+
+bool RenderScene::refitDDGIActivationCoverageBounds() noexcept {
+  const bool wasSealed = ddgiActivationCoverageBoundsSealed_;
+  ddgiActivationCoverageBoundsSealed_ = true;
+  const bool changed = publishCoverageFact(ddgiActivationCoverageBounds_,
+                                           ddgiCurrentCoverageBounds_,
+                                           ddgiCoverageBoundsGeneration_, true);
+  return !wasSealed || changed;
+}
+
+bool RenderScene::resetDDGIActivationCoverageBounds() noexcept {
+  if (!ddgiActivationCoverageBoundsSealed_ &&
+      !ddgiActivationCoverageBounds_.valid &&
+      !ddgiActivationCoverageBounds_.complete) {
+    return false;
+  }
+  ddgiActivationCoverageBoundsSealed_ = false;
+  (void)publishCoverageFact(ddgiActivationCoverageBounds_, {},
+                            ddgiCoverageBoundsGeneration_, true);
+  return true;
+}
+
+bool RenderScene::stageDDGIStaticCoverageBounds(
+    const DDGISceneCoverageBounds &bounds) noexcept {
+  DDGISceneCoverageBounds pending = ddgiPendingStaticCoverageBounds_;
+  pending.complete = bounds.complete;
+  if (bounds.valid) {
+    if (!pending.valid) {
+      pending.bounds = bounds.bounds;
+      pending.valid = true;
+    } else {
+      pending.bounds.combinePoint(bounds.bounds.min_);
+      pending.bounds.combinePoint(bounds.bounds.max_);
+    }
+  }
+  bool changed = publishCoverageFact(ddgiPendingStaticCoverageBounds_, pending,
+                                     ddgiCoverageBoundsGeneration_);
+  if (!ddgiStaticCoverageBounds_.valid && pending.valid) {
+    changed |= publishCoverageFact(ddgiStaticCoverageBounds_, pending,
+                                   ddgiCoverageBoundsGeneration_);
+  } else if (ddgiStaticCoverageBounds_.complete != pending.complete) {
+    DDGISceneCoverageBounds committed = ddgiStaticCoverageBounds_;
+    committed.complete = pending.complete;
+    changed |= publishCoverageFact(ddgiStaticCoverageBounds_, committed,
+                                   ddgiCoverageBoundsGeneration_);
+  }
+  return changed;
+}
+
+bool RenderScene::refitDDGIStaticCoverageBounds() noexcept {
+  if (!ddgiPendingStaticCoverageBounds_.valid &&
+      ddgiStaticCoverageBounds_.complete ==
+          ddgiPendingStaticCoverageBounds_.complete) {
+    return false;
+  }
+  DDGISceneCoverageBounds next = ddgiStaticCoverageBounds_;
+  next.complete = ddgiPendingStaticCoverageBounds_.complete;
+  if (ddgiPendingStaticCoverageBounds_.valid) {
+    if (!next.valid) {
+      next.bounds = ddgiPendingStaticCoverageBounds_.bounds;
+      next.valid = true;
+    } else {
+      next.bounds.combinePoint(ddgiPendingStaticCoverageBounds_.bounds.min_);
+      next.bounds.combinePoint(ddgiPendingStaticCoverageBounds_.bounds.max_);
+    }
+  }
+  return publishCoverageFact(ddgiStaticCoverageBounds_, next,
+                             ddgiCoverageBoundsGeneration_);
+}
+
 Result<bool, std::string> RenderScene::commit() {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
   if (incrementalCommit_ != nullptr) {
@@ -339,6 +559,9 @@ Result<bool, std::string> RenderScene::commit() {
   }
   bool changed = false;
   (void)sceneGraph_.syncWorldTransforms();
+  const bool coverageRenderableFactsChanged =
+      sceneGraph_.renderableTopologyDirty_ ||
+      sceneGraph_.renderableTransformsDirty_;
   if (sceneGraph_.renderableTopologyDirty_) {
     sanitizeGraphRenderableRefs();
     for (const Renderable &renderable : renderables_) {
@@ -410,6 +633,7 @@ Result<bool, std::string> RenderScene::commit() {
   }
   changed |= commitPackedLights();
   changed |= commitDDGIVolumes();
+  changed |= commitDDGICoverageBounds(coverageRenderableFactsChanged);
   return Result<bool, std::string>::makeResult(changed);
 }
 
@@ -535,6 +759,7 @@ RenderScene::commitInactiveStep(uint32_t maxOperations) {
   sceneGraph_.renderableDeformationsDirty_ = false;
   commitPackedLights();
   commitDDGIVolumes();
+  (void)commitDDGICoverageBounds(true);
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -586,6 +811,7 @@ void RenderScene::bindResources(ResourceManager *resources) {
   }
   releaseEnvironment(environment_);
   resources_ = resources;
+  ddgiCoverageFactsDirty_ = true;
   if (resources_ == nullptr) {
     return;
   }

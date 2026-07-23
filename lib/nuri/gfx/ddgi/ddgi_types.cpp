@@ -8,8 +8,7 @@
 namespace nuri {
 
 uint32_t ddgiProbeCount(const glm::uvec3 &counts) noexcept {
-  const uint64_t count =
-      static_cast<uint64_t>(counts.x) * counts.y * counts.z;
+  const uint64_t count = static_cast<uint64_t>(counts.x) * counts.y * counts.z;
   return count <= std::numeric_limits<uint32_t>::max()
              ? static_cast<uint32_t>(count)
              : 0u;
@@ -36,10 +35,10 @@ glm::uvec3 ddgiPhysicalProbeCoordinate(const glm::uvec3 &logicalCoordinate,
                                        const glm::uvec3 &counts) noexcept {
   glm::uvec3 physical(0u);
   for (uint32_t axis = 0u; axis < 3u; ++axis) {
-    physical[axis] = counts[axis] == 0u
-                         ? 0u
-                         : (logicalCoordinate[axis] + ringOrigin[axis]) %
-                               counts[axis];
+    physical[axis] =
+        counts[axis] == 0u
+            ? 0u
+            : (logicalCoordinate[axis] + ringOrigin[axis]) % counts[axis];
   }
   return physical;
 }
@@ -78,8 +77,7 @@ DDGIScrollPlan makeDDGIScrollPlan(const glm::ivec3 &cameraCell,
       continue;
     }
     const int64_t delta = static_cast<int64_t>(plan.cellDelta[axis]);
-    int64_t origin =
-        (static_cast<int64_t>(ringOrigin[axis]) + delta) % count;
+    int64_t origin = (static_cast<int64_t>(ringOrigin[axis]) + delta) % count;
     if (origin < 0) {
       origin += count;
     }
@@ -100,8 +98,7 @@ bool isDDGINewlyExposedCoordinate(const glm::uvec3 &logicalCoordinate,
   }
   for (uint32_t axis = 0u; axis < 3u; ++axis) {
     const int64_t delta = static_cast<int64_t>(plan.cellDelta[axis]);
-    const uint32_t magnitude =
-        static_cast<uint32_t>(std::abs(delta));
+    const uint32_t magnitude = static_cast<uint32_t>(std::abs(delta));
     if ((delta > 0 &&
          logicalCoordinate[axis] >= probeCounts[axis] - magnitude) ||
         (delta < 0 && logicalCoordinate[axis] < magnitude)) {
@@ -147,8 +144,7 @@ makeDDGIVolumeLayout(DDGIVolumeId id, const DDGIVolumeDesc &desc,
                      DDGIAtlasLayout irradianceAtlas,
                      DDGIAtlasLayout distanceAtlas, uint64_t generation,
                      glm::ivec3 cameraCell, glm::uvec3 ringOrigin) {
-  using LayoutResult =
-      Result<DDGIVolumeLayout, DDGIVolumeValidationError>;
+  using LayoutResult = Result<DDGIVolumeLayout, DDGIVolumeValidationError>;
   const DDGIVolumeValidationError validation = validateDDGIVolumeDesc(desc);
   if (validation.reason != DDGIVolumeValidationReason::None) {
     return LayoutResult::makeError(validation);
@@ -166,9 +162,9 @@ makeDDGIVolumeLayout(DDGIVolumeId id, const DDGIVolumeDesc &desc,
       .id = id,
       .probeCounts = desc.probeCounts,
       .probeSpacing = desc.probeSpacing,
-      .probeCenterHalfExtents =
-          0.5f * glm::vec3(desc.probeCounts - glm::uvec3(1u)) *
-          desc.probeSpacing,
+      .probeCenterHalfExtents = 0.5f *
+                                glm::vec3(desc.probeCounts - glm::uvec3(1u)) *
+                                desc.probeSpacing,
       .worldFromLocal = worldFromLocal,
       .localFromWorld = glm::affineInverse(worldFromLocal),
       .cameraCell = cameraCell,
@@ -179,11 +175,10 @@ makeDDGIVolumeLayout(DDGIVolumeId id, const DDGIVolumeDesc &desc,
   });
 }
 
-DDGIVolumeBlendWeights
-ddgiPriorityBlendWeights(float firstCoverage, float secondCoverage) noexcept {
+DDGIVolumeBlendWeights ddgiPriorityBlendWeights(float firstCoverage,
+                                                float secondCoverage) noexcept {
   const float first = std::clamp(firstCoverage, 0.0f, 1.0f);
-  const float secondCoverageClamped =
-      std::clamp(secondCoverage, 0.0f, 1.0f);
+  const float secondCoverageClamped = std::clamp(secondCoverage, 0.0f, 1.0f);
   const float second = (1.0f - first) * secondCoverageClamped;
   return {.first = first,
           .second = second,

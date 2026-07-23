@@ -189,6 +189,27 @@ applySceneEvents(RenderScene &scene,
       }
       continue;
     }
+    if (event->type == "setLocalLightIntensity") {
+      LightId selected = kInvalidLightId;
+      graph.forEachLightId([&](LightId id) {
+        LightDesc desc{};
+        if (!nuri::isValid(selected) && graph.getLightDesc(id, desc) &&
+            desc.type != LightType::Directional && desc.name == event->target) {
+          selected = id;
+        }
+      });
+      LightDesc desc{};
+      if (!nuri::isValid(selected) || !graph.getLightDesc(selected, desc)) {
+        return Result<bool, std::string>::makeError(
+            "setLocalLightIntensity target was not found: " + event->target);
+      }
+      desc.intensity = event->intensity;
+      if (!graph.updateLight(selected, desc)) {
+        return Result<bool, std::string>::makeError(
+            "setLocalLightIntensity failed to update the light");
+      }
+      continue;
+    }
     if (event->type == "setNodeTranslation") {
       const std::optional<NodeId> node = findNodeByName(graph, event->target);
       glm::mat4 transform{1.0f};

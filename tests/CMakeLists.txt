@@ -275,9 +275,27 @@ nuri_add_gtest_suite(
 )
 
 nuri_add_gtest_suite(
+  nuri_render_scene_ddgi_bounds_tests
+  src/render_scene_ddgi_bounds_tests.cpp
+  "render_scene_ddgi_bounds::"
+)
+
+nuri_add_gtest_suite(
   nuri_ddgi_atlas_tests
   src/ddgi_atlas_tests.cpp
   "ddgi_atlas::"
+)
+
+nuri_add_gtest_suite(
+  nuri_ddgi_coverage_tests
+  src/ddgi_coverage_tests.cpp
+  "ddgi_coverage::"
+)
+
+nuri_add_gtest_suite(
+  nuri_ddgi_dirty_regions_tests
+  src/ddgi_dirty_regions_tests.cpp
+  "ddgi_dirty_regions::"
 )
 
 nuri_add_gtest_suite(

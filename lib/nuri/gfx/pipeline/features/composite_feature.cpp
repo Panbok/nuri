@@ -1332,6 +1332,42 @@ Result<bool, std::string> PresentToneMapPass::build(FrameBuildContext &ctx) {
                             RenderCaptureLifetimeClass::FrameSharedRingTexture,
                             "linear_hdr", "debug_preview", "PresentToneMapPass",
                             "ddgi_debug_preview");
+    const DDGIDebugView ddgiView =
+        renderSettingsOrDefault(ctx.frame).ddgi.debugView;
+    std::string_view semanticCapture{};
+    if (ddgiView == DDGIDebugView::VolumeId ||
+        ddgiView == DDGIDebugView::ProbeWeights ||
+        ddgiView == DDGIDebugView::Confidence) {
+      semanticCapture = "ddgi_coverage_debug_preview";
+    } else if (ddgiView == DDGIDebugView::Classification) {
+      semanticCapture = "ddgi_classification_debug_preview";
+    } else if (ddgiView == DDGIDebugView::UpdateAge) {
+      // Update age is the production dirty-response visualization: affected
+      // probes return to a low submitted age as their localized work commits.
+      semanticCapture = "ddgi_dirty_region_debug_preview";
+    }
+    if (!semanticCapture.empty() &&
+        isRenderCaptureRequested(ctx.frame, semanticCapture)) {
+      DDGICaptureMetadata metadata{};
+      if (ctx.shared.ddgiFrameGpuData.has_value()) {
+        metadata = ctx.shared.ddgiFrameGpuData->captureMetadata[0u];
+      }
+      ctx.frame.captureRegistry.publish(RenderCapturePoint{
+          .name = semanticCapture,
+          .version = kDDGICaptureSemanticsVersion,
+          .texture = source,
+          .format = gpu_.getTextureFormat(source),
+          .dimensions = gpu_.getTextureDimensions(source),
+          .frameIndex = ctx.frame.frameIndex,
+          .kind = RenderCaptureValueKind::DebugPreview,
+          .lifetime = RenderCaptureLifetimeClass::FrameSharedRingTexture,
+          .colorSpace = "linear_hdr",
+          .defaultCompareProfile = "debug_preview",
+          .producerPassLabel = "PresentToneMapPass",
+          .debugLabel = semanticCapture,
+          .ddgiMetadata = metadata,
+      });
+    }
   }
   if (isRenderCaptureRequested(ctx.frame, "final_color") &&
       nuri::isValid(ctx.shared.presentCaptureTexture)) {

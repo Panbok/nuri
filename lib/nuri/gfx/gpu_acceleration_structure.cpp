@@ -6,16 +6,16 @@
 namespace nuri {
 namespace {
 
-[[nodiscard]] bool buildFlagsValid(
-    AccelerationStructureBuildFlags flags) noexcept {
+[[nodiscard]] bool
+buildFlagsValid(AccelerationStructureBuildFlags flags) noexcept {
   return !(hasAccelerationStructureBuildFlag(
                flags, AccelerationStructureBuildFlags::PreferFastTrace) &&
            hasAccelerationStructureBuildFlag(
                flags, AccelerationStructureBuildFlags::PreferFastBuild));
 }
 
-[[nodiscard]] bool transformFinite(
-    const AccelerationStructureTransform &transform) noexcept {
+[[nodiscard]] bool
+transformFinite(const AccelerationStructureTransform &transform) noexcept {
   for (const float value : transform.rowMajor3x4) {
     if (!std::isfinite(value)) {
       return false;
@@ -61,8 +61,7 @@ validateBlasCreateDesc(const BlasCreateDesc &desc,
     if (geometry.vertexCount == 0u || geometry.vertexStrideBytes < 12u ||
         geometry.vertexStrideBytes % 4u != 0u ||
         geometry.vertexByteOffset % 4u != 0u) {
-      return {AccelerationStructureValidationReason::InvalidVertexRange,
-              index};
+      return {AccelerationStructureValidationReason::InvalidVertexRange, index};
     }
     const uint32_t indexStride =
         geometry.indexFormat == IndexFormat::U16 ? 2u : 4u;

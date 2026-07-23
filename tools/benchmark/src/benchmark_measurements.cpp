@@ -23,6 +23,9 @@ BenchmarkFrameMeasurements::BenchmarkFrameMeasurements(
 
 void BenchmarkFrameMeasurements::appendRegistered(BenchmarkMetricIndex index,
                                                   double value) {
+  if (!index.valid()) {
+    return;
+  }
   values_.push_back(
       BenchmarkMeasurement{.registeredIndex = index, .second = value});
 }

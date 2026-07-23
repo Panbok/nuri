@@ -283,6 +283,30 @@ FakeGPUDeviceBase::createTextureImpl(const TextureDesc &desc) {
 }
 
 Result<bool, std::string>
+FakeGPUDeviceBase::copyBufferRegion(const BufferCopyRegion &copy) {
+  if (!isValid(copy.srcBuffer) || !isValid(copy.dstBuffer) ||
+      copy.srcBuffer.index > buffers_.size() ||
+      copy.dstBuffer.index > buffers_.size()) {
+    return Result<bool, std::string>::makeError(
+        "fake buffer copy: invalid buffer");
+  }
+  BufferState &source = buffers_[copy.srcBuffer.index - 1u];
+  BufferState &destination = buffers_[copy.dstBuffer.index - 1u];
+  if (!source.live || !destination.live || copy.srcOffset > source.size ||
+      copy.size > source.size - copy.srcOffset ||
+      copy.dstOffset > destination.size ||
+      copy.size > destination.size - copy.dstOffset) {
+    return Result<bool, std::string>::makeError(
+        "fake buffer copy: range out of bounds");
+  }
+  std::copy_n(
+      source.bytes.begin() + static_cast<std::ptrdiff_t>(copy.srcOffset),
+      static_cast<std::ptrdiff_t>(copy.size),
+      destination.bytes.begin() + static_cast<std::ptrdiff_t>(copy.dstOffset));
+  return Result<bool, std::string>::makeResult(true);
+}
+
+Result<bool, std::string>
 FakeGPUDeviceBase::copyTextureRegion(const TextureCopyItem &copy) {
   if (!isValid(copy.sourceTexture) || !isValid(copy.destinationTexture)) {
     return Result<bool, std::string>::makeError(
@@ -657,6 +681,7 @@ Result<bool, std::string> FakeGPUDeviceBase::beginFrame(uint64_t frameIndex) {
   finishCallCount_ = 0u;
   recordedPasses.clear();
   recordedMeshDispatchStorage_.clear();
+  recordedBufferCopyStorage_.clear();
   recordedTextureCopyStorage_.clear();
   submittedCommandBuffers.clear();
   submittedBatches.clear();
@@ -726,6 +751,12 @@ FakeGPUDeviceBase::recordGraphicsPass(RecordingContextHandle ctx,
   }
   for (auto &state : activeRecordingContexts_) {
     if (sameHandle(state.handle, ctx)) {
+      for (const BufferCopyRegion &copy : pass.bufferCopies) {
+        auto copyResult = copyBufferRegion(copy);
+        if (copyResult.hasError()) {
+          return copyResult;
+        }
+      }
       for (const TextureCopyItem &copy : pass.textureCopies) {
         auto copyResult = copyTextureRegion(copy);
         if (copyResult.hasError()) {
@@ -739,6 +770,12 @@ FakeGPUDeviceBase::recordGraphicsPass(RecordingContextHandle ctx,
           state.meshDispatchStorage.back();
       copiedPass.meshDispatches = std::span<const MeshDispatchItem>(
           meshDispatches.data(), meshDispatches.size());
+      state.bufferCopyStorage.emplace_back(pass.bufferCopies.begin(),
+                                           pass.bufferCopies.end());
+      std::vector<BufferCopyRegion> &bufferCopies =
+          state.bufferCopyStorage.back();
+      copiedPass.bufferCopies = std::span<const BufferCopyRegion>(
+          bufferCopies.data(), bufferCopies.size());
       state.textureCopyStorage.emplace_back(pass.textureCopies.begin(),
                                             pass.textureCopies.end());
       std::vector<TextureCopyItem> &textureCopies =
@@ -772,6 +809,8 @@ FakeGPUDeviceBase::finishGraphicsRecordingContext(RecordingContextHandle ctx) {
     finished.passes = activeRecordingContexts_[i].passes;
     finished.meshDispatchStorage =
         std::move(activeRecordingContexts_[i].meshDispatchStorage);
+    finished.bufferCopyStorage =
+        std::move(activeRecordingContexts_[i].bufferCopyStorage);
     finished.textureCopyStorage =
         std::move(activeRecordingContexts_[i].textureCopyStorage);
     finishedCommandBuffers_.push_back(std::move(finished));
@@ -821,8 +860,10 @@ void FakeGPUDeviceBase::recordSubmitFrame(
   ++submitCount;
   recordedPasses.assign(passes.begin(), passes.end());
   recordedMeshDispatchStorage_.clear();
+  recordedBufferCopyStorage_.clear();
   recordedTextureCopyStorage_.clear();
   recordedMeshDispatchStorage_.reserve(recordedPasses.size());
+  recordedBufferCopyStorage_.reserve(recordedPasses.size());
   recordedTextureCopyStorage_.reserve(recordedPasses.size());
   for (RenderPass &pass : recordedPasses) {
     recordedMeshDispatchStorage_.emplace_back(pass.meshDispatches.begin(),
@@ -831,6 +872,12 @@ void FakeGPUDeviceBase::recordSubmitFrame(
         recordedMeshDispatchStorage_.back();
     pass.meshDispatches = std::span<const MeshDispatchItem>(
         meshDispatches.data(), meshDispatches.size());
+    recordedBufferCopyStorage_.emplace_back(pass.bufferCopies.begin(),
+                                            pass.bufferCopies.end());
+    std::vector<BufferCopyRegion> &bufferCopies =
+        recordedBufferCopyStorage_.back();
+    pass.bufferCopies = std::span<const BufferCopyRegion>(bufferCopies.data(),
+                                                          bufferCopies.size());
     recordedTextureCopyStorage_.emplace_back(pass.textureCopies.begin(),
                                              pass.textureCopies.end());
     std::vector<TextureCopyItem> &textureCopies =

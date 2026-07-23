@@ -47,6 +47,7 @@ struct SnapshotArtifactMetadata {
   std::string profile{};
   std::string payload{};
   std::string hash{};
+  DDGICaptureMetadata ddgiMetadata{};
 };
 
 [[nodiscard]] size_t snapshotFormatBytesPerPixel(Format format) noexcept;

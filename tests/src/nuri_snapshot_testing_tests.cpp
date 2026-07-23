@@ -198,6 +198,99 @@ TEST(NuriSnapshotTestingTest, ManifestRejectsUnknownKeys) {
   std::filesystem::remove(path, ec);
 }
 
+TEST(NuriSnapshotTestingTest, ManifestParsesStrictVersionedDDGICoverage) {
+  const std::filesystem::path path =
+      makeTempPath("snapshot_ddgi_coverage", ".json");
+  const std::string manifest = R"json({
+    "schemaVersion": 1,
+    "id": "ddgi.coverage",
+    "suite": "ddgi",
+    "settings": {"ddgi": {"coverage": {
+      "schemaVersion": 1,
+      "mode": "Hybrid",
+      "constraintPolicy": "PreserveNearSpacing",
+      "sceneBoundsSource": "Authored",
+      "authoredBounds": {"min": [-4, -2, -6], "max": [8, 10, 12]},
+      "cascadeCount": 4,
+      "cascadeProbeCounts": [24, 14, 20],
+      "requestedNearSpacing": [1, 1.25, 1.5],
+      "spacingRatio": 2.5,
+      "requestedCoverageHalfExtents": [60, 35, 55],
+      "scenePaddingCells": 3,
+      "transitionCells": 2,
+      "includeAuthoredVolumes": false
+    }}},
+    "captures": [{"target": "final_color"}]
+  })json";
+  writeFile(path, manifest);
+
+  auto loaded = loadSnapshotCaseManifest(path);
+  ASSERT_FALSE(loaded.hasError()) << loaded.error();
+  const DDGICoverageSettings &coverage = loaded.value().settings.ddgi.coverage;
+  EXPECT_EQ(coverage.mode, DDGICoverageMode::Hybrid);
+  EXPECT_EQ(coverage.constraintPolicy,
+            DDGICoverageConstraintPolicy::PreserveNearSpacing);
+  EXPECT_EQ(coverage.sceneBoundsSource, DDGISceneBoundsSource::Authored);
+  EXPECT_TRUE(coverage.authoredBounds.valid);
+  EXPECT_TRUE(coverage.authoredBounds.complete);
+  EXPECT_FLOAT_EQ(coverage.authoredBounds.bounds.min_.x, -4.0f);
+  EXPECT_FLOAT_EQ(coverage.authoredBounds.bounds.min_.y, -2.0f);
+  EXPECT_FLOAT_EQ(coverage.authoredBounds.bounds.min_.z, -6.0f);
+  EXPECT_FLOAT_EQ(coverage.authoredBounds.bounds.max_.x, 8.0f);
+  EXPECT_FLOAT_EQ(coverage.authoredBounds.bounds.max_.y, 10.0f);
+  EXPECT_FLOAT_EQ(coverage.authoredBounds.bounds.max_.z, 12.0f);
+  EXPECT_EQ(coverage.cascadeCount, 4u);
+  EXPECT_EQ(coverage.cascadeProbeCounts.x, 24u);
+  EXPECT_EQ(coverage.cascadeProbeCounts.y, 14u);
+  EXPECT_EQ(coverage.cascadeProbeCounts.z, 20u);
+  EXPECT_FLOAT_EQ(coverage.requestedNearSpacing.x, 1.0f);
+  EXPECT_FLOAT_EQ(coverage.requestedNearSpacing.y, 1.25f);
+  EXPECT_FLOAT_EQ(coverage.requestedNearSpacing.z, 1.5f);
+  EXPECT_FLOAT_EQ(coverage.spacingRatio, 2.5f);
+  EXPECT_FLOAT_EQ(coverage.requestedCoverageHalfExtents.x, 60.0f);
+  EXPECT_FLOAT_EQ(coverage.requestedCoverageHalfExtents.y, 35.0f);
+  EXPECT_FLOAT_EQ(coverage.requestedCoverageHalfExtents.z, 55.0f);
+  EXPECT_EQ(coverage.scenePaddingCells, 3u);
+  EXPECT_EQ(coverage.transitionCells, 2u);
+  EXPECT_FALSE(coverage.includeAuthoredVolumes);
+
+  writeFile(path,
+            R"json({
+              "schemaVersion": 1,
+              "id": "ddgi.coverage.default",
+              "suite": "ddgi",
+              "settings": {"ddgi": {"enabled": true}},
+              "captures": [{"target": "final_color"}]
+            })json");
+  loaded = loadSnapshotCaseManifest(path);
+  ASSERT_FALSE(loaded.hasError()) << loaded.error();
+  EXPECT_EQ(loaded.value().settings.ddgi.coverage.mode,
+            DDGICoverageMode::Manual);
+  EXPECT_FALSE(loaded.value().settings.ddgi.coverage.authoredBounds.valid);
+
+  const std::array invalidManifests{
+      replaceFirst(manifest, "\"schemaVersion\": 1,\n      \"mode\"",
+                   "\"schemaVersion\": 2,\n      \"mode\""),
+      replaceFirst(manifest, "\"includeAuthoredVolumes\": false",
+                   "\"includeAuthoredVolumes\": false, \"unexpected\": true"),
+      replaceFirst(
+          manifest,
+          "\"authoredBounds\": {\"min\": [-4, -2, -6], \"max\": [8, 10, 12]}",
+          "\"authoredBounds\": {\"min\": [-4, -2, -6]}")};
+  for (const std::string &invalidManifest : invalidManifests) {
+    writeFile(path, invalidManifest);
+    auto invalid = loadSnapshotCaseManifest(path);
+    EXPECT_TRUE(invalid.hasError());
+    if (invalid.hasError()) {
+      EXPECT_NE(invalid.error().find("settings.ddgi.coverage"),
+                std::string::npos);
+    }
+  }
+
+  std::error_code ec;
+  std::filesystem::remove(path, ec);
+}
+
 TEST(NuriSnapshotTestingTest, ManifestRejectsRemovedBackends) {
   const std::filesystem::path path =
       makeTempPath("snapshot_removed_backend", ".json");
@@ -370,6 +463,29 @@ TEST(NuriSnapshotTestingTest, CatalogListsCapturableAndDiagnosticTargets) {
   EXPECT_EQ(gtaoPreviousDepth->availability,
             SnapshotCaptureAvailability::FirstSlice);
   EXPECT_EQ(gtaoPreviousDepth->defaultCompareProfile, "depth");
+  for (uint32_t slot = 0u; slot < kMaxDDGIEffectiveVolumes; ++slot) {
+    const std::string irradiance =
+        "ddgi_volume" + std::to_string(slot) + "_irradiance_atlas";
+    const std::string distance =
+        "ddgi_volume" + std::to_string(slot) + "_distance_atlas";
+    const SnapshotCaptureCatalogEntry *irradianceEntry =
+        findSnapshotCaptureCatalogEntry(irradiance);
+    const SnapshotCaptureCatalogEntry *distanceEntry =
+        findSnapshotCaptureCatalogEntry(distance);
+    ASSERT_NE(irradianceEntry, nullptr) << irradiance;
+    ASSERT_NE(distanceEntry, nullptr) << distance;
+    EXPECT_EQ(irradianceEntry->version, kDDGICaptureSemanticsVersion);
+    EXPECT_EQ(distanceEntry->version, kDDGICaptureSemanticsVersion);
+  }
+  for (std::string_view semantic :
+       {"ddgi_coverage_debug_preview", "ddgi_classification_debug_preview",
+        "ddgi_dirty_region_debug_preview"}) {
+    const SnapshotCaptureCatalogEntry *entry =
+        findSnapshotCaptureCatalogEntry(semantic);
+    ASSERT_NE(entry, nullptr) << semantic;
+    EXPECT_EQ(entry->version, kDDGICaptureSemanticsVersion);
+    EXPECT_EQ(entry->kind, RenderCaptureValueKind::DebugPreview);
+  }
 }
 
 TEST(NuriSnapshotTestingTest, CaptureRequestsAndRegistryAreStable) {
@@ -508,6 +624,23 @@ TEST(NuriSnapshotTestingTest, MipReadbackUsesReducedDimensionsEverywhere) {
   readback.point.dimensions =
       TextureDimensions{.width = 4u, .height = 4u, .depth = 1u};
   readback.point.mip = 1u;
+  readback.point.ddgiMetadata = DDGICaptureMetadata{
+      .effectiveKeyHash = 0x123456789abcdef0ull,
+      .coverageGeneration = 7u,
+      .layoutGeneration = 8u,
+      .resourceGeneration = 9u,
+      .sceneBoundsGeneration = 10u,
+      .effectiveKind = 2u,
+      .cascadeIndex = 3u,
+      .ringOrigin = {1u, 2u, 3u},
+      .cameraCell = {-4, 5, -6},
+      .requestedHalfExtents = {55.0f, 30.0f, 55.0f},
+      .achievedHalfExtents = {60.0f, 36.0f, 60.0f},
+      .fadeStartHalfExtents = {52.0f, 28.0f, 52.0f},
+      .fadeEndHalfExtents = {58.0f, 34.0f, 58.0f},
+      .transitionCells = 2u,
+      .valid = 1u,
+  };
   readback.rowStride = 8u;
   readback.bytes.assign(16u, std::byte{255});
   readback.hash = snapshotHashBytes(readback.bytes);
@@ -533,6 +666,13 @@ TEST(NuriSnapshotTestingTest, MipReadbackUsesReducedDimensionsEverywhere) {
   EXPECT_EQ(metadata.value().mip, 1u);
   EXPECT_EQ(metadata.value().kind, "color");
   EXPECT_EQ(metadata.value().profile, "ldr_color");
+  EXPECT_EQ(metadata.value().ddgiMetadata.effectiveKeyHash,
+            0x123456789abcdef0ull);
+  EXPECT_EQ(metadata.value().ddgiMetadata.coverageGeneration, 7u);
+  EXPECT_EQ(metadata.value().ddgiMetadata.ringOrigin, glm::uvec3(1u, 2u, 3u));
+  EXPECT_EQ(metadata.value().ddgiMetadata.cameraCell, glm::ivec3(-4, 5, -6));
+  EXPECT_EQ(metadata.value().ddgiMetadata.transitionCells, 2u);
+  EXPECT_EQ(metadata.value().ddgiMetadata.valid, 1u);
 
   std::error_code ec;
   std::filesystem::remove(paths.raw, ec);

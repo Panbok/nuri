@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 1,
+  "id": "stress.niagara_bistro.current_hiz_exact_editor_frames_repro",
+  "suite": "stress",
+  "description": "Exact editor-exported Bistro camera frames for residual current-frame Hi-Z facade self-occlusion",
+  "scene": {
+    "kind": "prefab",
+    "pathBase": "modelsRoot",
+    "path": "NiagaraBistro/bistrox.gltf",
+    "importOptions": {"mesh": {"generateMeshlets": true, "meshletMaxVertices": 64, "meshletMaxPrimitives": 124, "meshletConeWeight": 0.0}}
+  },
+  "environment": {
+    "cubemap": {"pathBase": "texturesRoot", "path": "qwantani_moon_noon_puresky_4k.hdr", "kind": "EquirectHdrCubemap", "debugName": "tool_qwantani_cubemap", "required": true},
+    "irradiance": {"pathBase": "texturesRoot", "path": "qwantani_moon_noon_puresky_4k_irradiance.ktx2", "kind": "Ktx2Cubemap", "debugName": "tool_qwantani_irradiance"},
+    "prefilteredGgx": {"pathBase": "texturesRoot", "path": "qwantani_moon_noon_puresky_4k_prefilter_ggx.ktx2", "kind": "Ktx2Cubemap", "debugName": "tool_qwantani_prefilter_ggx"},
+    "prefilteredCharlie": {"pathBase": "texturesRoot", "path": "qwantani_moon_noon_puresky_4k_prefilter_charlie.ktx2", "kind": "Ktx2Cubemap", "debugName": "tool_qwantani_prefilter_charlie"},
+    "brdfLut": {"pathBase": "texturesRoot", "path": "brdf_lut.ktx2", "debugName": "tool_brdf_lut"}
+  },
+  "backend": "nvrhi",
+  "resolution": [1858, 1057],
+  "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 12,
+  "endFrame": 14,
+  "authoritative": false,
+  "presentMode": "immediate",
+  "windowMode": "visible",
+  "renderGraph": {"workerCount": 1, "parallelCompile": false, "parallelRecording": false},
+  "camera": {
+    "position": [30.4899864, 5.7813735, 30.21367645],
+    "direction": [0.868285477, -0.074182868, 0.49048686],
+    "verticalFovDegrees": 60.0000038,
+    "nearPlane": 0.02500000035,
+    "farPlane": 250.0
+  },
+  "settings": {
+    "opaque": {"enabled": true, "meshletMode": "Opportunistic", "hybridClassicMaxMeshlets": 128, "enableMeshletFrustumCulling": true, "enableMeshletConeCulling": true, "enableDepthPrepass": true, "enableDepthPyramid": true, "enableInstanceCompute": false, "enableInstanceAnimation": false, "enableMeshLod": false, "enableTessellation": false, "forcedMeshLod": 0},
+    "visibility": {"mainViewMode": "GpuDriven", "occlusionMode": "CurrentFrameHiZExperimental", "enableMeshletFrustumCulling": true, "enableMeshletConeCulling": true, "enableIndirectMeshDispatch": true, "enableMeshletPreTaskCompaction": true, "visibleOnUncertain": true},
+    "antiAliasing": {"mode": "TAA", "temporalProvider": "Reference", "qualityPreset": "Ultra"},
+    "ambientOcclusion": {"mode": "GTAO", "preset": "Ultra"},
+    "shadow": {"enabled": true, "qualityPreset": "Ultra"},
+    "hdrPostProcess": {"bloomEnabled": false, "adaptationEnabled": false},
+    "transmission": {"enabled": false},
+    "transparent": {"enabled": false},
+    "textureFiltering": {"mode": "Anisotropic", "anisotropy": 8}
+  },
+  "timeline": {
+    "events": [
+      {"frame": 0, "type": "resetTemporalHistory", "eventReason": "scenario_start"},
+      {"frame": 13, "type": "setCamera", "preserveHistory": true, "eventReason": "exact_editor_frame_2", "camera": {"position": [30.16329385, 5.7813735, 30.80351065], "direction": [0.878020108, -0.089132607, 0.470251083], "verticalFovDegrees": 60.0000038, "nearPlane": 0.02500000035, "farPlane": 250.0}},
+      {"frame": 14, "type": "setCamera", "preserveHistory": true, "eventReason": "exact_editor_frame_3", "camera": {"position": [26.59051515, 5.91357945, 35.78352735], "direction": [0.989256799, -0.0017510429, 0.146178141], "verticalFovDegrees": 60.0000038, "nearPlane": 0.02500000035, "farPlane": 250.0}}
+    ]
+  },
+  "checkpoints": [
+    {"id": "exact_1", "frame": 12, "captures": [{"target": "final_color", "profile": "ldr_color", "required": true, "compare": false}, {"target": "scene_color_hdr", "profile": "hdr_color", "required": true, "compare": false}, {"target": "scene_depth", "profile": "depth", "required": true, "compare": false}, {"target": "material_normals", "profile": "normal", "required": true, "compare": false}], "assertions": [{"id": "current_hiz_active_1", "metric": "renderer.visibility.current_frame_hiz_active", "equals": 1}]},
+    {"id": "exact_2", "frame": 13, "captures": [{"target": "final_color", "profile": "ldr_color", "required": true, "compare": false}, {"target": "scene_color_hdr", "profile": "hdr_color", "required": true, "compare": false}, {"target": "scene_depth", "profile": "depth", "required": true, "compare": false}, {"target": "material_normals", "profile": "normal", "required": true, "compare": false}], "assertions": [{"id": "current_hiz_active_2", "metric": "renderer.visibility.current_frame_hiz_active", "equals": 1}]},
+    {"id": "exact_3", "frame": 14, "captures": [{"target": "final_color", "profile": "ldr_color", "required": true, "compare": false}, {"target": "scene_color_hdr", "profile": "hdr_color", "required": true, "compare": false}, {"target": "scene_depth", "profile": "depth", "required": true, "compare": false}, {"target": "material_normals", "profile": "normal", "required": true, "compare": false}], "assertions": [{"id": "current_hiz_active_3", "metric": "renderer.visibility.current_frame_hiz_active", "equals": 1}]}
+  ],
+  "metricWindows": [{"id": "exact_editor_frames", "frames": [12, 14], "assertions": [{"id": "current_hiz_stays_active", "metric": "renderer.visibility.current_frame_hiz_active", "equals": 1}, {"id": "current_hiz_is_fresh", "metric": "renderer.visibility.meshlet_occlusion_source_age", "equals": 0}, {"id": "facade_self_occlusion_rejects_zero_meshlets", "metric": "renderer.visibility.meshlet_rejected_occlusion", "equals": 0}, {"id": "pre_task_compaction_stays_active", "metric": "renderer.visibility.meshlet_pre_task_compaction_active", "equals": 1}, {"id": "no_payload_overflow", "metric": "renderer.visibility.meshlet_payload_overflow_count", "equals": 0}, {"id": "gtao_stays_active", "metric": "renderer.ao.active", "equals": 1}, {"id": "four_shadow_cascades", "metric": "renderer.shadow.cascades", "equals": 4}, {"id": "taa_stays_active", "metric": "renderer.aa.taa_resolve_passes", "equals": 1}]}],
+  "requirements": {"assets": ["modelsRoot:NiagaraBistro/bistrox.gltf", "texturesRoot:qwantani_moon_noon_puresky_4k.hdr"], "backends": ["nvrhi"], "allowVisibleWindow": true}
+}

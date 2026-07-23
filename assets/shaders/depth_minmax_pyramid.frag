@@ -23,6 +23,11 @@ vec2 sampleMinMax(ivec2 coord, ivec2 sourceSize) {
 
 void main() {
   ivec2 sourceSize = max(textureBindlessSize2D(pc.sourceTexId), ivec2(1));
+  if (pc.sourceIsRawDepth == 2u) {
+    const float depth = sampleMinMax(ivec2(gl_FragCoord.xy), sourceSize).x;
+    out_FragColor = vec2(depth);
+    return;
+  }
   // Reduction is addressed in texels; scene-copy UVs have a different Y
   // contract and are not valid for constructing this hierarchy.
   const ivec2 sourceBase = ivec2(gl_FragCoord.xy) * 2;

@@ -106,6 +106,14 @@ private:
     std::pmr::vector<AccelerationStructureTriangleGeometryDesc> geometries;
   };
 
+  struct GeometryBoundsSnapshot {
+    BoundingBox bounds{};
+    uint64_t sourceId = 0u;
+    bool dynamic = false;
+    bool deforming = false;
+    bool boundsKnown = false;
+  };
+
   [[nodiscard]] Result<bool, std::string> initialize();
   [[nodiscard]] Result<bool, std::string>
   rebuildStaticScene(FrameBuildContext &ctx, const SceneDrawDatabase &database);
@@ -122,8 +130,17 @@ private:
   [[nodiscard]] Result<bool, std::string>
   appendTlasUpdatePass(FrameBuildContext &ctx);
   [[nodiscard]] Result<bool, std::string> uploadTables();
+  void rebuildSurfaceBounds(const SceneDrawDatabase &database);
+  void prepareTopologyChangeRegions(uint64_t sourceVersion,
+                                    bool sceneChanged) noexcept;
+  void prepareTransformChangeRegions(uint64_t sourceVersion) noexcept;
+  void prepareDeformationChangeRegions(uint64_t sourceVersion) noexcept;
+  void publishGeometryChange(DDGISceneChangeRegion change) noexcept;
+  void beginGeometryChanges(uint64_t frameIndex, bool append) noexcept;
+  void commitGeometryChanges(uint64_t frameIndex) noexcept;
+  void abandonGeometryChanges(uint64_t frameIndex) noexcept;
   void rebuildIndirectReferences(const FrameSharedResources &shared);
-  void clearSceneResources() noexcept;
+  void clearSceneResources(bool clearChangeTracking = true) noexcept;
   void pollCompletion() noexcept;
   void publish(FrameBuildContext &ctx,
                RenderGraphAccelerationStructureId graphTlas = {});
@@ -140,6 +157,14 @@ private:
   std::pmr::vector<DynamicGeometryEntry> dynamicGeometries_;
   std::pmr::vector<RtInstanceGpuData> instanceRecords_;
   std::pmr::vector<RtGeometryGpuData> geometryRecords_;
+  std::pmr::vector<RtSurfaceBoundsGpuData> surfaceBoundsRecords_;
+  std::pmr::vector<GeometryBoundsSnapshot> currentGeometryBounds_;
+  std::pmr::vector<GeometryBoundsSnapshot> committedGeometryBounds_;
+  DDGISceneCoverageBounds currentStaticCoverageBounds_{};
+  std::array<DDGISceneChangeRegion, kMaxDDGIGeometryChangeRegions>
+      pendingGeometryChanges_{};
+  std::array<DDGISceneChangeRegion, kMaxDDGIGeometryChangeRegions>
+      committedGeometryChanges_{};
   std::pmr::vector<AccelerationStructureInstanceDesc> tlasInstances_;
   std::pmr::vector<DecodeWork> decodeWork_;
   std::pmr::vector<ComputeDispatchItem> decodeDispatches_;
@@ -152,9 +177,10 @@ private:
   std::pmr::vector<RenderGraphAccelerationStructureUse> blasUses_;
   std::pmr::vector<RenderGraphAccelerationStructureUse> tlasUses_;
   std::pmr::vector<BufferHandle> indirectReferences_;
-  std::array<BufferHandle, 7u> indirectReferenceInputs_{};
+  std::array<BufferHandle, 8u> indirectReferenceInputs_{};
   OwnedBufferHandle instanceTable_{};
   OwnedBufferHandle geometryTable_{};
+  OwnedBufferHandle surfaceBounds_{};
   OwnedAccelerationStructure tlas_{};
   SubmissionHandle buildCompletion_{};
   uint64_t sceneId_ = 0u;
@@ -163,18 +189,28 @@ private:
   uint64_t pendingTransformVersion_ = 0u;
   uint64_t deformationVersion_ = 0u;
   uint64_t geometryMutationVersion_ = 0u;
+  uint64_t asScratchHighWaterBytes_ = 0u;
   uint64_t animationVersion_ = 0u;
   uint64_t pendingAnimationVersion_ = 0u;
   uint64_t consumedRebuildEpoch_ = 0u;
   uint64_t scheduledFrameIndex_ = UINT64_MAX;
   uint32_t excludedDynamicInstances_ = 0u;
   uint32_t staticInstanceCount_ = 0u;
+  uint32_t staticSurfaceBoundsCount_ = 0u;
+  uint32_t dynamicSurfaceBoundsCount_ = 0u;
+  uint32_t pendingGeometryChangeCount_ = 0u;
+  uint32_t committedGeometryChangeCount_ = 0u;
+  uint64_t geometryChangeFrameIndex_ = UINT64_MAX;
+  bool geometryChangeOverflow_ = false;
+  bool committedGeometryChangeOverflow_ = false;
   bool topologyBuildScheduled_ = false;
   bool dynamicUpdateScheduled_ = false;
   bool transformUpdateScheduled_ = false;
   bool indirectReferencesDirty_ = true;
   bool ready_ = false;
   bool failed_ = false;
+  bool staticSurfaceBoundsAvailable_ = false;
+  bool dynamicSurfaceBoundsAvailable_ = false;
 };
 
 } // namespace nuri

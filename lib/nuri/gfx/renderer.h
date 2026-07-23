@@ -66,6 +66,7 @@ private:
   AssetPublicationStats lastAssetPublicationStats_{};
   std::optional<RenderGraphCompileResult> cachedCompileResult_;
   RenderGraphBuilder::GraphFingerprint cachedFingerprint_{};
+  SubmissionHandle lastFrameSubmission_{};
 };
 
 } // namespace nuri

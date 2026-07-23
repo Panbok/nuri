@@ -16,6 +16,8 @@ set(NURI_RENDERER_SOURCES
   nuri/core/thread_priority.cpp
   nuri/gfx/debug_draw_3d.cpp
   nuri/gfx/ddgi/ddgi_atlas.cpp
+  nuri/gfx/ddgi/ddgi_coverage.cpp
+  nuri/gfx/ddgi/ddgi_dirty_regions.cpp
   nuri/gfx/ddgi/ddgi_feature.cpp
   nuri/gfx/ddgi/ddgi_scheduler.cpp
   nuri/gfx/gpu_acceleration_structure.cpp

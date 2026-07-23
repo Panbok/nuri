@@ -45,6 +45,54 @@ constexpr Aggregation kFrameDistribution =
       Direction::Informational, Availability::EveryMeasuredFrame,              \
       Phase::PostRenderMeasuredFrame, Gate::WorkloadCharacterization)
 
+#define NURI_RATIO(id)                                                         \
+  NURI_EXACT_METRIC(id, Unit::Ratio, Numeric::Float64,                         \
+                    Direction::Informational,                                  \
+                    Availability::EveryMeasuredFrame,                          \
+                    Phase::PostRenderMeasuredFrame, Gate::Diagnostic)
+
+#define NURI_WORLD(id)                                                         \
+  NURI_EXACT_METRIC(id, Unit::WorldUnits, Numeric::Float64,                    \
+                    Direction::Informational,                                  \
+                    Availability::EveryMeasuredFrame,                          \
+                    Phase::PostRenderMeasuredFrame, Gate::Diagnostic)
+
+#define NURI_POST_CPU_TIMING(id)                                               \
+  NURI_EXACT_METRIC(id, Unit::Milliseconds, Numeric::Float64,                  \
+                    Direction::LowerIsBetter,                                  \
+                    Availability::EveryMeasuredFrame,                          \
+                    Phase::PostRenderMeasuredFrame, Gate::Diagnostic)
+
+#define NURI_DDGI_VOLUME_METRICS(slot)                                         \
+  NURI_COUNTER("renderer.ddgi.volume" #slot ".active"),                        \
+      NURI_COUNTER("renderer.ddgi.volume" #slot ".effective_kind"),            \
+      NURI_COUNTER("renderer.ddgi.volume" #slot ".tier"),                      \
+      NURI_COUNTER("renderer.ddgi.volume" #slot ".cascade_index"),             \
+      NURI_COUNTER("renderer.ddgi.volume" #slot ".total_probes"),              \
+      NURI_COUNTER("renderer.ddgi.volume" #slot ".initialized_probes"),        \
+      NURI_COUNTER("renderer.ddgi.volume" #slot ".shading_enabled_probes"),    \
+      NURI_COUNTER("renderer.ddgi.volume" #slot ".invalid_probes"),            \
+      NURI_COUNTER("renderer.ddgi.volume" #slot ".newly_exposed_probes"),      \
+      NURI_COUNTER("renderer.ddgi.volume" #slot ".updates"),                   \
+      NURI_COUNTER("renderer.ddgi.volume" #slot ".primary_queries"),           \
+      NURI_COUNTER("renderer.ddgi.volume" #slot ".primary_queries_issued"),    \
+      NURI_COUNTER("renderer.ddgi.volume" #slot ".secondary_queries"),         \
+      NURI_COUNTER("renderer.ddgi.volume" #slot ".update_age_median"),         \
+      NURI_COUNTER("renderer.ddgi.volume" #slot ".update_age_p95"),            \
+      NURI_COUNTER("renderer.ddgi.volume" #slot ".update_age_maximum"),        \
+      NURI_COUNTER("renderer.ddgi.volume" #slot ".scheduled_quota"),           \
+      NURI_COUNTER("renderer.ddgi.volume" #slot ".used_quota"),                \
+      NURI_EXACT_METRIC("renderer.ddgi.volume" #slot ".deficit", Unit::Count,  \
+                        Numeric::Float64, Direction::Informational,            \
+                        Availability::EveryMeasuredFrame,                      \
+                        Phase::PostRenderMeasuredFrame, Gate::Diagnostic),     \
+      NURI_COUNTER("renderer.ddgi.volume" #slot ".starvation_frames"),         \
+      NURI_COUNTER("renderer.ddgi.volume" #slot                                \
+                   ".estimated_full_refresh_frames"),                          \
+      NURI_RATIO("renderer.ddgi.volume" #slot ".history_ready_percentage"),    \
+      NURI_RATIO("renderer.ddgi.volume" #slot ".coverage_ready_percentage"),   \
+      NURI_RATIO("renderer.ddgi.volume" #slot ".confidence")
+
 #define NURI_RENDERGRAPH_COUNTER(id)                                           \
   NURI_EXACT_METRIC(id, Unit::Count, Numeric::Uint64EncodedAsFloat64,          \
                     Direction::Informational,                                  \
@@ -416,6 +464,13 @@ constexpr BenchmarkMetricDescriptor kDescriptors[] = {
                 Availability::EveryMeasuredFrame),
     NURI_MEMORY("gpu.memory.ray_tracing.tables_mb",
                 Availability::EveryMeasuredFrame),
+    NURI_MEMORY("gpu.memory.ray_tracing.blas_mb",
+                Availability::EveryMeasuredFrame),
+    NURI_MEMORY("gpu.memory.ray_tracing.tlas_mb",
+                Availability::EveryMeasuredFrame),
+    NURI_MEMORY("gpu.memory.ray_tracing.as_scratch_high_water_mb",
+                Availability::EveryMeasuredFrame),
+    NURI_COUNTER("renderer.ray_tracing.direct_binding_pool_high_water"),
     NURI_COUNTER("renderer.ddgi.active_volumes"),
     NURI_COUNTER("renderer.ddgi.ready_volumes"),
     NURI_COUNTER("renderer.ddgi.total_probes"),
@@ -428,12 +483,19 @@ constexpr BenchmarkMetricDescriptor kDescriptors[] = {
     NURI_COUNTER("renderer.ddgi.newly_vigilant_probes"),
     NURI_COUNTER("renderer.ddgi.relocated_probes"),
     NURI_COUNTER("renderer.ddgi.probe_state_readback_available"),
+    NURI_COUNTER("renderer.ddgi.probe_state_readback_source_frame"),
+    NURI_COUNTER("renderer.ddgi.probe_state_readback_stale_frames"),
     NURI_COUNTER("renderer.ddgi.max_relocation"),
     NURI_COUNTER("renderer.ddgi.updated_probes"),
     NURI_COUNTER("renderer.ddgi.primary_queries"),
+    NURI_COUNTER("renderer.ddgi.primary_queries_issued"),
+    NURI_COUNTER("renderer.ddgi.trace_counter_source_frame"),
     NURI_COUNTER("renderer.ddgi.secondary_queries_reserved"),
     NURI_COUNTER("renderer.ddgi.secondary_queries_unused"),
     NURI_COUNTER("renderer.ddgi.secondary_queries"),
+    NURI_COUNTER("renderer.ddgi.directional_secondary_queries"),
+    NURI_COUNTER("renderer.ddgi.local_secondary_queries"),
+    NURI_COUNTER("renderer.ddgi.total_queries_issued"),
     NURI_COUNTER("renderer.ddgi.primary_candidate_intersections"),
     NURI_COUNTER("renderer.ddgi.secondary_candidate_intersections"),
     NURI_COUNTER("renderer.ddgi.alpha_candidate_rejections"),
@@ -446,6 +508,32 @@ constexpr BenchmarkMetricDescriptor kDescriptors[] = {
     NURI_COUNTER("renderer.ddgi.scroll_count"),
     NURI_COUNTER("renderer.ddgi.invalidated_probes"),
     NURI_COUNTER("renderer.ddgi.failed_volumes"),
+    NURI_COUNTER("renderer.ddgi.effective_volumes"),
+    NURI_COUNTER("renderer.ddgi.authored_volumes"),
+    NURI_COUNTER("renderer.ddgi.generated_volumes"),
+    NURI_COUNTER("renderer.ddgi.coverage_mode"),
+    NURI_COUNTER("renderer.ddgi.coverage_status"),
+    NURI_COUNTER("renderer.ddgi.coverage_error"),
+    NURI_COUNTER("renderer.ddgi.limiting_constraint"),
+    NURI_WORLD("renderer.ddgi.requested_half_extent_x"),
+    NURI_WORLD("renderer.ddgi.requested_half_extent_y"),
+    NURI_WORLD("renderer.ddgi.requested_half_extent_z"),
+    NURI_WORLD("renderer.ddgi.achieved_half_extent_x"),
+    NURI_WORLD("renderer.ddgi.achieved_half_extent_y"),
+    NURI_WORLD("renderer.ddgi.achieved_half_extent_z"),
+    NURI_RATIO("renderer.ddgi.scene_coverage_ratio"),
+    NURI_POST_CPU_TIMING("renderer.ddgi.coverage_resolve_cpu_ms"),
+    NURI_COUNTER("renderer.ddgi.diagnostic_sample_count"),
+    NURI_COUNTER("renderer.ddgi.uncovered_diagnostic_samples"),
+    NURI_COUNTER("renderer.ddgi.sky_remainder_samples"),
+    NURI_COUNTER("renderer.ddgi.diagnostic_samples_available"),
+    NURI_COUNTER("renderer.ddgi.dirty_regions_produced"),
+    NURI_COUNTER("renderer.ddgi.dirty_regions_merged"),
+    NURI_COUNTER("renderer.ddgi.dirty_regions_overflowed"),
+    NURI_COUNTER("renderer.ddgi.dirty_regions_pending"),
+    NURI_COUNTER("renderer.ddgi.dirty_probes_affected"),
+    NURI_COUNTER("renderer.ddgi.classification_fallbacks"),
+    NURI_COUNTER("renderer.ddgi.classification_overflows"),
     NURI_COUNTER("renderer.ddgi.volume_failure_reason"),
     NURI_COUNTER("renderer.ddgi.history_ready"),
     NURI_COUNTER("renderer.ddgi.irradiance_response_remaining"),
@@ -469,6 +557,20 @@ constexpr BenchmarkMetricDescriptor kDescriptors[] = {
                 Availability::EveryMeasuredFrame),
     NURI_MEMORY("gpu.memory.ddgi.frame_batch_mb",
                 Availability::EveryMeasuredFrame),
+    NURI_MEMORY("gpu.memory.ddgi.committed_atlas_mb",
+                Availability::EveryMeasuredFrame),
+    NURI_MEMORY("gpu.memory.ddgi.pending_atlas_mb",
+                Availability::EveryMeasuredFrame),
+    NURI_MEMORY("gpu.memory.ddgi.peak_atlas_mb",
+                Availability::EveryMeasuredFrame),
+    NURI_DDGI_VOLUME_METRICS(0),
+    NURI_DDGI_VOLUME_METRICS(1),
+    NURI_DDGI_VOLUME_METRICS(2),
+    NURI_DDGI_VOLUME_METRICS(3),
+    NURI_DDGI_VOLUME_METRICS(4),
+    NURI_DDGI_VOLUME_METRICS(5),
+    NURI_DDGI_VOLUME_METRICS(6),
+    NURI_DDGI_VOLUME_METRICS(7),
 
     NURI_RENDERGRAPH_COUNTER("rendergraph.summary.declared_pass_count"),
     NURI_RENDERGRAPH_COUNTER("rendergraph.summary.culled_pass_count"),
@@ -529,6 +631,10 @@ constexpr BenchmarkMetricDescriptor kDescriptors[] = {
 #undef NURI_RENDERGRAPH_COUNTER
 #undef NURI_ASSET_TIMING
 #undef NURI_COUNTER
+#undef NURI_DDGI_VOLUME_METRICS
+#undef NURI_POST_CPU_TIMING
+#undef NURI_WORLD
+#undef NURI_RATIO
 #undef NURI_MEMORY
 #undef NURI_GPU_TIMING
 #undef NURI_CPU_TIMING

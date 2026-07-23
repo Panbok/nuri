@@ -13,7 +13,7 @@
   "resolution": [640, 360],
   "fixedDeltaSeconds": 0.016666667,
   "warmupFrames": 5,
-  "endFrame": 9,
+  "endFrame": 18,
   "authoritative": false,
   "presentMode": "immediate",
   "windowMode": "visible",
@@ -77,7 +77,7 @@
       {
         "id": "camera_motion_step",
         "startFrame": 0,
-        "endFrame": 9,
+        "endFrame": 18,
         "interpolation": "linear",
         "keyframes": [
           {
@@ -91,12 +91,12 @@
             "target": [0.0, 0.55, 0.0]
           },
           {
-            "frame": 6,
+            "frame": 12,
             "position": [8.0, 0.65, 3.2],
             "target": [0.0, 0.55, 0.0]
           },
           {
-            "frame": 9,
+            "frame": 18,
             "position": [8.0, 0.65, 3.2],
             "target": [0.0, 0.55, 0.0]
           }
@@ -134,8 +134,8 @@
       ]
     },
     {
-      "id": "after_camera_step",
-      "frame": 7,
+      "id": "during_camera_motion",
+      "frame": 10,
       "captures": [
         {
           "target": "final_color",
@@ -146,32 +146,37 @@
       ],
       "assertions": [
         {
-          "id": "step_readback_available",
+          "id": "motion_readback_available",
           "metric": "renderer.visibility.gpu_main_readback_available",
           "equals": 1
         },
         {
-          "id": "step_readback_source",
+          "id": "motion_readback_source_started",
           "metric": "renderer.visibility.gpu_main_readback_source_frame",
-          "equals": 6
+          "greaterOrEqual": 6
         },
         {
-          "id": "step_disables_uncertain_previous_hiz",
+          "id": "motion_readback_source_not_ahead",
+          "metric": "renderer.visibility.gpu_main_readback_source_frame",
+          "lessOrEqual": 9
+        },
+        {
+          "id": "motion_disables_uncertain_previous_hiz",
           "metric": "renderer.visibility.occlusion_available",
           "equals": 0
         },
         {
-          "id": "step_keeps_uncertain_target_visible",
+          "id": "motion_keeps_uncertain_target_visible",
           "metric": "renderer.visibility.gpu_main_rejected_occlusion",
           "equals": 0
         },
         {
-          "id": "step_keeps_both_candidates_visible",
+          "id": "motion_keeps_both_candidates_visible",
           "metric": "renderer.visibility.gpu_main_visible_candidates",
           "greaterOrEqual": 2
         },
         {
-          "id": "step_no_indirect_fallback",
+          "id": "motion_no_indirect_fallback",
           "metric": "renderer.visibility.gpu_indirect_draw_fallback",
           "equals": 0
         }
@@ -179,7 +184,7 @@
     },
     {
       "id": "restabilized",
-      "frame": 9,
+      "frame": 18,
       "assertions": [
         {
           "id": "restabilized_occlusion_available",

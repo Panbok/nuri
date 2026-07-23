@@ -40,38 +40,38 @@ TEST(AccelerationStructureContractTests,
 
   const auto error = nuri::validateBlasCreateDesc(desc, supportedCaps());
 
-  EXPECT_EQ(error.reason,
-            nuri::AccelerationStructureValidationReason::
-                ConflictingBuildPreference);
+  EXPECT_EQ(
+      error.reason,
+      nuri::AccelerationStructureValidationReason::ConflictingBuildPreference);
 }
 
 TEST(AccelerationStructureContractTests, ValidatesExactTriangleInputContract) {
   auto geometry = triangle();
   const std::array geometries{geometry};
-  EXPECT_EQ(nuri::validateBlasCreateDesc({.geometries = geometries},
-                                        supportedCaps())
-                .reason,
-            nuri::AccelerationStructureValidationReason::None);
+  EXPECT_EQ(
+      nuri::validateBlasCreateDesc({.geometries = geometries}, supportedCaps())
+          .reason,
+      nuri::AccelerationStructureValidationReason::None);
 
   geometry.vertexFormat = nuri::Format::RGBA32_FLOAT;
   const std::array invalidGeometries{geometry};
-  EXPECT_EQ(nuri::validateBlasCreateDesc({.geometries = invalidGeometries},
-                                        supportedCaps())
-                .reason,
-            nuri::AccelerationStructureValidationReason::
-                UnsupportedVertexFormat);
+  EXPECT_EQ(
+      nuri::validateBlasCreateDesc({.geometries = invalidGeometries},
+                                   supportedCaps())
+          .reason,
+      nuri::AccelerationStructureValidationReason::UnsupportedVertexFormat);
 }
 
-TEST(AccelerationStructureContractTests, RejectsUnsupportedAndOverCapacityTLAS) {
+TEST(AccelerationStructureContractTests,
+     RejectsUnsupportedAndOverCapacityTLAS) {
   nuri::RayTracingCapabilities caps{};
   EXPECT_EQ(nuri::validateTlasCreateDesc({.maxInstanceCount = 1u}, caps).reason,
             nuri::AccelerationStructureValidationReason::Unsupported);
 
   caps = supportedCaps();
-  EXPECT_EQ(nuri::validateTlasCreateDesc({.maxInstanceCount = 1025u}, caps)
-                .reason,
-            nuri::AccelerationStructureValidationReason::
-                CapacityLimitExceeded);
+  EXPECT_EQ(
+      nuri::validateTlasCreateDesc({.maxInstanceCount = 1025u}, caps).reason,
+      nuri::AccelerationStructureValidationReason::CapacityLimitExceeded);
 }
 
 TEST(AccelerationStructureContractTests, ValidatesInstanceIdentityAndMask) {
@@ -83,14 +83,14 @@ TEST(AccelerationStructureContractTests, ValidatesInstanceIdentityAndMask) {
 
   instance.mask = 0u;
   const std::array invalidInstances{instance};
-  EXPECT_EQ(nuri::validateAccelerationStructureInstances(invalidInstances, 1u)
-                .reason,
-            nuri::AccelerationStructureValidationReason::InvalidInstance);
+  EXPECT_EQ(
+      nuri::validateAccelerationStructureInstances(invalidInstances, 1u).reason,
+      nuri::AccelerationStructureValidationReason::InvalidInstance);
 }
 
 TEST(AccelerationStructureContractTests, TypedHandlesRemainDistinct) {
-  static_assert(!std::is_same_v<nuri::AccelerationStructureHandle,
-                                nuri::BufferHandle>);
+  static_assert(
+      !std::is_same_v<nuri::AccelerationStructureHandle, nuri::BufferHandle>);
   EXPECT_TRUE(nuri::isValid(nuri::AccelerationStructureHandle{1u, 1u}));
   EXPECT_FALSE(nuri::isValid(nuri::AccelerationStructureHandle{}));
 }

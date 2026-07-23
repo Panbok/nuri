@@ -201,6 +201,8 @@ public:
   virtual bool isValid(AccelerationStructureHandle h) const;
   virtual Result<AccelerationStructureFacts, std::string>
   getAccelerationStructureFacts(AccelerationStructureHandle h) const;
+  [[nodiscard]] virtual RayTracingBackendTelemetry
+  getRayTracingBackendTelemetry() const;
   virtual bool resolveGeometry(GeometryAllocationHandle h,
                                GeometryAllocationView &out) const;
   virtual uint64_t geometryMutationVersion() const;

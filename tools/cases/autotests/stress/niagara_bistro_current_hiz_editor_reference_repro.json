@@ -1,0 +1,58 @@
+{
+  "schemaVersion": 1,
+  "id": "stress.niagara_bistro.current_hiz_editor_reference_repro",
+  "suite": "stress",
+  "description": "Screenshot-matched Bistro facade camera with dense current-frame Hi-Z mouse-look perturbations",
+  "scene": {
+    "kind": "prefab",
+    "pathBase": "modelsRoot",
+    "path": "NiagaraBistro/bistrox.gltf",
+    "importOptions": {"mesh": {"generateMeshlets": true, "meshletMaxVertices": 64, "meshletMaxPrimitives": 124, "meshletConeWeight": 0.0}}
+  },
+  "environment": {
+    "cubemap": {"pathBase": "texturesRoot", "path": "qwantani_moon_noon_puresky_4k.hdr", "kind": "EquirectHdrCubemap", "debugName": "tool_qwantani_cubemap", "required": true},
+    "irradiance": {"pathBase": "texturesRoot", "path": "qwantani_moon_noon_puresky_4k_irradiance.ktx2", "kind": "Ktx2Cubemap", "debugName": "tool_qwantani_irradiance"},
+    "prefilteredGgx": {"pathBase": "texturesRoot", "path": "qwantani_moon_noon_puresky_4k_prefilter_ggx.ktx2", "kind": "Ktx2Cubemap", "debugName": "tool_qwantani_prefilter_ggx"},
+    "prefilteredCharlie": {"pathBase": "texturesRoot", "path": "qwantani_moon_noon_puresky_4k_prefilter_charlie.ktx2", "kind": "Ktx2Cubemap", "debugName": "tool_qwantani_prefilter_charlie"},
+    "brdfLut": {"pathBase": "texturesRoot", "path": "brdf_lut.ktx2", "kind": "Ktx2Texture2D", "debugName": "tool_brdf_lut"}
+  },
+  "backend": "nvrhi",
+  "resolution": [1920, 1080],
+  "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 12,
+  "endFrame": 20,
+  "authoritative": false,
+  "presentMode": "immediate",
+  "windowMode": "visible",
+  "renderGraph": {"workerCount": 1, "parallelCompile": false, "parallelRecording": false},
+  "camera": {"position": [28.0, 5.0, 31.0], "target": [44.0, 3.0, 35.0], "verticalFovDegrees": 60.0, "nearPlane": 0.05, "farPlane": 500.0},
+  "settings": {
+    "opaque": {"enabled": true, "meshletMode": "Opportunistic", "hybridClassicMaxMeshlets": 128, "enableMeshletFrustumCulling": true, "enableMeshletConeCulling": true, "enableDepthPrepass": true, "enableDepthPyramid": true, "enableInstanceCompute": false, "enableInstanceAnimation": false, "enableMeshLod": false, "enableTessellation": false, "forcedMeshLod": 0},
+    "visibility": {"mainViewMode": "GpuDriven", "occlusionMode": "CurrentFrameHiZExperimental", "enableMeshletFrustumCulling": true, "enableMeshletConeCulling": true, "enableIndirectMeshDispatch": true, "enableMeshletPreTaskCompaction": true, "visibleOnUncertain": true},
+    "antiAliasing": {"mode": "TAA", "temporalProvider": "Reference", "qualityPreset": "Ultra"},
+    "ambientOcclusion": {"mode": "GTAO", "preset": "Ultra"},
+    "shadow": {"enabled": true, "qualityPreset": "Ultra"},
+    "hdrPostProcess": {"bloomEnabled": false, "adaptationEnabled": false},
+    "transmission": {"enabled": false},
+    "transparent": {"enabled": false},
+    "textureFiltering": {"mode": "Anisotropic", "anisotropy": 8}
+  },
+  "timeline": {"cameraPaths": [{"id": "reference_mouse_look", "startFrame": 0, "endFrame": 20, "interpolation": "linear", "keyframes": [
+    {"frame": 0, "position": [28.0, 5.0, 31.0], "target": [44.0, 3.0, 35.0]},
+    {"frame": 12, "position": [28.0, 5.0, 31.0], "target": [44.0, 3.0, 35.0]},
+    {"frame": 13, "position": [28.0, 5.0, 31.0], "target": [44.0, 4.0, 35.0]},
+    {"frame": 14, "position": [28.0, 5.0, 31.0], "target": [44.0, 5.0, 35.0]},
+    {"frame": 15, "position": [28.0, 5.0, 31.0], "target": [44.0, 6.0, 35.0]},
+    {"frame": 16, "position": [28.0, 5.0, 31.0], "target": [44.0, 7.0, 35.0]},
+    {"frame": 17, "position": [28.0, 5.0, 31.0], "target": [44.0, 5.0, 33.0]},
+    {"frame": 18, "position": [28.0, 5.0, 31.0], "target": [44.0, 5.0, 37.0]},
+    {"frame": 19, "position": [28.0, 5.0, 31.0], "target": [42.0, 5.0, 35.0]},
+    {"frame": 20, "position": [28.0, 5.0, 31.0], "target": [46.0, 5.0, 35.0]}
+  ]}], "events": [{"frame": 0, "type": "resetTemporalHistory", "eventReason": "scenario_start"}]},
+  "checkpoints": [
+    {"id": "reference_16", "frame": 16, "captures": [{"target": "final_color", "profile": "ldr_color", "required": true, "compare": false}]},
+    {"id": "reference_20", "frame": 20, "assertions": [{"id": "current_hiz_active", "metric": "renderer.visibility.current_frame_hiz_active", "equals": 1}]}
+  ],
+  "metricWindows": [{"id": "reference_motion", "frames": [12, 20], "assertions": [{"id": "current_hiz_stays_active", "metric": "renderer.visibility.current_frame_hiz_active", "equals": 1}, {"id": "facade_self_occlusion_reject_budget", "metric": "renderer.visibility.meshlet_rejected_occlusion", "max": 16}, {"id": "no_payload_overflow", "metric": "renderer.visibility.meshlet_payload_overflow_count", "equals": 0}]}],
+  "requirements": {"assets": ["modelsRoot:NiagaraBistro/bistrox.gltf", "texturesRoot:qwantani_moon_noon_puresky_4k.hdr"], "backends": ["nvrhi"], "allowVisibleWindow": true}
+}
