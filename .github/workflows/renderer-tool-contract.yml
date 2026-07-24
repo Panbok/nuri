@@ -32,6 +32,8 @@ jobs:
           python-version: "3.12"
       - run: python scripts/nuri_validate.py check
       - run: python -m unittest tests/scripts/nuri_validate_tests.py
+      - run: python -m unittest tests/scripts/nuri_build_tests.py
+      - run: python scripts/measure_build.py --plan --scenario warm-noop --scenario compatible-target-switch
 
   tool-core:
     strategy:

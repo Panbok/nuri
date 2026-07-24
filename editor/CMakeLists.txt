@@ -1,15 +1,8 @@
-cmake_minimum_required(VERSION 3.27)
-
-project(nuri_editor)
-
 set(NURI_EDITOR_SOURCES
-  ${CMAKE_SOURCE_DIR}/lib/nuri/resources/stb_image.cpp
-  ${CMAKE_SOURCE_DIR}/lib/nuri/resources/storage/font/nfont_binary_codec.cpp
   src/bakery/bakery_system.cpp
   src/bakery/brdf_lut_baker.cpp
   src/bakery/envmap_prefilter_baker.cpp
   src/bakery/scene_asset_baker.cpp
-  src/bakery/smaa_lut_baker.cpp
   src/app/built_in_scenes.cpp
   src/app/editor_animation_player_service.cpp
   src/app/editor_application.cpp
@@ -34,26 +27,11 @@ set(NURI_EDITOR_SOURCES
 add_executable(nuri_editor
   ${NURI_EDITOR_SOURCES}
 )
-
-set_target_properties(nuri_editor PROPERTIES
-  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
-)
-
-foreach(_cfg IN ITEMS DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
-  string(TOUPPER "${_cfg}" _cfg_upper)
-  set_target_properties(nuri_editor PROPERTIES
-    "RUNTIME_OUTPUT_DIRECTORY_${_cfg_upper}" "${CMAKE_BINARY_DIR}"
-  )
-endforeach()
+nuri_configure_first_party_target(nuri_editor)
+nuri_register_artifact_target(nuri_editor)
 
 if(CMAKE_GENERATOR MATCHES "Visual Studio")
   set_property(TARGET nuri_editor PROPERTY VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/")
-endif()
-
-if(MSVC)
-  target_compile_options(nuri_editor PRIVATE /arch:AVX2)
-else()
-  target_compile_options(nuri_editor PRIVATE -march=native)
 endif()
 
 find_package(imgui CONFIG REQUIRED)
@@ -87,6 +65,28 @@ set(MSDFGEN_DYNAMIC_RUNTIME ${NURI_MSDF_DYNAMIC_RUNTIME} CACHE BOOL "" FORCE)
 
 add_subdirectory("${MSDF_ATLAS_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/_deps/msdf-atlas-gen-build")
 
+if(TARGET nuri::windows_clang_asan_abi)
+  foreach(NURI_MSDF_TARGET IN ITEMS
+      msdf-atlas-gen
+      msdfgen-core
+      msdfgen-ext)
+    if(TARGET ${NURI_MSDF_TARGET})
+      target_link_libraries(${NURI_MSDF_TARGET}
+        PRIVATE nuri::windows_clang_asan_abi)
+    endif()
+  endforeach()
+endif()
+
+add_library(nuri_smaa_bakery STATIC
+  src/bakery/smaa_lut_baker.cpp
+)
+nuri_configure_first_party_target(nuri_smaa_bakery)
+nuri_register_artifact_target(nuri_smaa_bakery)
+target_include_directories(nuri_smaa_bakery PUBLIC
+  "${CMAKE_CURRENT_SOURCE_DIR}/include"
+)
+target_link_libraries(nuri_smaa_bakery PUBLIC nuri_renderer)
+
 target_include_directories(nuri_editor
   PRIVATE
     ${CMAKE_SOURCE_DIR}/lib
@@ -97,7 +97,9 @@ target_include_directories(nuri_editor
 
 target_link_libraries(nuri_editor
   PRIVATE
+    nuri_asset_codecs
     nuri_renderer
+    nuri_smaa_bakery
     implot::implot
 )
 
@@ -132,7 +134,6 @@ target_link_libraries(nuri_editor PRIVATE ${NURI_KTX_TARGET})
 target_compile_features(nuri_editor PRIVATE cxx_std_20)
 
 set_source_files_properties(
-  ${CMAKE_SOURCE_DIR}/lib/nuri/resources/stb_image.cpp
   vendor/im-guizmo/ImGuizmo.cpp
   PROPERTIES
     SKIP_PRECOMPILE_HEADERS ON

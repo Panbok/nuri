@@ -1,0 +1,72 @@
+name: Build performance
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 4 * * 1"
+  push:
+    branches: [main]
+    paths:
+      - "CMakeLists.txt"
+      - "CMakePresets.json"
+      - "cmake/**"
+      - "scripts/build_*.bat"
+      - "scripts/build_*.sh"
+      - "scripts/nuri_build.py"
+      - "scripts/measure_build.py"
+      - "scripts/build_variants.json"
+      - "vcpkg.json"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nuri-build-performance
+  cancel-in-progress: false
+
+jobs:
+  measure:
+    if: github.event_name != 'pull_request'
+    runs-on: [self-hosted, windows, nuri]
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: jwlawson/actions-setup-cmake@v2
+        with:
+          cmake-version: "3.29.x"
+      - uses: lukka/run-vcpkg@v11
+      - name: Measure canonical build contract
+        shell: pwsh
+        env:
+          NURI_MEASUREMENT_POWER_POLICY: self-hosted-controlled
+          NURI_MEASUREMENT_BACKGROUND_LOAD: CI-exclusive
+        run: >-
+          python scripts/measure_build.py
+          --create-fixture "$env:RUNNER_TEMP/nuri-build-fixture"
+          --output artifacts/build-performance/result.json
+          --scenario cold-configure
+          --scenario cold-renderer
+          --scenario warm-noop
+          --scenario editor-cpp
+          --scenario renderer-cpp
+          --scenario compatible-target-switch
+          --scenario contract-validation
+      - name: Capture disk and identity state
+        if: always()
+        shell: pwsh
+        run: |
+          python scripts/nuri_build.py disk-usage | Out-File -Encoding utf8 artifacts/build-performance/disk-usage.json
+          python scripts/nuri_build.py status | Out-File -Encoding utf8 artifacts/build-performance/status.json
+      - name: Upload build evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuri-build-performance-${{ github.run_id }}
+          path: artifacts/build-performance
+          if-no-files-found: error
+          retention-days: 30

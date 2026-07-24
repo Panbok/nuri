@@ -36,9 +36,9 @@ jobs:
       - name: Metadata startup budgets
         shell: pwsh
         run: |
-          python scripts\check_tool_startup.py --tool build\release-snapshot\nuri-snapshot.exe --case smoke.procedural.final_color --budget-ms 200
-          python scripts\check_tool_startup.py --tool build\release-autotest\nuri-autotest.exe --case smoke.procedural.static_multiframe --budget-ms 200
-          python scripts\check_tool_startup.py --tool build\release-bench\nuri-bench.exe --case smoke.procedural.default --budget-ms 200
+          python scripts\check_tool_startup.py --target nuri-snapshot --variant release-fast --capability runtime-tools --case smoke.procedural.final_color --budget-ms 200
+          python scripts\check_tool_startup.py --target nuri-autotest --variant release-fast --capability runtime-tools --case smoke.procedural.static_multiframe --budget-ms 200
+          python scripts\check_tool_startup.py --target nuri-bench --variant release-fast --capability runtime-tools --case smoke.procedural.default --budget-ms 200
       - name: Verify non-empty smoke evidence
         shell: pwsh
         run: |

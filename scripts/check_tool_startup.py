@@ -50,7 +50,13 @@ def measure_command(
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--tool", required=True, type=Path)
+    parser.add_argument("--tool", type=Path)
+    parser.add_argument(
+        "--target",
+        choices=("nuri-bench", "nuri-snapshot", "nuri-autotest"),
+    )
+    parser.add_argument("--variant", default="release-fast")
+    parser.add_argument("--capability", default="runtime-tools")
     parser.add_argument("--case", required=True)
     parser.add_argument("--budget-ms", type=float, default=200.0)
     parser.add_argument("--warmups", type=int, default=2)
@@ -58,13 +64,47 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def resolve_tool(args: argparse.Namespace) -> Path:
+    if args.tool:
+        return args.tool
+    if not args.target:
+        raise ValueError("provide --tool or --target")
+    registry_path = ROOT / "build" / "_registry" / "trees.json"
+    try:
+        registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"cannot read canonical build registry: {error}") from error
+    for record in registry.get("trees", {}).values():
+        if (
+            record.get("variant") != args.variant
+            or record.get("capability") != args.capability
+            or record.get("state") != "ready"
+        ):
+            continue
+        manifest_path = Path(str(record.get("path", ""))) / ".nuri-artifacts.json"
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        artifact = manifest.get("targets", {}).get(args.target, {})
+        receipt = manifest.get("receipts", {}).get(args.target)
+        path = Path(str(artifact.get("path", "")))
+        if receipt and path.is_file():
+            return path
+    raise ValueError(
+        f"no identity-checked artifact for {args.variant}/{args.capability}/{args.target}"
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     if args.budget_ms <= 0 or args.warmups < 0 or args.iterations < 1:
         print("budget must be positive, warmups non-negative, and iterations positive", file=sys.stderr)
         return 2
-    if not args.tool.is_file():
-        print(f"tool executable not found: {args.tool}", file=sys.stderr)
+    try:
+        tool = resolve_tool(args)
+    except ValueError as error:
+        print(str(error), file=sys.stderr)
         return 2
 
     commands = (("list",), ("explain", "--case", args.case))
@@ -72,7 +112,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         for command in commands:
             samples = measure_command(
-                args.tool,
+                tool,
                 command,
                 warmups=args.warmups,
                 iterations=args.iterations,
@@ -97,7 +137,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             {
                 "schemaVersion": 1,
                 "kind": "nuri.tool.startup_check",
-                "tool": str(args.tool),
+                "tool": str(tool),
                 "passed": passed,
                 "results": results,
             },

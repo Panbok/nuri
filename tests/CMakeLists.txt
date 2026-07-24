@@ -21,19 +21,20 @@ endif()
 
 if(DEFINED VCPKG_TARGET_TRIPLET AND NOT "${VCPKG_TARGET_TRIPLET}" STREQUAL "")
   set(_nuri_vcpkg_bin_dirs
-    "${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/bin"
-    "${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/debug/bin"
+    "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/bin"
+    "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/debug/bin"
   )
 else()
   file(GLOB _nuri_vcpkg_bin_dirs
     LIST_DIRECTORIES true
-    "${CMAKE_BINARY_DIR}/vcpkg_installed/*/bin"
-    "${CMAKE_BINARY_DIR}/vcpkg_installed/*/debug/bin"
+    "${VCPKG_INSTALLED_DIR}/*/bin"
+    "${VCPKG_INSTALLED_DIR}/*/debug/bin"
   )
 endif()
 
 set(_nuri_test_path
-  "${CMAKE_BINARY_DIR}/lib"
+  "${CMAKE_BINARY_DIR}/out/$<CONFIG>/bin"
+  "${CMAKE_BINARY_DIR}/out/$<CONFIG>/lib"
   ${_nuri_clang_runtime_dirs}
   ${_nuri_vcpkg_bin_dirs}
   "${NURI_CXX_COMPILER_BIN_DIR}"
@@ -68,14 +69,35 @@ exec \"$@\"
   )
 endif()
 
+add_library(nuri_test_base STATIC
+  src/test_base.cpp
+)
+nuri_configure_first_party_target(nuri_test_base)
+nuri_register_artifact_target(nuri_test_base)
+target_link_libraries(nuri_test_base
+  PUBLIC
+    GTest::gtest
+    nuri::source_root
+)
+target_include_directories(nuri_test_base
+  PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/lib
+)
+target_precompile_headers(nuri_test_base PRIVATE
+  "${NURI_TEST_PCH_HEADER}"
+)
+
 add_library(nuri_render_graph_test_support STATIC
   src/render_graph_test_support.cpp
 )
+nuri_configure_first_party_target(nuri_render_graph_test_support)
+nuri_register_artifact_target(nuri_render_graph_test_support)
 
 target_link_libraries(nuri_render_graph_test_support
   PUBLIC
     nuri_renderer
-    GTest::gtest
+    nuri_test_base
 )
 
 target_include_directories(nuri_render_graph_test_support
@@ -87,25 +109,23 @@ target_precompile_headers(nuri_render_graph_test_support PRIVATE
   "${NURI_TEST_PCH_HEADER}"
 )
 
-set_target_properties(nuri_render_graph_test_support PROPERTIES
-  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-)
-
-foreach(_cfg IN ITEMS Debug Release RelWithDebInfo MinSizeRel)
-  string(TOUPPER "${_cfg}" _cfg_upper)
-  set_target_properties(nuri_render_graph_test_support PROPERTIES
-    "ARCHIVE_OUTPUT_DIRECTORY_${_cfg_upper}" "${CMAKE_BINARY_DIR}/lib"
-    "LIBRARY_OUTPUT_DIRECTORY_${_cfg_upper}" "${CMAKE_BINARY_DIR}/lib"
-    "RUNTIME_OUTPUT_DIRECTORY_${_cfg_upper}" "${CMAKE_BINARY_DIR}/lib"
-  )
-endforeach()
+set(NURI_RENDERER_TEST_TARGETS)
+set(NURI_CORE_TEST_TARGETS)
+set(NURI_TOOL_CORE_TEST_TARGETS)
+set(NURI_BENCHMARK_TEST_TARGETS)
+set(NURI_SNAPSHOT_TEST_TARGETS)
+set(NURI_AUTOTEST_TEST_TARGETS)
 
 function(nuri_test_properties target out_labels out_timeout)
   set(_labels "contract")
   set(_timeout 60)
-  if("${target}" MATCHES "(tool_core|benchmark|snapshot|autotest)")
+  if("${target}" MATCHES "benchmark")
+    string(APPEND _labels "+tool-core+benchmark")
+  elseif("${target}" MATCHES "snapshot")
+    string(APPEND _labels "+tool-core+snapshot")
+  elseif("${target}" MATCHES "autotest")
+    string(APPEND _labels "+tool-core+autotest")
+  elseif("${target}" MATCHES "tool_core")
     string(APPEND _labels "+tool-core")
   elseif("${target}" MATCHES "(import|cache)")
     string(APPEND _labels "+asset")
@@ -121,6 +141,8 @@ function(nuri_add_gtest_suite target source_file test_prefix)
   add_executable(${target}
     ${source_file}
   )
+  nuri_configure_first_party_target(${target})
+  nuri_register_artifact_target(${target})
 
   target_link_libraries(${target}
     PRIVATE
@@ -131,33 +153,52 @@ function(nuri_add_gtest_suite target source_file test_prefix)
   target_precompile_headers(${target} REUSE_FROM nuri_render_graph_test_support)
 
   set_target_properties(${target} PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
     TEST_LAUNCHER "${NURI_GTEST_LAUNCHER}"
   )
-
-  foreach(_cfg IN ITEMS Debug Release RelWithDebInfo MinSizeRel)
-    string(TOUPPER "${_cfg}" _cfg_upper)
-    set_target_properties(${target} PROPERTIES
-      "RUNTIME_OUTPUT_DIRECTORY_${_cfg_upper}" "${CMAKE_BINARY_DIR}/lib"
-    )
-  endforeach()
 
   nuri_test_properties(${target} _nuri_labels _nuri_timeout)
   gtest_discover_tests(${target}
     TEST_PREFIX "${test_prefix}"
     DISCOVERY_MODE PRE_TEST
-    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/out/$<CONFIG>/bin"
     PROPERTIES
       LABELS "${_nuri_labels}"
       TIMEOUT "${_nuri_timeout}"
       ENVIRONMENT "NURI_RENDER_GRAPH_WORKER_COUNT=1"
   )
+  list(APPEND NURI_RENDERER_TEST_TARGETS ${target})
+  set(NURI_RENDERER_TEST_TARGETS "${NURI_RENDERER_TEST_TARGETS}" PARENT_SCOPE)
+endfunction()
+
+function(nuri_add_core_gtest_suite target source_file test_prefix)
+  add_executable(${target} ${source_file})
+  nuri_configure_first_party_target(${target})
+  nuri_register_artifact_target(${target})
+  target_link_libraries(${target} PRIVATE nuri_test_base GTest::gtest_main)
+  target_precompile_headers(${target} REUSE_FROM nuri_test_base)
+  set_target_properties(${target} PROPERTIES
+    TEST_LAUNCHER "${NURI_GTEST_LAUNCHER}"
+  )
+  nuri_test_properties(${target} _nuri_labels _nuri_timeout)
+  gtest_discover_tests(${target}
+    TEST_PREFIX "${test_prefix}"
+    DISCOVERY_MODE PRE_TEST
+    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/out/$<CONFIG>/bin"
+    PROPERTIES
+      LABELS "${_nuri_labels}"
+      TIMEOUT "${_nuri_timeout}"
+      ENVIRONMENT "NURI_RENDER_GRAPH_WORKER_COUNT=1"
+  )
+  list(APPEND NURI_CORE_TEST_TARGETS ${target})
+  set(NURI_CORE_TEST_TARGETS "${NURI_CORE_TEST_TARGETS}" PARENT_SCOPE)
 endfunction()
 
 function(nuri_add_gtest_suite_with_sources target test_prefix)
   add_executable(${target}
     ${ARGN}
   )
+  nuri_configure_first_party_target(${target})
+  nuri_register_artifact_target(${target})
 
   target_link_libraries(${target}
     PRIVATE
@@ -173,27 +214,21 @@ function(nuri_add_gtest_suite_with_sources target test_prefix)
   target_precompile_headers(${target} REUSE_FROM nuri_render_graph_test_support)
 
   set_target_properties(${target} PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
     TEST_LAUNCHER "${NURI_GTEST_LAUNCHER}"
   )
-
-  foreach(_cfg IN ITEMS Debug Release RelWithDebInfo MinSizeRel)
-    string(TOUPPER "${_cfg}" _cfg_upper)
-    set_target_properties(${target} PROPERTIES
-      "RUNTIME_OUTPUT_DIRECTORY_${_cfg_upper}" "${CMAKE_BINARY_DIR}/lib"
-    )
-  endforeach()
 
   nuri_test_properties(${target} _nuri_labels _nuri_timeout)
   gtest_discover_tests(${target}
     TEST_PREFIX "${test_prefix}"
     DISCOVERY_MODE PRE_TEST
-    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/out/$<CONFIG>/bin"
     PROPERTIES
       LABELS "${_nuri_labels}"
       TIMEOUT "${_nuri_timeout}"
       ENVIRONMENT "NURI_RENDER_GRAPH_WORKER_COUNT=1"
   )
+  list(APPEND NURI_RENDERER_TEST_TARGETS ${target})
+  set(NURI_RENDERER_TEST_TARGETS "${NURI_RENDERER_TEST_TARGETS}" PARENT_SCOPE)
 endfunction()
 
 nuri_add_gtest_suite(
@@ -328,7 +363,7 @@ nuri_add_gtest_suite(
   "render_graph_acceleration_structure::"
 )
 
-nuri_add_gtest_suite(
+nuri_add_core_gtest_suite(
   nuri_slot_pool_tests
   src/slot_pool_tests.cpp
   "slot_pool::"
@@ -422,19 +457,19 @@ nuri_add_gtest_suite_with_sources(
   ${CMAKE_SOURCE_DIR}/editor/src/app/editor_animation_player_service.cpp
 )
 
-nuri_add_gtest_suite_with_sources(
+nuri_add_gtest_suite(
   nuri_smaa_lut_baker_tests
-  "smaa_lut_baker::"
   src/smaa_lut_baker_tests.cpp
-  ${CMAKE_SOURCE_DIR}/editor/src/bakery/smaa_lut_baker.cpp
+  "smaa_lut_baker::"
 )
+target_link_libraries(nuri_smaa_lut_baker_tests PRIVATE nuri_smaa_bakery)
 
-nuri_add_gtest_suite_with_sources(
+nuri_add_gtest_suite(
   nuri_spatial_aa_renderer_tests
-  "spatial_aa_renderer::"
   src/spatial_aa_feature_tests.cpp
-  ${CMAKE_SOURCE_DIR}/editor/src/bakery/smaa_lut_baker.cpp
+  "spatial_aa_renderer::"
 )
+target_link_libraries(nuri_spatial_aa_renderer_tests PRIVATE nuri_smaa_bakery)
 
 nuri_add_gtest_suite(
   nuri_scene_animation_tests
@@ -449,7 +484,7 @@ nuri_add_gtest_suite(
 )
 
 if(NURI_BUILD_TOOLS)
-  nuri_add_gtest_suite(
+  nuri_add_core_gtest_suite(
     nuri_tool_core_baseline_profile_tests
     src/nuri_baseline_profile_tests.cpp
     "baseline_profile::"
@@ -459,7 +494,7 @@ if(NURI_BUILD_TOOLS)
       nuri_tool_core
   )
 
-  nuri_add_gtest_suite(
+  nuri_add_core_gtest_suite(
     nuri_tool_core_tests
     src/nuri_tool_core_tests.cpp
     "tool_core::"
@@ -469,19 +504,12 @@ if(NURI_BUILD_TOOLS)
   add_executable(nuri_process_test_helper
     helpers/nuri_process_test_helper.cpp
   )
+  nuri_configure_first_party_target(nuri_process_test_helper)
+  nuri_register_artifact_target(nuri_process_test_helper)
   find_package(Threads REQUIRED)
   target_link_libraries(nuri_process_test_helper PRIVATE Threads::Threads)
-  set_target_properties(nuri_process_test_helper PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-  )
-  foreach(_cfg IN ITEMS Debug Release RelWithDebInfo MinSizeRel)
-    string(TOUPPER "${_cfg}" _cfg_upper)
-    set_target_properties(nuri_process_test_helper PROPERTIES
-      "RUNTIME_OUTPUT_DIRECTORY_${_cfg_upper}" "${CMAKE_BINARY_DIR}/lib"
-    )
-  endforeach()
 
-  nuri_add_gtest_suite(
+  nuri_add_core_gtest_suite(
     nuri_tool_core_process_tests
     src/nuri_process_tests.cpp
     "process::"
@@ -496,7 +524,7 @@ if(NURI_BUILD_TOOLS)
   )
   add_dependencies(nuri_tool_core_process_tests nuri_process_test_helper)
 
-  nuri_add_gtest_suite(
+  nuri_add_core_gtest_suite(
     nuri_tool_core_result_envelope_v2_tests
     src/nuri_result_envelope_v2_tests.cpp
     "result_envelope_v2::"
@@ -509,21 +537,13 @@ if(NURI_BUILD_TOOLS)
   add_executable(nuri_benchmark_child_fixture
     helpers/nuri_benchmark_child_fixture.cpp
   )
+  nuri_configure_first_party_target(nuri_benchmark_child_fixture)
+  nuri_register_artifact_target(nuri_benchmark_child_fixture)
   target_link_libraries(nuri_benchmark_child_fixture
     PRIVATE
       nuri_benchmarking
       Threads::Threads
   )
-  set_target_properties(nuri_benchmark_child_fixture PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-  )
-  foreach(_cfg IN ITEMS Debug Release RelWithDebInfo MinSizeRel)
-    string(TOUPPER "${_cfg}" _cfg_upper)
-    set_target_properties(nuri_benchmark_child_fixture PROPERTIES
-      "RUNTIME_OUTPUT_DIRECTORY_${_cfg_upper}" "${CMAKE_BINARY_DIR}/lib"
-    )
-  endforeach()
-
   nuri_add_gtest_suite(
     nuri_benchmarking_tests
     src/nuri_benchmarking_tests.cpp
@@ -606,3 +626,54 @@ if(NURI_BUILD_TOOLS)
     )
   endif()
 endif()
+
+if(NURI_BUILD_TOOLS)
+  set(NURI_TOOL_CORE_TEST_TARGETS
+    nuri_tool_core_baseline_profile_tests
+    nuri_tool_core_tests
+    nuri_tool_core_process_tests
+    nuri_tool_core_result_envelope_v2_tests
+  )
+  set(NURI_BENCHMARK_TEST_TARGETS
+    nuri_benchmarking_tests
+    nuri_benchmark_metric_registry_tests
+    nuri_benchmark_stats_tests
+  )
+  if(TARGET nuri_snapshot_testing_tests)
+    set(NURI_SNAPSHOT_TEST_TARGETS
+      nuri_snapshot_testing_tests
+      nuri_snapshot_semantic_tests
+    )
+  endif()
+  if(TARGET nuri_autotesting_tests)
+    set(NURI_AUTOTEST_TEST_TARGETS
+      nuri_autotesting_tests
+      nuri_autotest_motion_oracle_tests
+      nuri_autotest_quality_oracle_tests
+    )
+  endif()
+  list(REMOVE_ITEM NURI_CORE_TEST_TARGETS ${NURI_TOOL_CORE_TEST_TARGETS})
+  list(REMOVE_ITEM NURI_RENDERER_TEST_TARGETS
+    ${NURI_BENCHMARK_TEST_TARGETS}
+    ${NURI_SNAPSHOT_TEST_TARGETS}
+    ${NURI_AUTOTEST_TEST_TARGETS}
+  )
+endif()
+
+add_custom_target(nuri-tests-core DEPENDS ${NURI_CORE_TEST_TARGETS})
+add_custom_target(nuri-tests-renderer-contract
+  DEPENDS ${NURI_RENDERER_TEST_TARGETS}
+)
+add_custom_target(nuri-tests-tool-core DEPENDS ${NURI_TOOL_CORE_TEST_TARGETS})
+add_custom_target(nuri-tests-benchmark DEPENDS ${NURI_BENCHMARK_TEST_TARGETS})
+add_custom_target(nuri-tests-snapshot DEPENDS ${NURI_SNAPSHOT_TEST_TARGETS})
+add_custom_target(nuri-tests-autotest DEPENDS ${NURI_AUTOTEST_TEST_TARGETS})
+add_custom_target(nuri-tests-contract
+  DEPENDS
+    nuri-tests-core
+    nuri-tests-renderer-contract
+    nuri-tests-tool-core
+    nuri-tests-benchmark
+    nuri-tests-snapshot
+    nuri-tests-autotest
+)

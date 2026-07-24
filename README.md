@@ -30,6 +30,26 @@ $env:VCPKG_ROOT = "E:\install\vcpkg"   # adjust
 .\scripts\run_editor.bat
 ```
 
+The public wrappers now select named variants and capabilities through
+`scripts/nuri_build.py`. Compatible app, editor, renderer, test, snapshot,
+autotest, and benchmark requests reuse one identity-owned CMake/Ninja tree; the
+requested leaf target is not part of the tree identity. Build products live
+under `build/_trees/<identity>/out/<Config>/`, shared dependency installations
+under `build/_deps/vcpkg-installed/`, and every runnable artifact is discovered
+through the tree's `.nuri-artifacts.json` manifest.
+
+Useful build-state commands are:
+
+```powershell
+python scripts\nuri_build.py status
+python scripts\nuri_build.py health --variant release-checked --capability developer-full --target nuri_renderer
+python scripts\nuri_build.py disk-usage
+python scripts\nuri_build.py prune --stale-identities
+```
+
+Prune and clean operations are dry runs unless `--execute` is supplied. Legacy
+trees are retained side by side until explicitly pruned.
+
 Release build:
 
 ```powershell
@@ -110,7 +130,7 @@ Benchmarks:
 .\scripts\run_benchmarks.bat release off graph --reports artifacts\bench\renderer\cases --metric cpu.render_submit_ms gpu.scopes_sum_ms --stat median p95 --html-out artifacts\bench\renderer\index.html
 ```
 
-`run_benchmarks` builds the benchmark profile before running `nuri-bench`. If the first CLI argument after the build options is not a subcommand, the wrapper treats the command as `run`, so `--case smoke.procedural.default` is equivalent to `run --case smoke.procedural.default`.
+`run_benchmarks` builds the benchmark target in its compatible identity tree before running `nuri-bench`. If the first CLI argument after the build options is not a subcommand, the wrapper treats the command as `run`, so `--case smoke.procedural.default` is equivalent to `run --case smoke.procedural.default`.
 Pass `--no-build` before the tool subcommand to reuse an existing configured
 binary without invoking CMake or vcpkg, for example
 `.\scripts\run_benchmarks.bat release --no-build off list`. The snapshot and
@@ -234,13 +254,16 @@ Benchmarks:
 ./scripts/run_benchmarks.sh release off graph --reports artifacts/bench/renderer/cases --metric cpu.render_submit_ms gpu.scopes_sum_ms --stat median p95 --html-out artifacts/bench/renderer/index.html
 ```
 
-`run_benchmarks` builds the benchmark profile before running `nuri-bench`. If the first CLI argument after the build options is not a subcommand, the wrapper treats the command as `run`, so `--case smoke.procedural.default` is equivalent to `run --case smoke.procedural.default`.
+`run_benchmarks` builds the benchmark target in its compatible identity tree before running `nuri-bench`. If the first CLI argument after the build options is not a subcommand, the wrapper treats the command as `run`, so `--case smoke.procedural.default` is equivalent to `run --case smoke.procedural.default`.
 HTML graphs include all numeric metrics by default, grouped by CPU timings, GPU pass timings, render-graph pass timings, render-graph structure, process memory, benchmark PMR pools, GPU frame memory estimates, and renderer work counters. Compare reports also include a dedicated delta/status HTML view and reject incompatible run, render-graph, present-mode, settings, and build/profiling configurations unless `--force` is used. Use `--metric` on `graph` or `--html-metric` on `run`, `compare`, and `summarize` to filter to a focused subset.
 
 ## Notes
 
-- Target-specific scripts configure a minimal build tree per mode and target set. Debug `app` uses `build/`, other Debug profiles use `build_<target>/`, and Release profiles use `build_release/<target>/`.
-- `build_debug`/`build_release` remain as compatibility wrappers and default to the `app` profile.
+- Target-specific scripts are compatibility shims over named, identity-keyed
+  graphs. Switching compatible targets builds only the requested leaf without
+  reconfiguring the tree.
+- `build_debug`/`build_release` remain compatibility wrappers and default to the
+  `app` target.
 
 ## Project layout (high level)
 

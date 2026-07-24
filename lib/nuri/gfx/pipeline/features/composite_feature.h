@@ -38,6 +38,8 @@ static_assert(sizeof(CopyPushConstants) <= 128);
 class NURI_API FullscreenRenderPass {
 public:
   ~FullscreenRenderPass();
+  FullscreenRenderPass(const FullscreenRenderPass &) = delete;
+  FullscreenRenderPass &operator=(const FullscreenRenderPass &) = delete;
 
 protected:
   explicit FullscreenRenderPass(GPUDevice &gpu);

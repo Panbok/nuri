@@ -1,7 +1,3 @@
-cmake_minimum_required(VERSION 3.27)
-
-project(nuri_renderer)
-
 set(NURI_LIBRARY_TYPE STATIC)
 if(NURI_BUILD_SHARED)
   set(NURI_LIBRARY_TYPE SHARED)
@@ -67,10 +63,7 @@ set(NURI_RENDERER_SOURCES
   nuri/resources/detail/gltf_json_utils.cpp
   nuri/resources/mesh_importer_assimp.cpp
   nuri/resources/scene_importer.cpp
-    nuri/resources/stb_image.cpp
-    nuri/resources/stb_image_resize.cpp
     nuri/resources/storage/cache_utils.cpp
-    nuri/resources/storage/font/nfont_binary_codec.cpp
   nuri/resources/storage/material/material_binary_serializer.cpp
   nuri/resources/storage/material/material_cache_utils.cpp
   nuri/resources/storage/mesh/mesh_binary_serializer.cpp
@@ -105,6 +98,8 @@ set(NURI_RENDERER_SOURCES
 add_library(nuri_renderer ${NURI_LIBRARY_TYPE}
   ${NURI_RENDERER_SOURCES}
 )
+nuri_configure_first_party_target(nuri_renderer)
+nuri_register_artifact_target(nuri_renderer)
 
 set(NURI_FIDELITYFX_SDK_DIR "${CMAKE_SOURCE_DIR}/external/fidelityfx-sdk")
 set(NURI_FIDELITYFX_REQUIRED_FILES
@@ -133,12 +128,6 @@ else()
     NURI_WITH_FSR31=0
     NURI_FSR31_DEPENDENCY_PRESENT=0
   )
-endif()
-
-if(MSVC)
-  target_compile_options(nuri_renderer PRIVATE /arch:AVX2)
-else()
-  target_compile_options(nuri_renderer PRIVATE -march=native)
 endif()
 
 find_package(Vulkan REQUIRED)
@@ -191,6 +180,7 @@ endif()
 find_package(glm CONFIG REQUIRED)
 find_package(assimp CONFIG REQUIRED)
 find_package(meshoptimizer CONFIG REQUIRED)
+find_package(Stb REQUIRED)
 find_package(Ktx CONFIG QUIET)
 if(NOT Ktx_FOUND)
   find_package(ktx CONFIG REQUIRED)
@@ -199,6 +189,22 @@ find_package(yyjson CONFIG REQUIRED)
 find_package(unordered_dense CONFIG REQUIRED)
 find_package(harfbuzz CONFIG QUIET)
 find_package(HarfBuzz CONFIG QUIET)
+
+add_library(nuri_asset_codecs STATIC
+  nuri/resources/stb_image.cpp
+  nuri/resources/stb_image_resize.cpp
+  nuri/resources/storage/font/nfont_binary_codec.cpp
+)
+nuri_configure_first_party_target(nuri_asset_codecs)
+set_target_properties(nuri_asset_codecs PROPERTIES
+  POSITION_INDEPENDENT_CODE ON
+)
+target_include_directories(nuri_asset_codecs
+  PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${Stb_INCLUDE_DIR}
+)
+target_link_libraries(nuri_renderer PRIVATE nuri_asset_codecs)
 
 if(NURI_WITH_TRACY)
   find_package(Tracy CONFIG QUIET)
@@ -234,13 +240,16 @@ set(NVRHI_WITH_AFTERMATH OFF CACHE BOOL "" FORCE)
 set(NVRHI_WITH_RTXMU OFF CACHE BOOL "" FORCE)
 
 set(NVRHI_SOURCE_DIR "${CMAKE_SOURCE_DIR}/external/nvrhi")
+if(NURI_NVRHI_SOURCE_DIR)
+  set(NVRHI_SOURCE_DIR "${NURI_NVRHI_SOURCE_DIR}")
+endif()
 if(NOT EXISTS "${NVRHI_SOURCE_DIR}/CMakeLists.txt")
   message(FATAL_ERROR "NVRHI submodule is missing at: ${NVRHI_SOURCE_DIR}. Run: git submodule update --init --recursive")
 endif()
 
 set(NVRHI_ACTIVE_SOURCE_DIR "${NVRHI_SOURCE_DIR}")
 set(NVRHI_PATCH_FILE "${CMAKE_SOURCE_DIR}/patches/nvrhi/framebuffer-resolve.patch")
-if(EXISTS "${NVRHI_PATCH_FILE}")
+if(EXISTS "${NVRHI_PATCH_FILE}" AND NOT NURI_NVRHI_SOURCE_DIR)
   set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${NVRHI_PATCH_FILE}")
   find_package(Git REQUIRED)
 
@@ -320,8 +329,8 @@ add_subdirectory("${NVRHI_ACTIVE_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/_deps/nvrhi-b
 target_link_libraries(nuri_renderer
   PUBLIC
     glm::glm
-    assimp::assimp
   PRIVATE
+    assimp::assimp
     glfw
     nvrhi
     nvrhi_vk
@@ -351,7 +360,7 @@ endif()
 if(NOT NURI_MESHOPT_TARGET)
   message(FATAL_ERROR "meshoptimizer package was found but no target was available. Tried: meshoptimizer::meshoptimizer, meshoptimizer")
 endif()
-target_link_libraries(nuri_renderer PUBLIC ${NURI_MESHOPT_TARGET})
+target_link_libraries(nuri_renderer PRIVATE ${NURI_MESHOPT_TARGET})
 
 set(NURI_YYJSON_TARGET "")
 if(TARGET yyjson::yyjson)
@@ -392,7 +401,7 @@ endif()
 if(NOT NURI_HARFBUZZ_TARGET)
   message(FATAL_ERROR "Failed to resolve a HarfBuzz target. Ensure vcpkg harfbuzz is installed. Tried: harfbuzz::harfbuzz, HarfBuzz::harfbuzz, HarfBuzz::HarfBuzz, harfbuzz")
 endif()
-target_link_libraries(nuri_renderer PUBLIC ${NURI_HARFBUZZ_TARGET})
+target_link_libraries(nuri_renderer PRIVATE ${NURI_HARFBUZZ_TARGET})
 
 if(NURI_BUILD_SHARED)
   target_compile_definitions(nuri_renderer PUBLIC NURI_SHARED)
@@ -407,12 +416,6 @@ function(nuri_configure_backend_adapter target_name)
   )
 
   target_compile_features(${target_name} PUBLIC cxx_std_20)
-
-  if(MSVC)
-    target_compile_options(${target_name} PRIVATE /arch:AVX2)
-  else()
-    target_compile_options(${target_name} PRIVATE -march=native)
-  endif()
 
   if(NURI_WITH_LOGGING)
     target_compile_definitions(${target_name} PUBLIC NURI_LOGGING=1)
@@ -444,12 +447,12 @@ function(nuri_configure_backend_adapter target_name)
       ${NURI_UNORDERED_DENSE_TARGET}
   )
 
-  target_precompile_headers(${target_name} PRIVATE nuri/pch.h)
 endfunction()
 
 add_library(nuri_nvrhi_backend OBJECT
   nuri/platform/nvrhi_gpu_device.cpp
 )
+nuri_configure_first_party_target(nuri_nvrhi_backend)
 nuri_configure_backend_adapter(nuri_nvrhi_backend)
 target_link_libraries(nuri_nvrhi_backend
   PRIVATE
@@ -472,18 +475,3 @@ set_source_files_properties(
 )
 
 target_precompile_headers(nuri_renderer PRIVATE nuri/pch.h)
-
-set_target_properties(nuri_renderer PROPERTIES
-  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-)
-
-foreach(_cfg IN ITEMS DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
-  string(TOUPPER "${_cfg}" _cfg_upper)
-  set_target_properties(nuri_renderer PROPERTIES
-    "ARCHIVE_OUTPUT_DIRECTORY_${_cfg_upper}" "${CMAKE_BINARY_DIR}/lib"
-    "LIBRARY_OUTPUT_DIRECTORY_${_cfg_upper}" "${CMAKE_BINARY_DIR}/lib"
-    "RUNTIME_OUTPUT_DIRECTORY_${_cfg_upper}" "${CMAKE_BINARY_DIR}/lib"
-  )
-endforeach()

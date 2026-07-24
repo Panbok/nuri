@@ -17,15 +17,15 @@ def _command_for(mode: str, profile: str, args: list[str]) -> list[str]:
         raise ValueError("invalid mode or test profile")
     args = list(args)
     repo_root = Path(__file__).resolve().parents[1]
-    suffix = mode if profile == "tests" else f"{mode}-{profile}"
     command = [
-        "ctest",
-        "--test-dir",
-        str(repo_root / "build" / suffix),
-        "--output-on-failure",
+        sys.executable,
+        str(repo_root / "scripts" / "nuri_build.py"),
+        "legacy-test",
+        mode,
+        profile,
+        "--no-build",
+        "--",
     ]
-    if "-j" not in args and "--parallel" not in args:
-        command.extend(["-j", str(os.cpu_count() or 4)])
     command.extend(args)
     return command
 

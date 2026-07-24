@@ -1,0 +1,296 @@
+{
+  "schemaVersion": 1,
+  "policyEpoch": 1,
+  "layoutEpoch": 1,
+  "generator": "Ninja",
+  "minimumCMakeVersion": "3.29",
+  "cpuProfiles": {
+    "x86-64-v3": {
+      "architecture": "x64",
+      "description": "Explicit AVX2-class local renderer profile"
+    }
+  },
+  "capabilities": {
+    "developer-full": {
+      "cmake": {
+        "NURI_BUILD_APP": true,
+        "NURI_BUILD_EDITOR": true,
+        "NURI_BUILD_TESTS": true,
+        "NURI_BUILD_TOOLS": true,
+        "NURI_BUILD_BENCHMARK_CLI": true,
+        "NURI_BUILD_SNAPSHOT_CLI": true,
+        "NURI_BUILD_SNAPSHOT_TESTING": true,
+        "NURI_BUILD_AUTOTEST_CLI": true,
+        "NURI_BUILD_AUTOTESTING": true
+      },
+      "features": [
+        "editor",
+        "tests",
+        "benchmark-tools",
+        "snapshot-tools",
+        "autotest-tools"
+      ],
+      "targets": [
+        "nuri_renderer",
+        "nuri",
+        "nuri_editor",
+        "nuri-bench",
+        "nuri-snapshot",
+        "nuri-autotest",
+        "nuri-tests-core",
+        "nuri-tests-renderer-contract",
+        "nuri-tests-tool-core",
+        "nuri-tests-benchmark",
+        "nuri-tests-snapshot",
+        "nuri-tests-autotest",
+        "nuri-tests-contract"
+      ]
+    },
+    "runtime-tools": {
+      "cmake": {
+        "NURI_BUILD_APP": false,
+        "NURI_BUILD_EDITOR": false,
+        "NURI_BUILD_TESTS": false,
+        "NURI_BUILD_TOOLS": true,
+        "NURI_BUILD_BENCHMARK_CLI": true,
+        "NURI_BUILD_SNAPSHOT_CLI": true,
+        "NURI_BUILD_SNAPSHOT_TESTING": true,
+        "NURI_BUILD_AUTOTEST_CLI": true,
+        "NURI_BUILD_AUTOTESTING": true
+      },
+      "features": [
+        "benchmark-tools",
+        "snapshot-tools",
+        "autotest-tools"
+      ],
+      "targets": [
+        "nuri_renderer",
+        "nuri-bench",
+        "nuri-snapshot",
+        "nuri-autotest"
+      ]
+    }
+  },
+  "variants": {
+    "debug-dev": {
+      "configuration": "Debug",
+      "preset": "nuri-debug-dev",
+      "compilerFrontend": "clang++",
+      "linker": "lld-link",
+      "triplet": {
+        "windows": "x64-windows-release",
+        "linux": "x64-linux-release"
+      },
+      "cmake": {
+        "NURI_BUILD_SHARED": true,
+        "NURI_WITH_ASAN": true,
+        "NURI_WITH_LOGGING": true,
+        "NURI_WITH_ASSERTS": true,
+        "NURI_WITH_TRACY": true,
+        "NURI_WITH_FSR31": false,
+        "NURI_DEV_CHECKS": true,
+        "NURI_CPU_PROFILE": "x86-64-v3"
+      }
+    },
+    "debug-dev-no-tracy": {
+      "configuration": "Debug",
+      "preset": "nuri-debug-dev-no-tracy",
+      "compilerFrontend": "clang++",
+      "linker": "lld-link",
+      "triplet": {
+        "windows": "x64-windows-release",
+        "linux": "x64-linux-release"
+      },
+      "cmake": {
+        "NURI_BUILD_SHARED": true,
+        "NURI_WITH_ASAN": true,
+        "NURI_WITH_LOGGING": true,
+        "NURI_WITH_ASSERTS": true,
+        "NURI_WITH_TRACY": false,
+        "NURI_WITH_FSR31": false,
+        "NURI_DEV_CHECKS": true,
+        "NURI_CPU_PROFILE": "x86-64-v3"
+      }
+    },
+    "release-fast": {
+      "configuration": "Release",
+      "preset": "nuri-release-fast",
+      "compilerFrontend": "clang-cl",
+      "linker": "link.exe",
+      "triplet": {
+        "windows": "x64-windows-static-release",
+        "linux": "x64-linux-release"
+      },
+      "cmake": {
+        "NURI_BUILD_SHARED": false,
+        "NURI_WITH_ASAN": false,
+        "NURI_WITH_LOGGING": false,
+        "NURI_WITH_ASSERTS": false,
+        "NURI_WITH_TRACY": false,
+        "NURI_WITH_FSR31": false,
+        "NURI_DEV_CHECKS": false,
+        "NURI_CPU_PROFILE": "x86-64-v3"
+      }
+    },
+    "release-checked": {
+      "configuration": "Release",
+      "preset": "nuri-release-checked",
+      "compilerFrontend": "clang-cl",
+      "linker": "link.exe",
+      "triplet": {
+        "windows": "x64-windows-static-release",
+        "linux": "x64-linux-release"
+      },
+      "cmake": {
+        "NURI_BUILD_SHARED": false,
+        "NURI_WITH_ASAN": false,
+        "NURI_WITH_LOGGING": true,
+        "NURI_WITH_ASSERTS": true,
+        "NURI_WITH_TRACY": false,
+        "NURI_WITH_FSR31": false,
+        "NURI_DEV_CHECKS": true,
+        "NURI_CPU_PROFILE": "x86-64-v3"
+      }
+    },
+    "release-tracy": {
+      "configuration": "Release",
+      "preset": "nuri-release-tracy",
+      "compilerFrontend": "clang-cl",
+      "linker": "link.exe",
+      "triplet": {
+        "windows": "x64-windows-static-release",
+        "linux": "x64-linux-release"
+      },
+      "cmake": {
+        "NURI_BUILD_SHARED": false,
+        "NURI_WITH_ASAN": false,
+        "NURI_WITH_LOGGING": false,
+        "NURI_WITH_ASSERTS": false,
+        "NURI_WITH_TRACY": true,
+        "NURI_WITH_FSR31": false,
+        "NURI_DEV_CHECKS": false,
+        "NURI_CPU_PROFILE": "x86-64-v3"
+      }
+    },
+    "release-tracy-checked": {
+      "configuration": "Release",
+      "preset": "nuri-release-tracy-checked",
+      "compilerFrontend": "clang-cl",
+      "linker": "link.exe",
+      "triplet": {
+        "windows": "x64-windows-static-release",
+        "linux": "x64-linux-release"
+      },
+      "cmake": {
+        "NURI_BUILD_SHARED": false,
+        "NURI_WITH_ASAN": false,
+        "NURI_WITH_LOGGING": true,
+        "NURI_WITH_ASSERTS": true,
+        "NURI_WITH_TRACY": true,
+        "NURI_WITH_FSR31": false,
+        "NURI_DEV_CHECKS": true,
+        "NURI_CPU_PROFILE": "x86-64-v3"
+      }
+    }
+  },
+  "legacyProfiles": {
+    "lib": {
+      "target": "nuri_renderer",
+      "capability": "developer-full",
+      "class": "checked"
+    },
+    "app": {
+      "target": "nuri",
+      "capability": "developer-full",
+      "class": "checked"
+    },
+    "editor": {
+      "target": "nuri_editor",
+      "capability": "developer-full",
+      "class": "checked"
+    },
+    "tests": {
+      "target": "nuri-tests-contract",
+      "capability": "developer-full",
+      "class": "checked",
+      "labels": "contract"
+    },
+    "bench": {
+      "aliases": [
+        "benchmark"
+      ],
+      "target": "nuri-bench",
+      "capability": "runtime-tools",
+      "class": "fast"
+    },
+    "snapshot": {
+      "aliases": [
+        "snapshots"
+      ],
+      "target": "nuri-snapshot",
+      "capability": "runtime-tools",
+      "class": "fast"
+    },
+    "autotest": {
+      "aliases": [
+        "autotests"
+      ],
+      "target": "nuri-autotest",
+      "capability": "runtime-tools",
+      "class": "fast"
+    },
+    "bench-tests": {
+      "aliases": [
+        "benchmark-tests"
+      ],
+      "target": "nuri-tests-benchmark",
+      "capability": "developer-full",
+      "class": "checked",
+      "labels": "benchmark"
+    },
+    "snapshot-tests": {
+      "aliases": [
+        "snapshots-tests"
+      ],
+      "target": "nuri-tests-snapshot",
+      "capability": "developer-full",
+      "class": "checked",
+      "labels": "snapshot"
+    },
+    "autotest-tests": {
+      "aliases": [
+        "autotests-tests"
+      ],
+      "target": "nuri-tests-autotest",
+      "capability": "developer-full",
+      "class": "checked",
+      "labels": "autotest"
+    }
+  },
+  "supportedPlatforms": {
+    "windows": {
+      "generator": "Ninja",
+      "architectures": [
+        "x64"
+      ],
+      "toolchains": [
+        "clang++/lld-link",
+        "clang-cl/link.exe"
+      ]
+    },
+    "linux": {
+      "generator": "Ninja",
+      "architectures": [
+        "x64"
+      ],
+      "toolchains": [
+        "clang++/system-linker"
+      ]
+    }
+  },
+  "retention": {
+    "logMaxAgeDays": 14,
+    "logMaxBytes": 1073741824,
+    "compilerCacheMaxBytes": 21474836480
+  }
+}

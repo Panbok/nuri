@@ -17,19 +17,13 @@ if(WIN32)
     endif()
 endif()
 
-project(nuri LANGUAGES CXX)
+project(nuri LANGUAGES C CXX)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
-
-add_compile_definitions(PROJECT_SOURCE_DIR="${CMAKE_SOURCE_DIR}/")
-
-if(DEFINED CMAKE_BUILD_TYPE AND CMAKE_BUILD_TYPE MATCHES "debug")
-    add_compile_definitions($<$<CONFIG:Debug>:NURI_DEBUG>)
-endif()
 
 option(NURI_BUILD_SHARED "Build nuri as a shared library" ON)
 option(NURI_WITH_ASAN "Enable AddressSanitizer for supported toolchains" ON)
@@ -41,15 +35,15 @@ option(NURI_BUILD_APP "Build nuri app target" ON)
 option(NURI_BUILD_EDITOR "Build nuri editor target" ON)
 option(NURI_BUILD_TESTS "Build nuri test targets" OFF)
 option(NURI_BUILD_TOOLS "Build nuri automation tools" OFF)
-
-set(SAN_FLAGS "")
-if(NURI_WITH_ASAN AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
-    if(WIN32)
-        set(SAN_FLAGS "-fsanitize=address")
-    else()
-        set(SAN_FLAGS "-fsanitize=address,undefined -fno-omit-frame-pointer")
-    endif()
-endif()
+set(NURI_GRAPH_CAPABILITY "manual" CACHE STRING
+    "Named configured target-graph capability")
+set(NURI_TREE_IDENTITY_DIGEST "" CACHE STRING "Canonical tree identity digest")
+set(NURI_COMPILE_COMPATIBILITY_DIGEST "" CACHE STRING
+    "Compile-compatibility digest")
+set(NURI_DEPENDENCY_IDENTITY_DIGEST "" CACHE STRING
+    "Dependency identity digest")
+set(NURI_NVRHI_SOURCE_DIR "" CACHE PATH
+    "Prepared immutable NVRHI source directory")
 
 if(WIN32 AND NURI_WITH_ASAN AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
     if(NURI_USE_STATIC_CRT)
@@ -65,61 +59,11 @@ if(WIN32 AND NURI_WITH_ASAN AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
 endif()
 
 if(NURI_WITH_ASAN AND WIN32 AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
-    # ASan on Windows requires the release CRT (msvcrt), not the debug CRT (msvcrtd).
-    if(NURI_USE_STATIC_CRT)
-        add_compile_options(-fms-runtime-lib=static)
-        add_link_options(-fms-runtime-lib=static)
-    else()
-        add_compile_options(-fms-runtime-lib=dll)
-        add_link_options(-fms-runtime-lib=dll)
-    endif()
-    add_compile_definitions(
-        _ITERATOR_DEBUG_LEVEL=0
-        _DISABLE_STL_ANNOTATION
-    )
-    add_compile_options($<$<CONFIG:Debug>:-U_DEBUG>)
     set(CMAKE_MAP_IMPORTED_CONFIG_DEBUG Release)
-
-    # CMake's Windows-Clang defaults inject the Debug CRT via /defaultlib directives
-    # (commonly `msvcrtd`). ASan on Windows does not support the Debug CRT.
-    # Suppress the debug CRT and explicitly pull the release CRT instead.
-    if(NURI_USE_STATIC_CRT)
-        # Static CRT variants.
-        add_link_options("LINKER:/NODEFAULTLIB:libcmtd")
-        add_link_options("LINKER:/DEFAULTLIB:libcmt")
-    else()
-        # Dynamic CRT variants. Clang+ASan must not use any debug CRT/STL libs.
-        add_link_options("LINKER:/NODEFAULTLIB:msvcrtd")
-        add_link_options("LINKER:/NODEFAULTLIB:ucrtd")
-        add_link_options("LINKER:/NODEFAULTLIB:vcruntimed")
-        add_link_options("LINKER:/NODEFAULTLIB:msvcprtd")
-        # Note: don't force msvcp140(.lib) here; some setups only provide msvcprt.lib.
-
-        add_link_options("LINKER:/DEFAULTLIB:msvcrt")
-        add_link_options("LINKER:/DEFAULTLIB:ucrt")
-        add_link_options("LINKER:/DEFAULTLIB:vcruntime")
-        add_link_options("LINKER:/DEFAULTLIB:msvcprt")
-    endif()
 endif()
 
-if(MSVC)
-    set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} /Zi -W4 /FC")
-    if(SAN_FLAGS)
-        set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} ${SAN_FLAGS}")
-        set(CMAKE_EXE_LINKER_FLAGS_DEBUG "${CMAKE_EXE_LINKER_FLAGS_DEBUG} ${SAN_FLAGS}")
-    endif()
-    
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /wd4013 /arch:AVX2")  # implicit function declaration
-
-else()
-    set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} ${SAN_FLAGS} -g")
-    set(CMAKE_EXE_LINKER_FLAGS_DEBUG "${CMAKE_EXE_LINKER_FLAGS_DEBUG} ${SAN_FLAGS}")
-
-    set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXX_FLAGS_RELWITHDEBINFO} ${SAN_FLAGS} -g")
-    set(CMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO "${CMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO} ${SAN_FLAGS}")
-    
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-implicit-function-declaration -march=native")
-endif()
+include(cmake/NuriBuildOptions.cmake)
+include(cmake/NuriArtifactManifest.cmake)
 
 add_subdirectory(lib)
 if(NURI_BUILD_TOOLS)
@@ -136,3 +80,5 @@ if(NURI_BUILD_TESTS)
   enable_testing()
   add_subdirectory(tests)
 endif()
+
+nuri_write_artifact_manifest()

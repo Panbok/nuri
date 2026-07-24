@@ -1,7 +1,3 @@
-if(NOT DEFINED NURI_TOOL_PROFILE)
-  set(NURI_TOOL_PROFILE "tools")
-endif()
-
 option(NURI_BUILD_BENCHMARK_CLI "Build nuri-bench executable" ON)
 option(NURI_BUILD_SNAPSHOT_CLI "Build nuri-snapshot executable" ON)
 option(NURI_BUILD_SNAPSHOT_TESTING "Build nuri snapshot testing library" ${NURI_BUILD_SNAPSHOT_CLI})
@@ -65,6 +61,8 @@ add_library(nuri_tool_core STATIC
   core/src/safe_path.cpp
   core/src/sha256.cpp
 )
+nuri_configure_first_party_target(nuri_tool_core)
+nuri_register_artifact_target(nuri_tool_core)
 
 target_include_directories(nuri_tool_core
   PUBLIC
@@ -88,6 +86,8 @@ endif()
 add_library(nuri_tools_runtime STATIC
   runtime/src/tools_runtime.cpp
 )
+nuri_configure_first_party_target(nuri_tools_runtime)
+nuri_register_artifact_target(nuri_tools_runtime)
 
 target_include_directories(nuri_tools_runtime
   PUBLIC
@@ -115,6 +115,8 @@ add_library(nuri_benchmarking STATIC
   benchmark/src/benchmark_runner.cpp
   benchmark/src/benchmark_stats.cpp
 )
+nuri_configure_first_party_target(nuri_benchmarking)
+nuri_register_artifact_target(nuri_benchmarking)
 
 target_include_directories(nuri_benchmarking
   PUBLIC
@@ -128,6 +130,7 @@ target_link_libraries(nuri_benchmarking
     nuri_tool_core
   PRIVATE
     nuri_tools_runtime
+    nuri::source_root
 )
 
 target_compile_features(nuri_benchmarking PUBLIC cxx_std_20)
@@ -146,6 +149,8 @@ if(NURI_BUILD_SNAPSHOT_TESTING OR NURI_BUILD_SNAPSHOT_CLI OR NURI_BUILD_AUTOTEST
     snapshot/src/snapshot_report.cpp
     snapshot/src/snapshot_runner.cpp
   )
+  nuri_configure_first_party_target(nuri_snapshot_testing)
+  nuri_register_artifact_target(nuri_snapshot_testing)
 
   find_package(OpenImageIO CONFIG REQUIRED)
 
@@ -161,6 +166,7 @@ if(NURI_BUILD_SNAPSHOT_TESTING OR NURI_BUILD_SNAPSHOT_CLI OR NURI_BUILD_AUTOTEST
       nuri_tool_core
     PRIVATE
       nuri_tools_runtime
+      nuri::source_root
       OpenImageIO::OpenImageIO
   )
 
@@ -180,6 +186,8 @@ if(NURI_BUILD_AUTOTESTING OR NURI_BUILD_AUTOTEST_CLI)
     autotest/src/autotest_runner.cpp
     autotest/src/autotest_timeline.cpp
   )
+  nuri_configure_first_party_target(nuri_autotesting)
+  nuri_register_artifact_target(nuri_autotesting)
 
   target_include_directories(nuri_autotesting
     PUBLIC
@@ -205,6 +213,8 @@ if(NURI_BUILD_BENCHMARK_CLI)
   add_executable(nuri-bench
     cli/nuri_benchmark_main.cpp
   )
+  nuri_configure_first_party_target(nuri-bench)
+  nuri_register_artifact_target(nuri-bench)
 
   target_link_libraries(nuri-bench
     PRIVATE
@@ -212,16 +222,6 @@ if(NURI_BUILD_BENCHMARK_CLI)
       CLI11::CLI11
   )
 
-  set_target_properties(nuri-bench PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
-  )
-
-  foreach(_cfg IN ITEMS Debug Release RelWithDebInfo MinSizeRel)
-    string(TOUPPER "${_cfg}" _cfg_upper)
-    set_target_properties(nuri-bench PROPERTIES
-      "RUNTIME_OUTPUT_DIRECTORY_${_cfg_upper}" "${CMAKE_BINARY_DIR}"
-    )
-  endforeach()
 endif()
 
 if(NURI_BUILD_SNAPSHOT_CLI)
@@ -230,6 +230,8 @@ if(NURI_BUILD_SNAPSHOT_CLI)
   add_executable(nuri-snapshot
     cli/nuri_snapshot_main.cpp
   )
+  nuri_configure_first_party_target(nuri-snapshot)
+  nuri_register_artifact_target(nuri-snapshot)
 
   target_link_libraries(nuri-snapshot
     PRIVATE
@@ -237,16 +239,6 @@ if(NURI_BUILD_SNAPSHOT_CLI)
       CLI11::CLI11
   )
 
-  set_target_properties(nuri-snapshot PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
-  )
-
-  foreach(_cfg IN ITEMS Debug Release RelWithDebInfo MinSizeRel)
-    string(TOUPPER "${_cfg}" _cfg_upper)
-    set_target_properties(nuri-snapshot PROPERTIES
-      "RUNTIME_OUTPUT_DIRECTORY_${_cfg_upper}" "${CMAKE_BINARY_DIR}"
-    )
-  endforeach()
 endif()
 
 if(NURI_BUILD_AUTOTEST_CLI)
@@ -255,6 +247,8 @@ if(NURI_BUILD_AUTOTEST_CLI)
   add_executable(nuri-autotest
     cli/nuri_autotest_main.cpp
   )
+  nuri_configure_first_party_target(nuri-autotest)
+  nuri_register_artifact_target(nuri-autotest)
 
   target_link_libraries(nuri-autotest
     PRIVATE
@@ -262,14 +256,4 @@ if(NURI_BUILD_AUTOTEST_CLI)
       CLI11::CLI11
   )
 
-  set_target_properties(nuri-autotest PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
-  )
-
-  foreach(_cfg IN ITEMS Debug Release RelWithDebInfo MinSizeRel)
-    string(TOUPPER "${_cfg}" _cfg_upper)
-    set_target_properties(nuri-autotest PROPERTIES
-      "RUNTIME_OUTPUT_DIRECTORY_${_cfg_upper}" "${CMAKE_BINARY_DIR}"
-    )
-  endforeach()
 endif()

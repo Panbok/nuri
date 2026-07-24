@@ -53,14 +53,12 @@ bool reconstructViewNormal(ivec2 pos, float centerDepth, out vec3 normal) {
     return false;
   }
 
-  bool useLeft =
-      leftValid &&
-      (!rightValid ||
-       abs(leftDepth - centerDepth) < abs(rightDepth - centerDepth));
-  bool useTop =
-      topValid &&
-      (!bottomValid ||
-       abs(topDepth - centerDepth) < abs(bottomDepth - centerDepth));
+  bool useLeft = leftValid &&
+                 (!rightValid ||
+                  abs(leftDepth - centerDepth) < abs(rightDepth - centerDepth));
+  bool useTop = topValid &&
+                (!bottomValid ||
+                 abs(topDepth - centerDepth) < abs(bottomDepth - centerDepth));
   float horizontalDepth = useLeft ? leftDepth : rightDepth;
   float verticalDepth = useTop ? topDepth : bottomDepth;
   float discontinuityLimit = max(0.05, centerDepth * 0.10);
@@ -81,8 +79,8 @@ bool reconstructViewNormal(ivec2 pos, float centerDepth, out vec3 normal) {
   vec3 dy = useTop ? center - vertical : vertical - center;
   float dxLengthSq = dot(dx, dx);
   float dyLengthSq = dot(dy, dy);
-  if (!(dxLengthSq > 0.0) || !(dyLengthSq > 0.0) ||
-      isinf(dxLengthSq) || isinf(dyLengthSq)) {
+  if (!(dxLengthSq > 0.0) || !(dyLengthSq > 0.0) || isinf(dxLengthSq) ||
+      isinf(dyLengthSq)) {
     normal = vec3(0.0);
     return false;
   }

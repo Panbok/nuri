@@ -52,7 +52,7 @@ class NuriValidateTests(unittest.TestCase):
             repeat=2,
             extra_ctest_args=("--timeout", "5"),
         )
-        self.assertIn("-j", command)
+        self.assertIn("--jobs", command)
         self.assertIn("Registry", command)
         self.assertIn("until-fail:2", command)
         self.assertEqual(command[-2:], ["--timeout", "5"])
@@ -62,9 +62,9 @@ class NuriValidateTests(unittest.TestCase):
             False,
             test_filter="(Registry|Envelope)",
         )
-        self.assertEqual(len(commands), 2)
-        self.assertEqual(commands[1][-2:], ["-R", "(Registry|Envelope)"])
-        self.assertEqual(commands[1][0], "ctest")
+        self.assertEqual(len(commands), 1)
+        self.assertEqual(commands[0][-2:], ["-R", "(Registry|Envelope)"])
+        self.assertTrue(commands[0][1].endswith("nuri_build.py"))
 
     def test_windows_ctest_dispatch_preserves_regex_argv(self):
         regex = "(Envelope|Baseline.*Verify)"
@@ -72,7 +72,7 @@ class NuriValidateTests(unittest.TestCase):
             ["release", "bench-tests", "-R", regex, "--timeout", "5"]
         )
         self.assertEqual(command[-4:], ["-R", regex, "--timeout", "5"])
-        self.assertIn("release-bench-tests", command[2])
+        self.assertEqual(command[2:5], ["legacy-test", "release", "bench-tests"])
         environment = {
             "NURI_CTEST_MODE": "release",
             "NURI_CTEST_PROFILE": "bench-tests",
@@ -153,13 +153,13 @@ class NuriValidateTests(unittest.TestCase):
                         [],
                     )
 
-    def test_no_build_wrapper_contract_rejects_unguarded_build(self):
+    def test_run_wrapper_contract_rejects_policy_outside_driver(self):
         errors = nuri_validate._validate_run_wrapper_contract(
             "--no-build\nno_build=1\n_nuri_build.sh\nbaseline\nif [[ ${no_build} -eq 0 ]]; then\n",
             ".sh",
             Path("scripts/run_broken.sh"),
         )
-        self.assertTrue(any("not guarded" in error for error in errors))
+        self.assertTrue(any("canonical driver" in error for error in errors))
 
     def test_startup_measurement_uses_successful_direct_process_samples(self):
         samples = check_tool_startup.measure_command(

@@ -1,0 +1,92 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 29,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "nuri-base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/_preset/${presetName}",
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": true,
+        "NURI_CPU_PROFILE": "x86-64-v3"
+      }
+    },
+    {
+      "name": "nuri-debug-dev",
+      "inherits": "nuri-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "NURI_BUILD_SHARED": true,
+        "NURI_WITH_ASAN": true,
+        "NURI_WITH_LOGGING": true,
+        "NURI_WITH_ASSERTS": true,
+        "NURI_WITH_TRACY": true,
+        "NURI_DEV_CHECKS": true
+      }
+    },
+    {
+      "name": "nuri-debug-dev-no-tracy",
+      "inherits": "nuri-debug-dev",
+      "cacheVariables": {
+        "NURI_WITH_TRACY": false
+      }
+    },
+    {
+      "name": "nuri-release-fast",
+      "inherits": "nuri-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "NURI_BUILD_SHARED": false,
+        "NURI_WITH_ASAN": false,
+        "NURI_WITH_LOGGING": false,
+        "NURI_WITH_ASSERTS": false,
+        "NURI_WITH_TRACY": false,
+        "NURI_DEV_CHECKS": false
+      }
+    },
+    {
+      "name": "nuri-release-checked",
+      "inherits": "nuri-release-fast",
+      "cacheVariables": {
+        "NURI_WITH_LOGGING": true,
+        "NURI_WITH_ASSERTS": true,
+        "NURI_DEV_CHECKS": true
+      }
+    },
+    {
+      "name": "nuri-release-tracy",
+      "inherits": "nuri-release-fast",
+      "cacheVariables": {
+        "NURI_WITH_TRACY": true
+      }
+    },
+    {
+      "name": "nuri-release-tracy-checked",
+      "inherits": "nuri-release-checked",
+      "cacheVariables": {
+        "NURI_WITH_TRACY": true
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "nuri-renderer-debug",
+      "configurePreset": "nuri-debug-dev",
+      "targets": [
+        "nuri_renderer"
+      ]
+    },
+    {
+      "name": "nuri-renderer-release",
+      "configurePreset": "nuri-release-checked",
+      "targets": [
+        "nuri_renderer"
+      ]
+    }
+  ]
+}

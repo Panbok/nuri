@@ -2221,11 +2221,19 @@ void destroyDebugMessenger(Impl &impl) {
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
       .pNext = &features13,
   };
-  VkPhysicalDeviceFeatures2 features2{
-      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+  VkPhysicalDeviceVulkan11Features features11{
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
       .pNext = &features12,
   };
+  VkPhysicalDeviceFeatures2 features2{
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+      .pNext = &features11,
+  };
   vkGetPhysicalDeviceFeatures2(device, &features2);
+  if (features11.shaderDrawParameters != VK_TRUE) {
+    reason = "shader draw parameters are not supported";
+    return false;
+  }
   if (features12.bufferDeviceAddress != VK_TRUE) {
     reason = "buffer device address is not supported";
     return false;
@@ -2384,10 +2392,14 @@ void destroyDebugMessenger(Impl &impl) {
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
       .pNext = &supported13,
   };
+  VkPhysicalDeviceVulkan11Features supported11{
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
+      .pNext = &supported12,
+  };
   VkPhysicalDeviceAccelerationStructureFeaturesKHR supportedAcceleration{
       .sType =
           VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR,
-      .pNext = &supported12,
+      .pNext = &supported11,
   };
   VkPhysicalDeviceRayQueryFeaturesKHR supportedRayQuery{
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR,
@@ -2493,6 +2505,11 @@ void destroyDebugMessenger(Impl &impl) {
   enabled12.runtimeDescriptorArray = VK_TRUE;
   enabled12.timelineSemaphore = VK_TRUE;
   enabled12.bufferDeviceAddress = VK_TRUE;
+  VkPhysicalDeviceVulkan11Features enabled11{
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
+      .pNext = &enabled12,
+  };
+  enabled11.shaderDrawParameters = VK_TRUE;
   VkPhysicalDeviceAccelerationStructureFeaturesKHR enabledAcceleration{
       .sType =
           VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR,
@@ -2504,7 +2521,7 @@ void destroyDebugMessenger(Impl &impl) {
       .sType =
           VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR,
   };
-  void *enabledFeatureChain = &enabled12;
+  void *enabledFeatureChain = &enabled11;
   if (enableRayQuerySubset) {
     enabledAcceleration.accelerationStructure = VK_TRUE;
     enabledAcceleration.pNext = enabledFeatureChain;
@@ -2997,8 +3014,14 @@ void destroySwapchain(Impl &impl) {
   }
   impl.imageAvailableSemaphores.resize(kSwapchainFramesInFlight,
                                        VK_NULL_HANDLE);
-  impl.renderFinishedSemaphores.resize(kSwapchainFramesInFlight,
-                                       VK_NULL_HANDLE);
+  for (size_t i = actualImageCount; i < impl.renderFinishedSemaphores.size();
+       ++i) {
+    if (impl.renderFinishedSemaphores[i] != VK_NULL_HANDLE) {
+      vkDestroySemaphore(impl.device, impl.renderFinishedSemaphores[i],
+                         nullptr);
+    }
+  }
+  impl.renderFinishedSemaphores.resize(actualImageCount, VK_NULL_HANDLE);
   for (uint32_t i = 0u; i < kSwapchainFramesInFlight; ++i) {
     const VkSemaphoreCreateInfo semaphoreInfo{
         .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
@@ -3011,7 +3034,12 @@ void destroySwapchain(Impl &impl) {
             vkError("GPUDevice::createSwapchain image semaphore", result));
       }
     }
+  }
+  for (uint32_t i = 0u; i < actualImageCount; ++i) {
     if (impl.renderFinishedSemaphores[i] == VK_NULL_HANDLE) {
+      const VkSemaphoreCreateInfo semaphoreInfo{
+          .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+      };
       result = vkCreateSemaphore(impl.device, &semaphoreInfo, nullptr,
                                  &impl.renderFinishedSemaphores[i]);
       if (result != VK_SUCCESS) {
@@ -6454,7 +6482,8 @@ GPUDevice::submitRecordedGraphicsFrame(
   }
   if (wantsPresent) {
     if (impl_->semaphoreFrameIndex >= impl_->imageAvailableSemaphores.size() ||
-        impl_->semaphoreFrameIndex >= impl_->renderFinishedSemaphores.size()) {
+        impl_->preparedSwapchainImageIndex >=
+            impl_->renderFinishedSemaphores.size()) {
       return Result<SubmittedGraphicsFrame, std::string>::makeError(
           "GPUDevice::submitRecordedGraphicsFrame: invalid frame "
           "semaphore slot");
@@ -6470,7 +6499,8 @@ GPUDevice::submitRecordedGraphicsFrame(
         impl_->imageAvailableSemaphores[impl_->semaphoreFrameIndex], 0u);
     impl_->nvrhiDevice->queueSignalSemaphore(
         nvrhi::CommandQueue::Graphics,
-        impl_->renderFinishedSemaphores[impl_->semaphoreFrameIndex], 0u);
+        impl_->renderFinishedSemaphores[impl_->preparedSwapchainImageIndex],
+        0u);
   }
   const bool frameUploadContainsTextureData =
       impl_->pendingAsyncUploadTextureCount != 0u;
@@ -6570,7 +6600,7 @@ GPUDevice::submitRecordedGraphicsFrame(
           instance;
     }
     const VkSemaphore renderFinished =
-        impl_->renderFinishedSemaphores[impl_->semaphoreFrameIndex];
+        impl_->renderFinishedSemaphores[imageIndex];
     const VkPresentInfoKHR presentInfo{
         .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
         .waitSemaphoreCount = 1u,

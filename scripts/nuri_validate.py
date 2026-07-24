@@ -182,21 +182,12 @@ def _validate_case_location(document: dict[str, object], path: Path, case_root: 
 
 
 def _validate_run_wrapper_contract(text: str, suffix: str, display_path: Path) -> list[str]:
-    """Keep the native wrappers' metadata fast path from regressing into a build."""
+    """Keep native wrappers thin and route policy through the canonical driver."""
     errors: list[str] = []
-    if "baseline" not in text:
-        errors.append(f"{display_path}: baseline subcommand is not routed")
-    if "--no-build" not in text:
-        errors.append(f"{display_path}: --no-build is not parsed")
-    if suffix == ".bat":
-        required = ('set "NO_BUILD=1"', 'if "%NO_BUILD%"=="0" (', "_nuri_build.bat")
-    else:
-        required = ("no_build=1", "if [[ ${no_build} -eq 0 ]]; then", "_nuri_build.sh")
+    required = ("nuri_build.py", "legacy-wrapper-run")
     for token in required:
         if token not in text:
-            errors.append(f"{display_path}: missing no-build contract token {token!r}")
-    if all(token in text for token in required) and text.index(required[1]) > text.index(required[2]):
-        errors.append(f"{display_path}: build invocation is not guarded by no-build")
+            errors.append(f"{display_path}: missing canonical driver token {token!r}")
     return errors
 
 
@@ -277,10 +268,27 @@ def validate_repository() -> list[str]:
     except OSError as error:
         errors.append(f"{windows_build.relative_to(ROOT)}: {error}")
     else:
-        if 'set "BUILD_EXIT=!errorlevel!"' not in build_text or "exit /b !BUILD_EXIT!" not in build_text:
+        if "nuri_build.py" not in build_text or "legacy-build" not in build_text:
             errors.append(
-                f"{windows_build.relative_to(ROOT)}: build exit must be captured with delayed expansion"
+                f"{windows_build.relative_to(ROOT)}: compatibility shim must route to nuri_build.py"
             )
+
+    canonical_driver = ROOT / "scripts" / "nuri_build.py"
+    try:
+        driver_text = canonical_driver.read_text(encoding="utf-8")
+    except OSError as error:
+        errors.append(f"{canonical_driver.relative_to(ROOT)}: {error}")
+    else:
+        for token in (
+            "validate_manifest",
+            "--no-build",
+            "FileLock",
+            "runtimeSearchPaths",
+        ):
+            if token not in driver_text:
+                errors.append(
+                    f"{canonical_driver.relative_to(ROOT)}: missing build contract token {token!r}"
+                )
 
     for wrapper_name in ("run_benchmarks", "run_snapshots", "run_autotests"):
         for suffix in (".bat", ".sh"):
@@ -334,8 +342,7 @@ def select_steps(preset: str, shard_index: int, shard_count: int) -> tuple[Step,
 
 
 def build_dir(profile: str) -> Path:
-    suffix = "release" if profile == "tests" else f"release-{profile}"
-    return ROOT / "build" / suffix
+    raise RuntimeError("profile-derived build directories are no longer supported")
 
 
 def step_command(
@@ -346,30 +353,35 @@ def step_command(
     repeat: int = 1,
     extra_ctest_args: Iterable[str] = (),
 ) -> list[str]:
+    aggregates = {
+        "tests": "nuri-tests-renderer-contract",
+        "bench-tests": "nuri-tests-benchmark",
+        "snapshot-tests": "nuri-tests-snapshot",
+        "autotest-tests": "nuri-tests-autotest",
+    }
+    command = [
+        sys.executable,
+        str(ROOT / "scripts" / "nuri_build.py"),
+        "test",
+        "--variant",
+        "release-checked",
+        "--capability",
+        "developer-full",
+        "--target",
+        aggregates[step.profile],
+        "--labels",
+        step.labels,
+    ]
     if no_build:
-        command = [
-            "ctest",
-            "--test-dir",
-            str(build_dir(step.profile)),
-            "--output-on-failure",
-            "-L",
-            step.labels,
-        ]
-    else:
-        wrapper = ROOT / "scripts" / ("run_tests.bat" if os.name == "nt" else "run_tests.sh")
-        command = [str(wrapper), "release"]
-        if step.profile != "tests":
-            command.append(step.profile)
-        command.extend(["-L", step.labels])
+        command.append("--no-build")
     if jobs > 0:
-        command.extend(["-j", str(jobs)])
+        command.extend(["--jobs", str(jobs)])
+    command.append("--")
     if test_filter:
         command.extend(["-R", test_filter])
     if repeat > 1:
         command.extend(["--repeat", f"until-fail:{repeat}"])
     command.extend(extra_ctest_args)
-    if not no_build and os.name == "nt":
-        return ["cmd.exe", "/d", "/c", *command]
     return command
 
 
@@ -381,21 +393,15 @@ def step_commands(
     repeat: int = 1,
     extra_ctest_args: Iterable[str] = (),
 ) -> list[list[str]]:
-    ctest = step_command(
+    command = step_command(
         step,
-        True,
+        no_build,
         jobs,
         test_filter,
         repeat,
         extra_ctest_args,
     )
-    if no_build:
-        return [ctest]
-    wrapper = ROOT / "scripts" / ("_nuri_build.bat" if os.name == "nt" else "_nuri_build.sh")
-    build = [str(wrapper), "release", step.profile]
-    if os.name == "nt":
-        build = ["cmd.exe", "/d", "/c", *build]
-    return [build, ctest]
+    return [command]
 
 
 def write_junit(path: Path, results: list[dict[str, object]], elapsed: float) -> None:
@@ -911,10 +917,32 @@ def _doctor_command(_args: argparse.Namespace) -> int:
                 "path": str(path.relative_to(ROOT)).replace("\\", "/"),
             }
         )
-    binaries = {}
-    for tool, name in (("benchmark", "nuri-bench"), ("snapshot", "nuri-snapshot"), ("autotest", "nuri-autotest")):
-        candidates = sorted(ROOT.glob(f"build/**/{name}{'.exe' if os.name == 'nt' else ''}"))
-        binaries[tool] = str(candidates[-1].relative_to(ROOT)).replace("\\", "/") if candidates else None
+    binaries: dict[str, str | None] = {
+        "benchmark": None,
+        "snapshot": None,
+        "autotest": None,
+    }
+    registry_path = ROOT / "build" / "_registry" / "trees.json"
+    if registry_path.is_file():
+        try:
+            registry = json.loads(registry_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            registry = {}
+        for record in registry.get("trees", {}).values():
+            manifest_path = Path(str(record.get("path", ""))) / ".nuri-artifacts.json"
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            for tool, name in (
+                ("benchmark", "nuri-bench"),
+                ("snapshot", "nuri-snapshot"),
+                ("autotest", "nuri-autotest"),
+            ):
+                artifact = manifest.get("targets", {}).get(name, {})
+                path = Path(str(artifact.get("path", "")))
+                if path.is_file():
+                    binaries[tool] = str(path)
     approval_files = sorted((ROOT / "tools" / "baselines").rglob("approval.json"))
     governed_approvals = 0
     for approval_path in approval_files:

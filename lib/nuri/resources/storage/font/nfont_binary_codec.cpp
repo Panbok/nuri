@@ -1,7 +1,12 @@
 #include "nuri/resources/storage/font/nfont_binary_codec.h"
-#include "nuri/pch.h"
 #include "nuri/resources/storage/binary_io.h"
 #include "nuri/resources/storage/font/nfont_binary_format.h"
+#include <algorithm>
+#include <array>
+#include <cstring>
+#include <limits>
+#include <ranges>
+#include <utility>
 namespace nuri {
 namespace {
 struct Section {
