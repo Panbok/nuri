@@ -1,0 +1,183 @@
+{
+  "schemaVersion": 1,
+  "id": "aa.specular_minification.msaa4x_postaa",
+  "suite": "aa",
+  "description": "Versioned Post-AA roughness, metalness, normal-frequency, clearcoat, slant, and pin-light fixture under a deterministic slow dolly",
+  "scene": {
+    "kind": "procedural",
+    "generator": "nuri.procedural.specular_minification.v1",
+    "seed": 1,
+    "contentHash": "nuri.procedural.specular_minification.v1:1"
+  },
+  "backend": "default",
+  "resolution": [1280, 720],
+  "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 12,
+  "endFrame": 72,
+  "authoritative": false,
+  "presentMode": "immediate",
+  "windowMode": "visible",
+  "renderGraph": {
+    "workerCount": 1,
+    "parallelCompile": false,
+    "parallelRecording": false
+  },
+  "camera": {
+    "position": [0.0, 0.0, 7.0],
+    "target": [0.0, 0.0, 0.0],
+    "verticalFovDegrees": 48.0,
+    "nearPlane": 0.05,
+    "farPlane": 40.0
+  },
+  "settings": {
+    "ddgi": {"enabled": false},
+    "opaque": {
+      "enabled": true,
+      "meshletMode": "Disabled",
+      "enableDepthPrepass": true,
+      "enableInstanceCompute": true,
+      "enableInstanceAnimation": false,
+      "enableMeshLod": false,
+      "enableTessellation": false,
+      "forcedMeshLod": -1
+    },
+    "antiAliasing": {
+      "mode": "MSAA4x",
+      "debugView": "None",
+      "specularAAOverride": "None",
+      "postAA": {
+        "enabled": true,
+        "specular": "BakedClean",
+        "spatial": "Smaa1x",
+        "materialVarianceScale": 1.0,
+        "geometricVarianceScale": 0.35,
+        "maxSlopeVariance": 0.25
+      }
+    },
+    "ambientOcclusion": {"mode": "GTAO", "preset": "Ultra"},
+    "shadow": {"enabled": true, "qualityPreset": "Ultra"},
+    "hdrPostProcess": {"bloomEnabled": false, "adaptationEnabled": false},
+    "transmission": {"enabled": false},
+    "transparent": {"enabled": false},
+    "textureFiltering": {"mode": "Anisotropic", "anisotropy": 8}
+  },
+  "timeline": {
+    "events": [
+      {
+        "frame": 44,
+        "type": "setSettings",
+        "settings": {
+          "antiAliasing": {"debugView": "SpecularAAVariance"}
+        }
+      },
+      {
+        "frame": 52,
+        "type": "setSettings",
+        "settings": {
+          "antiAliasing": {"debugView": "SpecularAARoughnessDelta"}
+        }
+      },
+      {
+        "frame": 60,
+        "type": "setSettings",
+        "settings": {
+          "antiAliasing": {"debugView": "None"}
+        }
+      }
+    ],
+    "cameraPaths": [
+      {
+        "id": "post_aa_slow_dolly",
+        "startFrame": 0,
+        "endFrame": 72,
+        "interpolation": "smoothstep",
+        "keyframes": [
+          {"frame": 0, "position": [0.0, 0.0, 7.0], "target": [0.0, 0.0, 0.0]},
+          {"frame": 36, "position": [0.22, 0.08, 5.3], "target": [0.0, 0.0, 0.0]},
+          {"frame": 72, "position": [-0.18, -0.05, 6.4], "target": [0.0, 0.0, 0.0]}
+        ]
+      }
+    ]
+  },
+  "checkpoints": [
+    {
+      "id": "near",
+      "frame": 36,
+      "captures": [
+        {"target": "scene_color_hdr", "profile": "hdr_color", "required": true, "compare": false},
+        {"target": "final_color", "profile": "ldr_color", "required": true, "compare": false}
+      ],
+      "assertions": [
+        {"id": "postaa_requested", "metric": "renderer.aa.post_aa_requested", "equals": 1},
+        {"id": "postaa_active", "metric": "renderer.aa.post_aa_resolved_active", "equals": 1},
+        {"id": "baked_clean_selected", "metric": "renderer.aa.resolved_material_specular_aa", "equals": 2},
+        {"id": "variance_materials_live", "metric": "renderer.aa.normal_variance_contract_materials_live", "greaterOrEqual": 1},
+        {"id": "variance_textures_live", "metric": "renderer.aa.normal_variance_contract_textures_live", "greaterOrEqual": 1},
+        {"id": "classic_route_draws", "metric": "renderer.opaque.classic_main_draws", "greaterOrEqual": 1},
+        {"id": "smaa_planned", "metric": "renderer.aa.post_aa_smaa_planned", "equals": 1},
+        {"id": "smaa_submitted", "metric": "renderer.aa.post_aa_smaa_submitted", "equals": 1},
+        {"id": "smaa_four_passes", "metric": "renderer.aa.post_aa_smaa_submitted_passes", "equals": 4},
+        {"id": "one_color_resolve", "metric": "renderer.aa.msaa_color_resolves", "equals": 1},
+        {"id": "one_depth_resolve", "metric": "renderer.aa.msaa_depth_resolves", "equals": 1}
+      ]
+    },
+    {
+      "id": "variance_debug",
+      "frame": 48,
+      "captures": [
+        {"target": "scene_color_hdr", "profile": "hdr_color", "required": true, "compare": false},
+        {"target": "final_color", "profile": "ldr_color", "required": true, "compare": false}
+      ],
+      "assertions": [
+        {"id": "variance_debug_selected", "metric": "renderer.aa.debug_view", "equals": 36},
+        {"id": "smaa_suppressed_for_debug", "metric": "renderer.aa.post_aa_smaa_submitted_passes", "equals": 0}
+      ]
+    },
+    {
+      "id": "roughness_delta_debug",
+      "frame": 56,
+      "captures": [
+        {"target": "scene_color_hdr", "profile": "hdr_color", "required": true, "compare": false},
+        {"target": "final_color", "profile": "ldr_color", "required": true, "compare": false}
+      ],
+      "assertions": [
+        {"id": "roughness_debug_selected", "metric": "renderer.aa.debug_view", "equals": 37},
+        {"id": "smaa_suppressed_for_debug", "metric": "renderer.aa.post_aa_smaa_submitted_passes", "equals": 0}
+      ]
+    },
+    {
+      "id": "end",
+      "frame": 72,
+      "captures": [
+        {"target": "scene_color_hdr", "profile": "hdr_color", "required": true, "compare": false},
+        {"target": "final_color", "profile": "ldr_color", "required": true, "compare": false}
+      ]
+    }
+  ],
+  "metricWindows": [
+    {
+      "id": "steady_postaa",
+      "frames": [12, 35],
+      "assertions": [
+        {"id": "postaa_never_degrades", "metric": "renderer.aa.post_aa_degradation_mask", "equals": 0},
+        {"id": "smaa_stays_four_passes", "metric": "renderer.aa.post_aa_smaa_submitted_passes", "equals": 4},
+        {"id": "no_msaa_color_allocations", "metric": "renderer.aa.msaa_color_allocations", "equals": 0},
+        {"id": "no_msaa_depth_allocations", "metric": "renderer.aa.msaa_depth_allocations", "equals": 0},
+        {"id": "no_msaa_color_reallocations", "metric": "renderer.aa.msaa_color_reallocations", "equals": 0},
+        {"id": "no_msaa_depth_reallocations", "metric": "renderer.aa.msaa_depth_reallocations", "equals": 0},
+        {"id": "no_smaa_allocations", "metric": "renderer.aa.spatial_aa_allocations", "equals": 0},
+        {"id": "no_smaa_reallocations", "metric": "renderer.aa.spatial_aa_reallocations", "equals": 0}
+      ]
+    }
+  ],
+  "requirements": {
+    "assets": [
+      "modelsRoot:common/flat_plane.obj",
+      "repoRoot:assets/models/common/smooth_icosphere.obj",
+      "repoRoot:assets/fixtures/post_aa/specular_minification_normal.ppm"
+    ],
+    "backends": [],
+    "allowVisibleWindow": true,
+    "msaaSamples": 4
+  }
+}

@@ -4,7 +4,8 @@
 
 #include "ddgi_common.sp"
 
-float applySpecularAARoughnessBias(float roughness, vec3 shadingNormal) {
+float applyLegacySpecularAARoughnessBias(float roughness,
+                                         vec3 shadingNormal) {
   vec3 dndx = dFdx(shadingNormal);
   vec3 dndy = dFdy(shadingNormal);
   float normalVariance =
@@ -12,6 +13,41 @@ float applySpecularAARoughnessBias(float roughness, vec3 shadingNormal) {
   float alpha = max(roughness * roughness, kBrdfMinRoughness);
   alpha = clamp(alpha + 0.35 * normalVariance, kBrdfMinRoughness, 1.0);
   return clamp(sqrt(alpha), kBrdfMinRoughness, 1.0);
+}
+
+bool finiteFloat(float value) { return !isnan(value) && !isinf(value); }
+
+float zeroVarianceCompatibilityRoughness(float perceptualRoughness) {
+  float p = clamp(perceptualRoughness, kBrdfMinRoughness, 1.0);
+  return sqrt(max(p * p, kBrdfMinRoughness));
+}
+
+float filterGgxPerceptualRoughness(
+    float perceptualRoughness, float geometricNormalVariance,
+    float bakedMaterialVariance, float normalScale, uint contractBit,
+    out float materialVariance, out float combinedVariance) {
+  vec2 scales = getSpecularAAVarianceScales(pc.frameData);
+  float maxVariance =
+      clamp(getSpecularAAMaxSlopeVariance(pc.frameData), 0.0, 1.0);
+  float sampledVariance =
+      finiteFloat(bakedMaterialVariance) ? bakedMaterialVariance : 0.0;
+  geometricNormalVariance = finiteFloat(geometricNormalVariance)
+                                ? geometricNormalVariance
+                                : 0.0;
+  materialVariance =
+      contractBit != 0u
+          ? max(sampledVariance, 0.0) * normalScale * normalScale * scales.x
+          : 0.0;
+  float geometricVariance =
+      max(geometricNormalVariance, 0.0) * scales.y;
+  combinedVariance =
+      clamp(materialVariance + geometricVariance, 0.0, maxVariance);
+  float p = clamp(perceptualRoughness, kBrdfMinRoughness, 1.0);
+  float baseAlpha = max(p * p, kBrdfMinRoughness);
+  float filteredAlpha2 =
+      clamp(baseAlpha * baseAlpha + combinedVariance,
+            kBrdfMinRoughness * kBrdfMinRoughness, 1.0);
+  return clamp(pow(filteredAlpha2, 0.25), sqrt(kBrdfMinRoughness), 1.0);
 }
 
 struct ShadedMaterial {
@@ -43,7 +79,40 @@ struct ShadedMaterial {
   float sheenRoughness;
   vec3 sheenColor;
   vec3 emissive;
+  float specularAAMaterialVariance;
+  float specularAAGeometricVariance;
+  float specularAACombinedVariance;
+  float specularAARoughnessDelta;
+  bool specularAAInvalidInput;
 };
+
+bool trySpecularAADebugColor(ShadedMaterial sm, out vec4 color) {
+  const uint debugView = getSpecularAADebugView(pc.frameData);
+  if (debugView == kAntiAliasingDebugViewSpecularAAVariance) {
+    if (sm.specularAAInvalidInput) {
+      color = vec4(1.0, 0.0, 1.0, 1.0);
+      return true;
+    }
+    float maxVariance =
+        clamp(getSpecularAAMaxSlopeVariance(pc.frameData), 0.0, 1.0);
+    vec3 normalizedVariance =
+        maxVariance > 0.0
+            ? vec3(sm.specularAAMaterialVariance,
+                   sm.specularAAGeometricVariance,
+                   sm.specularAACombinedVariance) /
+                  maxVariance
+            : vec3(0.0);
+    color = vec4(clamp(normalizedVariance, vec3(0.0), vec3(1.0)), 1.0);
+    return true;
+  }
+  if (debugView == kAntiAliasingDebugViewSpecularAARoughnessDelta) {
+    float delta = clamp(sm.specularAARoughnessDelta, 0.0, 1.0);
+    color = vec4(delta, delta * delta, 0.0, 1.0);
+    return true;
+  }
+  color = vec4(0.0);
+  return false;
+}
 
 bool tryAmbientOcclusionDebugColor(FrameDataBuffer frameData,
                                    ShadedMaterial sm, out vec4 color) {
@@ -70,6 +139,11 @@ bool tryAmbientOcclusionDebugColor(FrameDataBuffer frameData,
 
 ShadedMaterial evaluateMaterial(MaterialData material, PerVertex vtx) {
   ShadedMaterial sm;
+  sm.specularAAMaterialVariance = 0.0;
+  sm.specularAAGeometricVariance = 0.0;
+  sm.specularAACombinedVariance = 0.0;
+  sm.specularAARoughnessDelta = 0.0;
+  sm.specularAAInvalidInput = false;
 
   const uint featureMask = materialFeatureMask(material);
   const uint workflow = materialWorkflow(material);
@@ -157,6 +231,20 @@ ShadedMaterial evaluateMaterial(MaterialData material, PerVertex vtx) {
   if (!gl_FrontFacing) {
     sm.nGeom *= -1.0;
   }
+  const uint specularAAAlgorithm =
+      getResolvedMaterialSpecularAA(pc.frameData);
+  float geometricNormalVariance = 0.0;
+  if (specularAAAlgorithm == kResolvedMaterialSpecularAABakedClean) {
+    vec3 geometricNormal = normalize(sm.nGeom);
+    vec3 dndx = dFdx(geometricNormal);
+    vec3 dndy = dFdy(geometricNormal);
+    geometricNormalVariance =
+        0.5 * (dot(dndx, dndx) + dot(dndy, dndy));
+    if (!finiteFloat(geometricNormalVariance)) {
+      sm.specularAAInvalidInput = true;
+      geometricNormalVariance = 0.0;
+    }
+  }
 
   sm.hasClearcoat = material.hasClearcoat &&
                     (featureMask & kMaterialFeatureClearcoat) != 0u;
@@ -187,11 +275,15 @@ ShadedMaterial evaluateMaterial(MaterialData material, PerVertex vtx) {
   }
 
   sm.nBase = sm.nGeom;
+  float baseBakedVariance = 0.0;
   if (normalTexId != kInvalidTextureBindlessIndex) {
     const vec2 uvNormal =
         transformedUv(material, vtx, kMaterialTextureSlotNormal);
-    vec3 n =
-        textureBindless2D(normalTexId, dataSampler, uvNormal).xyz * 2.0 - 1.0;
+    vec4 rawNormal =
+        textureBindless2D(normalTexId, dataSampler, uvNormal);
+    vec3 n = rawNormal.xyz * 2.0 - 1.0;
+    baseBakedVariance =
+        clamp(rawNormal.a, 0.0, 1.0) * kEncodedSlopeVarianceMax;
     n.xy *= materialNormalScale(material);
     float nLen = length(n);
     if (nLen > kEpsilon) {
@@ -228,16 +320,39 @@ ShadedMaterial evaluateMaterial(MaterialData material, PerVertex vtx) {
       }
     }
   }
-  sm.roughness = applySpecularAARoughnessBias(sm.roughness, sm.nBase);
+  const float authoredBaseRoughness = sm.roughness;
+  if (specularAAAlgorithm ==
+      kResolvedMaterialSpecularAALegacyShadingNormalDerivative) {
+    sm.roughness =
+        applyLegacySpecularAARoughnessBias(sm.roughness, sm.nBase);
+  } else if (specularAAAlgorithm ==
+             kResolvedMaterialSpecularAABakedClean) {
+    sm.roughness = filterGgxPerceptualRoughness(
+        sm.roughness, geometricNormalVariance, baseBakedVariance,
+        materialNormalScale(material),
+        material.header.materialFlags &
+            kMaterialFlagsBaseNormalVarianceBit,
+        sm.specularAAMaterialVariance, sm.specularAACombinedVariance);
+    sm.specularAAGeometricVariance =
+        max(geometricNormalVariance, 0.0) *
+        getSpecularAAVarianceScales(pc.frameData).y;
+    sm.specularAARoughnessDelta =
+        max(sm.roughness -
+                zeroVarianceCompatibilityRoughness(authoredBaseRoughness),
+            0.0);
+  }
 
   sm.nClearcoat = sm.nGeom;
+  float clearcoatBakedVariance = 0.0;
+  float clearcoatNormalBlend = 1.0;
   if (sm.hasClearcoat && clearcoatNormalTexId != kInvalidTextureBindlessIndex) {
     const vec2 uvClearcoatNormal =
         transformedUv(material, vtx, kMaterialTextureSlotClearcoatNormal);
-    vec3 n = textureBindless2D(clearcoatNormalTexId, dataSampler,
-                               uvClearcoatNormal).xyz *
-                 2.0 -
-             1.0;
+    vec4 rawNormal = textureBindless2D(clearcoatNormalTexId, dataSampler,
+                                       uvClearcoatNormal);
+    vec3 n = rawNormal.xyz * 2.0 - 1.0;
+    clearcoatBakedVariance =
+        clamp(rawNormal.a, 0.0, 1.0) * kEncodedSlopeVarianceMax;
     n.xy *= material.clearcoat.clearcoatFactors.z;
     float nLen = length(n);
     if (nLen > kEpsilon) {
@@ -248,12 +363,29 @@ ShadedMaterial evaluateMaterial(MaterialData material, PerVertex vtx) {
     vec3 perturbed =
         applyNormalMap(sm.nClearcoat, vtx.worldTangent, vtx.worldPos,
                        uvClearcoatNormal, n);
-    float blend = clamp(sqrt(sm.clearcoatRoughness), kBrdfMinRoughness, 1.0);
-    sm.nClearcoat = normalize(mix(sm.nClearcoat, perturbed, blend));
+    clearcoatNormalBlend =
+        clamp(sqrt(sm.clearcoatRoughness), kBrdfMinRoughness, 1.0);
+    sm.nClearcoat =
+        normalize(mix(sm.nClearcoat, perturbed, clearcoatNormalBlend));
   }
   if (sm.hasClearcoat) {
-    sm.clearcoatRoughness =
-        applySpecularAARoughnessBias(sm.clearcoatRoughness, sm.nClearcoat);
+    if (specularAAAlgorithm ==
+        kResolvedMaterialSpecularAALegacyShadingNormalDerivative) {
+      sm.clearcoatRoughness = applyLegacySpecularAARoughnessBias(
+          sm.clearcoatRoughness, sm.nClearcoat);
+    } else if (specularAAAlgorithm ==
+               kResolvedMaterialSpecularAABakedClean) {
+      float clearcoatMaterialVariance = 0.0;
+      float clearcoatCombinedVariance = 0.0;
+      const float effectiveScale =
+          material.clearcoat.clearcoatFactors.z * clearcoatNormalBlend;
+      sm.clearcoatRoughness = filterGgxPerceptualRoughness(
+          sm.clearcoatRoughness, geometricNormalVariance,
+          clearcoatBakedVariance, effectiveScale,
+          material.header.materialFlags &
+              kMaterialFlagsClearcoatNormalVarianceBit,
+          clearcoatMaterialVariance, clearcoatCombinedVariance);
+    }
   }
 
   sm.emissive = material.header.emissiveFactorStrength.xyz;
@@ -706,9 +838,10 @@ float directionalShadowMaxDistanceFade(ShadowFrameBuffer shadow,
   return saturate((viewDepth - fadeStart) / (fadeEnd - fadeStart));
 }
 
-DirectionalShadowResult evaluateDirectionalShadow(
-    ShadowFrameBuffer shadow, vec3 worldPos, vec3 surfaceNormal,
-    vec3 lightDir) {
+// Fast path contract: both direction inputs are finite unit vectors.
+DirectionalShadowResult evaluateDirectionalShadowUnitVectors(
+    ShadowFrameBuffer shadow, vec3 worldPos, vec3 unitNormal,
+    vec3 unitLight) {
   DirectionalShadowResult r;
   r.factor = 1.0;
   r.cascadeIndexDebug = 0.0;
@@ -716,13 +849,6 @@ DirectionalShadowResult evaluateDirectionalShadow(
   r.pcfFactorDebug = 1.0;
   r.receiverDepthDebug = 0.0;
   r.shadowMapDepthDebug = 0.0;
-  const float normalLength = length(surfaceNormal);
-  const vec3 unitNormal = normalLength > kEpsilon
-                              ? surfaceNormal / normalLength
-                              : vec3(0.0);
-  const float lightLength = length(lightDir);
-  const vec3 unitLight =
-      lightLength > kEpsilon ? lightDir / lightLength : vec3(0.0);
   const float ndotl = clamp(dot(unitNormal, unitLight), 0.0, 1.0);
   const float viewDepth = directionalShadowViewDepth(worldPos);
   const DirectionalShadowCascadeState state = makeDirectionalShadowCascadeState(
@@ -770,6 +896,20 @@ DirectionalShadowResult evaluateDirectionalShadow(
       directionalShadowMaxDistanceFade(shadow, viewDepth);
   r.factor = mix(r.factor, 1.0, distanceFade);
   return r;
+}
+
+DirectionalShadowResult evaluateDirectionalShadow(
+    ShadowFrameBuffer shadow, vec3 worldPos, vec3 surfaceNormal,
+    vec3 lightDir) {
+  const float normalLength = length(surfaceNormal);
+  const vec3 unitNormal = normalLength > kEpsilon
+                              ? surfaceNormal / normalLength
+                              : vec3(0.0);
+  const float lightLength = length(lightDir);
+  const vec3 unitLight =
+      lightLength > kEpsilon ? lightDir / lightLength : vec3(0.0);
+  return evaluateDirectionalShadowUnitVectors(shadow, worldPos, unitNormal,
+                                               unitLight);
 }
 
 float directionalShadowFactor(ShadowFrameBuffer shadow, vec3 worldPos,
@@ -847,7 +987,8 @@ DirectLightingResult evaluateDirectLighting(ShadedMaterial sm, vec3 worldPos) {
       if ((shadowState.x & kShadowFrameFlagEnabled) != 0u &&
           shadowState.y > 0u && shadowState.z == i) {
         DirectionalShadowResult shadowResult =
-            evaluateDirectionalShadow(shadow, worldPos, sm.nGeom, l);
+            evaluateDirectionalShadowUnitVectors(shadow, worldPos, sm.nGeom,
+                                                  l);
         shadowFactor = shadowResult.factor;
         r.shadowFactorDebug = shadowResult.factor;
         r.shadowCascadeIndexDebug = shadowResult.cascadeIndexDebug;

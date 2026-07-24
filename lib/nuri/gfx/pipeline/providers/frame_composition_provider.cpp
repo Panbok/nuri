@@ -2,6 +2,7 @@
 #include "nuri/core/profiling.h"
 #include "nuri/gfx/frame/presentation_aa_plan.h"
 #include "nuri/pch.h"
+#include "nuri/resources/gpu/resource_manager.h"
 namespace nuri {
 namespace {
 uint32_t levelDimensions(uint32_t base, uint32_t mipLevel) {
@@ -224,14 +225,29 @@ FrameCompositionProvider::prepare(FrameBuildContext &ctx) {
       aoMetrics.ambientOcclusionTextureBytes *
           static_cast<uint64_t>(aoMetrics.ambientOcclusionTextureCount);
   AntiAliasingFrameMetrics &aaMetrics = ctx.frame.metrics.antiAliasing;
+  aaMetrics.postAAPlan = ctx.frame.presentationAA.postAA;
+  aaMetrics.postAA.specularSelected =
+      aaMetrics.postAAPlan.specular == PostAASpecularAlgorithm::BakedClean;
   aaMetrics.msaaEnabled = coverage != CoverageMode::Sample1;
   aaMetrics.msaaSampleCount = sampleCount;
   aaMetrics.msaaAlphaCoverageRequested = isMsaaMode(settings.antiAliasing.mode);
   aaMetrics.msaaSpatialCleanupRequested =
-      settings.antiAliasing.debug.spatialPostMsaaCleanup;
+      aaMetrics.postAAPlan.requested &&
+      aaMetrics.postAAPlan.spatial == PostAASpatialAlgorithm::Smaa1x;
   aaMetrics.msaaSpatialCleanupEnabled =
-      aaMetrics.msaaEnabled &&
-      settings.antiAliasing.debug.spatialPostMsaaCleanup;
+      aaMetrics.postAAPlan.active &&
+      aaMetrics.postAAPlan.spatial == PostAASpatialAlgorithm::Smaa1x;
+  const PoolStats poolStats = ctx.resources.stats();
+  aaMetrics.normalVarianceContractMaterialsLive =
+      poolStats.normalVarianceContractMaterialsLive;
+  aaMetrics.normalVarianceContractTexturesLive =
+      poolStats.normalVarianceContractTexturesLive;
+  aaMetrics.normalVarianceUnavailableSlotsLive =
+      aaMetrics.postAA.specularSelected
+          ? poolStats.normalVarianceUnavailableSlotsLive
+          : 0u;
+  aaMetrics.normalVarianceContractTextureBytesLive =
+      poolStats.normalVarianceContractTextureBytesLive;
   aaMetrics.msaaResolvePlacement = aaMetrics.msaaEnabled
                                        ? MsaaResolvePlacement::ExplicitPass
                                        : MsaaResolvePlacement::None;

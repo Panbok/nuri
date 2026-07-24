@@ -7,8 +7,11 @@
 #include "nuri/gfx/sim/animation_scene_frame_data.h"
 #include "nuri/resources/gpu/resource_manager.h"
 #include "nuri/resources/scene_importer.h"
+#include "nuri/resources/storage/texture/texture_artifact_builder.h"
 
+#include <cmath>
 #include <cstdlib>
+#include <fstream>
 #include <memory>
 #include <optional>
 #include <vector>
@@ -418,6 +421,220 @@ populateReactiveMaskScene(const ToolRuntimeDesc &runtime, Renderer &renderer,
 }
 
 [[nodiscard]] Result<bool, std::string>
+populateSpecularMinificationScene(const ToolRuntimeDesc &runtime,
+                                  Renderer &renderer, RenderScene &scene) {
+  if (runtime.scene.generator != "nuri.procedural.specular_minification.v1") {
+    return Result<bool, std::string>::makeResult(true);
+  }
+  auto planePath =
+      resolveToolPath(runtime, "modelsRoot", "common/flat_plane.obj");
+  if (planePath.hasError()) {
+    return Result<bool, std::string>::makeError(planePath.error());
+  }
+  auto model = renderer.resources().acquireModel(ModelRequest{
+      .path = planePath.value().string(),
+      .debugName = "post_aa_specular_minification_plane",
+  });
+  if (model.hasError()) {
+    return Result<bool, std::string>::makeError(model.error());
+  }
+  auto spherePath = resolveToolPath(
+      runtime, "repoRoot", "assets/models/common/smooth_icosphere.obj");
+  if (spherePath.hasError()) {
+    return Result<bool, std::string>::makeError(spherePath.error());
+  }
+  auto sphereModel = renderer.resources().acquireModel(ModelRequest{
+      .path = spherePath.value().string(),
+      .debugName = "post_aa_specular_minification_sphere",
+  });
+  if (sphereModel.hasError()) {
+    return Result<bool, std::string>::makeError(sphereModel.error());
+  }
+
+  auto normalSource = resolveToolPath(
+      runtime, "repoRoot",
+      "assets/fixtures/post_aa/specular_minification_normal.ppm");
+  if (normalSource.hasError()) {
+    return Result<bool, std::string>::makeError(normalSource.error());
+  }
+  const TextureArtifactBuildOptions buildOptions{
+      .loadOptions =
+          TextureLoadOptions{
+              .srgb = false,
+              .generateMipmaps = true,
+              .mipSemantic = TextureMipSemantic::NormalMap,
+          },
+      .encoding = TextureArtifactEncoding::Uastc,
+      .contentContract = TextureContentContract::NormalRgbCleanVarianceA,
+  };
+  const std::string canonicalNormalPath =
+      canonicalizeResourcePath(normalSource.value().string());
+  const uint64_t normalIdentity = hashTextureSourceIdentity(
+      canonicalNormalPath, false, textureArtifactProcessingTag(buildOptions));
+  const TextureCompressionCaps compression =
+      renderer.resources().textureCompressionCaps();
+  const Format targetFormat = selectTextureArtifactTargetFormat(
+      compression.bc7, compression.etc2, false, 4u);
+  std::ifstream ppm(normalSource.value());
+  std::string ppmMagic;
+  uint32_t ppmWidth = 0u;
+  uint32_t ppmHeight = 0u;
+  uint32_t ppmMaxValue = 0u;
+  ppm >> ppmMagic >> ppmWidth >> ppmHeight >> ppmMaxValue;
+  if (!ppm || ppmMagic != "P3" || ppmWidth == 0u || ppmHeight == 0u ||
+      ppmMaxValue != 255u) {
+    return Result<bool, std::string>::makeError(
+        "Post-AA fixture normal source must be an 8-bit P3 PPM");
+  }
+  EmbeddedSceneTextureData embeddedNormal{
+      .width = ppmWidth,
+      .height = ppmHeight,
+      .compressed = false,
+  };
+  embeddedNormal.bytes.resize(static_cast<size_t>(ppmWidth) *
+                              static_cast<size_t>(ppmHeight) * 4u);
+  for (size_t texel = 0u; texel < static_cast<size_t>(ppmWidth) * ppmHeight;
+       ++texel) {
+    uint32_t red = 0u;
+    uint32_t green = 0u;
+    uint32_t blue = 0u;
+    ppm >> red >> green >> blue;
+    if (!ppm || red > 255u || green > 255u || blue > 255u) {
+      return Result<bool, std::string>::makeError(
+          "Post-AA fixture normal source contains an invalid texel");
+    }
+    embeddedNormal.bytes[texel * 4u] = static_cast<std::byte>(red);
+    embeddedNormal.bytes[texel * 4u + 1u] = static_cast<std::byte>(green);
+    embeddedNormal.bytes[texel * 4u + 2u] = static_cast<std::byte>(blue);
+    embeddedNormal.bytes[texel * 4u + 3u] = std::byte{255u};
+  }
+  auto builder = SceneTextureArtifactBuilder::create(
+      normalSource.value(),
+      std::span<const EmbeddedSceneTextureData>(&embeddedNormal, 1u));
+  if (builder.hasError()) {
+    return Result<bool, std::string>::makeError(builder.error());
+  }
+  auto artifact = builder.value().ensure(
+      MaterialTextureSlotData{
+          .sourceKind = MaterialTextureSourceKind::EmbeddedSceneTexture,
+          .embeddedIndex = 0u,
+      },
+      normalIdentity, targetFormat, buildOptions);
+  if (artifact.hasError()) {
+    return Result<bool, std::string>::makeError(artifact.error());
+  }
+  auto normalTexture = renderer.resources().acquireTexture(TextureRequest{
+      .path = artifact.value().artifactPath.string(),
+      .loadOptions = buildOptions.loadOptions,
+      .contentContract = TextureContentContract::NormalRgbCleanVarianceA,
+      .kind = TextureRequestKind::Ktx2Texture2D,
+      .debugName = "post_aa_specular_minification_normal",
+  });
+  if (normalTexture.hasError()) {
+    return Result<bool, std::string>::makeError(normalTexture.error());
+  }
+
+  constexpr std::array roughness{0.04f, 0.12f, 0.32f, 0.68f};
+  constexpr std::array metallic{0.0f, 0.5f, 1.0f};
+  std::array<MaterialRef, roughness.size() * metallic.size()> materials{};
+  for (size_t row = 0u; row < roughness.size(); ++row) {
+    for (size_t column = 0u; column < metallic.size(); ++column) {
+      MaterialRequest request{};
+      request.debugName = "post_aa_specular_tile_" + std::to_string(row) + "_" +
+                          std::to_string(column);
+      request.sourceIdentity = request.debugName;
+      request.desc.baseColorFactor =
+          glm::vec4(0.34f + 0.18f * static_cast<float>(column),
+                    0.42f + 0.10f * static_cast<float>(row), 0.52f, 1.0f);
+      request.desc.metallicFactor = metallic[column];
+      request.desc.roughnessFactor = roughness[row];
+      request.desc.doubleSided = true;
+      request.textureRefs[kMaterialTextureSlotNormal] = normalTexture.value();
+      request.desc.transforms[kMaterialTextureSlotNormal].scale =
+          glm::vec2(static_cast<float>(1u << (column + 2u)));
+      if (row == 2u) {
+        request.desc.featureMask |= kMaterialFeatureClearcoat;
+        request.desc.clearcoatFactor = 1.0f;
+        request.desc.clearcoatRoughnessFactor = 0.08f;
+        request.textureRefs[kMaterialTextureSlotClearcoatNormal] =
+            normalTexture.value();
+        request.desc.transforms[kMaterialTextureSlotClearcoatNormal].scale =
+            glm::vec2(12.0f);
+      }
+      auto material = renderer.resources().acquireMaterial(request);
+      if (material.hasError()) {
+        renderer.resources().release(normalTexture.value());
+        return Result<bool, std::string>::makeError(material.error());
+      }
+      materials[row * metallic.size() + column] = material.value();
+    }
+  }
+  auto sphereNode = scene.graph().createNode(
+      scene.graph().rootNode(), "SpecularMinificationCurved",
+      glm::translate(glm::mat4(1.0f), glm::vec3(3.15f, 0.0f, -0.15f)) *
+          glm::scale(glm::mat4(1.0f), glm::vec3(1.15f)));
+  if (sphereNode.hasError()) {
+    return Result<bool, std::string>::makeError(sphereNode.error());
+  }
+  auto sphereRenderable =
+      scene.graph().addRenderable(sphereNode.value(), sphereModel.value(),
+                                  materials[2u * metallic.size() + 2u]);
+  if (sphereRenderable.hasError()) {
+    return Result<bool, std::string>::makeError(sphereRenderable.error());
+  }
+  renderer.resources().release(normalTexture.value());
+
+  const glm::mat4 upright = glm::rotate(glm::mat4(1.0f), glm::radians(90.0f),
+                                        glm::vec3(1.0f, 0.0f, 0.0f));
+  for (size_t row = 0u; row < roughness.size(); ++row) {
+    for (size_t column = 0u; column < metallic.size(); ++column) {
+      const float x = (static_cast<float>(column) - 1.0f) * 1.55f;
+      const float y = (1.5f - static_cast<float>(row)) * 1.12f;
+      const float slant =
+          glm::radians((static_cast<float>(column) - 1.0f) * 11.0f);
+      const glm::mat4 orientation =
+          glm::rotate(upright, slant, glm::vec3(0.0f, 1.0f, 0.0f));
+      const glm::mat4 transform =
+          glm::translate(glm::mat4(1.0f), glm::vec3(x, y, 0.0f)) * orientation *
+          glm::scale(glm::mat4(1.0f), glm::vec3(0.68f, 0.48f, 1.0f));
+      const std::string name = "SpecularMinificationTile_" +
+                               std::to_string(row) + "_" +
+                               std::to_string(column);
+      auto node =
+          scene.graph().createNode(scene.graph().rootNode(), name, transform);
+      if (node.hasError()) {
+        return Result<bool, std::string>::makeError(node.error());
+      }
+      auto renderable = scene.graph().addRenderable(
+          node.value(), model.value(),
+          materials[row * metallic.size() + column]);
+      if (renderable.hasError()) {
+        return Result<bool, std::string>::makeError(renderable.error());
+      }
+    }
+  }
+  constexpr std::array lightPositions{glm::vec3(-1.7f, 1.75f, 1.4f),
+                                      glm::vec3(1.55f, 0.35f, 1.2f),
+                                      glm::vec3(0.0f, -1.65f, 1.0f)};
+  for (size_t index = 0u; index < lightPositions.size(); ++index) {
+    auto light = scene.graph().addLight(
+        scene.graph().rootNode(),
+        LightDesc{.type = LightType::Point,
+                  .name = "SpecularMinificationPin_" + std::to_string(index),
+                  .position = lightPositions[index],
+                  .color = index == 1u ? glm::vec3(0.70f, 0.82f, 1.0f)
+                                       : glm::vec3(1.0f, 0.82f, 0.62f),
+                  .intensity = 18.0f,
+                  .range = 6.0f,
+                  .enabled = true});
+    if (light.hasError()) {
+      return Result<bool, std::string>::makeError(light.error());
+    }
+  }
+  return Result<bool, std::string>::makeResult(true);
+}
+
+[[nodiscard]] Result<bool, std::string>
 populateOcclusionWallScene(const ToolRuntimeDesc &runtime, Renderer &renderer,
                            RenderScene &scene) {
   if (runtime.scene.generator != "nuri.procedural.occlusion_wall.v1") {
@@ -818,6 +1035,11 @@ populateToolScene(const ToolRuntimeDesc &runtime, Renderer &renderer,
     if (proceduralResult.hasError()) {
       return proceduralResult;
     }
+    proceduralResult =
+        populateSpecularMinificationScene(runtime, renderer, scene);
+    if (proceduralResult.hasError()) {
+      return proceduralResult;
+    }
     proceduralResult = populateOcclusionWallScene(runtime, renderer, scene);
     if (proceduralResult.hasError()) {
       return proceduralResult;
@@ -840,6 +1062,12 @@ populateToolScene(const ToolRuntimeDesc &runtime, Renderer &renderer,
 }
 
 } // namespace
+
+Result<bool, std::string>
+populateSpecularMinificationToolScene(const ToolRuntimeDesc &desc,
+                                      Renderer &renderer, RenderScene &scene) {
+  return populateSpecularMinificationScene(desc, renderer, scene);
+}
 
 struct ToolRendererRuntime::Impl {
   explicit Impl(const ToolRuntimeDesc &desc)
@@ -1029,6 +1257,20 @@ void buildToolFrameContext(RenderFrameContext &frameContext, RenderScene &scene,
                            Renderer &renderer, RenderSettings &settings,
                            TemporalFrameService &temporalFrameService,
                            const Camera &camera, const ToolFrameDesc &desc) {
+  scene.graph().forEachLightOnNode(
+      scene.graph().rootNode(), [&](LightId lightId) {
+        LightDesc light{};
+        if (!scene.graph().getLightDesc(lightId, light) ||
+            light.name != "SpecularMinificationPin_0") {
+          return;
+        }
+        const float phase = static_cast<float>(desc.timeSeconds * 1.35);
+        light.position =
+            glm::vec3(-1.7f + std::sin(phase) * 1.15f,
+                      1.75f + std::cos(phase * 0.73f) * 0.35f, 1.4f);
+        (void)scene.graph().updateLight(lightId, light);
+      });
+  (void)scene.graph().syncWorldTransforms();
   frameContext.scene = &scene;
   frameContext.resources = &renderer.resources();
   frameContext.frameIndex = desc.frameIndex;

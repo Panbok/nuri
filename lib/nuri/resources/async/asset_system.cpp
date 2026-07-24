@@ -370,6 +370,7 @@ AssetSystem::requestTexture(const TextureRequest &request,
       .canonicalPath = resolved.path,
       .optionsHash = hashTextureLoadOptions(resolved.loadOptions),
       .kind = resolved.kind,
+      .contentContract = resolved.contentContract,
   };
   const auto ready = resources_.tryAcquireTexture(resolved);
   return requestGpuAsset<TextureNode, TextureAssetHandle, TextureCpuCompletion>(

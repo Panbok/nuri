@@ -711,6 +711,16 @@ TextureCacheTelemetry Texture::cacheTelemetry() noexcept {
       .artifactBuildTimeNs = artifact.artifactBuildTimeNs,
       .ddsReadTimeNs =
           gTextureCacheTelemetry.ddsReadTimeNs.load(std::memory_order_relaxed),
+      .normalVarianceArtifactBuilds = artifact.normalVarianceArtifactBuilds,
+      .normalVarianceCleanTexels = artifact.normalVarianceCleanTexels,
+      .normalVarianceToksvigFallbackTexels =
+          artifact.normalVarianceToksvigFallbackTexels,
+      .normalVarianceContractRejections =
+          artifact.normalVarianceContractRejections,
+      .normalVarianceArtifactBytesWritten =
+          artifact.normalVarianceArtifactBytesWritten,
+      .normalVarianceArtifactBuildTimeNs =
+          artifact.normalVarianceArtifactBuildTimeNs,
   };
 }
 

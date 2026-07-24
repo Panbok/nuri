@@ -215,7 +215,7 @@ constexpr std::array<const char *, 4> kAmbientOcclusionDebugViewLabels = {
 constexpr std::array<const char *, 5> kHDRPostProcessDebugViewLabels = {
     "None", "Bloom Prefilter", "Bloom Final", "Log Average Luminance",
     "Adapted Exposure"};
-constexpr std::array<const char *, 36> kAntiAliasingDebugViewLabels = {
+constexpr std::array<const char *, 38> kAntiAliasingDebugViewLabels = {
     "None",
     "Settings",
     "Motion Vectors",
@@ -251,7 +251,9 @@ constexpr std::array<const char *, 36> kAntiAliasingDebugViewLabels = {
     "Spatial AA Edges",
     "Spatial AA Blend Weights",
     "Spatial AA Cleanup Mask",
-    "Spatial AA Split Compare"};
+    "Spatial AA Split Compare",
+    "Specular AA Variance",
+    "Specular AA Roughness Delta"};
 constexpr std::array<const char *, 6> kTemporalAAClampModeLabels = {
     "Clamp RGB",   "Clip RGB",   "Variance RGB",
     "Clamp YCoCg", "Clip YCoCg", "Variance YCoCg"};
@@ -564,8 +566,35 @@ const char *antiAliasingDebugViewDisplayName(AntiAliasingDebugView view) {
     return "TAA Patch Probe";
   case AntiAliasingDebugView::TAAMotionFilter:
     return "TAA Motion Filter";
+  case AntiAliasingDebugView::SpecularAAVariance:
+    return "Specular AA Variance";
+  case AntiAliasingDebugView::SpecularAARoughnessDelta:
+    return "Specular AA Roughness Delta";
   }
   return "Unknown";
+}
+
+const char *postAAInactiveReasonDisplayName(PostAAInactiveReason reason) {
+  switch (reason) {
+  case PostAAInactiveReason::None:
+    return "None";
+  case PostAAInactiveReason::NotRequested:
+    return "Not requested";
+  case PostAAInactiveReason::CoverageIsSingleSample:
+    return "Coverage is single-sample";
+  case PostAAInactiveReason::NoComponentEnabled:
+    return "No component enabled";
+  }
+  return "Unknown";
+}
+
+const char *postAASpecularDisplayName(PostAASpecularAlgorithm algorithm) {
+  return algorithm == PostAASpecularAlgorithm::BakedClean ? "Baked CLEAN"
+                                                          : "Inherit current";
+}
+
+const char *postAASpatialDisplayName(PostAASpatialAlgorithm algorithm) {
+  return algorithm == PostAASpatialAlgorithm::Smaa1x ? "SMAA 1x" : "Off";
 }
 
 const char *ambientOcclusionModeDisplayName(AmbientOcclusionMode mode) {
@@ -2913,8 +2942,30 @@ void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
   }
   const bool msaaControlsDisabled = !isMsaaMode(aa.mode);
   ImGui::BeginDisabled(msaaControlsDisabled);
-  ImGui::Checkbox("Post-MSAA Spatial Cleanup##AntiAliasing",
-                  &aa.debug.spatialPostMsaaCleanup);
+  ImGui::Checkbox("Post-AA##AntiAliasing", &aa.postAA.enabled);
+  if (ImGui::TreeNode("Post-AA Advanced##AntiAliasing")) {
+    constexpr std::array<const char *, 2> specularLabels{"Inherit Current",
+                                                         "Baked CLEAN"};
+    int specular = std::clamp(static_cast<int>(aa.postAA.specular), 0, 1);
+    if (ImGui::Combo("Specular##PostAA", &specular, specularLabels.data(),
+                     static_cast<int>(specularLabels.size()))) {
+      aa.postAA.specular = static_cast<PostAASpecularAlgorithm>(specular);
+    }
+    constexpr std::array<const char *, 2> spatialLabels{"Off", "SMAA 1x"};
+    int spatial = std::clamp(static_cast<int>(aa.postAA.spatial), 0, 1);
+    if (ImGui::Combo("Spatial##PostAA", &spatial, spatialLabels.data(),
+                     static_cast<int>(spatialLabels.size()))) {
+      aa.postAA.spatial = static_cast<PostAASpatialAlgorithm>(spatial);
+    }
+    ImGui::SliderFloat("Material Variance Scale##PostAA",
+                       &aa.postAA.materialVarianceScale, 0.0f, 2.0f, "%.2f");
+    ImGui::SliderFloat("Geometric Variance Scale##PostAA",
+                       &aa.postAA.geometricVarianceScale, 0.0f, 1.0f, "%.2f");
+    ImGui::SliderFloat("Maximum Slope Variance##PostAA",
+                       &aa.postAA.maxSlopeVariance, 0.0f, 1.0f, "%.2f");
+    ImGui::TreePop();
+  }
+  aa.debug.spatialPostMsaaCleanup = false;
   ImGui::EndDisabled();
 
   if (ImGui::Button("Reset History##AntiAliasing")) {
@@ -2958,6 +3009,20 @@ void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
   ImGui::Text("TemporalAAFeature: %s",
               temporalFeaturePresent ? "registered" : "missing");
   const AntiAliasingFrameMetrics &metrics = frameMetrics.antiAliasing;
+  ImGui::Text("Post-AA: %s; specular %s; spatial %s",
+              metrics.postAAPlan.active ? "active" : "inactive",
+              postAASpecularDisplayName(metrics.postAAPlan.specular),
+              postAASpatialDisplayName(metrics.postAAPlan.spatial));
+  if (!metrics.postAAPlan.active) {
+    ImGui::TextDisabled(
+        "Post-AA inactive: %s",
+        postAAInactiveReasonDisplayName(metrics.postAAPlan.inactiveReason));
+  }
+  if (metrics.postAA.degradation != PostAADegradation::None) {
+    ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.22f, 1.0f),
+                       "Post-AA degraded (mask 0x%X)",
+                       static_cast<uint32_t>(metrics.postAA.degradation));
+  }
   if (ImGui::CollapsingHeader("TAA Capture HUD",
                               ImGuiTreeNodeFlags_DefaultOpen)) {
     const std::string_view hudResetReason =

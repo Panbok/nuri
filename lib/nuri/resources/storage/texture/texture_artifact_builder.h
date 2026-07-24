@@ -19,6 +19,7 @@ struct TextureArtifactBuildOptions {
       .generateMipmaps = true,
   };
   TextureArtifactEncoding encoding = TextureArtifactEncoding::Etc1s;
+  TextureContentContract contentContract = TextureContentContract::Generic;
 };
 
 struct TextureArtifactBuildResult {
@@ -38,6 +39,12 @@ struct TextureArtifactCacheTelemetry {
   uint64_t authoredSourceBytesRead = 0u;
   uint64_t nativeArtifactBytesRead = 0u;
   uint64_t artifactBuildTimeNs = 0u;
+  uint64_t normalVarianceArtifactBuilds = 0u;
+  uint64_t normalVarianceCleanTexels = 0u;
+  uint64_t normalVarianceToksvigFallbackTexels = 0u;
+  uint64_t normalVarianceContractRejections = 0u;
+  uint64_t normalVarianceArtifactBytesWritten = 0u;
+  uint64_t normalVarianceArtifactBuildTimeNs = 0u;
 };
 
 class NURI_API SceneTextureArtifactBuilder final {

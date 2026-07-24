@@ -672,6 +672,65 @@ yyjson_mut_val *makeRendererMetricsObject(yyjson_mut_doc *doc,
 
   const AntiAliasingFrameMetrics &aa = metrics.antiAliasing;
   yyjson_mut_val *aaObject = yyjson_mut_obj(doc);
+  const PostAAPlan &postAAPlan = aa.postAAPlan;
+  const PostAAFrameFacts &postAA = aa.postAA;
+  yyjson_mut_obj_add_bool(doc, aaObject, "postAARequested",
+                          postAAPlan.requested);
+  yyjson_mut_obj_add_bool(doc, aaObject, "postAAResolvedActive",
+                          postAAPlan.active);
+  yyjson_mut_obj_add_uint(doc, aaObject, "postAAInactiveReason",
+                          static_cast<uint32_t>(postAAPlan.inactiveReason));
+  yyjson_mut_obj_add_uint(doc, aaObject, "postAASpecularAlgorithm",
+                          static_cast<uint32_t>(postAAPlan.specular));
+  yyjson_mut_obj_add_uint(doc, aaObject, "postAASpatialAlgorithm",
+                          static_cast<uint32_t>(postAAPlan.spatial));
+  yyjson_mut_obj_add_uint(
+      doc, aaObject, "resolvedMaterialSpecularAA",
+      static_cast<uint32_t>(postAAPlan.resolvedMaterialSpecularAA));
+  yyjson_mut_obj_add_uint(doc, aaObject, "debugView",
+                          static_cast<uint32_t>(postAAPlan.debugView));
+  yyjson_mut_obj_add_uint(
+      doc, aaObject, "specularAADebugOverride",
+      static_cast<uint32_t>(postAAPlan.specularAADebugOverride));
+  yyjson_mut_obj_add_real(doc, aaObject, "postAAMaterialVarianceScale",
+                          postAAPlan.materialVarianceScale);
+  yyjson_mut_obj_add_real(doc, aaObject, "postAAGeometricVarianceScale",
+                          postAAPlan.geometricVarianceScale);
+  yyjson_mut_obj_add_real(doc, aaObject, "postAAMaxSlopeVariance",
+                          postAAPlan.maxSlopeVariance);
+  yyjson_mut_obj_add_bool(doc, aaObject, "postAASpecularSelected",
+                          postAA.specularSelected);
+  yyjson_mut_obj_add_bool(doc, aaObject, "postAASmaaPlanned",
+                          postAA.smaaPlanned);
+  yyjson_mut_obj_add_bool(doc, aaObject, "postAASmaaSubmitted",
+                          postAA.smaaSubmitted);
+  yyjson_mut_obj_add_uint(doc, aaObject, "postAASmaaSubmittedPassCount",
+                          postAA.smaaSubmittedPassCount);
+  yyjson_mut_obj_add_bool(doc, aaObject, "postAASmaaCompleted",
+                          postAA.smaaCompleted);
+  if (postAA.smaaCompletedSourceFrameIndex ==
+      std::numeric_limits<uint64_t>::max()) {
+    yyjson_mut_obj_add_null(doc, aaObject,
+                            "postAASmaaCompletedSourceFrameIndex");
+  } else {
+    yyjson_mut_obj_add_uint(doc, aaObject,
+                            "postAASmaaCompletedSourceFrameIndex",
+                            postAA.smaaCompletedSourceFrameIndex);
+  }
+  yyjson_mut_obj_add_uint(doc, aaObject, "postAADegradationMask",
+                          static_cast<uint32_t>(postAA.degradation));
+  yyjson_mut_obj_add_uint(doc, aaObject, "normalVarianceContractMaterialCount",
+                          aa.normalVarianceContractMaterialsLive);
+  yyjson_mut_obj_add_uint(doc, aaObject, "normalVarianceContractTextureCount",
+                          aa.normalVarianceContractTexturesLive);
+  yyjson_mut_obj_add_uint(doc, aaObject, "normalVarianceUnavailableSlotCount",
+                          aa.normalVarianceUnavailableSlotsLive);
+  yyjson_mut_obj_add_uint(doc, aaObject, "normalVarianceContractTextureBytes",
+                          aa.normalVarianceContractTextureBytesLive);
+  yyjson_mut_obj_add_uint(doc, aaObject, "spatialAAAllocationCount",
+                          aa.spatialAAAllocationCount);
+  yyjson_mut_obj_add_uint(doc, aaObject, "spatialAAReallocationCount",
+                          aa.spatialAAReallocationCount);
   yyjson_mut_obj_add_bool(doc, aaObject, "historyValid", aa.historyValid);
   yyjson_mut_obj_add_bool(doc, aaObject, "temporalDataValid",
                           aa.temporalDataValid);
@@ -1181,6 +1240,70 @@ void readRendererMetrics(yyjson_val *object, RenderFrameMetrics &metrics) {
   yyjson_val *aaObject = yyjson_obj_get(object, "antiAliasing");
   if (yyjson_is_obj(aaObject)) {
     AntiAliasingFrameMetrics &aa = metrics.antiAliasing;
+    aa.postAAPlan.requested =
+        readBool(aaObject, "postAARequested", aa.postAAPlan.requested);
+    aa.postAAPlan.active =
+        readBool(aaObject, "postAAResolvedActive", aa.postAAPlan.active);
+    aa.postAAPlan.inactiveReason = static_cast<PostAAInactiveReason>(
+        readU32(aaObject, "postAAInactiveReason",
+                static_cast<uint32_t>(aa.postAAPlan.inactiveReason)));
+    aa.postAAPlan.specular = static_cast<PostAASpecularAlgorithm>(
+        readU32(aaObject, "postAASpecularAlgorithm",
+                static_cast<uint32_t>(aa.postAAPlan.specular)));
+    aa.postAAPlan.spatial = static_cast<PostAASpatialAlgorithm>(
+        readU32(aaObject, "postAASpatialAlgorithm",
+                static_cast<uint32_t>(aa.postAAPlan.spatial)));
+    aa.postAAPlan.resolvedMaterialSpecularAA =
+        static_cast<ResolvedMaterialSpecularAA>(readU32(
+            aaObject, "resolvedMaterialSpecularAA",
+            static_cast<uint32_t>(aa.postAAPlan.resolvedMaterialSpecularAA)));
+    aa.postAAPlan.debugView = static_cast<AntiAliasingDebugView>(readU32(
+        aaObject, "debugView", static_cast<uint32_t>(aa.postAAPlan.debugView)));
+    aa.postAAPlan.specularAADebugOverride =
+        static_cast<SpecularAADebugOverride>(readU32(
+            aaObject, "specularAADebugOverride",
+            static_cast<uint32_t>(aa.postAAPlan.specularAADebugOverride)));
+    aa.postAAPlan.materialVarianceScale =
+        readF32(aaObject, "postAAMaterialVarianceScale",
+                aa.postAAPlan.materialVarianceScale);
+    aa.postAAPlan.geometricVarianceScale =
+        readF32(aaObject, "postAAGeometricVarianceScale",
+                aa.postAAPlan.geometricVarianceScale);
+    aa.postAAPlan.maxSlopeVariance = readF32(aaObject, "postAAMaxSlopeVariance",
+                                             aa.postAAPlan.maxSlopeVariance);
+    aa.postAA.specularSelected = readBool(aaObject, "postAASpecularSelected",
+                                          aa.postAA.specularSelected);
+    aa.postAA.smaaPlanned =
+        readBool(aaObject, "postAASmaaPlanned", aa.postAA.smaaPlanned);
+    aa.postAA.smaaSubmitted =
+        readBool(aaObject, "postAASmaaSubmitted", aa.postAA.smaaSubmitted);
+    aa.postAA.smaaSubmittedPassCount =
+        readU32(aaObject, "postAASmaaSubmittedPassCount",
+                aa.postAA.smaaSubmittedPassCount);
+    aa.postAA.smaaCompleted =
+        readBool(aaObject, "postAASmaaCompleted", aa.postAA.smaaCompleted);
+    aa.postAA.smaaCompletedSourceFrameIndex =
+        readU64(aaObject, "postAASmaaCompletedSourceFrameIndex",
+                aa.postAA.smaaCompletedSourceFrameIndex);
+    aa.postAA.degradation = static_cast<PostAADegradation>(
+        readU32(aaObject, "postAADegradationMask",
+                static_cast<uint32_t>(aa.postAA.degradation)));
+    aa.normalVarianceContractMaterialsLive =
+        readU32(aaObject, "normalVarianceContractMaterialCount",
+                aa.normalVarianceContractMaterialsLive);
+    aa.normalVarianceContractTexturesLive =
+        readU32(aaObject, "normalVarianceContractTextureCount",
+                aa.normalVarianceContractTexturesLive);
+    aa.normalVarianceUnavailableSlotsLive =
+        readU32(aaObject, "normalVarianceUnavailableSlotCount",
+                aa.normalVarianceUnavailableSlotsLive);
+    aa.normalVarianceContractTextureBytesLive =
+        readU64(aaObject, "normalVarianceContractTextureBytes",
+                aa.normalVarianceContractTextureBytesLive);
+    aa.spatialAAAllocationCount = readU32(aaObject, "spatialAAAllocationCount",
+                                          aa.spatialAAAllocationCount);
+    aa.spatialAAReallocationCount = readU32(
+        aaObject, "spatialAAReallocationCount", aa.spatialAAReallocationCount);
     aa.historyValid = readBool(aaObject, "historyValid", aa.historyValid);
     aa.temporalDataValid =
         readBool(aaObject, "temporalDataValid", aa.temporalDataValid);

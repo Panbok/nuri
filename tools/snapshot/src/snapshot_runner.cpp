@@ -21,6 +21,7 @@
 #include "nuri/tools/core/fingerprint.h"
 #include "nuri/tools/core/result_envelope_v2.h"
 #include "nuri/tools/core/run_workspace.h"
+#include "nuri/tools/runtime/render_tool_runtime.h"
 #include "nuri/tools/snapshot/snapshot_baseline.h"
 #include "nuri/tools/snapshot/snapshot_capture_artifacts.h"
 #include "nuri/tools/snapshot/snapshot_capture_point.h"
@@ -1138,6 +1139,19 @@ populateScene(const SnapshotCase &snapshotCase, Renderer &renderer,
     proceduralResult = populateShadowPlanesScene(snapshotCase, renderer, scene);
     if (proceduralResult.hasError()) {
       return proceduralResult;
+    }
+    if (snapshotCase.scene.generator ==
+        "nuri.procedural.specular_minification.v1") {
+      nuri::tools::runtime::ToolRuntimeDesc runtimeDesc{};
+      runtimeDesc.scene.kind = snapshotCase.scene.kind;
+      runtimeDesc.scene.generator = snapshotCase.scene.generator;
+      runtimeDesc.resolvePath = resolveSnapshotPath;
+      proceduralResult =
+          nuri::tools::runtime::populateSpecularMinificationToolScene(
+              runtimeDesc, renderer, scene);
+      if (proceduralResult.hasError()) {
+        return proceduralResult;
+      }
     }
   }
 

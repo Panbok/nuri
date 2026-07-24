@@ -25,6 +25,7 @@ namespace nuri {
 struct NURI_API TextureRequest {
   std::string path{};
   TextureLoadOptions loadOptions{};
+  TextureContentContract contentContract = TextureContentContract::Generic;
   TextureRequestKind kind = TextureRequestKind::Texture2D;
   std::string debugName{};
   DdsTexturePack *ddsPack = nullptr;
@@ -68,6 +69,7 @@ struct NURI_API TextureRecord {
   uint32_t numMipLevels = 1;
   TextureRequestKind sourceKind = TextureRequestKind::Texture2D;
   TextureLoadOptions loadOptions{};
+  TextureContentContract contentContract = TextureContentContract::Generic;
   std::pmr::string canonicalPath;
   std::pmr::string debugName;
   explicit TextureRecord(
@@ -135,6 +137,10 @@ struct NURI_API PoolStats {
   uint32_t retiredTextures = 0;
   uint32_t retiredMaterials = 0;
   uint32_t retiredModels = 0;
+  uint32_t normalVarianceContractTexturesLive = 0u;
+  uint32_t normalVarianceContractMaterialsLive = 0u;
+  uint32_t normalVarianceUnavailableSlotsLive = 0u;
+  uint64_t normalVarianceContractTextureBytesLive = 0u;
 };
 
 class NURI_API ResourceManager final {
@@ -284,6 +290,10 @@ private:
   uint32_t publicationBatchDepth_ = 0u;
   bool materialTablesDirty_ = false;
   bool modelMaterialBindingsDirty_ = false;
+  uint32_t normalVarianceContractTexturesLive_ = 0u;
+  uint32_t normalVarianceContractMaterialsLive_ = 0u;
+  uint32_t normalVarianceUnavailableSlotsLive_ = 0u;
+  uint64_t normalVarianceContractTextureBytesLive_ = 0u;
   HashMap<TextureKey, TextureRef, TextureKeyHash> textureCache_;
   HashMap<MaterialKey, MaterialRef, MaterialKeyHash> materialCache_;
   HashMap<ModelKey, ModelRef, ModelKeyHash> modelCache_;

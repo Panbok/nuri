@@ -18,6 +18,16 @@ inline constexpr uint32_t kInvalidMaterialIndex =
     std::numeric_limits<uint32_t>::max();
 inline constexpr uint32_t kInvalidMaterialExtensionIndex =
     std::numeric_limits<uint32_t>::max();
+inline constexpr uint32_t kMaterialFlagsAlphaModeMask = 0x3u;
+inline constexpr uint32_t kMaterialFlagsDoubleSidedBit = 1u << 2u;
+inline constexpr uint32_t kMaterialFlagsBaseNormalVarianceBit = 1u << 3u;
+inline constexpr uint32_t kMaterialFlagsClearcoatNormalVarianceBit = 1u << 4u;
+inline constexpr uint32_t kMaterialFlagsNormalVarianceMask =
+    kMaterialFlagsBaseNormalVarianceBit |
+    kMaterialFlagsClearcoatNormalVarianceBit;
+inline constexpr uint32_t kMaterialFlagsWorkflowShift = 8u;
+inline constexpr uint32_t kMaterialFlagsWorkflowMask = 0xFFu;
+inline constexpr uint32_t kMaterialFlagsFeatureShift = 16u;
 
 enum MaterialFeatureBits : uint32_t {
   kMaterialFeatureNone = 0u,

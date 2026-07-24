@@ -27,6 +27,7 @@
 #include "nuri/tools/core/run_workspace.h"
 #include "nuri/tools/core/safe_path.h"
 #include "nuri/tools/core/sha256.h"
+#include "nuri/tools/runtime/render_tool_runtime.h"
 
 #include <algorithm>
 #include <array>
@@ -2179,18 +2180,42 @@ void addTextureResourceMetrics(BenchmarkFrameMeasurements &measurements,
   appendCounter(measurements,
                 NURI_BENCHMARK_METRIC("texture.cache.artifact_builds"),
                 cache.artifactBuilds);
+  appendCounter(
+      measurements,
+      NURI_BENCHMARK_METRIC("texture.cache.normal_variance_artifact_builds"),
+      cache.normalVarianceArtifactBuilds);
+  appendCounter(
+      measurements,
+      NURI_BENCHMARK_METRIC("texture.cache.normal_variance_clean_texels"),
+      cache.normalVarianceCleanTexels);
+  appendCounter(measurements,
+                NURI_BENCHMARK_METRIC(
+                    "texture.cache.normal_variance_toksvig_fallback_texels"),
+                cache.normalVarianceToksvigFallbackTexels);
+  appendCounter(measurements,
+                NURI_BENCHMARK_METRIC(
+                    "texture.cache.normal_variance_contract_rejections"),
+                cache.normalVarianceContractRejections);
   appendBytesAsMiB(measurements,
                    NURI_BENCHMARK_METRIC("texture.io.authored_source_read_mb"),
                    cache.authoredSourceBytesRead);
   appendBytesAsMiB(measurements,
                    NURI_BENCHMARK_METRIC("texture.io.native_artifact_read_mb"),
                    cache.nativeArtifactBytesRead);
+  appendBytesAsMiB(
+      measurements,
+      NURI_BENCHMARK_METRIC("texture.io.normal_variance_artifact_write_mb"),
+      cache.normalVarianceArtifactBytesWritten);
   appendBytesAsMiB(measurements,
                    NURI_BENCHMARK_METRIC("texture.io.dds_source_read_mb"),
                    cache.ddsSourceBytesRead);
   measurements.appendRegistered(
       NURI_BENCHMARK_METRIC("texture.artifact_build_ms"),
       static_cast<double>(cache.artifactBuildTimeNs) / 1'000'000.0);
+  measurements.appendRegistered(
+      NURI_BENCHMARK_METRIC("texture.normal_variance_artifact_build_ms"),
+      static_cast<double>(cache.normalVarianceArtifactBuildTimeNs) /
+          1'000'000.0);
   measurements.appendRegistered(NURI_BENCHMARK_METRIC("texture.dds_read_ms"),
                                 static_cast<double>(cache.ddsReadTimeNs) /
                                     1'000'000.0);
@@ -2606,6 +2631,65 @@ void addRendererFrameMetrics(BenchmarkFrameMeasurements &measurements,
                 shadow.cascadeTextureBytes);
 
   const AntiAliasingFrameMetrics &aa = metrics.antiAliasing;
+  const PostAAPlan &postAAPlan = aa.postAAPlan;
+  const PostAAFrameFacts &postAA = aa.postAA;
+  addIfNonzero(measurements, "renderer.aa.post_aa_requested",
+               postAAPlan.requested);
+  addIfNonzero(measurements, "renderer.aa.post_aa_resolved_active",
+               postAAPlan.active);
+  addIfNonzero(measurements, "renderer.aa.post_aa_inactive_reason",
+               static_cast<uint32_t>(postAAPlan.inactiveReason));
+  addIfNonzero(measurements, "renderer.aa.post_aa_specular_algorithm",
+               static_cast<uint32_t>(postAAPlan.specular));
+  addIfNonzero(measurements, "renderer.aa.post_aa_spatial_algorithm",
+               static_cast<uint32_t>(postAAPlan.spatial));
+  appendValue(
+      measurements,
+      NURI_BENCHMARK_METRIC("renderer.aa.post_aa_material_variance_scale"),
+      postAAPlan.materialVarianceScale);
+  appendValue(
+      measurements,
+      NURI_BENCHMARK_METRIC("renderer.aa.post_aa_geometric_variance_scale"),
+      postAAPlan.geometricVarianceScale);
+  appendValue(measurements,
+              NURI_BENCHMARK_METRIC("renderer.aa.post_aa_max_slope_variance"),
+              postAAPlan.maxSlopeVariance);
+  addIfNonzero(measurements, "renderer.aa.post_aa_specular_selected",
+               postAA.specularSelected);
+  addIfNonzero(measurements, "renderer.aa.post_aa_smaa_planned",
+               postAA.smaaPlanned);
+  addIfNonzero(measurements, "renderer.aa.post_aa_smaa_submitted",
+               postAA.smaaSubmitted);
+  addIfNonzero(measurements, "renderer.aa.post_aa_smaa_submitted_passes",
+               postAA.smaaSubmittedPassCount);
+  addIfNonzero(measurements, "renderer.aa.post_aa_smaa_completed",
+               postAA.smaaCompleted);
+  if (postAA.smaaCompletedSourceFrameIndex !=
+      std::numeric_limits<uint64_t>::max()) {
+    addIfNonzero(measurements,
+                 "renderer.aa.post_aa_smaa_completed_source_frame",
+                 postAA.smaaCompletedSourceFrameIndex);
+  }
+  addIfNonzero(measurements, "renderer.aa.post_aa_degradation_mask",
+               static_cast<uint32_t>(postAA.degradation));
+  addIfNonzero(measurements, "renderer.aa.resolved_material_specular_aa",
+               static_cast<uint32_t>(postAAPlan.resolvedMaterialSpecularAA));
+  addIfNonzero(measurements, "renderer.aa.debug_view",
+               static_cast<uint32_t>(postAAPlan.debugView));
+  addIfNonzero(measurements, "renderer.aa.specular_aa_debug_override",
+               static_cast<uint32_t>(postAAPlan.specularAADebugOverride));
+  addIfNonzero(measurements,
+               "renderer.aa.normal_variance_contract_materials_live",
+               aa.normalVarianceContractMaterialsLive);
+  addIfNonzero(measurements,
+               "renderer.aa.normal_variance_contract_textures_live",
+               aa.normalVarianceContractTexturesLive);
+  addIfNonzero(measurements,
+               "renderer.aa.normal_variance_unavailable_slots_live",
+               aa.normalVarianceUnavailableSlotsLive);
+  addBytesAsMiB(measurements,
+                "gpu.memory.aa.normal_variance_contract_textures_mb",
+                aa.normalVarianceContractTextureBytesLive);
   addIfNonzero(measurements, "renderer.aa.motion_vector_textures",
                aa.motionVectorTextureCount);
   addIfNonzero(measurements, "renderer.aa.motion_class_textures",
@@ -2658,6 +2742,10 @@ void addRendererFrameMetrics(BenchmarkFrameMeasurements &measurements,
                aa.msaaDepthAllocationCount);
   addIfNonzero(measurements, "renderer.aa.msaa_depth_reallocations",
                aa.msaaDepthReallocationCount);
+  addIfNonzero(measurements, "renderer.aa.spatial_aa_allocations",
+               aa.spatialAAAllocationCount);
+  addIfNonzero(measurements, "renderer.aa.spatial_aa_reallocations",
+               aa.spatialAAReallocationCount);
   addIfNonzero(measurements, "renderer.aa.msaa_sample4_color_supported",
                aa.msaaSample4ColorSupported);
   addIfNonzero(measurements, "renderer.aa.msaa_sample4_depth_supported",
@@ -3840,6 +3928,20 @@ populateScene(const BenchmarkCase &benchmarkCase, Renderer &renderer,
                                            .maxRayDistance = 120.0f});
     if (volume.hasError()) {
       return Result<bool, std::string>::makeError(volume.error());
+    }
+  }
+
+  if (benchmarkCase.scene.generator ==
+      "nuri.procedural.specular_minification.v1") {
+    nuri::tools::runtime::ToolRuntimeDesc runtimeDesc{};
+    runtimeDesc.scene.kind = benchmarkCase.scene.kind;
+    runtimeDesc.scene.generator = benchmarkCase.scene.generator;
+    runtimeDesc.resolvePath = resolveBenchmarkPath;
+    auto populated =
+        nuri::tools::runtime::populateSpecularMinificationToolScene(
+            runtimeDesc, renderer, scene);
+    if (populated.hasError()) {
+      return populated;
     }
   }
 

@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
-  "id": "aa.niagara_bistro.msaa4x_alpha_rapid",
+  "id": "aa.niagara_bistro.msaa4x_postaa_rapid",
   "suite": "aa",
-  "description": "Exercise masked meshlet MSAA coverage across rapid Bistro translation, turns, and reversals",
+  "description": "Exercise the full Post-AA bundle across the canonical masked-meshlet Bistro rapid translation, sharp-turn, reversal, visibility, and occlusion route",
   "scene": {
     "kind": "prefab",
     "pathBase": "modelsRoot",
@@ -54,7 +54,14 @@
       "mode": "MSAA4x",
       "temporalProvider": "Reference",
       "qualityPreset": "Ultra",
-      "spatialPostMsaaCleanup": false
+      "postAA": {
+        "enabled": true,
+        "specular": "BakedClean",
+        "spatial": "Smaa1x",
+        "materialVarianceScale": 1.0,
+        "geometricVarianceScale": 0.35,
+        "maxSlopeVariance": 0.25
+      }
     },
     "ambientOcclusion": {"mode": "GTAO", "preset": "Ultra"},
     "shadow": {"enabled": true, "qualityPreset": "Ultra"},
@@ -95,7 +102,12 @@
         {"id": "depth_reused", "metric": "renderer.opaque.main_equal_readonly_dispatches", "greaterOrEqual": 1},
         {"id": "no_main_depth_writes", "metric": "renderer.opaque.main_less_write_dispatches", "equals": 0},
         {"id": "alpha_to_coverage", "metric": "renderer.aa.msaa_alpha_to_coverage_active", "equals": 1},
-        {"id": "gtao_active", "metric": "renderer.ao.active", "equals": 1}
+        {"id": "gtao_active", "metric": "renderer.ao.active", "equals": 1},
+        {"id": "postaa_active", "metric": "renderer.aa.post_aa_resolved_active", "equals": 1},
+        {"id": "baked_clean_selected", "metric": "renderer.aa.resolved_material_specular_aa", "equals": 2},
+        {"id": "meshlet_main_dispatches", "metric": "renderer.opaque.meshlet_main_dispatches", "greaterOrEqual": 1},
+        {"id": "smaa_four_passes", "metric": "renderer.aa.post_aa_smaa_submitted_passes", "equals": 4},
+        {"id": "postaa_not_degraded", "metric": "renderer.aa.post_aa_degradation_mask", "equals": 0}
       ]
     },
     {
@@ -128,7 +140,12 @@
         {"id": "depth_reuse_stable", "metric": "renderer.opaque.main_equal_readonly_dispatches", "medianMin": 1},
         {"id": "main_depth_writes_absent", "metric": "renderer.opaque.main_less_write_dispatches", "equals": 0},
         {"id": "a2c_stable", "metric": "renderer.aa.msaa_alpha_to_coverage_active", "equals": 1},
-        {"id": "gtao_stable", "metric": "renderer.ao.active", "equals": 1}
+        {"id": "gtao_stable", "metric": "renderer.ao.active", "equals": 1},
+        {"id": "postaa_stable", "metric": "renderer.aa.post_aa_resolved_active", "equals": 1},
+        {"id": "smaa_stable", "metric": "renderer.aa.post_aa_smaa_submitted_passes", "equals": 4},
+        {"id": "postaa_never_degrades", "metric": "renderer.aa.post_aa_degradation_mask", "equals": 0},
+        {"id": "no_smaa_allocations", "metric": "renderer.aa.spatial_aa_allocations", "equals": 0},
+        {"id": "no_smaa_reallocations", "metric": "renderer.aa.spatial_aa_reallocations", "equals": 0}
       ]
     }
   ],

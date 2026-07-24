@@ -726,6 +726,51 @@ void flattenAutotestRendererMetrics(std::map<std::string, double> &out,
   }
 
   const AntiAliasingFrameMetrics &aa = metrics.antiAliasing;
+  const PostAAPlan &postAAPlan = aa.postAAPlan;
+  const PostAAFrameFacts &postAA = aa.postAA;
+  addBoolMetric(out, "renderer.aa.post_aa_requested", postAAPlan.requested);
+  addBoolMetric(out, "renderer.aa.post_aa_resolved_active", postAAPlan.active);
+  addMetric(out, "renderer.aa.post_aa_inactive_reason",
+            static_cast<uint32_t>(postAAPlan.inactiveReason));
+  addMetric(out, "renderer.aa.post_aa_specular_algorithm",
+            static_cast<uint32_t>(postAAPlan.specular));
+  addMetric(out, "renderer.aa.post_aa_spatial_algorithm",
+            static_cast<uint32_t>(postAAPlan.spatial));
+  addMetric(out, "renderer.aa.post_aa_material_variance_scale",
+            postAAPlan.materialVarianceScale);
+  addMetric(out, "renderer.aa.post_aa_geometric_variance_scale",
+            postAAPlan.geometricVarianceScale);
+  addMetric(out, "renderer.aa.post_aa_max_slope_variance",
+            postAAPlan.maxSlopeVariance);
+  addBoolMetric(out, "renderer.aa.post_aa_specular_selected",
+                postAA.specularSelected);
+  addBoolMetric(out, "renderer.aa.post_aa_smaa_planned", postAA.smaaPlanned);
+  addBoolMetric(out, "renderer.aa.post_aa_smaa_submitted",
+                postAA.smaaSubmitted);
+  addMetric(out, "renderer.aa.post_aa_smaa_submitted_passes",
+            postAA.smaaSubmittedPassCount);
+  addBoolMetric(out, "renderer.aa.post_aa_smaa_completed",
+                postAA.smaaCompleted);
+  if (postAA.smaaCompletedSourceFrameIndex != kInvalidFrameIndex) {
+    addMetric(out, "renderer.aa.post_aa_smaa_completed_source_frame",
+              postAA.smaaCompletedSourceFrameIndex);
+  }
+  addMetric(out, "renderer.aa.post_aa_degradation_mask",
+            static_cast<uint32_t>(postAA.degradation));
+  addMetric(out, "renderer.aa.resolved_material_specular_aa",
+            static_cast<uint32_t>(postAAPlan.resolvedMaterialSpecularAA));
+  addMetric(out, "renderer.aa.debug_view",
+            static_cast<uint32_t>(postAAPlan.debugView));
+  addMetric(out, "renderer.aa.specular_aa_debug_override",
+            static_cast<uint32_t>(postAAPlan.specularAADebugOverride));
+  addMetric(out, "renderer.aa.normal_variance_contract_materials_live",
+            aa.normalVarianceContractMaterialsLive);
+  addMetric(out, "renderer.aa.normal_variance_contract_textures_live",
+            aa.normalVarianceContractTexturesLive);
+  addMetric(out, "renderer.aa.normal_variance_unavailable_slots_live",
+            aa.normalVarianceUnavailableSlotsLive);
+  addBytesAsMiB(out, "gpu.memory.aa.normal_variance_contract_textures_mb",
+                aa.normalVarianceContractTextureBytesLive);
   addBoolMetric(out, "renderer.aa.history_valid", aa.historyValid);
   addBoolMetric(out, "renderer.aa.temporal_data_valid", aa.temporalDataValid);
   addMetric(out, "renderer.aa.history_reset_count", aa.historyResetCount);
@@ -862,6 +907,10 @@ void flattenAutotestRendererMetrics(std::map<std::string, double> &out,
             aa.msaaDepthAllocationCount);
   addMetric(out, "renderer.aa.msaa_depth_reallocations",
             aa.msaaDepthReallocationCount);
+  addMetric(out, "renderer.aa.spatial_aa_allocations",
+            aa.spatialAAAllocationCount);
+  addMetric(out, "renderer.aa.spatial_aa_reallocations",
+            aa.spatialAAReallocationCount);
 
   const AmbientOcclusionFrameMetrics &ao = metrics.ambientOcclusion;
   addBoolMetric(out, "renderer.ao.enabled", ao.enabled);

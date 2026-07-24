@@ -22,6 +22,12 @@ struct TextureCacheTelemetry {
   uint64_t ddsSourceBytesRead = 0u;
   uint64_t artifactBuildTimeNs = 0u;
   uint64_t ddsReadTimeNs = 0u;
+  uint64_t normalVarianceArtifactBuilds = 0u;
+  uint64_t normalVarianceCleanTexels = 0u;
+  uint64_t normalVarianceToksvigFallbackTexels = 0u;
+  uint64_t normalVarianceContractRejections = 0u;
+  uint64_t normalVarianceArtifactBytesWritten = 0u;
+  uint64_t normalVarianceArtifactBuildTimeNs = 0u;
 };
 
 struct NURI_API PreparedTextureData {

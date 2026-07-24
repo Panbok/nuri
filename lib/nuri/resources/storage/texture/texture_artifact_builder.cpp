@@ -30,6 +30,12 @@ struct AtomicTextureArtifactCacheTelemetry {
   std::atomic<uint64_t> authoredSourceBytesRead{0u};
   std::atomic<uint64_t> nativeArtifactBytesRead{0u};
   std::atomic<uint64_t> artifactBuildTimeNs{0u};
+  std::atomic<uint64_t> normalVarianceArtifactBuilds{0u};
+  std::atomic<uint64_t> normalVarianceCleanTexels{0u};
+  std::atomic<uint64_t> normalVarianceToksvigFallbackTexels{0u};
+  std::atomic<uint64_t> normalVarianceContractRejections{0u};
+  std::atomic<uint64_t> normalVarianceArtifactBytesWritten{0u};
+  std::atomic<uint64_t> normalVarianceArtifactBuildTimeNs{0u};
 };
 AtomicTextureArtifactCacheTelemetry gTelemetry{};
 [[nodiscard]] uint64_t
@@ -265,6 +271,32 @@ resolveTranscodeFormat(Format format) {
   return format == Format::RGBA8_SRGB || format == Format::BC7_RGBA_SRGB ||
          format == Format::ETC2_RGB8_SRGB;
 }
+[[nodiscard]] bool
+textureFormatPreservesIndependentAlpha(Format format) noexcept {
+  return format == Format::RGBA8_UNORM || format == Format::BC7_RGBA_UNORM;
+}
+
+[[nodiscard]] Result<bool, std::string>
+validateContentContract(const TextureArtifactBuildOptions &options,
+                        Format targetFormat) {
+  if (options.contentContract !=
+      TextureContentContract::NormalRgbCleanVarianceA) {
+    return Result<bool, std::string>::makeResult(true);
+  }
+  if (options.loadOptions.mipSemantic != TextureMipSemantic::NormalMap) {
+    return Result<bool, std::string>::makeError(
+        "NormalRgbCleanVarianceA requires NormalMap mip semantics");
+  }
+  if (options.loadOptions.srgb) {
+    return Result<bool, std::string>::makeError(
+        "NormalRgbCleanVarianceA requires linear texture data");
+  }
+  if (!textureFormatPreservesIndependentAlpha(targetFormat)) {
+    return Result<bool, std::string>::makeError(
+        "NormalRgbCleanVarianceA requires an alpha-preserving target format");
+  }
+  return Result<bool, std::string>::makeResult(true);
+}
 [[nodiscard]] Result<KtxTexture2Ptr, std::string>
 createNativeCopy(const ktxTexture &source, Format targetFormat) {
   if (source.classId != ktxTexture2_c) {
@@ -326,7 +358,8 @@ transcodeBasisToNative(ktxTexture2 &source, Format targetFormat) {
 }
 [[nodiscard]] Result<KtxTexture2Ptr, std::string>
 createRgbaSourceTexture(const ImageRgba8 &image,
-                        const TextureArtifactBuildOptions &options) {
+                        const TextureArtifactBuildOptions &options,
+                        NormalVarianceBuildStats *varianceStats) {
   if (image.width <= 0 || image.height <= 0 || image.bytes.empty()) {
     return Result<KtxTexture2Ptr, std::string>::makeError(
         "Texture artifact builder: decoded image is empty");
@@ -363,6 +396,21 @@ createRgbaSourceTexture(const ImageRgba8 &image,
   int32_t height = image.height;
   std::span<const std::byte> current(image.bytes.data(), image.bytes.size());
   std::vector<std::byte> owned;
+  std::vector<std::byte> cleanChain;
+  size_t cleanOffset = 0u;
+  if (options.contentContract ==
+      TextureContentContract::NormalRgbCleanVarianceA) {
+    auto chain = generateSemanticRgba8MipChain(
+        current, static_cast<uint32_t>(width), static_cast<uint32_t>(height),
+        mipLevels, options.loadOptions, options.contentContract, varianceStats);
+    if (chain.hasError()) {
+      return Result<KtxTexture2Ptr, std::string>::makeError(chain.error());
+    }
+    cleanChain = std::move(chain.value());
+    current = std::span<const std::byte>(cleanChain.data(),
+                                         static_cast<size_t>(width) *
+                                             static_cast<size_t>(height) * 4u);
+  }
   for (uint32_t level = 0u; level < mipLevels; ++level) {
     if (ktxTexture_SetImageFromMemory(
             ktxTexture(texturePtr.get()), level, 0u, 0u,
@@ -374,14 +422,22 @@ createRgbaSourceTexture(const ImageRgba8 &image,
     if (level + 1u == mipLevels) {
       break;
     }
-    auto next =
-        generateRgba8Mip(current, static_cast<uint32_t>(width),
-                         static_cast<uint32_t>(height), options.loadOptions);
-    if (next.hasError()) {
-      return Result<KtxTexture2Ptr, std::string>::makeError(next.error());
+    if (!cleanChain.empty()) {
+      cleanOffset += current.size();
+      const uint32_t nextWidth = std::max(1, width >> 1);
+      const uint32_t nextHeight = std::max(1, height >> 1);
+      current = std::span<const std::byte>(cleanChain.data() + cleanOffset,
+                                           size_t{nextWidth} * nextHeight * 4u);
+    } else {
+      auto next =
+          generateRgba8Mip(current, static_cast<uint32_t>(width),
+                           static_cast<uint32_t>(height), options.loadOptions);
+      if (next.hasError()) {
+        return Result<KtxTexture2Ptr, std::string>::makeError(next.error());
+      }
+      owned = std::move(next.value());
+      current = std::span<const std::byte>(owned.data(), owned.size());
     }
-    owned = std::move(next.value());
-    current = std::span<const std::byte>(owned.data(), owned.size());
     width = std::max(1, width >> 1);
     height = std::max(1, height >> 1);
   }
@@ -389,8 +445,9 @@ createRgbaSourceTexture(const ImageRgba8 &image,
 }
 [[nodiscard]] Result<KtxTexture2Ptr, std::string>
 buildNativeFromImage(const ImageRgba8 &image, Format targetFormat,
-                     const TextureArtifactBuildOptions &options) {
-  auto rgbaTexture = createRgbaSourceTexture(image, options);
+                     const TextureArtifactBuildOptions &options,
+                     NormalVarianceBuildStats *varianceStats) {
+  auto rgbaTexture = createRgbaSourceTexture(image, options, varianceStats);
   if (rgbaTexture.hasError()) {
     return rgbaTexture;
   }
@@ -596,6 +653,16 @@ ArtifactResult SceneTextureArtifactBuilder::ensure(
     return ArtifactResult::makeError(
         "Texture artifact builder: invalid artifact request");
   }
+  auto contractValidation = validateContentContract(options, targetFormat);
+  if (contractValidation.hasError()) {
+    gTelemetry.normalVarianceContractRejections.fetch_add(
+        1u, std::memory_order_relaxed);
+    return ArtifactResult::makeError(contractValidation.error());
+  }
+  const uint32_t contentEncodingVersion =
+      options.contentContract == TextureContentContract::NormalRgbCleanVarianceA
+          ? kNormalVarianceEncodingVersion
+          : 0u;
   const std::filesystem::path freshnessPath =
       source.sourceKind == MaterialTextureSourceKind::ExternalFile
           ? std::filesystem::path(source.path)
@@ -612,8 +679,9 @@ ArtifactResult SceneTextureArtifactBuilder::ensure(
   }
   NativeTextureCacheProbe probe{};
   if (!forceRebuild) {
-    probe = probeNativeTextureCache(artifactPath.value(), freshnessPath,
-                                    sourceIdentityHash, targetFormat);
+    probe = probeNativeTextureCache(
+        artifactPath.value(), freshnessPath, sourceIdentityHash, targetFormat,
+        options.contentContract, contentEncodingVersion);
     recordProbeStatus(probe.status);
     if (probe.status == NativeTextureCacheProbeStatus::Hit) {
       gTelemetry.nativeHits.fetch_add(1u, std::memory_order_relaxed);
@@ -637,7 +705,9 @@ ArtifactResult SceneTextureArtifactBuilder::ensure(
   ScopedScratch scopedScratch(impl_->scratch);
   std::pmr::memory_resource *memory = scopedScratch.resource();
   KtxTexture2Ptr native;
-  if (source.sourceKind == MaterialTextureSourceKind::ExternalFile &&
+  if (options.contentContract !=
+          TextureContentContract::NormalRgbCleanVarianceA &&
+      source.sourceKind == MaterialTextureSourceKind::ExternalFile &&
       isKtxPath(freshnessPath)) {
     auto direct = tryBuildDirectlyFromAuthoredKtx(freshnessPath, targetFormat);
     if (direct.hasError()) {
@@ -665,11 +735,22 @@ ArtifactResult SceneTextureArtifactBuilder::ensure(
     if (image.hasError()) {
       return ArtifactResult::makeError(image.error());
     }
-    auto built = buildNativeFromImage(image.value(), targetFormat, options);
+    NormalVarianceBuildStats varianceStats{};
+    auto built = buildNativeFromImage(image.value(), targetFormat, options,
+                                      &varianceStats);
     if (built.hasError()) {
       return ArtifactResult::makeError(built.error());
     }
     native = std::move(built.value());
+    if (options.contentContract ==
+        TextureContentContract::NormalRgbCleanVarianceA) {
+      gTelemetry.normalVarianceArtifactBuilds.fetch_add(
+          1u, std::memory_order_relaxed);
+      gTelemetry.normalVarianceCleanTexels.fetch_add(varianceStats.cleanTexels,
+                                                     std::memory_order_relaxed);
+      gTelemetry.normalVarianceToksvigFallbackTexels.fetch_add(
+          varianceStats.toksvigFallbackTexels, std::memory_order_relaxed);
+    }
   }
   auto finalFingerprint = queryTextureSourceFingerprint(freshnessPath);
   if (finalFingerprint.hasError() ||
@@ -701,6 +782,8 @@ ArtifactResult SceneTextureArtifactBuilder::ensure(
       .numMipLevels = std::max(1u, texture.numLevels),
       .payloadSizeBytes = tightPayloadSize(texture),
       .artifactSizeBytes = artifactWrite.value(),
+      .contentContract = options.contentContract,
+      .contentEncodingVersion = contentEncodingVersion,
   };
   auto metadataWrite =
       writeNativeTextureCacheMetadataAtomic(artifactPath.value(), metadata);
@@ -710,8 +793,16 @@ ArtifactResult SceneTextureArtifactBuilder::ensure(
   }
   gTelemetry.authoredSourceBytesRead.fetch_add(
       initialFingerprint.value().sizeBytes, std::memory_order_relaxed);
-  gTelemetry.artifactBuildTimeNs.fetch_add(elapsedNanoseconds(buildStart),
+  const uint64_t buildTimeNs = elapsedNanoseconds(buildStart);
+  gTelemetry.artifactBuildTimeNs.fetch_add(buildTimeNs,
                                            std::memory_order_relaxed);
+  if (options.contentContract ==
+      TextureContentContract::NormalRgbCleanVarianceA) {
+    gTelemetry.normalVarianceArtifactBytesWritten.fetch_add(
+        artifactWrite.value(), std::memory_order_relaxed);
+    gTelemetry.normalVarianceArtifactBuildTimeNs.fetch_add(
+        buildTimeNs, std::memory_order_relaxed);
+  }
   gTelemetry.artifactBuilds.fetch_add(1u, std::memory_order_relaxed);
   gTelemetry.nativeWrites.fetch_add(1u, std::memory_order_relaxed);
   return ArtifactResult::makeResult(TextureArtifactBuildResult{
@@ -750,6 +841,14 @@ uint32_t textureArtifactProcessingTag(
   mix(static_cast<uint32_t>(options.loadOptions.mipSemantic));
   mix(std::bit_cast<uint32_t>(options.loadOptions.alphaCoverageCutoff));
   mix(static_cast<uint32_t>(options.encoding));
+  mix(static_cast<uint32_t>(options.contentContract));
+  if (options.contentContract ==
+      TextureContentContract::NormalRgbCleanVarianceA) {
+    mix(kNormalVarianceEncodingVersion);
+    mix(std::bit_cast<uint32_t>(kEncodedSlopeVarianceMax));
+    mix(std::bit_cast<uint32_t>(kCleanNormalZFloor));
+    mix(std::bit_cast<uint32_t>(kCleanValidWeightEpsilon));
+  }
   return hash;
 }
 
@@ -770,6 +869,23 @@ TextureArtifactCacheTelemetry textureArtifactCacheTelemetry() noexcept {
           gTelemetry.nativeArtifactBytesRead.load(std::memory_order_relaxed),
       .artifactBuildTimeNs =
           gTelemetry.artifactBuildTimeNs.load(std::memory_order_relaxed),
+      .normalVarianceArtifactBuilds =
+          gTelemetry.normalVarianceArtifactBuilds.load(
+              std::memory_order_relaxed),
+      .normalVarianceCleanTexels =
+          gTelemetry.normalVarianceCleanTexels.load(std::memory_order_relaxed),
+      .normalVarianceToksvigFallbackTexels =
+          gTelemetry.normalVarianceToksvigFallbackTexels.load(
+              std::memory_order_relaxed),
+      .normalVarianceContractRejections =
+          gTelemetry.normalVarianceContractRejections.load(
+              std::memory_order_relaxed),
+      .normalVarianceArtifactBytesWritten =
+          gTelemetry.normalVarianceArtifactBytesWritten.load(
+              std::memory_order_relaxed),
+      .normalVarianceArtifactBuildTimeNs =
+          gTelemetry.normalVarianceArtifactBuildTimeNs.load(
+              std::memory_order_relaxed),
   };
 }
 

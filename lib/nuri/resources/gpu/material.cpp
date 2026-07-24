@@ -4,11 +4,6 @@
 #include "nuri/pch.h"
 namespace nuri {
 namespace {
-constexpr uint32_t kMaterialFlagsAlphaModeMask = 0x3u;
-constexpr uint32_t kMaterialFlagsDoubleSidedBit = 1u << 2u;
-constexpr uint32_t kMaterialFlagsWorkflowShift = 8u;
-constexpr uint32_t kMaterialFlagsWorkflowMask = 0xFFu;
-constexpr uint32_t kMaterialFlagsFeatureShift = 16u;
 constexpr std::array<std::string_view, kMaterialTextureSlotCount> kSlotNames{
     "baseColor",          "metallicRoughness", "normal",
     "occlusion",          "emissive",          "clearcoat",

@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1, "id": "aa.procedural.specular_minification_1080p.msaa8x", "suite": "aa",
+  "comparisonGroup": "aa.procedural.specular_minification_1080p", "variant": "msaa8x",
+  "description": "Post-AA controlled pure MSAA8x control at 1080p",
+  "scene": {"kind": "procedural", "generator": "nuri.procedural.specular_minification.v1", "contentHash": "nuri.procedural.specular_minification.v1:1"},
+  "backend": "nvrhi", "resolution": [1920, 1080], "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 30, "measurementFrames": 600, "cooldownFrames": 2, "samples": 5,
+  "authoritative": false, "presentMode": "immediate",
+  "camera": {"position": [0.0, 0.0, 7.0], "target": [0.0, 0.0, 0.0], "verticalFovDegrees": 48.0, "nearPlane": 0.05, "farPlane": 40.0},
+  "settings": {
+    "opaque": {"enabled": true, "meshletMode": "Disabled", "enableDepthPrepass": true, "enableMeshLod": false},
+    "antiAliasing": {"mode": "MSAA8x", "postAA": {"enabled": false}},
+    "ambientOcclusion": {"mode": "GTAO", "preset": "Ultra"}, "shadow": {"enabled": true, "qualityPreset": "Ultra"},
+    "hdrPostProcess": {"bloomEnabled": false, "adaptationEnabled": false}
+  },
+  "requirements": {"assets": ["modelsRoot:common/flat_plane.obj", "repoRoot:assets/models/common/smooth_icosphere.obj", "repoRoot:assets/fixtures/post_aa/specular_minification_normal.ppm"], "backends": ["nvrhi"], "allowVisibleWindow": true, "msaaSamples": 8},
+  "requiredMetrics": ["cpu.render_submit_ms", "gpu.scopes.opaque_ms", "gpu.scopes.msaa_resolve_ms", "gpu.scopes_sum_ms"]
+}

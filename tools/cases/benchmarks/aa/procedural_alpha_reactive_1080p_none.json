@@ -226,6 +226,8 @@
     "renderer.aa.msaa_color_reallocations",
     "renderer.aa.msaa_depth_allocations",
     "renderer.aa.msaa_depth_reallocations",
+    "renderer.aa.spatial_aa_allocations",
+    "renderer.aa.spatial_aa_reallocations",
     "renderer.backend.render_pipeline_creations",
     "renderer.backend.compute_pipeline_creations",
     "renderer.backend.meshlet_pipeline_creations",

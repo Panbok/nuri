@@ -327,6 +327,46 @@ TEST(NuriAutotestingTest, ManifestRejectsUnknownKeys) {
   std::filesystem::remove(path, ec);
 }
 
+TEST(NuriAutotestingTest, ManifestNormalizesLegacyAndPostAAWins) {
+  const std::filesystem::path path = makeTempPath("autotest_post_aa", ".json");
+  writeFile(path,
+            R"json({
+              "schemaVersion": 1,
+              "id": "aa.post_aa",
+              "suite": "aa",
+              "settings": {"antiAliasing": {
+                "mode": "MSAA4x",
+                "debugView": "SpecularAARoughnessDelta",
+                "specularAAOverride": "ForceOff",
+                "spatialPostMsaaCleanup": true,
+                "postAA": {
+                  "enabled": true,
+                  "specular": "BakedClean",
+                  "spatial": "Off",
+                  "materialVarianceScale": 0.75,
+                  "geometricVarianceScale": 0.25,
+                  "maxSlopeVariance": 0.2
+                }
+              }}
+            })json");
+
+  auto loaded = loadAutotestCaseManifest(path);
+  ASSERT_FALSE(loaded.hasError()) << loaded.error();
+  const auto &aa = loaded.value().settings.antiAliasing;
+  EXPECT_FALSE(aa.debug.spatialPostMsaaCleanup);
+  EXPECT_EQ(aa.debug.view, AntiAliasingDebugView::SpecularAARoughnessDelta);
+  EXPECT_EQ(aa.debug.specularAAOverride, SpecularAADebugOverride::ForceOff);
+  EXPECT_TRUE(aa.postAA.enabled);
+  EXPECT_EQ(aa.postAA.specular, PostAASpecularAlgorithm::BakedClean);
+  EXPECT_EQ(aa.postAA.spatial, PostAASpatialAlgorithm::Off);
+  EXPECT_FLOAT_EQ(aa.postAA.materialVarianceScale, 0.75f);
+  EXPECT_FLOAT_EQ(aa.postAA.geometricVarianceScale, 0.25f);
+  EXPECT_FLOAT_EQ(aa.postAA.maxSlopeVariance, 0.2f);
+
+  std::error_code ec;
+  std::filesystem::remove(path, ec);
+}
+
 TEST(NuriAutotestingTest, ManifestParsesStrictVersionedDDGICoverage) {
   const std::filesystem::path path =
       makeTempPath("autotest_ddgi_coverage", ".json");

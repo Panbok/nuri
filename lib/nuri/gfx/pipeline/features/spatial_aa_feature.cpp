@@ -145,8 +145,9 @@ shouldRunPostTransparentSpatialAA(const RenderFrameContext &frame) noexcept {
       sanitizeAntiAliasingDebugView(aaDebug.view);
   const PresentationAAPlan presentationAA = presentationAAPlanForFrame(frame);
   if (presentationAA.coverage != CoverageMode::Sample1) {
-    return presentationAA.spatialCleanup ==
-               SpatialCleanupPoint::PostTransparency &&
+    return presentationAA.postAA.active &&
+           presentationAA.postAA.spatial == PostAASpatialAlgorithm::Smaa1x &&
+           presentationAA.postAA.debugView == AntiAliasingDebugView::None &&
            !isAADebugOutputView(debugView);
   }
   const bool jitteredTaaFrame = frame.camera.jitterEnabled;
@@ -180,7 +181,8 @@ isSpatialCleanupActive(const RenderFrameContext &frame) noexcept {
   const RenderSettings::AntiAliasingDebugSettings aaDebug =
       effectiveTemporalAADebugSettings(settings.antiAliasing);
   if (presentationAAPlanForFrame(frame).coverage != CoverageMode::Sample1) {
-    return aaDebug.spatialPostMsaaCleanup;
+    const PostAAPlan &postAA = presentationAAPlanForFrame(frame).postAA;
+    return postAA.active && postAA.spatial == PostAASpatialAlgorithm::Smaa1x;
   }
   return mode == AntiAliasingMode::TAA && aaDebug.spatialPostTaaCleanup &&
          !frame.camera.jitterEnabled && !isSpatialFallbackActive(frame);
@@ -270,6 +272,12 @@ createSmaaLut(GPUDevice &gpu, const std::filesystem::path &path, uint32_t width,
                   .dataNumMipLevels = 1u},
       label);
 }
+void addPostAADegradation(AntiAliasingFrameMetrics &metrics,
+                          PostAADegradation degradation) {
+  metrics.postAA.degradation = static_cast<PostAADegradation>(
+      static_cast<uint32_t>(metrics.postAA.degradation) |
+      static_cast<uint32_t>(degradation));
+}
 } // namespace
 
 SpatialAAPass::SpatialAAPass(GPUDevice &gpu, RuntimeCompositeConfig config,
@@ -285,6 +293,63 @@ SpatialAAPass::SpatialAAPass(GPUDevice &gpu, RuntimeCompositeConfig config,
 }
 
 SpatialAAPass::~SpatialAAPass() { destroyResources(); }
+
+SpatialAALifecycleSnapshot SpatialAAPass::lifecycleSnapshot() const noexcept {
+  SpatialAALifecycleSnapshot snapshot{
+      .scratchSlotCount = static_cast<uint32_t>(scratchSlots_.size()),
+      .retiredScratchGroupCount = static_cast<uint32_t>(retiredScratch_.size()),
+      .submittedPostAALedgerCount =
+          static_cast<uint32_t>(submittedPostAA_.size()),
+  };
+  for (const ScratchSlot &slot : scratchSlots_) {
+    snapshot.recordingLeaseCount += slot.leased ? 1u : 0u;
+    snapshot.submittedScratchCount += nuri::isValid(slot.submission) ? 1u : 0u;
+  }
+  return snapshot;
+}
+
+void SpatialAAPass::collectCompletedScratch() {
+  for (auto it = retiredScratch_.begin(); it != retiredScratch_.end();) {
+    if (nuri::isValid(it->submission) &&
+        !gpu_.isSubmissionComplete(it->submission)) {
+      ++it;
+      continue;
+    }
+    for (TextureHandle texture : it->textures) {
+      if (nuri::isValid(texture)) {
+        gpu_.destroyTexture(texture);
+      }
+    }
+    it = retiredScratch_.erase(it);
+  }
+}
+
+void SpatialAAPass::retireCurrentScratch() {
+  for (size_t slotIndex = 0u; slotIndex < scratchSlots_.size(); ++slotIndex) {
+    RetiredScratch retired{
+        .submission = scratchSlots_[slotIndex].submission,
+    };
+    for (size_t kind = 0u; kind < scratchTextures_.size(); ++kind) {
+      if (slotIndex < scratchTextures_[kind].size()) {
+        retired.textures[kind] = scratchTextures_[kind][slotIndex];
+      }
+    }
+    if (nuri::isValid(retired.submission) &&
+        !gpu_.isSubmissionComplete(retired.submission)) {
+      retiredScratch_.push_back(retired);
+    } else {
+      for (TextureHandle texture : retired.textures) {
+        if (nuri::isValid(texture)) {
+          gpu_.destroyTexture(texture);
+        }
+      }
+    }
+  }
+  for (auto &textures : scratchTextures_) {
+    textures.clear();
+  }
+  scratchSlots_.clear();
+}
 
 void SpatialAAPass::destroyResources() {
   for (RenderPipelineHandle &pipeline : pipelines_) {
@@ -307,6 +372,17 @@ void SpatialAAPass::destroyResources() {
         gpu_.destroyTexture(texture);
     textures.clear();
   }
+  for (RetiredScratch &retired : retiredScratch_) {
+    for (TextureHandle texture : retired.textures) {
+      if (nuri::isValid(texture)) {
+        gpu_.destroyTexture(texture);
+      }
+    }
+  }
+  retiredScratch_.clear();
+  scratchSlots_.clear();
+  submittedPostAA_.clear();
+  pendingLease_.reset();
   scratchWidth_ = 0u;
   scratchHeight_ = 0u;
   scratchRingCount_ = 0u;
@@ -399,6 +475,7 @@ Result<bool, std::string> SpatialAAPass::ensureLuts() {
 
 Result<bool, std::string>
 SpatialAAPass::ensureScratchTextures(FrameBuildContext &ctx) {
+  collectCompletedScratch();
   if (!initializationError_.empty()) {
     return Result<bool, std::string>::makeError(initializationError_);
   }
@@ -423,17 +500,22 @@ SpatialAAPass::ensureScratchTextures(FrameBuildContext &ctx) {
   if (!recreateScratch) {
     return Result<bool, std::string>::makeResult(true);
   }
-  for (auto &textures : scratchTextures_) {
-    for (TextureHandle texture : textures)
-      if (nuri::isValid(texture))
-        gpu_.destroyTexture(texture);
-    textures.clear();
-  }
-  scratchTextures_[EdgeScratch].reserve(ringCount);
-  scratchTextures_[BlendScratch].reserve(ringCount);
+  const bool hadScratch = scratchRingCount_ != 0u;
+  std::array<std::vector<TextureHandle>, ScratchCount> newTextures{};
+  newTextures[EdgeScratch].reserve(ringCount);
+  newTextures[BlendScratch].reserve(ringCount);
   if (needsOutputScratch) {
-    scratchTextures_[OutputScratch].reserve(ringCount);
+    newTextures[OutputScratch].reserve(ringCount);
   }
+  const auto abandonNewTextures = [&]() {
+    for (auto &textures : newTextures) {
+      for (TextureHandle texture : textures) {
+        if (nuri::isValid(texture)) {
+          gpu_.destroyTexture(texture);
+        }
+      }
+    }
+  };
   const TextureDesc scratchDesc{
       .type = TextureType::Texture2D,
       .format = Format::RGBA8_UNORM,
@@ -451,9 +533,11 @@ SpatialAAPass::ensureScratchTextures(FrameBuildContext &ctx) {
     constexpr std::array names{"spatial_aa_edges", "spatial_aa_blend_weights"};
     for (size_t kind = EdgeScratch; kind <= BlendScratch; ++kind) {
       auto texture = gpu_.createTexture(scratchDesc, names[kind]);
-      if (texture.hasError())
+      if (texture.hasError()) {
+        abandonNewTextures();
         return Result<bool, std::string>::makeError(texture.error());
-      scratchTextures_[kind].push_back(texture.value());
+      }
+      newTextures[kind].push_back(texture.value());
     }
     if (needsOutputScratch) {
       TextureDesc outputDesc = scratchDesc;
@@ -461,15 +545,27 @@ SpatialAAPass::ensureScratchTextures(FrameBuildContext &ctx) {
       auto outputTexture =
           gpu_.createTexture(outputDesc, "transparent_spatial_aa_output");
       if (outputTexture.hasError()) {
+        abandonNewTextures();
         return Result<bool, std::string>::makeError(outputTexture.error());
       }
-      scratchTextures_[OutputScratch].push_back(outputTexture.value());
+      newTextures[OutputScratch].push_back(outputTexture.value());
     }
   }
+  retireCurrentScratch();
+  scratchTextures_.swap(newTextures);
+  scratchSlots_.assign(ringCount, ScratchSlot{});
   scratchWidth_ = dimensions.width;
   scratchHeight_ = dimensions.height;
   scratchRingCount_ = ringCount;
   outputScratchFormat_ = outputScratchFormat;
+  const uint32_t createdTextureCount =
+      ringCount * (needsOutputScratch ? 3u : 2u);
+  AntiAliasingFrameMetrics &metrics = ctx.frame.metrics.antiAliasing;
+  if (hadScratch) {
+    metrics.spatialAAReallocationCount += createdTextureCount;
+  } else {
+    metrics.spatialAAAllocationCount += createdTextureCount;
+  }
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -484,28 +580,98 @@ bool SpatialAAPass::isEnabled(const FrameBuildContext &ctx) const {
 }
 
 Result<bool, std::string> SpatialAAPass::prepare(FrameBuildContext &ctx) {
+  const bool postAA =
+      placement_ == SpatialAAPlacement::PostTransparent &&
+      ctx.frame.presentationAA.coverage != CoverageMode::Sample1 &&
+      ctx.frame.presentationAA.postAA.active &&
+      ctx.frame.presentationAA.postAA.spatial == PostAASpatialAlgorithm::Smaa1x;
+  AntiAliasingFrameMetrics &metrics = ctx.frame.metrics.antiAliasing;
+  const uint64_t timingSource = ctx.frame.gpuTiming.spatialAASourceFrameIndex;
+  for (auto it = submittedPostAA_.begin(); it != submittedPostAA_.end();) {
+    const bool timingMatches =
+        hasGpuTimingScope(ctx.frame.gpuTiming, GpuTimingScope::SpatialAA) &&
+        timingSource == it->sourceFrameIndex;
+    if (!timingMatches && nuri::isValid(it->submission) &&
+        !gpu_.isSubmissionComplete(it->submission)) {
+      ++it;
+      continue;
+    }
+    metrics.postAA.smaaCompleted = true;
+    metrics.postAA.smaaCompletedSourceFrameIndex = it->sourceFrameIndex;
+    it = submittedPostAA_.erase(it);
+  }
   if (placement_ == SpatialAAPlacement::PostTransparent) {
     const RenderSettings &settings = renderSettingsOrDefault(ctx.frame);
     const RenderSettings::AntiAliasingDebugSettings aaDebug =
         effectiveTemporalAADebugSettings(settings.antiAliasing);
     if (presentationAAPlanForFrame(ctx.frame).coverage !=
         CoverageMode::Sample1) {
-      ctx.frame.metrics.antiAliasing.msaaSpatialCleanupEnabled =
-          presentationAAPlanForFrame(ctx.frame).spatialCleanup ==
-          SpatialCleanupPoint::PostTransparency;
+      ctx.frame.metrics.antiAliasing.msaaSpatialCleanupEnabled = postAA;
     } else {
       ctx.frame.metrics.antiAliasing.taaTransparentPostSpatialCleanupEnabled =
           aaDebug.transparentPostTaaSpatialCleanup;
     }
   }
-  return ensureScratchTextures(ctx);
+  if (!initializationError_.empty()) {
+    if (postAA) {
+      addPostAADegradation(metrics,
+                           PostAADegradation::SmaaDependenciesUnavailable);
+      return Result<bool, std::string>::makeResult(false);
+    }
+    return Result<bool, std::string>::makeError(initializationError_);
+  }
+  auto luts = ensureLuts();
+  if (luts.hasError()) {
+    if (postAA) {
+      addPostAADegradation(metrics,
+                           PostAADegradation::SmaaDependenciesUnavailable);
+      return Result<bool, std::string>::makeResult(false);
+    }
+    return luts;
+  }
+  auto scratch = ensureScratchTextures(ctx);
+  if (scratch.hasError()) {
+    if (postAA) {
+      addPostAADegradation(metrics,
+                           PostAADegradation::SmaaScratchAllocationFailed);
+      return Result<bool, std::string>::makeResult(false);
+    }
+    return scratch;
+  }
+  for (uint32_t slotIndex = 0u; slotIndex < scratchSlots_.size(); ++slotIndex) {
+    ScratchSlot &slot = scratchSlots_[slotIndex];
+    if (slot.leased) {
+      continue;
+    }
+    if (nuri::isValid(slot.submission) &&
+        !gpu_.isSubmissionComplete(slot.submission)) {
+      continue;
+    }
+    slot.submission = {};
+    slot.leased = true;
+    pendingLease_ = PendingLease{
+        .frameIndex = ctx.frame.frameIndex,
+        .slot = slotIndex,
+        .postAA = postAA,
+    };
+    return Result<bool, std::string>::makeResult(true);
+  }
+  if (postAA) {
+    addPostAADegradation(metrics, PostAADegradation::SmaaScratchRingSaturated);
+    return Result<bool, std::string>::makeResult(false);
+  }
+  return Result<bool, std::string>::makeError(
+      "SpatialAA: every scratch slot is still in flight");
 }
 
 Result<bool, std::string> SpatialAAPass::build(FrameBuildContext &ctx) {
+  if (!pendingLease_.has_value() ||
+      pendingLease_->frameIndex != ctx.frame.frameIndex) {
+    return Result<bool, std::string>::makeResult(false);
+  }
   const bool postTransparent =
       placement_ == SpatialAAPlacement::PostTransparent;
-  const uint32_t ringIndex = static_cast<uint32_t>(
-      ctx.frame.frameIndex % scratchTextures_[EdgeScratch].size());
+  const uint32_t ringIndex = pendingLease_->slot;
   const TextureHandle edgeTexture = scratchTextures_[EdgeScratch][ringIndex];
   const TextureHandle blendTexture = scratchTextures_[BlendScratch][ringIndex];
   const TextureHandle sourceTexture = postTransparent
@@ -597,23 +763,27 @@ Result<bool, std::string> SpatialAAPass::build(FrameBuildContext &ctx) {
         timingReport.spatialAASourceFrameIndex;
     aaMetrics.spatialAAGpuTimingAvailable = 1u;
   }
+  aaMetrics.spatialAATextureBytes =
+      textureStorageBytes(gpu_, edgeTexture) +
+      textureStorageBytes(gpu_, blendTexture) +
+      (postTransparent ? textureStorageBytes(gpu_, outputTexture) : 0u);
+  aaMetrics.spatialAATotalBytes =
+      aaMetrics.spatialAATextureBytes *
+      static_cast<uint64_t>(scratchTextures_[EdgeScratch].size());
+  aaMetrics.spatialAALutTextureBytes =
+      textureStorageBytes(gpu_, luts_[AreaLut]) +
+      textureStorageBytes(gpu_, luts_[SearchLut]);
   if (!postTransparent) {
     aaMetrics.spatialAAEnabled = true;
     aaMetrics.spatialAAFallbackActive = fallbackActive;
     aaMetrics.spatialAACleanupActive = cleanupActive;
     aaMetrics.msaaSpatialCleanupEnabled =
-        multisampled && aaDebug.spatialPostMsaaCleanup;
+        multisampled && ctx.frame.presentationAA.postAA.active &&
+        ctx.frame.presentationAA.postAA.spatial ==
+            PostAASpatialAlgorithm::Smaa1x;
     aaMetrics.msaaSpatialCleanupActive = multisampled && cleanupActive;
     aaMetrics.spatialAAWidth = dimensions.width;
     aaMetrics.spatialAAHeight = dimensions.height;
-    aaMetrics.spatialAATextureBytes = textureStorageBytes(gpu_, edgeTexture) +
-                                      textureStorageBytes(gpu_, blendTexture);
-    aaMetrics.spatialAATotalBytes =
-        aaMetrics.spatialAATextureBytes *
-        static_cast<uint64_t>(scratchTextures_[EdgeScratch].size());
-    aaMetrics.spatialAALutTextureBytes =
-        textureStorageBytes(gpu_, luts_[AreaLut]) +
-        textureStorageBytes(gpu_, luts_[SearchLut]);
     aaMetrics.spatialAAEdgePixelEstimate = 0.0f;
     aaMetrics.spatialAAModifiedPixelEstimate = 0.0f;
     if (cleanupActive) {
@@ -820,6 +990,10 @@ Result<bool, std::string> SpatialAAPass::build(FrameBuildContext &ctx) {
   aaMetrics.spatialAABandwidthEstimateBytes +=
       textureStorageBytes(gpu_, outputTexture) +
       textureStorageBytes(gpu_, sourceTexture);
+  if (pendingLease_->postAA) {
+    pendingLease_->passCount = 4u;
+    aaMetrics.postAA.smaaPlanned = true;
+  }
   if (postTransparent) {
     ctx.shared.frameColorGraphTexture = importSource.value();
     ctx.frame.sharedResources.frameColorGraphTexture = importSource.value();
@@ -830,12 +1004,55 @@ Result<bool, std::string> SpatialAAPass::build(FrameBuildContext &ctx) {
   return Result<bool, std::string>::makeResult(true);
 }
 
+void SpatialAAPass::onFrameSubmitted(const RenderFrameContext &frame) noexcept {
+  if (!pendingLease_.has_value() ||
+      pendingLease_->frameIndex != frame.frameIndex) {
+    return;
+  }
+  ScratchSlot &slot = scratchSlots_[pendingLease_->slot];
+  slot.leased = false;
+  slot.submission = frame.submission;
+  if (pendingLease_->postAA) {
+    auto &metrics =
+        const_cast<RenderFrameContext &>(frame).metrics.antiAliasing.postAA;
+    metrics.smaaSubmitted = true;
+    metrics.smaaSubmittedPassCount = pendingLease_->passCount;
+    submittedPostAA_.push_back(SubmittedPostAA{
+        .sourceFrameIndex = frame.frameIndex,
+        .submission = frame.submission,
+        .passCount = pendingLease_->passCount,
+    });
+  }
+  pendingLease_.reset();
+}
+
+void SpatialAAPass::onFrameAbandoned(const RenderFrameContext &frame) noexcept {
+  if (!pendingLease_.has_value() ||
+      pendingLease_->frameIndex != frame.frameIndex) {
+    return;
+  }
+  ScratchSlot &slot = scratchSlots_[pendingLease_->slot];
+  slot.leased = false;
+  slot.submission = {};
+  pendingLease_.reset();
+}
+
 void registerSpatialAAStage(RenderPipeline &pipeline, GPUDevice &gpu,
                             RuntimeCompositeConfig config,
                             SpatialAAPlacement placement) {
   pipeline.addStage(
       std::make_unique<SpatialAAPass>(gpu, std::move(config), placement),
-      "SpatialAAFeature", "SpatialAAPass");
+      "SpatialAAFeature", "SpatialAAPass", false,
+      PipelineComponentDesc{
+          .submitted =
+              [](void *state, const RenderFrameContext &frame) noexcept {
+                static_cast<SpatialAAPass *>(state)->onFrameSubmitted(frame);
+              },
+          .abandoned =
+              [](void *state, const RenderFrameContext &frame) noexcept {
+                static_cast<SpatialAAPass *>(state)->onFrameAbandoned(frame);
+              },
+      });
 }
 
 } // namespace nuri

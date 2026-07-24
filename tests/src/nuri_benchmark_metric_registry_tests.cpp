@@ -56,6 +56,23 @@ TEST(NuriBenchmarkMetricRegistryTest, CoreDescriptorsAreTypedAndBounded) {
             nullptr);
   EXPECT_NE(findBenchmarkMetricDescriptor("benchmark.camera.direction_delta"),
             nullptr);
+  EXPECT_NE(findBenchmarkMetricDescriptor(
+                "texture.normal_variance_artifact_build_ms"),
+            nullptr);
+  EXPECT_NE(findBenchmarkMetricDescriptor(
+                "texture.io.normal_variance_artifact_write_mb"),
+            nullptr);
+  EXPECT_NE(findBenchmarkMetricDescriptor(
+                "gpu.memory.aa.normal_variance_contract_textures_mb"),
+            nullptr);
+  EXPECT_NE(findBenchmarkMetricDescriptor(
+                "texture.cache.normal_variance_contract_rejections"),
+            nullptr);
+  EXPECT_NE(findBenchmarkMetricDescriptor("renderer.aa.spatial_aa_allocations"),
+            nullptr);
+  EXPECT_NE(
+      findBenchmarkMetricDescriptor("renderer.aa.spatial_aa_reallocations"),
+      nullptr);
   for (std::string_view metric :
        {"renderer.opaque.meshlet_dispatches",
         "renderer.opaque.meshlet_task_groups",

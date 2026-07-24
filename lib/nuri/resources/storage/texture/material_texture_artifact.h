@@ -44,6 +44,9 @@ makeMaterialTextureArtifactBuildOptions(const MaterialData &material,
               .alphaCoverageCutoff = material.alphaCutoff,
           },
       .encoding = spec.encoding,
+      .contentContract = semantic == TextureMipSemantic::NormalMap
+                             ? TextureContentContract::NormalRgbCleanVarianceA
+                             : TextureContentContract::Generic,
   };
 }
 } // namespace nuri

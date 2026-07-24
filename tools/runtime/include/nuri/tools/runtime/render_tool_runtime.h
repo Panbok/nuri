@@ -156,6 +156,9 @@ private:
 
 [[nodiscard]] Result<std::unique_ptr<ToolRendererRuntime>, std::string>
 createToolRendererRuntime(const ToolRuntimeDesc &desc);
+[[nodiscard]] Result<bool, std::string>
+populateSpecularMinificationToolScene(const ToolRuntimeDesc &desc,
+                                      Renderer &renderer, RenderScene &scene);
 [[nodiscard]] Camera makeToolCamera(const ToolCameraDesc &desc);
 void buildToolFrameContext(RenderFrameContext &frameContext, RenderScene &scene,
                            Renderer &renderer, RenderSettings &settings,

@@ -27,6 +27,12 @@ const uint kAmbientOcclusionDebugViewNone = 0u;
 const uint kAmbientOcclusionDebugViewVisibility = 1u;
 const uint kAmbientOcclusionDebugViewBentNormal = 2u;
 const uint kAmbientOcclusionDebugViewNormals = 3u;
+const uint kResolvedMaterialSpecularAAOff = 0u;
+const uint kResolvedMaterialSpecularAALegacyShadingNormalDerivative = 1u;
+const uint kResolvedMaterialSpecularAABakedClean = 2u;
+const uint kAntiAliasingDebugViewSpecularAAVariance = 36u;
+const uint kAntiAliasingDebugViewSpecularAARoughnessDelta = 37u;
+const float kEncodedSlopeVarianceMax = 1.0;
 const uint kMaxSceneDepthPyramidLevels = 16u;
 const uint kSceneDepthPyramidTexIdPackWidth = 4u;
 const uint kSceneDepthPyramidArraySize =
@@ -73,6 +79,11 @@ const uint kPackedVertexFormatAnimatedFloat32 = 2u;
 
 const uint kMaterialFlagsAlphaModeMask = 0x3u;
 const uint kMaterialFlagsDoubleSidedBit = 1u << 2u;
+const uint kMaterialFlagsBaseNormalVarianceBit = 1u << 3u;
+const uint kMaterialFlagsClearcoatNormalVarianceBit = 1u << 4u;
+const uint kMaterialFlagsNormalVarianceMask =
+    kMaterialFlagsBaseNormalVarianceBit |
+    kMaterialFlagsClearcoatNormalVarianceBit;
 const uint kMaterialFlagsWorkflowShift = 8u;
 const uint kMaterialFlagsFeatureShift = 16u;
 
@@ -249,9 +260,9 @@ layout(std430, buffer_reference) readonly buffer FrameDataBuffer {
   uint materialCoverageSamplerId;
   // Material data textures should not inherit TAA color-detail mip bias.
   uint materialDataSamplerId;
-  uint materialSamplerReserved0;
-  uint materialSamplerReserved1;
-  uint materialSamplerReserved2;
+  uint specularAAStatePacked;
+  uint specularAAScalesPacked;
+  uint specularAAMaxVarianceBits;
   uvec2 ddgiFrameBufferAddress;
   uint ddgiFlags;
   uint ddgiDebugView;
@@ -594,6 +605,22 @@ uint packedVertexStrideWords(uint packedVertexFormat) {
     return 8u;
   }
   return packedVertexFormat == kPackedVertexFormatAnimatedFloat24 ? 6u : 5u;
+}
+
+uint getResolvedMaterialSpecularAA(FrameDataBuffer frameData) {
+  return frameData.specularAAStatePacked & 0xFFu;
+}
+
+uint getSpecularAADebugView(FrameDataBuffer frameData) {
+  return (frameData.specularAAStatePacked >> 8u) & 0xFFu;
+}
+
+vec2 getSpecularAAVarianceScales(FrameDataBuffer frameData) {
+  return unpackHalf2x16(frameData.specularAAScalesPacked);
+}
+
+float getSpecularAAMaxSlopeVariance(FrameDataBuffer frameData) {
+  return uintBitsToFloat(frameData.specularAAMaxVarianceBits);
 }
 
 uint packedVertexWordFrom(PackedVertexWordBuffer vertexBuffer,

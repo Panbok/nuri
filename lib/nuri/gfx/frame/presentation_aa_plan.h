@@ -5,6 +5,89 @@
 #include <string_view>
 namespace nuri {
 
+[[nodiscard]] constexpr bool
+isPostAASpecularDebugView(AntiAliasingDebugView view) noexcept {
+  return view == AntiAliasingDebugView::SpecularAAVariance ||
+         view == AntiAliasingDebugView::SpecularAARoughnessDelta;
+}
+
+[[nodiscard]] inline PostAAPlan
+resolvePostAAPlan(const RenderSettings::AntiAliasingSettings &settings,
+                  CoverageMode coverage) noexcept {
+  PostAASettings authored = settings.postAA;
+  if (!authored.enabled && settings.debug.spatialPostMsaaCleanup) {
+    authored.enabled = true;
+    authored.specular = PostAASpecularAlgorithm::InheritCurrent;
+    authored.spatial = PostAASpatialAlgorithm::Smaa1x;
+  }
+  PostAAPlan plan{};
+  plan.requested = authored.enabled;
+  const bool msaaEligible =
+      coverage == CoverageMode::Sample4 || coverage == CoverageMode::Sample8;
+  if (!msaaEligible) {
+    if (authored.enabled) {
+      plan.inactiveReason = PostAAInactiveReason::CoverageIsSingleSample;
+    }
+    return plan;
+  }
+  plan.specularAADebugOverride = settings.debug.specularAAOverride;
+  if (!authored.enabled) {
+    plan.resolvedMaterialSpecularAA =
+        plan.specularAADebugOverride == SpecularAADebugOverride::ForceOff
+            ? ResolvedMaterialSpecularAA::Off
+            : ResolvedMaterialSpecularAA::LegacyShadingNormalDerivative;
+    return plan;
+  }
+  plan.specular = authored.specular;
+  plan.spatial = authored.spatial;
+  plan.materialVarianceScale = authored.materialVarianceScale;
+  plan.geometricVarianceScale = authored.geometricVarianceScale;
+  plan.maxSlopeVariance = authored.maxSlopeVariance;
+  plan.active = plan.specular == PostAASpecularAlgorithm::BakedClean ||
+                plan.spatial == PostAASpatialAlgorithm::Smaa1x;
+  if (!plan.active) {
+    plan.specular = PostAASpecularAlgorithm::InheritCurrent;
+    plan.spatial = PostAASpatialAlgorithm::Off;
+    plan.inactiveReason = PostAAInactiveReason::NoComponentEnabled;
+    plan.resolvedMaterialSpecularAA =
+        plan.specularAADebugOverride == SpecularAADebugOverride::ForceOff
+            ? ResolvedMaterialSpecularAA::Off
+            : ResolvedMaterialSpecularAA::LegacyShadingNormalDerivative;
+    return plan;
+  }
+  plan.inactiveReason = PostAAInactiveReason::None;
+  plan.resolvedMaterialSpecularAA =
+      plan.specularAADebugOverride == SpecularAADebugOverride::ForceOff
+          ? ResolvedMaterialSpecularAA::Off
+          : (plan.specular == PostAASpecularAlgorithm::BakedClean
+                 ? ResolvedMaterialSpecularAA::BakedClean
+                 : ResolvedMaterialSpecularAA::LegacyShadingNormalDerivative);
+  const AntiAliasingDebugView debugView =
+      sanitizeAntiAliasingDebugView(settings.debug.view);
+  plan.debugView = plan.specular == PostAASpecularAlgorithm::BakedClean &&
+                           isPostAASpecularDebugView(debugView)
+                       ? debugView
+                       : AntiAliasingDebugView::None;
+  return plan;
+}
+
+[[nodiscard]] constexpr bool
+temporalAAContinuityEquivalent(const PresentationAAPlan &lhs,
+                               const PresentationAAPlan &rhs) noexcept {
+  return lhs.coverage == rhs.coverage &&
+         lhs.reconstruction == rhs.reconstruction &&
+         lhs.alphaCoverage == rhs.alphaCoverage &&
+         lhs.transparency == rhs.transparency &&
+         lhs.sampleShadingSupported == rhs.sampleShadingSupported &&
+         lhs.sampleShadingEnabled == rhs.sampleShadingEnabled &&
+         lhs.jitterScene == rhs.jitterScene &&
+         lhs.needsMotion == rhs.needsMotion &&
+         lhs.needsReactiveMask == rhs.needsReactiveMask &&
+         lhs.needsCompositionMask == rhs.needsCompositionMask &&
+         lhs.needsMotionClass == rhs.needsMotionClass &&
+         lhs.gtaoTemporal == rhs.gtaoTemporal && lhs.valid == rhs.valid;
+}
+
 [[nodiscard]] constexpr PresentationAAUnsupportedReason msaaUnsupportedReason(
     AntiAliasingMode mode,
     const PresentationAAGpuCapabilities &capabilities) noexcept {
@@ -84,9 +167,6 @@ buildPresentationAAPlan(
     plan.transparency = TransparencyAAPolicy::SingleSamplePostResolve;
     plan.sampleShadingSupported = gpuCapabilities.sampleRateShading;
     plan.sampleShadingEnabled = false;
-    plan.spatialCleanup = settings.antiAliasing.debug.spatialPostMsaaCleanup
-                              ? SpatialCleanupPoint::PostTransparency
-                              : SpatialCleanupPoint::Off;
     break;
   case AntiAliasingMode::TAA:
     switch (temporalProvider) {
@@ -129,6 +209,7 @@ buildPresentationAAPlan(
   plan.needsMotion = plan.needsMotion || plan.gtaoTemporal;
   plan.needsMotionClass = plan.needsMotionClass || plan.gtaoTemporal;
   plan.needsReactiveMask = plan.needsReactiveMask || plan.gtaoTemporal;
+  plan.postAA = resolvePostAAPlan(settings.antiAliasing, plan.coverage);
   plan.valid = true;
   return Result<PresentationAAPlan, std::string>::makeResult(plan);
 }

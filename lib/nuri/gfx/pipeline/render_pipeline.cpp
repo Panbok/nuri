@@ -157,8 +157,7 @@ Result<bool, std::string> RenderPipeline::prepareSceneStep(
   return Result<bool, std::string>::makeResult(complete);
 }
 
-void RenderPipeline::onFrameSubmitted(
-    const RenderFrameContext &frame) noexcept {
+void RenderPipeline::onFrameSubmitted(RenderFrameContext &frame) noexcept {
   for (Component &component : components_) {
     if (component.desc.submitted) {
       component.desc.submitted(component.owner.get(), frame);
@@ -166,8 +165,7 @@ void RenderPipeline::onFrameSubmitted(
   }
 }
 
-void RenderPipeline::onFrameAbandoned(
-    const RenderFrameContext &frame) noexcept {
+void RenderPipeline::onFrameAbandoned(RenderFrameContext &frame) noexcept {
   for (Component &component : components_) {
     if (component.desc.abandoned) {
       component.desc.abandoned(component.owner.get(), frame);

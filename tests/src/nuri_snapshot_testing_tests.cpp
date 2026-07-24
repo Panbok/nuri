@@ -162,6 +162,35 @@ SnapshotReport makeReport(std::filesystem::path caseDir = {}) {
   report.rendererMetrics.antiAliasing
       .transparentTransmissionFeedbackSourceAvailable = 1u;
   report.rendererMetrics.antiAliasing.taaTransparentPostTaaDrawCount = 3u;
+  report.rendererMetrics.antiAliasing.postAAPlan = PostAAPlan{
+      .requested = true,
+      .active = true,
+      .specular = PostAASpecularAlgorithm::BakedClean,
+      .spatial = PostAASpatialAlgorithm::Smaa1x,
+      .resolvedMaterialSpecularAA = ResolvedMaterialSpecularAA::BakedClean,
+      .specularAADebugOverride = SpecularAADebugOverride::None,
+      .debugView = AntiAliasingDebugView::SpecularAAVariance,
+      .materialVarianceScale = 0.8f,
+      .geometricVarianceScale = 0.3f,
+      .maxSlopeVariance = 0.2f,
+      .inactiveReason = PostAAInactiveReason::None,
+  };
+  report.rendererMetrics.antiAliasing.postAA = PostAAFrameFacts{
+      .specularSelected = true,
+      .smaaPlanned = true,
+      .smaaSubmitted = true,
+      .smaaCompleted = true,
+      .smaaSubmittedPassCount = 4u,
+      .smaaCompletedSourceFrameIndex = 6u,
+      .degradation = PostAADegradation::SmaaScratchRingSaturated,
+  };
+  report.rendererMetrics.antiAliasing.normalVarianceContractMaterialsLive = 7u;
+  report.rendererMetrics.antiAliasing.normalVarianceContractTexturesLive = 3u;
+  report.rendererMetrics.antiAliasing.normalVarianceUnavailableSlotsLive = 2u;
+  report.rendererMetrics.antiAliasing.normalVarianceContractTextureBytesLive =
+      4096u;
+  report.rendererMetrics.antiAliasing.spatialAAAllocationCount = 9u;
+  report.rendererMetrics.antiAliasing.spatialAAReallocationCount = 6u;
   report.rendererMetrics.visibility.gpuMainReadbackAvailable = 1u;
   report.rendererMetrics.visibility.gpuMainReadbackSourceFrame = 7u;
   report.rendererMetrics.visibility.gpuMainReadbackStaleFrameCount = 1u;
@@ -198,8 +227,7 @@ TEST(NuriSnapshotTestingTest, ManifestRejectsUnknownKeys) {
   std::filesystem::remove(path, ec);
 }
 
-TEST(NuriSnapshotTestingTest,
-     ManifestParsesMsaaEnvironmentAndSpatialCleanupContract) {
+TEST(NuriSnapshotTestingTest, ManifestNormalizesLegacyAndPostAAWins) {
   const std::filesystem::path path =
       makeTempPath("snapshot_msaa_environment", ".json");
   writeFile(path,
@@ -219,7 +247,17 @@ TEST(NuriSnapshotTestingTest,
               "settings": {
                 "antiAliasing": {
                   "mode": "MSAA8x",
-                  "spatialPostMsaaCleanup": true
+                  "debugView": "SpecularAAVariance",
+                  "specularAAOverride": "ForceOff",
+                  "spatialPostMsaaCleanup": true,
+                  "postAA": {
+                    "enabled": true,
+                    "specular": "BakedClean",
+                    "spatial": "Off",
+                    "materialVarianceScale": 0.8,
+                    "geometricVarianceScale": 0.3,
+                    "maxSlopeVariance": 0.2
+                  }
                 }
               },
               "requirements": {"msaaSamples": 8},
@@ -232,8 +270,16 @@ TEST(NuriSnapshotTestingTest,
   EXPECT_EQ(*loaded.value().requirements.msaaSamples, 8u);
   EXPECT_EQ(loaded.value().settings.antiAliasing.mode,
             AntiAliasingMode::MSAA8x);
-  EXPECT_TRUE(
-      loaded.value().settings.antiAliasing.debug.spatialPostMsaaCleanup);
+  const auto &aa = loaded.value().settings.antiAliasing;
+  EXPECT_FALSE(aa.debug.spatialPostMsaaCleanup);
+  EXPECT_EQ(aa.debug.view, AntiAliasingDebugView::SpecularAAVariance);
+  EXPECT_EQ(aa.debug.specularAAOverride, SpecularAADebugOverride::ForceOff);
+  EXPECT_TRUE(aa.postAA.enabled);
+  EXPECT_EQ(aa.postAA.specular, PostAASpecularAlgorithm::BakedClean);
+  EXPECT_EQ(aa.postAA.spatial, PostAASpatialAlgorithm::Off);
+  EXPECT_FLOAT_EQ(aa.postAA.materialVarianceScale, 0.8f);
+  EXPECT_FLOAT_EQ(aa.postAA.geometricVarianceScale, 0.3f);
+  EXPECT_FLOAT_EQ(aa.postAA.maxSlopeVariance, 0.2f);
   EXPECT_EQ(loaded.value().environment.cubemap.pathBase, "texturesRoot");
   EXPECT_EQ(loaded.value().environment.cubemap.path,
             std::filesystem::path("sky.hdr"));
@@ -840,6 +886,25 @@ TEST(NuriSnapshotTestingTest, ReportJsonRoundTripsCaptureSummary) {
   EXPECT_EQ(loaded.value()
                 .rendererMetrics.antiAliasing.taaTransparentPostTaaDrawCount,
             3u);
+  const auto &postAA = loaded.value().rendererMetrics.antiAliasing;
+  EXPECT_TRUE(postAA.postAAPlan.requested);
+  EXPECT_TRUE(postAA.postAAPlan.active);
+  EXPECT_EQ(postAA.postAAPlan.specular, PostAASpecularAlgorithm::BakedClean);
+  EXPECT_EQ(postAA.postAAPlan.spatial, PostAASpatialAlgorithm::Smaa1x);
+  EXPECT_EQ(postAA.postAAPlan.debugView,
+            AntiAliasingDebugView::SpecularAAVariance);
+  EXPECT_FLOAT_EQ(postAA.postAAPlan.materialVarianceScale, 0.8f);
+  EXPECT_TRUE(postAA.postAA.smaaCompleted);
+  EXPECT_EQ(postAA.postAA.smaaSubmittedPassCount, 4u);
+  EXPECT_EQ(postAA.postAA.smaaCompletedSourceFrameIndex, 6u);
+  EXPECT_EQ(postAA.postAA.degradation,
+            PostAADegradation::SmaaScratchRingSaturated);
+  EXPECT_EQ(postAA.normalVarianceContractMaterialsLive, 7u);
+  EXPECT_EQ(postAA.normalVarianceContractTexturesLive, 3u);
+  EXPECT_EQ(postAA.normalVarianceUnavailableSlotsLive, 2u);
+  EXPECT_EQ(postAA.normalVarianceContractTextureBytesLive, 4096u);
+  EXPECT_EQ(postAA.spatialAAAllocationCount, 9u);
+  EXPECT_EQ(postAA.spatialAAReallocationCount, 6u);
   EXPECT_EQ(loaded.value().rendererMetrics.shadow.cascadeCount, 2u);
   EXPECT_EQ(loaded.value().rendererMetrics.visibility.gpuMainReadbackAvailable,
             1u);

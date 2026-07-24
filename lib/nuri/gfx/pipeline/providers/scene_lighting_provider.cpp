@@ -308,6 +308,10 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
   const DDGIFrameGpuDataHandle *ddgiFrame =
       ctx.shared.ddgiFrameGpuData.has_value() ? &*ctx.shared.ddgiFrameGpuData
                                               : nullptr;
+  const PostAAPlan &postAA = frame.presentationAA.postAA;
+  const uint32_t specularAAStatePacked =
+      static_cast<uint32_t>(postAA.resolvedMaterialSpecularAA) |
+      (static_cast<uint32_t>(postAA.debugView) << 8u);
   const ForwardSceneFrameData frameData{
       .view = frame.camera.view,
       .proj = frame.camera.proj,
@@ -347,6 +351,11 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
       .shadowFlags = shadowFlags,
       .materialCoverageSamplerId = materialCoverageSamplerId,
       .materialDataSamplerId = materialDataSamplerId,
+      .specularAAStatePacked = specularAAStatePacked,
+      .specularAAScalesPacked = glm::packHalf2x16(glm::vec2(
+          postAA.materialVarianceScale, postAA.geometricVarianceScale)),
+      .specularAAMaxVarianceBits =
+          std::bit_cast<uint32_t>(postAA.maxSlopeVariance),
       .ddgiFrameBufferAddress =
           ddgiFrame != nullptr ? ddgiFrame->bufferAddress : 0u,
       .ddgiFlags = ddgiFrame != nullptr ? ddgiFrame->flags : 0u,

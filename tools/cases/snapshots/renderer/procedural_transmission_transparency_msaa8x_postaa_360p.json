@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
-  "id": "renderer.procedural.transmission_transparency.msaa8x_cleanup_360p",
+  "id": "renderer.procedural.transmission_transparency.msaa8x_postaa_360p",
   "suite": "renderer",
-  "description": "Generated transmission/transparency boundary with MSAA8x and post-MSAA cleanup enabled",
+  "description": "Generated transmission/transparency boundary with MSAA8x and the full Post-AA bundle",
   "scene": {
     "kind": "procedural",
     "generator": "nuri.procedural.transmission_transparency.v1",
@@ -41,7 +41,7 @@
     "antiAliasing": {
       "mode": "MSAA8x",
       "qualityPreset": "Quality",
-      "spatialPostMsaaCleanup": true
+      "postAA": {"enabled": true, "specular": "BakedClean", "spatial": "Smaa1x", "materialVarianceScale": 1.0, "geometricVarianceScale": 0.35, "maxSlopeVariance": 0.25}
     },
     "ambientOcclusion": {
       "mode": "Disabled",

@@ -1,4 +1,5 @@
 #include "nuri/gfx/frame/temporal_frame_service.h"
+#include "nuri/gfx/frame/presentation_aa_plan.h"
 #include "nuri/pch.h"
 #include <cmath>
 namespace nuri {
@@ -69,7 +70,8 @@ Result<CameraFrameState, std::string> TemporalFrameService::prepareFrame(
       camera, aspectRatio, antiAliasing, desc, pending.cameraHistory);
   TemporalResetReasonFlags reasons =
       resetFlags(cameraState.historyResetReason) | deferredResetReasons_;
-  if (committedPlan_.valid && committedPlan_ != plan) {
+  if (committedPlan_.valid &&
+      !temporalAAContinuityEquivalent(committedPlan_, plan)) {
     reasons |= TemporalResetReasonFlags::ProviderChange;
   }
   pending.facts = committedFacts_;

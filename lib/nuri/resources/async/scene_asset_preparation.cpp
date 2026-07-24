@@ -148,6 +148,8 @@ Result<PreparedImportedMaterial, std::string> prepareImportedMaterial(
     }
     prepared.textures[slotIndex] = TextureRequest{
         .path = artifact.value().artifactPath.string(),
+        .loadOptions = buildOptions.loadOptions,
+        .contentContract = buildOptions.contentContract,
         .kind = TextureRequestKind::Ktx2Texture2D,
         .debugName = debugName,
     };

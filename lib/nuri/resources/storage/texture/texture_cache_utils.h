@@ -3,11 +3,12 @@
 #include "nuri/defines.h"
 #include "nuri/gfx/gpu_types.h"
 #include "nuri/resources/cpu/material_data.h"
+#include "nuri/resources/storage/texture/texture_processing.h"
 #include <filesystem>
 #include <string_view>
 namespace nuri {
-constexpr uint32_t kSceneTextureArtifactSettingsVersion = 14u;
-constexpr uint32_t kNativeTextureArtifactProfileVersion = 3u;
+constexpr uint32_t kSceneTextureArtifactSettingsVersion = 15u;
+constexpr uint32_t kNativeTextureArtifactProfileVersion = 4u;
 enum class TextureArtifactTranscodeFormat : uint8_t {
   BC7_RGBA,
   ETC1_RGB,
@@ -31,6 +32,8 @@ struct NativeTextureCacheMetadata {
   uint32_t numMipLevels = 1u;
   uint64_t payloadSizeBytes = 0u;
   uint64_t artifactSizeBytes = 0u;
+  TextureContentContract contentContract = TextureContentContract::Generic;
+  uint32_t contentEncodingVersion = 0u;
 };
 enum class NativeTextureCacheProbeStatus : uint8_t {
   Hit,
@@ -72,10 +75,16 @@ queryTextureSourceFingerprint(const std::filesystem::path &path);
 writeNativeTextureCacheMetadataAtomic(
     const std::filesystem::path &nativeTexturePath,
     const NativeTextureCacheMetadata &metadata);
+[[nodiscard]] NURI_API Result<NativeTextureCacheMetadata, std::string>
+readNativeTextureCacheMetadata(
+    const std::filesystem::path &nativeTexturePath) noexcept;
 [[nodiscard]] NURI_API NativeTextureCacheProbe probeNativeTextureCache(
     const std::filesystem::path &nativeTexturePath,
     const std::filesystem::path &sourcePath,
-    uint64_t expectedSourceIdentityHash, Format expectedTargetFormat) noexcept;
+    uint64_t expectedSourceIdentityHash, Format expectedTargetFormat,
+    TextureContentContract expectedContentContract =
+        TextureContentContract::Generic,
+    uint32_t expectedContentEncodingVersion = 0u) noexcept;
 [[nodiscard]] NURI_API bool
 isTextureCacheUpToDate(const std::filesystem::path &cachePath,
                        const std::filesystem::path &sourcePath) noexcept;

@@ -126,6 +126,8 @@ target_link_libraries(nuri_benchmarking
   PUBLIC
     nuri_renderer
     nuri_tool_core
+  PRIVATE
+    nuri_tools_runtime
 )
 
 target_compile_features(nuri_benchmarking PUBLIC cxx_std_20)
@@ -158,6 +160,7 @@ if(NURI_BUILD_SNAPSHOT_TESTING OR NURI_BUILD_SNAPSHOT_CLI OR NURI_BUILD_AUTOTEST
       nuri_renderer
       nuri_tool_core
     PRIVATE
+      nuri_tools_runtime
       OpenImageIO::OpenImageIO
   )
 

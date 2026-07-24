@@ -6,7 +6,7 @@
 namespace nuri {
 namespace {
 constexpr uint32_t kNativeTextureMetadataMagic = 0x4D43544Eu;
-constexpr uint32_t kNativeTextureMetadataSchemaVersion = 2u;
+constexpr uint32_t kNativeTextureMetadataSchemaVersion = 3u;
 [[nodiscard]] std::vector<std::byte>
 encodeMetadata(const NativeTextureCacheMetadata &metadata) {
   BinaryWriter writer;
@@ -27,6 +27,8 @@ encodeMetadata(const NativeTextureCacheMetadata &metadata) {
   writer.write(metadata.numMipLevels);
   writer.write(metadata.payloadSizeBytes);
   writer.write(metadata.artifactSizeBytes);
+  writer.write(metadata.contentContract);
+  writer.write(metadata.contentEncodingVersion);
   return std::move(writer).take();
 }
 [[nodiscard]] bool decodeMetadata(std::span<const std::byte> bytes,
@@ -49,10 +51,14 @@ encodeMetadata(const NativeTextureCacheMetadata &metadata) {
   metadata.numMipLevels = reader.read<uint32_t>();
   metadata.payloadSizeBytes = reader.read<uint64_t>();
   metadata.artifactSizeBytes = reader.read<uint64_t>();
+  metadata.contentContract = reader.read<TextureContentContract>();
+  metadata.contentEncodingVersion = reader.read<uint32_t>();
   return reader.empty() && magic == kNativeTextureMetadataMagic &&
          schema == kNativeTextureMetadataSchemaVersion &&
          metadata.targetFormat < Format::Count &&
-         metadata.textureType < TextureType::Count;
+         metadata.textureType < TextureType::Count &&
+         metadata.contentContract <=
+             TextureContentContract::NormalRgbCleanVarianceA;
 }
 struct FormatPolicy {
   Format format;
@@ -192,11 +198,37 @@ Result<bool, std::string> writeNativeTextureCacheMetadataAtomic(
       encodeMetadata(metadata));
 }
 
+Result<NativeTextureCacheMetadata, std::string> readNativeTextureCacheMetadata(
+    const std::filesystem::path &nativeTexturePath) noexcept {
+  auto bytes =
+      readBinaryFile(buildNativeTextureCacheMetadataPath(nativeTexturePath));
+  if (bytes.hasError()) {
+    return Result<NativeTextureCacheMetadata, std::string>::makeError(
+        bytes.error());
+  }
+  NativeTextureCacheMetadata metadata{};
+  if (!decodeMetadata(bytes.value(), metadata) ||
+      metadata.profileVersion != kNativeTextureArtifactProfileVersion) {
+    return Result<NativeTextureCacheMetadata, std::string>::makeError(
+        "native texture metadata profile is invalid");
+  }
+  std::error_code ec;
+  const uint64_t artifactSize =
+      std::filesystem::file_size(nativeTexturePath, ec);
+  if (ec || artifactSize == 0u || artifactSize != metadata.artifactSizeBytes) {
+    return Result<NativeTextureCacheMetadata, std::string>::makeError(
+        "native texture artifact size is invalid");
+  }
+  return Result<NativeTextureCacheMetadata, std::string>::makeResult(metadata);
+}
+
 NativeTextureCacheProbe
 probeNativeTextureCache(const std::filesystem::path &nativeTexturePath,
                         const std::filesystem::path &sourcePath,
                         uint64_t expectedSourceIdentityHash,
-                        Format expectedTargetFormat) noexcept {
+                        Format expectedTargetFormat,
+                        TextureContentContract expectedContentContract,
+                        uint32_t expectedContentEncodingVersion) noexcept {
   NativeTextureCacheProbe probe{};
   const auto failure = [&probe](NativeTextureCacheProbeStatus status,
                                 std::string message = {}) {
@@ -226,7 +258,9 @@ probeNativeTextureCache(const std::filesystem::path &nativeTexturePath,
   if (probe.metadata.profileVersion != kNativeTextureArtifactProfileVersion ||
       probe.metadata.sourceIdentityHash != expectedSourceIdentityHash ||
       probe.metadata.source != sourceFingerprint.value() ||
-      probe.metadata.targetFormat != expectedTargetFormat) {
+      probe.metadata.targetFormat != expectedTargetFormat ||
+      probe.metadata.contentContract != expectedContentContract ||
+      probe.metadata.contentEncodingVersion != expectedContentEncodingVersion) {
     return failure(NativeTextureCacheProbeStatus::Stale,
                    "native texture metadata does not match the source/profile");
   }

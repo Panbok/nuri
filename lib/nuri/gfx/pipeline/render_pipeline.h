@@ -171,8 +171,8 @@ public:
                    const RenderSettings *settings = nullptr,
                    const Camera *camera = nullptr, float aspectRatio = 1.0f,
                    uint32_t renderWidth = 1u, uint32_t renderHeight = 1u);
-  void onFrameSubmitted(const RenderFrameContext &frame) noexcept;
-  void onFrameAbandoned(const RenderFrameContext &frame) noexcept;
+  void onFrameSubmitted(RenderFrameContext &frame) noexcept;
+  void onFrameAbandoned(RenderFrameContext &frame) noexcept;
   [[nodiscard]] bool empty() const noexcept {
     return components_.empty() && stages_.empty();
   }

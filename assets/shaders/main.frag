@@ -37,6 +37,11 @@ void main() {
     out_FragColor = aoDebugColor;
     return;
   }
+  vec4 specularAADebugColor;
+  if (trySpecularAADebugColor(sm, specularAADebugColor)) {
+    out_FragColor = specularAADebugColor;
+    return;
+  }
   vec4 ddgiDebugColor;
   if (tryDDGIDebugColor(sm, vtx.worldPos, ddgiDebugColor)) {
     out_FragColor = ddgiDebugColor;

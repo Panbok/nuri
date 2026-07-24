@@ -1,0 +1,82 @@
+{
+  "schemaVersion": 1,
+  "id": "renderer.procedural.specular_minification.msaa4x_360p",
+  "suite": "renderer",
+  "description": "Controlled specular-minification msaa4x candidate; baseline requires review",
+  "scene": {
+    "kind": "procedural",
+    "generator": "nuri.procedural.specular_minification.v1",
+    "contentHash": "nuri.procedural.specular_minification.v1:1"
+  },
+  "backend": "default",
+  "resolution": [
+    640,
+    360
+  ],
+  "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 12,
+  "captureFrame": 36,
+  "authoritative": false,
+  "presentMode": "immediate",
+  "windowMode": "visible",
+  "camera": {
+    "position": [
+      0.22,
+      0.08,
+      5.3
+    ],
+    "target": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "verticalFovDegrees": 48.0,
+    "nearPlane": 0.05,
+    "farPlane": 40.0
+  },
+  "settings": {
+    "opaque": {
+      "enabled": true,
+      "meshletMode": "Disabled",
+      "enableDepthPrepass": true,
+      "enableMeshLod": false
+    },
+    "antiAliasing": {
+      "mode": "MSAA4x"
+    },
+    "ambientOcclusion": {
+      "mode": "GTAO",
+      "preset": "Ultra"
+    },
+    "shadow": {
+      "enabled": true,
+      "qualityPreset": "Ultra"
+    },
+    "hdrPostProcess": {
+      "bloomEnabled": false,
+      "adaptationEnabled": false
+    }
+  },
+  "requirements": {
+    "assets": [
+      "modelsRoot:common/flat_plane.obj",
+      "repoRoot:assets/models/common/smooth_icosphere.obj",
+      "repoRoot:assets/fixtures/post_aa/specular_minification_normal.ppm"
+    ],
+    "backends": [],
+    "allowVisibleWindow": true,
+    "msaaSamples": 4
+  },
+  "captures": [
+    {
+      "target": "scene_color_hdr",
+      "profile": "hdr_color",
+      "required": true
+    },
+    {
+      "target": "final_color",
+      "profile": "ldr_color",
+      "required": true
+    }
+  ]
+}

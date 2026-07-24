@@ -84,6 +84,129 @@ TEST(TemporalFrameServiceTest,
   EXPECT_TRUE(plan.jitterScene);
 }
 
+TEST(TemporalFrameServiceTest, PostAAPlanResolvesAndCanonicalizesEveryMode) {
+  RenderSettings settings{};
+  settings.antiAliasing.mode = AntiAliasingMode::MSAA4x;
+
+  PresentationAAPlan plan = requirePlan(settings);
+  EXPECT_FALSE(plan.postAA.requested);
+  EXPECT_FALSE(plan.postAA.active);
+  EXPECT_EQ(plan.postAA.inactiveReason, PostAAInactiveReason::NotRequested);
+  EXPECT_EQ(plan.postAA.specular, PostAASpecularAlgorithm::InheritCurrent);
+  EXPECT_EQ(plan.postAA.spatial, PostAASpatialAlgorithm::Off);
+  EXPECT_EQ(plan.postAA.resolvedMaterialSpecularAA,
+            ResolvedMaterialSpecularAA::LegacyShadingNormalDerivative);
+
+  settings.antiAliasing.postAA.enabled = true;
+  settings.antiAliasing.postAA.specular = PostAASpecularAlgorithm::BakedClean;
+  settings.antiAliasing.postAA.spatial = PostAASpatialAlgorithm::Smaa1x;
+  plan = requirePlan(settings);
+  EXPECT_TRUE(plan.postAA.requested);
+  EXPECT_TRUE(plan.postAA.active);
+  EXPECT_EQ(plan.postAA.inactiveReason, PostAAInactiveReason::None);
+  EXPECT_EQ(plan.postAA.specular, PostAASpecularAlgorithm::BakedClean);
+  EXPECT_EQ(plan.postAA.spatial, PostAASpatialAlgorithm::Smaa1x);
+  EXPECT_EQ(plan.postAA.resolvedMaterialSpecularAA,
+            ResolvedMaterialSpecularAA::BakedClean);
+
+  settings.antiAliasing.postAA.specular =
+      PostAASpecularAlgorithm::InheritCurrent;
+  settings.antiAliasing.postAA.spatial = PostAASpatialAlgorithm::Off;
+  plan = requirePlan(settings);
+  EXPECT_TRUE(plan.postAA.requested);
+  EXPECT_FALSE(plan.postAA.active);
+  EXPECT_EQ(plan.postAA.inactiveReason,
+            PostAAInactiveReason::NoComponentEnabled);
+  EXPECT_EQ(plan.postAA.specular, PostAASpecularAlgorithm::InheritCurrent);
+  EXPECT_EQ(plan.postAA.spatial, PostAASpatialAlgorithm::Off);
+
+  settings.antiAliasing.postAA.specular = PostAASpecularAlgorithm::BakedClean;
+  settings.antiAliasing.postAA.spatial = PostAASpatialAlgorithm::Smaa1x;
+  settings.antiAliasing.mode = AntiAliasingMode::TAA;
+  plan = requirePlan(settings);
+  EXPECT_TRUE(plan.postAA.requested);
+  EXPECT_FALSE(plan.postAA.active);
+  EXPECT_EQ(plan.postAA.inactiveReason,
+            PostAAInactiveReason::CoverageIsSingleSample);
+  EXPECT_EQ(plan.postAA.specular, PostAASpecularAlgorithm::InheritCurrent);
+  EXPECT_EQ(plan.postAA.spatial, PostAASpatialAlgorithm::Off);
+  EXPECT_EQ(plan.postAA.resolvedMaterialSpecularAA,
+            ResolvedMaterialSpecularAA::LegacyShadingNormalDerivative);
+}
+
+TEST(TemporalFrameServiceTest,
+     PostAADiagnosticsAndTuningSanitizeWithoutContaminatingTemporalModes) {
+  RenderSettings settings{};
+  settings.antiAliasing.mode = AntiAliasingMode::MSAA8x;
+  settings.antiAliasing.postAA.enabled = true;
+  settings.antiAliasing.postAA.specular = PostAASpecularAlgorithm::BakedClean;
+  settings.antiAliasing.postAA.spatial = PostAASpatialAlgorithm::Off;
+  settings.antiAliasing.postAA.materialVarianceScale =
+      std::numeric_limits<float>::quiet_NaN();
+  settings.antiAliasing.postAA.geometricVarianceScale =
+      std::numeric_limits<float>::infinity();
+  settings.antiAliasing.postAA.maxSlopeVariance = -1.0f;
+  settings.antiAliasing.debug.view = AntiAliasingDebugView::SpecularAAVariance;
+  settings.antiAliasing.debug.specularAAOverride =
+      SpecularAADebugOverride::ForceOff;
+
+  PresentationAAPlan plan = requirePlan(settings);
+  EXPECT_EQ(plan.postAA.resolvedMaterialSpecularAA,
+            ResolvedMaterialSpecularAA::Off);
+  EXPECT_EQ(plan.postAA.specularAADebugOverride,
+            SpecularAADebugOverride::ForceOff);
+  EXPECT_EQ(plan.postAA.debugView, AntiAliasingDebugView::SpecularAAVariance);
+  EXPECT_FLOAT_EQ(plan.postAA.materialVarianceScale, 1.0f);
+  EXPECT_FLOAT_EQ(plan.postAA.geometricVarianceScale, 0.35f);
+  EXPECT_FLOAT_EQ(plan.postAA.maxSlopeVariance, 0.0f);
+
+  settings.antiAliasing.postAA.enabled = false;
+  plan = requirePlan(settings);
+  EXPECT_EQ(plan.postAA.resolvedMaterialSpecularAA,
+            ResolvedMaterialSpecularAA::Off);
+  EXPECT_EQ(plan.postAA.debugView, AntiAliasingDebugView::None);
+
+  settings.antiAliasing.mode = AntiAliasingMode::TAA;
+  settings.antiAliasing.postAA.enabled = true;
+  plan = requirePlan(settings);
+  EXPECT_EQ(plan.postAA.specularAADebugOverride, SpecularAADebugOverride::None);
+  EXPECT_EQ(plan.postAA.debugView, AntiAliasingDebugView::None);
+  EXPECT_EQ(plan.postAA.resolvedMaterialSpecularAA,
+            ResolvedMaterialSpecularAA::LegacyShadingNormalDerivative);
+}
+
+TEST(TemporalFrameServiceTest,
+     PostAAChangesDoNotAlterTemporalContinuityProjection) {
+  RenderSettings settings{};
+  settings.antiAliasing.mode = AntiAliasingMode::MSAA4x;
+  PresentationAAPlan baseline = requirePlan(settings);
+  settings.antiAliasing.postAA.enabled = true;
+  settings.antiAliasing.postAA.specular = PostAASpecularAlgorithm::BakedClean;
+  settings.antiAliasing.postAA.spatial = PostAASpatialAlgorithm::Smaa1x;
+  settings.antiAliasing.postAA.materialVarianceScale = 1.7f;
+  const PresentationAAPlan postAA = requirePlan(settings);
+
+  EXPECT_NE(baseline, postAA);
+  EXPECT_TRUE(temporalAAContinuityEquivalent(baseline, postAA));
+
+  Camera camera{};
+  TemporalCameraFrameDesc desc{};
+  desc.renderExtent = {640u, 360u};
+  TemporalFrameService service;
+  auto frame = service.prepareFrame(camera, 16.0f / 9.0f, settings.antiAliasing,
+                                    baseline, desc, 0u, 0.0, 1.0 / 60.0);
+  ASSERT_FALSE(frame.hasError()) << frame.error();
+  ASSERT_TRUE(service.commitFrame(0u));
+  const uint32_t providerEpoch = service.facts().epochs.providerConfiguration;
+
+  frame = service.prepareFrame(camera, 16.0f / 9.0f, settings.antiAliasing,
+                               postAA, desc, 1u, 1.0, 1.0 / 60.0);
+  ASSERT_FALSE(frame.hasError()) << frame.error();
+  EXPECT_FALSE(hasTemporalResetReason(
+      service.facts().resetReasons, TemporalResetReasonFlags::ProviderChange));
+  EXPECT_EQ(service.facts().epochs.providerConfiguration, providerEpoch);
+}
+
 TEST(TemporalFrameServiceTest,
      HistoryRegistryAdvancesOnlyCommittedWritesAndAvoidsReadWriteAliasing) {
   HistoryRegistry registry;

@@ -550,6 +550,55 @@ TEST(NuriBenchmarkingTest, ManifestRejectsUnknownKeys) {
   std::filesystem::remove(path, ec);
 }
 
+TEST(NuriBenchmarkingTest, PostAASignatureUsesResolvedCanonicalPlan) {
+  const std::filesystem::path path = makeTempPath("benchmark_post_aa", ".json");
+  writeFile(path,
+            R"json({
+              "schemaVersion": 1,
+              "id": "aa.post_aa.msaa4x_specular",
+              "suite": "aa",
+              "comparisonGroup": "aa.post_aa",
+              "variant": "msaa4x_specular",
+              "settings": {"antiAliasing": {
+                "mode": "MSAA4x",
+                "debugView": "SpecularAAVariance",
+                "specularAAOverride": "None",
+                "spatialPostMsaaCleanup": true,
+                "postAA": {
+                  "enabled": true,
+                  "specular": "BakedClean",
+                  "spatial": "Off",
+                  "materialVarianceScale": 0.75,
+                  "geometricVarianceScale": 0.25,
+                  "maxSlopeVariance": 0.2
+                }
+              }}
+            })json");
+
+  auto loaded = loadBenchmarkCaseManifest(path);
+  ASSERT_FALSE(loaded.hasError()) << loaded.error();
+  const auto &aa = loaded.value().settings.antiAliasing;
+  EXPECT_FALSE(aa.debug.spatialPostMsaaCleanup);
+  EXPECT_EQ(aa.debug.view, AntiAliasingDebugView::SpecularAAVariance);
+  EXPECT_TRUE(aa.postAA.enabled);
+  EXPECT_EQ(aa.postAA.specular, PostAASpecularAlgorithm::BakedClean);
+  EXPECT_EQ(aa.postAA.spatial, PostAASpatialAlgorithm::Off);
+
+  BenchmarkReport report{};
+  report.benchmarkCase = loaded.value();
+  auto json = writeBenchmarkReportJson(report, false);
+  ASSERT_FALSE(json.hasError()) << json.error();
+  EXPECT_NE(json.value().find("aa.postAA.requested=1"), std::string::npos);
+  EXPECT_NE(json.value().find("aa.postAA.active=1"), std::string::npos);
+  EXPECT_NE(json.value().find("aa.postAA.specular=1"), std::string::npos);
+  EXPECT_NE(json.value().find("aa.postAA.spatial=0"), std::string::npos);
+  EXPECT_NE(json.value().find("aa.postAA.materialVarianceScale=0.75"),
+            std::string::npos);
+
+  std::error_code ec;
+  std::filesystem::remove(path, ec);
+}
+
 TEST(NuriBenchmarkingTest, ManifestParsesCanonicalMsaaSampleRequirement) {
   const std::filesystem::path path =
       makeTempPath("benchmark_msaa_requirement", ".json");
@@ -1710,9 +1759,11 @@ TEST(NuriBenchmarkingTest, ReportWritesReadsAndComputesMeasuredStats) {
   ASSERT_TRUE(
       loaded.value().benchmarkCase.requirements.msaaSamples.has_value());
   EXPECT_EQ(*loaded.value().benchmarkCase.requirements.msaaSamples, 4u);
-  EXPECT_TRUE(
+  EXPECT_FALSE(
       loaded.value()
           .benchmarkCase.settings.antiAliasing.debug.spatialPostMsaaCleanup);
+  EXPECT_FALSE(
+      loaded.value().benchmarkCase.settings.antiAliasing.postAA.enabled);
   const RenderSettings::DDGISettings &loadedDDGI =
       loaded.value().benchmarkCase.settings.ddgi;
   EXPECT_TRUE(loadedDDGI.enabled);

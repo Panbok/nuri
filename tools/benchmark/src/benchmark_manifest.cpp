@@ -1,5 +1,6 @@
 #include "nuri/tools/benchmark/benchmark_manifest.h"
 
+#include "nuri/core/log.h"
 #include "nuri/core/runtime_config.h"
 #include "nuri/tools/benchmark/benchmark_environment.h"
 #include "nuri/tools/benchmark/benchmark_metric_registry.h"
@@ -598,7 +599,10 @@ parseAntiAliasingSettings(yyjson_val *object, RenderSettings &settings,
   static constexpr std::array keys{std::string_view("mode"),
                                    std::string_view("temporalProvider"),
                                    std::string_view("qualityPreset"),
-                                   std::string_view("spatialPostMsaaCleanup")};
+                                   std::string_view("spatialPostMsaaCleanup"),
+                                   std::string_view("debugView"),
+                                   std::string_view("specularAAOverride"),
+                                   std::string_view("postAA")};
   auto keysResult = rejectUnknownKeys(object, keys, path);
   if (keysResult.hasError()) {
     return keysResult;
@@ -610,6 +614,22 @@ parseAntiAliasingSettings(yyjson_val *object, RenderSettings &settings,
                      {"SpatialFallback", AntiAliasingMode::SpatialFallback},
                      {"MSAA4x", AntiAliasingMode::MSAA4x},
                      {"MSAA8x", AntiAliasingMode::MSAA8x}});
+  if (result.hasError()) {
+    return result;
+  }
+  result = readEnumField(
+      object, "debugView", path, settings.antiAliasing.debug.view,
+      {{"None", AntiAliasingDebugView::None},
+       {"SpecularAAVariance", AntiAliasingDebugView::SpecularAAVariance},
+       {"SpecularAARoughnessDelta",
+        AntiAliasingDebugView::SpecularAARoughnessDelta}});
+  if (result.hasError()) {
+    return result;
+  }
+  result = readEnumField(object, "specularAAOverride", path,
+                         settings.antiAliasing.debug.specularAAOverride,
+                         {{"None", SpecularAADebugOverride::None},
+                          {"ForceOff", SpecularAADebugOverride::ForceOff}});
   if (result.hasError()) {
     return result;
   }
@@ -637,6 +657,70 @@ parseAntiAliasingSettings(yyjson_val *object, RenderSettings &settings,
     return Result<bool, std::string>::makeError(cleanup.error());
   }
   settings.antiAliasing.debug.spatialPostMsaaCleanup = cleanup.value();
+  yyjson_val *postAA = yyjson_obj_get(object, "postAA");
+  if (postAA != nullptr) {
+    if (!yyjson_is_obj(postAA)) {
+      return Result<bool, std::string>::makeError(jsonPath(path, "postAA") +
+                                                  " must be an object");
+    }
+    static constexpr std::array postAAKeys{
+        std::string_view("enabled"),
+        std::string_view("specular"),
+        std::string_view("spatial"),
+        std::string_view("materialVarianceScale"),
+        std::string_view("geometricVarianceScale"),
+        std::string_view("maxSlopeVariance")};
+    auto postKeys =
+        rejectUnknownKeys(postAA, postAAKeys, jsonPath(path, "postAA"));
+    if (postKeys.hasError()) {
+      return postKeys;
+    }
+    auto enabled = readBool(postAA, "enabled", jsonPath(path, "postAA"),
+                            settings.antiAliasing.postAA.enabled);
+    if (enabled.hasError()) {
+      return Result<bool, std::string>::makeError(enabled.error());
+    }
+    settings.antiAliasing.postAA.enabled = enabled.value();
+    result = readEnumField(
+        postAA, "specular", jsonPath(path, "postAA"),
+        settings.antiAliasing.postAA.specular,
+        {{"InheritCurrent", PostAASpecularAlgorithm::InheritCurrent},
+         {"BakedClean", PostAASpecularAlgorithm::BakedClean}});
+    if (result.hasError()) {
+      return result;
+    }
+    result = readEnumField(postAA, "spatial", jsonPath(path, "postAA"),
+                           settings.antiAliasing.postAA.spatial,
+                           {{"Off", PostAASpatialAlgorithm::Off},
+                            {"Smaa1x", PostAASpatialAlgorithm::Smaa1x}});
+    if (result.hasError()) {
+      return result;
+    }
+    for (const auto [key, output] : std::array{
+             std::pair{"materialVarianceScale",
+                       &settings.antiAliasing.postAA.materialVarianceScale},
+             std::pair{"geometricVarianceScale",
+                       &settings.antiAliasing.postAA.geometricVarianceScale},
+             std::pair{"maxSlopeVariance",
+                       &settings.antiAliasing.postAA.maxSlopeVariance}}) {
+      auto number = readDouble(postAA, key, jsonPath(path, "postAA"), *output);
+      if (number.hasError()) {
+        return Result<bool, std::string>::makeError(number.error());
+      }
+      *output = static_cast<float>(number.value());
+    }
+    if (yyjson_obj_get(object, "spatialPostMsaaCleanup") != nullptr) {
+      NURI_LOG_WARNING("settings.antiAliasing.postAA overrides legacy "
+                       "spatialPostMsaaCleanup");
+    }
+    settings.antiAliasing.debug.spatialPostMsaaCleanup = false;
+  } else if (cleanup.value()) {
+    settings.antiAliasing.postAA = PostAASettings{
+        .enabled = true,
+        .specular = PostAASpecularAlgorithm::InheritCurrent,
+        .spatial = PostAASpatialAlgorithm::Smaa1x,
+    };
+  }
   return Result<bool, std::string>::makeResult(true);
 }
 

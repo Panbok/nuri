@@ -15,6 +15,32 @@
 namespace nuri {
 
 namespace {
+[[nodiscard]] uint64_t
+textureStorageBytes(const TextureRecord &record) noexcept {
+  const uint64_t texelBytes = formatTexelBytes(record.format);
+  const bool bc7 = record.format == Format::BC7_RGBA_UNORM ||
+                   record.format == Format::BC7_RGBA_SRGB;
+  if (texelBytes == 0u && !bc7) {
+    return 0u;
+  }
+  uint32_t width = std::max(1u, record.dimensions.width);
+  uint32_t height = std::max(1u, record.dimensions.height);
+  uint32_t depth = std::max(1u, record.dimensions.depth);
+  uint64_t bytes = 0u;
+  for (uint32_t mip = 0u; mip < std::max(1u, record.numMipLevels); ++mip) {
+    const uint64_t mipBytes =
+        bc7 ? static_cast<uint64_t>((width + 3u) / 4u) * ((height + 3u) / 4u) *
+                  depth * 16u
+            : static_cast<uint64_t>(width) * height * depth * texelBytes;
+    bytes += mipBytes * std::max(1u, record.numLayers) *
+             std::max(1u, record.numSamples);
+    width = std::max(1u, width >> 1u);
+    height = std::max(1u, height >> 1u);
+    depth = std::max(1u, depth >> 1u);
+  }
+  return bytes;
+}
+
 template <typename T>
 [[nodiscard]] MaterialTableDirtyRange
 calculateDirtyRange(std::span<const T> previous, std::span<const T> current) {
@@ -64,6 +90,34 @@ resolveTextureRequestKindForPath(std::string_view path,
     return TextureRequestKind::Ktx2Texture2D;
   }
   return fallback;
+}
+[[nodiscard]] Result<bool, std::string>
+validateTextureRequestContentContract(const TextureRequest &request) {
+  if (request.contentContract !=
+      TextureContentContract::NormalRgbCleanVarianceA) {
+    return Result<bool, std::string>::makeResult(true);
+  }
+  if (request.loadOptions.mipSemantic != TextureMipSemantic::NormalMap ||
+      request.loadOptions.srgb ||
+      request.kind != TextureRequestKind::Ktx2Texture2D) {
+    return Result<bool, std::string>::makeError(
+        "NormalRgbCleanVarianceA requires a linear, normal-semantic Nuri KTX2 "
+        "artifact");
+  }
+  auto metadata =
+      readNativeTextureCacheMetadata(std::filesystem::path(request.path));
+  if (metadata.hasError() ||
+      metadata.value().contentContract != request.contentContract ||
+      metadata.value().contentEncodingVersion !=
+          kNormalVarianceEncodingVersion) {
+    return Result<bool, std::string>::makeError(
+        "NormalRgbCleanVarianceA is not proven by trusted native metadata");
+  }
+  return Result<bool, std::string>::makeResult(true);
+}
+
+[[nodiscard]] bool formatPreservesNormalVarianceAlpha(Format format) noexcept {
+  return format == Format::RGBA8_UNORM || format == Format::BC7_RGBA_UNORM;
 }
 struct MaterialTextureSpec {
   const char *name = nullptr;
@@ -375,6 +429,8 @@ struct ImportedTextureRefsResult {
               ? Result<TextureRef, std::string>::makeError(artifact.error())
               : resources.acquireTexture(TextureRequest{
                     .path = artifact.value().artifactPath.string(),
+                    .loadOptions = options.loadOptions,
+                    .contentContract = options.contentContract,
                     .kind = TextureRequestKind::Ktx2Texture2D,
                     .debugName = debugName,
                 });
@@ -478,8 +534,19 @@ void ResourceManager::destroyTextureSlot(uint32_t index) {
       .canonicalPath = std::string(slot.record.canonicalPath),
       .optionsHash = hashTextureLoadOptions(slot.record.loadOptions),
       .kind = slot.record.sourceKind,
+      .contentContract = slot.record.contentContract,
   };
   textureCache_.erase(key);
+  if (slot.record.contentContract ==
+      TextureContentContract::NormalRgbCleanVarianceA) {
+    NURI_ASSERT(normalVarianceContractTexturesLive_ > 0u,
+                "Normal-variance texture live count underflow");
+    const uint64_t bytes = textureStorageBytes(slot.record);
+    NURI_ASSERT(normalVarianceContractTextureBytesLive_ >= bytes,
+                "Normal-variance texture byte count underflow");
+    --normalVarianceContractTexturesLive_;
+    normalVarianceContractTextureBytesLive_ -= bytes;
+  }
   slot.owner.reset();
   slot.refCount = 0;
   slot.record = TextureRecord(memory_);
@@ -537,6 +604,8 @@ void ResourceManager::rebuildPackedMaterialTables() {
     return record != nullptr ? record->bindlessIndex
                              : kInvalidTextureBindlessIndex;
   };
+  normalVarianceContractMaterialsLive_ = 0u;
+  normalVarianceUnavailableSlotsLive_ = 0u;
   for (uint32_t index = 0; index < materials_.slots.size(); ++index) {
     if (!materials_.meta.isLive(index)) {
       nextHeaders[index] = MaterialHeaderGpuData{};
@@ -567,6 +636,28 @@ void ResourceManager::rebuildPackedMaterialTables() {
         textureIndex(textureRefs[kMaterialTextureSlotSpecular]),
         textureIndex(textureRefs[kMaterialTextureSlotSpecularColor]), 0u, 0u);
     MaterialHeaderGpuData header = packed.header;
+    header.materialFlags &= ~kMaterialFlagsNormalVarianceMask;
+    const auto projectNormalVariance = [this, &header](TextureRef ref,
+                                                       uint32_t flag) {
+      if (!isValid(ref)) {
+        return;
+      }
+      const TextureRecord *record = tryGet(ref);
+      if (record != nullptr &&
+          record->contentContract ==
+              TextureContentContract::NormalRgbCleanVarianceA) {
+        header.materialFlags |= flag;
+      } else {
+        ++normalVarianceUnavailableSlotsLive_;
+      }
+    };
+    projectNormalVariance(textureRefs[kMaterialTextureSlotNormal],
+                          kMaterialFlagsBaseNormalVarianceBit);
+    projectNormalVariance(textureRefs[kMaterialTextureSlotClearcoatNormal],
+                          kMaterialFlagsClearcoatNormalVarianceBit);
+    if ((header.materialFlags & kMaterialFlagsNormalVarianceMask) != 0u) {
+      ++normalVarianceContractMaterialsLive_;
+    }
     header.clearcoatExtensionIndex = kInvalidMaterialExtensionIndex;
     header.sheenExtensionIndex = kInvalidMaterialExtensionIndex;
     header.transmissionExtensionIndex = kInvalidMaterialExtensionIndex;
@@ -642,11 +733,15 @@ ResourceManager::tryAcquireTexture(const TextureRequest &request) {
   if (request.path.empty()) {
     return std::nullopt;
   }
+  if (validateTextureRequestContentContract(request).hasError()) {
+    return std::nullopt;
+  }
   const std::string canonicalPath = canonicalizeResourcePath(request.path);
   TextureKey key{
       .canonicalPath = canonicalPath,
       .optionsHash = hashTextureLoadOptions(request.loadOptions),
       .kind = request.kind,
+      .contentContract = request.contentContract,
   };
   if (auto it = textureCache_.find(key); it != textureCache_.end()) {
     if (TextureSlot *cached = tryGetSlotImpl(textures_, it->second)) {
@@ -665,6 +760,10 @@ ResourceManager::acquireTexture(const TextureRequest &request) {
     return Result<TextureRef, std::string>::makeError(
         "ResourceManager::acquireTexture: path is empty");
   }
+  if (auto validation = validateTextureRequestContentContract(request);
+      validation.hasError()) {
+    return Result<TextureRef, std::string>::makeError(validation.error());
+  }
   if (const std::optional<TextureRef> cached = tryAcquireTexture(request);
       cached.has_value()) {
     return Result<TextureRef, std::string>::makeResult(*cached);
@@ -674,6 +773,7 @@ ResourceManager::acquireTexture(const TextureRequest &request) {
       .canonicalPath = canonicalPath,
       .optionsHash = hashTextureLoadOptions(request.loadOptions),
       .kind = request.kind,
+      .contentContract = request.contentContract,
   };
   Result<std::unique_ptr<Texture>, std::string> textureResult =
       Result<std::unique_ptr<Texture>, std::string>::makeError(
@@ -704,6 +804,7 @@ ResourceManager::acquireTexture(const TextureRequest &request) {
       TextureArtifactBuildOptions buildOptions{
           .loadOptions = request.loadOptions,
           .encoding = TextureArtifactEncoding::Uastc,
+          .contentContract = request.contentContract,
       };
       const uint64_t identity =
           hashTextureSourceIdentity(canonicalPath, request.loadOptions.srgb,
@@ -743,6 +844,12 @@ Result<TextureRef, std::string> ResourceManager::storeAcquiredTexture(
     return Result<TextureRef, std::string>::makeError(
         "ResourceManager::storeAcquiredTexture: loaded texture is invalid");
   }
+  if (request.contentContract ==
+          TextureContentContract::NormalRgbCleanVarianceA &&
+      !formatPreservesNormalVarianceAlpha(texture->format())) {
+    return Result<TextureRef, std::string>::makeError(
+        "NormalRgbCleanVarianceA texture lost its alpha channel");
+  }
   auto slotResult =
       allocateSlot(textures_, memory_, "ResourceManager::acquireTexture");
   if (slotResult.hasError()) {
@@ -767,6 +874,12 @@ Result<TextureRef, std::string> ResourceManager::storeAcquiredTexture(
   slot.record.numMipLevels = texture->numMipLevels();
   slot.record.sourceKind = request.kind;
   slot.record.loadOptions = request.loadOptions;
+  slot.record.contentContract = request.contentContract;
+  if (request.contentContract ==
+      TextureContentContract::NormalRgbCleanVarianceA) {
+    ++normalVarianceContractTexturesLive_;
+    normalVarianceContractTextureBytesLive_ += textureStorageBytes(slot.record);
+  }
   slot.record.canonicalPath = canonicalPath;
   slot.record.debugName = request.debugName;
   slot.owner.reset(gpu_, texture->release());
@@ -782,6 +895,10 @@ ResourceManager::adoptPreparedTexture(const TextureRequest &request,
     return Result<TextureRef, std::string>::makeError(
         "ResourceManager::adoptPreparedTexture: path is empty");
   }
+  if (auto validation = validateTextureRequestContentContract(request);
+      validation.hasError()) {
+    return Result<TextureRef, std::string>::makeError(validation.error());
+  }
   if (const std::optional<TextureRef> cached = tryAcquireTexture(request);
       cached.has_value()) {
     return Result<TextureRef, std::string>::makeResult(*cached);
@@ -791,6 +908,7 @@ ResourceManager::adoptPreparedTexture(const TextureRequest &request,
       .canonicalPath = canonicalPath,
       .optionsHash = hashTextureLoadOptions(request.loadOptions),
       .kind = request.kind,
+      .contentContract = request.contentContract,
   };
   return storeAcquiredTexture(key, canonicalPath, request, std::move(texture));
 }
@@ -1324,6 +1442,11 @@ PoolStats ResourceManager::stats() const {
   std::tie(s.liveTextures, s.retiredTextures) = resourceCounts(textures_);
   std::tie(s.liveMaterials, s.retiredMaterials) = resourceCounts(materials_);
   std::tie(s.liveModels, s.retiredModels) = resourceCounts(models_);
+  s.normalVarianceContractTexturesLive = normalVarianceContractTexturesLive_;
+  s.normalVarianceContractMaterialsLive = normalVarianceContractMaterialsLive_;
+  s.normalVarianceUnavailableSlotsLive = normalVarianceUnavailableSlotsLive_;
+  s.normalVarianceContractTextureBytesLive =
+      normalVarianceContractTextureBytesLive_;
   return s;
 }
 

@@ -92,6 +92,118 @@ enum class SpatialCleanupPoint : uint8_t {
   PostTransparency = 2,
 };
 
+enum class PostAASpecularAlgorithm : uint8_t {
+  InheritCurrent = 0,
+  BakedClean = 1,
+};
+
+enum class PostAASpatialAlgorithm : uint8_t {
+  Off = 0,
+  Smaa1x = 1,
+};
+
+enum class PostAAInactiveReason : uint8_t {
+  None = 0,
+  NotRequested = 1,
+  CoverageIsSingleSample = 2,
+  NoComponentEnabled = 3,
+};
+
+enum class ResolvedMaterialSpecularAA : uint8_t {
+  Off = 0,
+  LegacyShadingNormalDerivative = 1,
+  BakedClean = 2,
+};
+
+enum class SpecularAADebugOverride : uint8_t {
+  None = 0,
+  ForceOff = 1,
+};
+
+enum class AntiAliasingDebugView : uint8_t {
+  None = 0,
+  Settings = 1,
+  MotionVectors = 2,
+  VelocityMagnitude = 3,
+  TAACurrentColor = 4,
+  TAAPreviousHistory = 5,
+  TAAResolved = 6,
+  TAAHistoryValidity = 7,
+  TAARejectionMask = 8,
+  TAABlendFactor = 9,
+  TAAClampDelta = 10,
+  TAAPixelInspector = 11,
+  TAAReactiveMask = 12,
+  TAADisocclusionMask = 13,
+  TAAVelocityDilation = 14,
+  TAASceneColorHalfRes = 15,
+  TAASceneColorQuarterRes = 16,
+  TAATransmissionMipSource = 17,
+  TAAReprojectedHistory = 18,
+  TAAResolveConfidence = 19,
+  TAAClampDiagnostics = 20,
+  TAAPreviousVelocity = 21,
+  TAAHdrWeight = 22,
+  TAAHistoryFilterDelta = 23,
+  TAADisocclusionFallback = 24,
+  TAASplitCompare = 25,
+  TAATemporalConfidence = 26,
+  TAAPreviousDepthRejection = 27,
+  TAAStabilityDiagnostics = 28,
+  TAAStabilityOwnership = 29,
+  TAAPatchProbe = 30,
+  TAAMotionFilter = 31,
+  SpatialAAEdges = 32,
+  SpatialAABlendWeights = 33,
+  SpatialAACleanupMask = 34,
+  SpatialAASplitCompare = 35,
+  SpecularAAVariance = 36,
+  SpecularAARoughnessDelta = 37,
+};
+
+struct PostAASettings {
+  bool enabled = false;
+  PostAASpecularAlgorithm specular = PostAASpecularAlgorithm::BakedClean;
+  PostAASpatialAlgorithm spatial = PostAASpatialAlgorithm::Smaa1x;
+  float materialVarianceScale = 1.0f;
+  float geometricVarianceScale = 0.35f;
+  float maxSlopeVariance = 0.25f;
+};
+
+struct PostAAPlan {
+  bool requested = false;
+  bool active = false;
+  PostAASpecularAlgorithm specular = PostAASpecularAlgorithm::InheritCurrent;
+  PostAASpatialAlgorithm spatial = PostAASpatialAlgorithm::Off;
+  ResolvedMaterialSpecularAA resolvedMaterialSpecularAA =
+      ResolvedMaterialSpecularAA::LegacyShadingNormalDerivative;
+  SpecularAADebugOverride specularAADebugOverride =
+      SpecularAADebugOverride::None;
+  AntiAliasingDebugView debugView = AntiAliasingDebugView::None;
+  float materialVarianceScale = 1.0f;
+  float geometricVarianceScale = 0.35f;
+  float maxSlopeVariance = 0.25f;
+  PostAAInactiveReason inactiveReason = PostAAInactiveReason::NotRequested;
+  bool operator==(const PostAAPlan &) const = default;
+};
+
+enum class PostAADegradation : uint32_t {
+  None = 0,
+  SmaaDependenciesUnavailable = 1u << 0u,
+  SmaaScratchAllocationFailed = 1u << 1u,
+  SmaaScratchRingSaturated = 1u << 2u,
+};
+
+struct PostAAFrameFacts {
+  bool specularSelected = false;
+  bool smaaPlanned = false;
+  bool smaaSubmitted = false;
+  bool smaaCompleted = false;
+  uint32_t smaaSubmittedPassCount = 0u;
+  uint64_t smaaCompletedSourceFrameIndex = std::numeric_limits<uint64_t>::max();
+  PostAADegradation degradation = PostAADegradation::None;
+};
+
 enum class AlphaCoveragePolicy : uint8_t {
   Off = 0,
   ThresholdedAlphaToCoverage = 1,
@@ -138,6 +250,7 @@ struct PresentationAAPlan {
   CoverageMode coverage = CoverageMode::Sample1;
   ColorReconstruction reconstruction = ColorReconstruction::Off;
   SpatialCleanupPoint spatialCleanup = SpatialCleanupPoint::Off;
+  PostAAPlan postAA{};
   AlphaCoveragePolicy alphaCoverage = AlphaCoveragePolicy::Off;
   TransparencyAAPolicy transparency = TransparencyAAPolicy::InheritCoverage;
   bool sampleShadingSupported = false;
@@ -150,45 +263,6 @@ struct PresentationAAPlan {
   bool gtaoTemporal = false;
   bool valid = false;
   bool operator==(const PresentationAAPlan &) const = default;
-};
-
-enum class AntiAliasingDebugView : uint8_t {
-  None = 0,
-  Settings = 1,
-  MotionVectors = 2,
-  VelocityMagnitude = 3,
-  TAACurrentColor = 4,
-  TAAPreviousHistory = 5,
-  TAAResolved = 6,
-  TAAHistoryValidity = 7,
-  TAARejectionMask = 8,
-  TAABlendFactor = 9,
-  TAAClampDelta = 10,
-  TAAPixelInspector = 11,
-  TAAReactiveMask = 12,
-  TAADisocclusionMask = 13,
-  TAAVelocityDilation = 14,
-  TAASceneColorHalfRes = 15,
-  TAASceneColorQuarterRes = 16,
-  TAATransmissionMipSource = 17,
-  TAAReprojectedHistory = 18,
-  TAAResolveConfidence = 19,
-  TAAClampDiagnostics = 20,
-  TAAPreviousVelocity = 21,
-  TAAHdrWeight = 22,
-  TAAHistoryFilterDelta = 23,
-  TAADisocclusionFallback = 24,
-  TAASplitCompare = 25,
-  TAATemporalConfidence = 26,
-  TAAPreviousDepthRejection = 27,
-  TAAStabilityDiagnostics = 28,
-  TAAStabilityOwnership = 29,
-  TAAPatchProbe = 30,
-  TAAMotionFilter = 31,
-  SpatialAAEdges = 32,
-  SpatialAABlendWeights = 33,
-  SpatialAACleanupMask = 34,
-  SpatialAASplitCompare = 35,
 };
 
 enum class AmbientOcclusionMode : uint8_t {
@@ -547,7 +621,7 @@ sanitizeHDRPostProcessDebugView(HDRPostProcessDebugView view) noexcept {
 [[nodiscard]] constexpr AntiAliasingDebugView
 sanitizeAntiAliasingDebugView(AntiAliasingDebugView view) noexcept {
   return sanitizeContiguousEnum(view,
-                                AntiAliasingDebugView::SpatialAASplitCompare,
+                                AntiAliasingDebugView::SpecularAARoughnessDelta,
                                 AntiAliasingDebugView::None);
 }
 
@@ -739,6 +813,7 @@ struct RenderSettings {
     bool logDiagnostics = false;
     bool spatialPostTaaCleanup = true;
     bool spatialPostMsaaCleanup = false;
+    SpecularAADebugOverride specularAAOverride = SpecularAADebugOverride::None;
     bool taaSharpenEnabled = true;
     bool taaMaterialMipBiasEnabled = false;
     bool transparentPostTaaSpatialCleanup = true;
@@ -774,6 +849,7 @@ struct RenderSettings {
     TemporalReconstructionProvider temporalProvider =
         TemporalReconstructionProvider::Legacy;
     TemporalAAQualityPreset qualityPreset = TemporalAAQualityPreset::Quality;
+    PostAASettings postAA{};
     AntiAliasingDebugSettings debug{};
   };
   struct DDGISettings {
@@ -1064,6 +1140,33 @@ sanitizeAntiAliasingSettings(RenderSettings::AntiAliasingSettings &settings) {
   settings.mode = sanitizeAntiAliasingMode(settings.mode);
   settings.qualityPreset =
       sanitizeTemporalAAQualityPreset(settings.qualityPreset);
+  settings.postAA.specular = sanitizeContiguousEnum(
+      settings.postAA.specular, PostAASpecularAlgorithm::BakedClean,
+      PostAASpecularAlgorithm::BakedClean);
+  settings.postAA.spatial = sanitizeContiguousEnum(
+      settings.postAA.spatial, PostAASpatialAlgorithm::Smaa1x,
+      PostAASpatialAlgorithm::Smaa1x);
+  settings.postAA.materialVarianceScale =
+      finiteClamp(settings.postAA.materialVarianceScale, 0.0f, 2.0f, 1.0f);
+  settings.postAA.geometricVarianceScale =
+      finiteClamp(settings.postAA.geometricVarianceScale, 0.0f, 1.0f, 0.35f);
+  settings.postAA.maxSlopeVariance =
+      finiteClamp(settings.postAA.maxSlopeVariance, 0.0f, 1.0f, 0.25f);
+  settings.debug.specularAAOverride = sanitizeContiguousEnum(
+      settings.debug.specularAAOverride, SpecularAADebugOverride::ForceOff,
+      SpecularAADebugOverride::None);
+  const bool postAAMsaaEligible = settings.mode == AntiAliasingMode::MSAA4x ||
+                                  settings.mode == AntiAliasingMode::MSAA8x;
+  if (!postAAMsaaEligible) {
+    settings.debug.specularAAOverride = SpecularAADebugOverride::None;
+  }
+  if ((!postAAMsaaEligible || !settings.postAA.enabled ||
+       settings.postAA.specular != PostAASpecularAlgorithm::BakedClean) &&
+      (settings.debug.view == AntiAliasingDebugView::SpecularAAVariance ||
+       settings.debug.view ==
+           AntiAliasingDebugView::SpecularAARoughnessDelta)) {
+    settings.debug.view = AntiAliasingDebugView::None;
+  }
   settings.debug.view = sanitizeAntiAliasingDebugView(settings.debug.view);
   settings.debug.taaClampMode =
       sanitizeTemporalAAClampMode(settings.debug.taaClampMode);
@@ -1857,9 +1960,9 @@ struct ForwardSceneFrameData {
   uint32_t shadowFlags = 0;
   uint32_t materialCoverageSamplerId = kInvalidSamplerBindlessIndex;
   uint32_t materialDataSamplerId = kInvalidSamplerBindlessIndex;
-  uint32_t materialSamplerReserved0 = 0;
-  uint32_t materialSamplerReserved1 = 0;
-  uint32_t materialSamplerReserved2 = 0;
+  uint32_t specularAAStatePacked = 0;
+  uint32_t specularAAScalesPacked = 0;
+  uint32_t specularAAMaxVarianceBits = 0;
   uint64_t ddgiFrameBufferAddress = 0u;
   uint32_t ddgiFlags = 0u;
   uint32_t ddgiDebugView = 0u;
@@ -2091,6 +2194,8 @@ struct VisibilityFrameMetrics {
 };
 
 struct AntiAliasingFrameMetrics {
+  PostAAPlan postAAPlan{};
+  PostAAFrameFacts postAA{};
   glm::vec2 jitterPixelOffset{0.0f};
   glm::vec2 previousJitterPixelOffset{0.0f};
   glm::vec2 jitterDeltaPixelOffset{0.0f};
@@ -2175,6 +2280,8 @@ struct AntiAliasingFrameMetrics {
   uint32_t msaaColorReallocationCount = 0u;
   uint32_t msaaDepthAllocationCount = 0u;
   uint32_t msaaDepthReallocationCount = 0u;
+  uint32_t spatialAAAllocationCount = 0u;
+  uint32_t spatialAAReallocationCount = 0u;
   uint32_t msaaResolveGpuTimingAvailable = 0u;
   uint64_t taaResolveGpuTimingSourceFrameIndex =
       std::numeric_limits<uint64_t>::max();
@@ -2357,6 +2464,10 @@ struct AntiAliasingFrameMetrics {
   bool msaaSpatialCleanupRequested = false;
   bool msaaSpatialCleanupEnabled = false;
   bool msaaSpatialCleanupActive = false;
+  uint32_t normalVarianceContractMaterialsLive = 0u;
+  uint32_t normalVarianceContractTexturesLive = 0u;
+  uint32_t normalVarianceUnavailableSlotsLive = 0u;
+  uint64_t normalVarianceContractTextureBytesLive = 0u;
   PresentationAAUnsupportedReason msaaUnsupportedReason =
       PresentationAAUnsupportedReason::None;
   AlphaCoveragePolicy msaaAlphaCoveragePolicy = AlphaCoveragePolicy::Off;

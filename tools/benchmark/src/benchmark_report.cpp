@@ -1,5 +1,6 @@
 #include "nuri/tools/benchmark/benchmark_report.h"
 
+#include "nuri/gfx/frame/presentation_aa_plan.h"
 #include "nuri/tools/benchmark/benchmark_metric_registry.h"
 #include "nuri/tools/core/atomic_file.h"
 #include "nuri/tools/core/json_contract.h"
@@ -657,6 +658,34 @@ temporalAAQualityPresetName(TemporalAAQualityPreset preset) {
   return "Unknown";
 }
 
+[[nodiscard]] const char *
+postAASpecularAlgorithmName(PostAASpecularAlgorithm algorithm) {
+  return algorithm == PostAASpecularAlgorithm::BakedClean ? "BakedClean"
+                                                          : "InheritCurrent";
+}
+
+[[nodiscard]] const char *
+postAASpatialAlgorithmName(PostAASpatialAlgorithm algorithm) {
+  return algorithm == PostAASpatialAlgorithm::Smaa1x ? "Smaa1x" : "Off";
+}
+
+[[nodiscard]] const char *
+specularAADebugOverrideName(SpecularAADebugOverride override_) {
+  return override_ == SpecularAADebugOverride::ForceOff ? "ForceOff" : "None";
+}
+
+[[nodiscard]] const char *
+antiAliasingDebugViewName(AntiAliasingDebugView view) {
+  switch (view) {
+  case AntiAliasingDebugView::SpecularAAVariance:
+    return "SpecularAAVariance";
+  case AntiAliasingDebugView::SpecularAARoughnessDelta:
+    return "SpecularAARoughnessDelta";
+  default:
+    return "None";
+  }
+}
+
 [[nodiscard]] const char *ambientOcclusionModeName(AmbientOcclusionMode mode) {
   switch (mode) {
   case AmbientOcclusionMode::Disabled:
@@ -882,8 +911,31 @@ makeSettingsSignature(const RenderSettings &sourceSettings) {
                        enumValue(settings.antiAliasing.temporalProvider));
   appendSignatureField(out, "aa.quality",
                        enumValue(settings.antiAliasing.qualityPreset));
-  appendSignatureField(out, "aa.spatialPostMsaaCleanup",
-                       settings.antiAliasing.debug.spatialPostMsaaCleanup);
+  const CoverageMode coverage =
+      settings.antiAliasing.mode == AntiAliasingMode::MSAA8x
+          ? CoverageMode::Sample8
+          : (settings.antiAliasing.mode == AntiAliasingMode::MSAA4x
+                 ? CoverageMode::Sample4
+                 : CoverageMode::Sample1);
+  const PostAAPlan postAA = resolvePostAAPlan(settings.antiAliasing, coverage);
+  appendSignatureField(out, "aa.postAA.requested", postAA.requested);
+  appendSignatureField(out, "aa.postAA.active", postAA.active);
+  appendSignatureField(out, "aa.postAA.specular", enumValue(postAA.specular));
+  appendSignatureField(out, "aa.postAA.spatial", enumValue(postAA.spatial));
+  appendSignatureField(out, "aa.postAA.materialAlgorithm",
+                       enumValue(postAA.resolvedMaterialSpecularAA));
+  appendSignatureField(out, "aa.postAA.debugView", enumValue(postAA.debugView));
+  appendSignatureField(out, "aa.postAA.debugOverride",
+                       enumValue(postAA.specularAADebugOverride));
+  if (postAA.resolvedMaterialSpecularAA ==
+      ResolvedMaterialSpecularAA::BakedClean) {
+    appendSignatureField(out, "aa.postAA.materialVarianceScale",
+                         postAA.materialVarianceScale);
+    appendSignatureField(out, "aa.postAA.geometricVarianceScale",
+                         postAA.geometricVarianceScale);
+    appendSignatureField(out, "aa.postAA.maxSlopeVariance",
+                         postAA.maxSlopeVariance);
+  }
   appendSignatureField(out, "ao.mode",
                        enumValue(settings.ambientOcclusion.mode));
   appendSignatureField(out, "ao.preset",
@@ -1222,8 +1274,25 @@ yyjson_mut_val *makeSettingsObject(yyjson_mut_doc *doc,
                 settings.antiAliasing.temporalProvider));
   addString(doc, antiAliasing, "qualityPreset",
             temporalAAQualityPresetName(settings.antiAliasing.qualityPreset));
-  yyjson_mut_obj_add_bool(doc, antiAliasing, "spatialPostMsaaCleanup",
-                          settings.antiAliasing.debug.spatialPostMsaaCleanup);
+  addString(doc, antiAliasing, "debugView",
+            antiAliasingDebugViewName(settings.antiAliasing.debug.view));
+  addString(doc, antiAliasing, "specularAAOverride",
+            specularAADebugOverrideName(
+                settings.antiAliasing.debug.specularAAOverride));
+  yyjson_mut_val *postAA = yyjson_mut_obj(doc);
+  yyjson_mut_obj_add_bool(doc, postAA, "enabled",
+                          settings.antiAliasing.postAA.enabled);
+  addString(doc, postAA, "specular",
+            postAASpecularAlgorithmName(settings.antiAliasing.postAA.specular));
+  addString(doc, postAA, "spatial",
+            postAASpatialAlgorithmName(settings.antiAliasing.postAA.spatial));
+  yyjson_mut_obj_add_real(doc, postAA, "materialVarianceScale",
+                          settings.antiAliasing.postAA.materialVarianceScale);
+  yyjson_mut_obj_add_real(doc, postAA, "geometricVarianceScale",
+                          settings.antiAliasing.postAA.geometricVarianceScale);
+  yyjson_mut_obj_add_real(doc, postAA, "maxSlopeVariance",
+                          settings.antiAliasing.postAA.maxSlopeVariance);
+  yyjson_mut_obj_add_val(doc, antiAliasing, "postAA", postAA);
   yyjson_mut_obj_add_val(doc, object, "antiAliasing", antiAliasing);
 
   yyjson_mut_val *ambientOcclusion = yyjson_mut_obj(doc);
@@ -2013,6 +2082,46 @@ readEnumValue(yyjson_val *object, const char *key, Enum defaultValue,
     settings.antiAliasing.debug.spatialPostMsaaCleanup =
         readBool(antiAliasing, "spatialPostMsaaCleanup",
                  settings.antiAliasing.debug.spatialPostMsaaCleanup);
+    settings.antiAliasing.debug.view = readEnumValue(
+        antiAliasing, "debugView", settings.antiAliasing.debug.view,
+        {{"None", AntiAliasingDebugView::None},
+         {"SpecularAAVariance", AntiAliasingDebugView::SpecularAAVariance},
+         {"SpecularAARoughnessDelta",
+          AntiAliasingDebugView::SpecularAARoughnessDelta}});
+    settings.antiAliasing.debug.specularAAOverride =
+        readEnumValue(antiAliasing, "specularAAOverride",
+                      settings.antiAliasing.debug.specularAAOverride,
+                      {{"None", SpecularAADebugOverride::None},
+                       {"ForceOff", SpecularAADebugOverride::ForceOff}});
+    yyjson_val *postAA = yyjson_obj_get(antiAliasing, "postAA");
+    if (yyjson_is_obj(postAA)) {
+      settings.antiAliasing.postAA.enabled =
+          readBool(postAA, "enabled", settings.antiAliasing.postAA.enabled);
+      settings.antiAliasing.postAA.specular = readEnumValue(
+          postAA, "specular", settings.antiAliasing.postAA.specular,
+          {{"InheritCurrent", PostAASpecularAlgorithm::InheritCurrent},
+           {"BakedClean", PostAASpecularAlgorithm::BakedClean}});
+      settings.antiAliasing.postAA.spatial =
+          readEnumValue(postAA, "spatial", settings.antiAliasing.postAA.spatial,
+                        {{"Off", PostAASpatialAlgorithm::Off},
+                         {"Smaa1x", PostAASpatialAlgorithm::Smaa1x}});
+      settings.antiAliasing.postAA.materialVarianceScale = static_cast<float>(
+          readReal(postAA, "materialVarianceScale",
+                   settings.antiAliasing.postAA.materialVarianceScale));
+      settings.antiAliasing.postAA.geometricVarianceScale = static_cast<float>(
+          readReal(postAA, "geometricVarianceScale",
+                   settings.antiAliasing.postAA.geometricVarianceScale));
+      settings.antiAliasing.postAA.maxSlopeVariance = static_cast<float>(
+          readReal(postAA, "maxSlopeVariance",
+                   settings.antiAliasing.postAA.maxSlopeVariance));
+      settings.antiAliasing.debug.spatialPostMsaaCleanup = false;
+    } else if (settings.antiAliasing.debug.spatialPostMsaaCleanup) {
+      settings.antiAliasing.postAA = PostAASettings{
+          .enabled = true,
+          .specular = PostAASpecularAlgorithm::InheritCurrent,
+          .spatial = PostAASpatialAlgorithm::Smaa1x,
+      };
+    }
   }
 
   yyjson_val *ambientOcclusion = yyjson_obj_get(object, "ambientOcclusion");
