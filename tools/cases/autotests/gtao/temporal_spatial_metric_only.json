@@ -95,7 +95,8 @@
     },
     "ambientOcclusion": {
       "mode": "GTAO",
-      "preset": "Ultra"
+      "preset": "Ultra",
+      "workingResolution": "Full"
     },
     "shadow": {
       "enabled": true,
@@ -127,14 +128,39 @@
           "equals": 1
         },
         {
+          "id": "gtao_full_resolution",
+          "metric": "renderer.ao.working_resolution",
+          "equals": 0
+        },
+        {
+          "id": "gtao_full_width",
+          "metric": "renderer.ao.working_width",
+          "equals": 640
+        },
+        {
+          "id": "gtao_full_height",
+          "metric": "renderer.ao.working_height",
+          "equals": 360
+        },
+        {
           "id": "gtao_temporal_pass",
           "metric": "renderer.ao.temporal_passes",
           "greaterOrEqual": 1
         },
         {
-          "id": "gtao_motion_class",
-          "metric": "renderer.ao.temporal_motion_class_consumed",
+          "id": "gtao_reactive_mask",
+          "metric": "renderer.ao.temporal_reactive_mask_consumed",
           "equals": 1
+        },
+        {
+          "id": "gtao_motion_class_not_consumed",
+          "metric": "renderer.ao.temporal_motion_class_consumed",
+          "equals": 0
+        },
+        {
+          "id": "motion_class_ring_absent",
+          "metric": "renderer.aa.motion_class_textures",
+          "equals": 0
         },
         {
           "id": "gtao_previous_depth",

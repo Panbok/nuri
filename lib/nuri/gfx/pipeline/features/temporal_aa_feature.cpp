@@ -1153,8 +1153,7 @@ TemporalAAClearPass::publishFrameData(FrameBuildContext &ctx) {
     }
     ctx.shared.textureRequirements |=
         FrameTextureRequirementFlags::MotionVectors |
-        FrameTextureRequirementFlags::ReactiveMask |
-        FrameTextureRequirementFlags::MotionClass;
+        FrameTextureRequirementFlags::ReactiveMask;
     return Result<bool, std::string>::makeResult(true);
   }
   if (plan.needsMotion) {

@@ -2827,6 +2827,24 @@ void addRendererFrameMetrics(BenchmarkFrameMeasurements &measurements,
                aa.transparentTransmissionFeedbackSourceAvailable);
 
   const AmbientOcclusionFrameMetrics &ao = metrics.ambientOcclusion;
+  appendValue(measurements, NURI_BENCHMARK_METRIC("renderer.ao.input_mode"),
+              static_cast<uint32_t>(ao.inputMode));
+  appendValue(measurements,
+              NURI_BENCHMARK_METRIC("renderer.ao.working_resolution"),
+              static_cast<uint32_t>(ao.workingResolution));
+  appendValue(measurements, NURI_BENCHMARK_METRIC("renderer.ao.output_width"),
+              ao.width);
+  appendValue(measurements, NURI_BENCHMARK_METRIC("renderer.ao.output_height"),
+              ao.height);
+  appendValue(measurements, NURI_BENCHMARK_METRIC("renderer.ao.working_width"),
+              ao.workingWidth);
+  appendValue(measurements, NURI_BENCHMARK_METRIC("renderer.ao.working_height"),
+              ao.workingHeight);
+  appendValue(measurements,
+              NURI_BENCHMARK_METRIC("renderer.ao.working_pixel_count"),
+              static_cast<uint64_t>(ao.workingWidth) *
+                  static_cast<uint64_t>(ao.workingHeight));
+  addIfNonzero(measurements, "renderer.ao.input_pass_draws", ao.inputPassDraws);
   addIfNonzero(measurements, "renderer.ao.normal_prepass_draws",
                ao.normalPrepassDraws);
   addIfNonzero(measurements, "renderer.ao.depth_prefilter_passes",
@@ -2834,6 +2852,8 @@ void addRendererFrameMetrics(BenchmarkFrameMeasurements &measurements,
   addIfNonzero(measurements, "renderer.ao.main_passes", ao.mainPassCount);
   addIfNonzero(measurements, "renderer.ao.temporal_passes",
                ao.temporalPassCount);
+  addIfNonzero(measurements, "renderer.ao.temporal_reactive_mask_consumed",
+               ao.temporalReactiveMaskConsumed);
   addIfNonzero(measurements, "renderer.ao.temporal_motion_class_consumed",
                ao.temporalMotionClassConsumed);
   addIfNonzero(measurements, "renderer.ao.temporal_previous_depth_consumed",
@@ -2845,6 +2865,16 @@ void addRendererFrameMetrics(BenchmarkFrameMeasurements &measurements,
                ao.ambientOcclusionTextureCount);
   addBytesAsMiB(measurements, "gpu.memory.ao.total_texture_mb",
                 ao.totalTextureBytes);
+  addBytesAsMiB(measurements, "gpu.memory.ao.scratch_texture_mb",
+                ao.scratchTextureBytes);
+  addBytesAsMiB(measurements, "renderer.ao.allocated_texture_mb",
+                ao.totalTextureBytes);
+  addBytesAsMiB(measurements, "renderer.ao.logical_active_texture_mb",
+                ao.logicalActiveTextureBytes);
+  addBytesAsMiB(measurements, "renderer.ao.provider_texture_mb",
+                ao.providerTextureBytes);
+  addBytesAsMiB(measurements, "renderer.ao.feature_texture_mb",
+                ao.featureTextureBytes);
 
   const HDRPostProcessFrameMetrics &hdr = metrics.hdrPostProcess;
   addIfNonzero(measurements, "renderer.hdr.bloom_passes", hdr.bloomPassCount);
@@ -3525,6 +3555,18 @@ void applyGpuTimingReport(BenchmarkReport &report,
     }
     return true;
   };
+  const auto addAlias = [&](BenchmarkMetricIndex index, GpuTimingScope scope,
+                            uint64_t sourceFrameIndex, float ms) {
+    if (!hasGpuTimingScope(timingReport, scope)) {
+      return;
+    }
+    const auto frameIt = frameByIndex.find(sourceFrameIndex);
+    if (frameIt == frameByIndex.end()) {
+      return;
+    }
+    report.frames[frameIt->second].measurements.appendRegistered(
+        index, static_cast<double>(ms));
+  };
   add(NURI_BENCHMARK_METRIC("gpu.frame_ms"), GpuTimingScope::WholeFrame,
       timingReport.wholeFrameSourceFrameIndex, timingReport.wholeFrameTimeMs);
   const bool shadowAdded =
@@ -3547,6 +3589,10 @@ void applyGpuTimingReport(BenchmarkReport &report,
       NURI_BENCHMARK_METRIC("gpu.scopes.opaque_normal_ms"),
       GpuTimingScope::OpaqueNormal, timingReport.opaqueNormalSourceFrameIndex,
       timingReport.opaqueNormalTimeMs);
+  addAlias(NURI_BENCHMARK_METRIC("renderer.ao.input_ms"),
+           GpuTimingScope::OpaqueNormal,
+           timingReport.opaqueNormalSourceFrameIndex,
+           timingReport.opaqueNormalTimeMs);
   const bool opaqueMainAdded =
       add(NURI_BENCHMARK_METRIC("gpu.scopes.opaque_main_ms"),
           GpuTimingScope::OpaqueMain, timingReport.opaqueMainSourceFrameIndex,
@@ -3554,6 +3600,18 @@ void applyGpuTimingReport(BenchmarkReport &report,
   const bool gtaoAdded =
       add(NURI_BENCHMARK_METRIC("gpu.scopes.gtao_ms"), GpuTimingScope::GTAO,
           timingReport.gtaoSourceFrameIndex, timingReport.gtaoTimeMs);
+  add(NURI_BENCHMARK_METRIC("renderer.ao.prefilter_edges_ms"),
+      GpuTimingScope::GTAOPrefilterEdges,
+      timingReport.gtaoPrefilterEdgesSourceFrameIndex,
+      timingReport.gtaoPrefilterEdgesTimeMs);
+  add(NURI_BENCHMARK_METRIC("renderer.ao.main_ms"), GpuTimingScope::GTAOMain,
+      timingReport.gtaoMainSourceFrameIndex, timingReport.gtaoMainTimeMs);
+  add(NURI_BENCHMARK_METRIC("renderer.ao.denoise_ms"),
+      GpuTimingScope::GTAODenoise, timingReport.gtaoDenoiseSourceFrameIndex,
+      timingReport.gtaoDenoiseTimeMs);
+  add(NURI_BENCHMARK_METRIC("renderer.ao.upscale_ms"),
+      GpuTimingScope::GTAOUpscale, timingReport.gtaoUpscaleSourceFrameIndex,
+      timingReport.gtaoUpscaleTimeMs);
   const bool msaaResolveAdded =
       add(NURI_BENCHMARK_METRIC("gpu.scopes.msaa_resolve_ms"),
           GpuTimingScope::MsaaResolve, timingReport.msaaResolveSourceFrameIndex,
@@ -3595,6 +3653,14 @@ void applyGpuTimingReport(BenchmarkReport &report,
   add(NURI_BENCHMARK_METRIC("gpu.scopes.gtao_temporal_ms"),
       GpuTimingScope::GTAOTemporal, timingReport.gtaoTemporalSourceFrameIndex,
       timingReport.gtaoTemporalTimeMs);
+  addAlias(NURI_BENCHMARK_METRIC("renderer.ao.temporal_ms"),
+           GpuTimingScope::GTAOTemporal,
+           timingReport.gtaoTemporalSourceFrameIndex,
+           timingReport.gtaoTemporalTimeMs);
+  addAlias(NURI_BENCHMARK_METRIC("renderer.ao.upscale_ms"),
+           GpuTimingScope::GTAOTemporal,
+           timingReport.gtaoTemporalSourceFrameIndex,
+           timingReport.gtaoTemporalTimeMs);
   add(NURI_BENCHMARK_METRIC("gpu.scopes.ray_tracing_scene_ms"),
       GpuTimingScope::RayTracingScene,
       timingReport.rayTracingSceneSourceFrameIndex,

@@ -278,6 +278,16 @@ enum class AmbientOcclusionPreset : uint8_t {
   Custom = 4,
 };
 
+enum class AmbientOcclusionInputMode : uint8_t {
+  MaterialNormalAndDepth = 0,
+  DepthOnlyReconstructedNormal = 1,
+};
+
+enum class AmbientOcclusionWorkingResolution : uint8_t {
+  Full = 0,
+  Half = 1,
+};
+
 enum class AmbientOcclusionDebugView : uint8_t {
   None = 0,
   Visibility = 1,
@@ -606,6 +616,21 @@ sanitizeAmbientOcclusionPreset(AmbientOcclusionPreset preset) noexcept {
                                 AmbientOcclusionPreset::Balanced);
 }
 
+[[nodiscard]] constexpr AmbientOcclusionWorkingResolution
+sanitizeAmbientOcclusionWorkingResolution(
+    AmbientOcclusionWorkingResolution resolution) noexcept {
+  return sanitizeContiguousEnum(resolution,
+                                AmbientOcclusionWorkingResolution::Half,
+                                AmbientOcclusionWorkingResolution::Full);
+}
+
+[[nodiscard]] constexpr AmbientOcclusionInputMode
+sanitizeAmbientOcclusionInputMode(AmbientOcclusionInputMode mode) noexcept {
+  return sanitizeContiguousEnum(
+      mode, AmbientOcclusionInputMode::DepthOnlyReconstructedNormal,
+      AmbientOcclusionInputMode::MaterialNormalAndDepth);
+}
+
 [[nodiscard]] constexpr AmbientOcclusionDebugView
 sanitizeAmbientOcclusionDebugView(AmbientOcclusionDebugView view) noexcept {
   return sanitizeContiguousEnum(view, AmbientOcclusionDebugView::Normals,
@@ -759,6 +784,9 @@ struct RenderSettings {
   struct AmbientOcclusionSettings {
     AmbientOcclusionMode mode = AmbientOcclusionMode::GTAO;
     AmbientOcclusionPreset preset = AmbientOcclusionPreset::Balanced;
+    std::optional<AmbientOcclusionInputMode> inputModeOverride{};
+    std::optional<AmbientOcclusionWorkingResolution>
+        workingResolutionOverride{};
     AmbientOcclusionDebugView debugView = AmbientOcclusionDebugView::None;
     float strength = 1.0f;
     bool active = true;
@@ -1014,6 +1042,15 @@ inline void sanitizeAmbientOcclusionSettings(
     const RenderSettings::AntiAliasingSettings &antiAliasing) {
   settings.mode = sanitizeAmbientOcclusionMode(settings.mode);
   settings.preset = sanitizeAmbientOcclusionPreset(settings.preset);
+  if (settings.inputModeOverride.has_value()) {
+    settings.inputModeOverride =
+        sanitizeAmbientOcclusionInputMode(*settings.inputModeOverride);
+  }
+  if (settings.workingResolutionOverride.has_value()) {
+    settings.workingResolutionOverride =
+        sanitizeAmbientOcclusionWorkingResolution(
+            *settings.workingResolutionOverride);
+  }
   settings.debugView = sanitizeAmbientOcclusionDebugView(settings.debugView);
   settings.strength = finiteClamp(settings.strength, 0.0f, 4.0f, 1.0f);
   const bool temporalAccumulationRequested = settings.temporalAccumulation;
@@ -1040,6 +1077,54 @@ inline void sanitizeAmbientOcclusionSettings(
     settings.stepCount = values[1];
     settings.denoisePassCount = values[2];
   }
+}
+
+struct AmbientOcclusionExecutionPlan {
+  bool active = false;
+  bool temporal = false;
+  AmbientOcclusionInputMode inputMode =
+      AmbientOcclusionInputMode::MaterialNormalAndDepth;
+  AmbientOcclusionWorkingResolution workingResolution =
+      AmbientOcclusionWorkingResolution::Full;
+  AmbientOcclusionPreset preset = AmbientOcclusionPreset::Balanced;
+  uint32_t sliceCount = 1u;
+  uint32_t stepCount = 3u;
+  uint32_t denoisePassCount = 1u;
+  uint32_t outputWidth = 1u;
+  uint32_t outputHeight = 1u;
+  uint32_t workingWidth = 1u;
+  uint32_t workingHeight = 1u;
+  bool operator==(const AmbientOcclusionExecutionPlan &) const = default;
+};
+
+[[nodiscard]] inline AmbientOcclusionExecutionPlan
+resolveAmbientOcclusionExecutionPlan(const RenderSettings &settings,
+                                     CoverageMode coverage,
+                                     uint32_t outputWidth,
+                                     uint32_t outputHeight) noexcept {
+  const RenderSettings::AmbientOcclusionSettings &ao =
+      settings.ambientOcclusion;
+  AmbientOcclusionExecutionPlan plan{};
+  plan.active = ao.active;
+  plan.temporal = ao.active && ao.temporalAccumulation;
+  plan.inputMode =
+      coverage == CoverageMode::Sample1
+          ? AmbientOcclusionInputMode::MaterialNormalAndDepth
+          : ao.inputModeOverride.value_or(
+                AmbientOcclusionInputMode::DepthOnlyReconstructedNormal);
+  plan.workingResolution = ao.workingResolutionOverride.value_or(
+      AmbientOcclusionWorkingResolution::Half);
+  plan.preset = ao.preset;
+  plan.sliceCount = ao.sliceCount;
+  plan.stepCount = ao.stepCount;
+  plan.denoisePassCount = ao.denoisePassCount;
+  plan.outputWidth = std::max(outputWidth, 1u);
+  plan.outputHeight = std::max(outputHeight, 1u);
+  const bool half =
+      plan.workingResolution == AmbientOcclusionWorkingResolution::Half;
+  plan.workingWidth = half ? (plan.outputWidth + 1u) / 2u : plan.outputWidth;
+  plan.workingHeight = half ? (plan.outputHeight + 1u) / 2u : plan.outputHeight;
+  return plan;
 }
 
 [[nodiscard]] inline bool
@@ -2490,12 +2575,19 @@ struct AntiAliasingFrameMetrics {
 
 struct AmbientOcclusionFrameMetrics {
   AmbientOcclusionPreset activePreset = AmbientOcclusionPreset::Balanced;
+  AmbientOcclusionInputMode inputMode =
+      AmbientOcclusionInputMode::MaterialNormalAndDepth;
+  AmbientOcclusionWorkingResolution workingResolution =
+      AmbientOcclusionWorkingResolution::Full;
   AmbientOcclusionDisabledReason disabledReason =
       AmbientOcclusionDisabledReason::None;
   Format normalFormat = Format::Count;
   Format ambientOcclusionFormat = Format::Count;
   uint32_t width = 0u;
   uint32_t height = 0u;
+  uint32_t workingWidth = 0u;
+  uint32_t workingHeight = 0u;
+  uint32_t inputPassDraws = 0u;
   uint32_t normalPrepassDraws = 0u;
   uint32_t depthPrefilterPassCount = 0u;
   uint32_t mainPassCount = 0u;
@@ -2519,9 +2611,18 @@ struct AmbientOcclusionFrameMetrics {
   uint64_t depthPrefilterTextureBytes = 0u;
   uint64_t edgeTextureBytes = 0u;
   uint64_t scratchTextureBytes = 0u;
+  uint64_t providerTextureBytes = 0u;
+  uint64_t featureTextureBytes = 0u;
+  uint64_t logicalActiveTextureBytes = 0u;
   uint64_t totalTextureBytes = 0u;
   float strength = 1.0f;
   float gpuTimeMs = 0.0f;
+  float inputGpuTimeMs = 0.0f;
+  float prefilterEdgesGpuTimeMs = 0.0f;
+  float mainGpuTimeMs = 0.0f;
+  float denoiseGpuTimeMs = 0.0f;
+  float upscaleGpuTimeMs = 0.0f;
+  float temporalGpuTimeMs = 0.0f;
   uint64_t gpuTimingSourceFrameIndex = std::numeric_limits<uint64_t>::max();
   uint32_t gpuTimingAvailable = 0u;
   bool enabled = false;
@@ -2535,6 +2636,7 @@ struct AmbientOcclusionFrameMetrics {
   bool temporalHistoryInvalidated = false;
   bool temporalHistoryValid = false;
   bool temporalMotionVectorsConsumed = false;
+  bool temporalReactiveMaskConsumed = false;
   bool temporalMotionClassConsumed = false;
   bool temporalPreviousDepthConsumed = false;
   bool scalarAoAvailable = false;
@@ -3086,6 +3188,7 @@ struct RenderFrameContext {
   RenderScene *scene = nullptr;
   CameraFrameState camera{};
   PresentationAAPlan presentationAA{};
+  AmbientOcclusionExecutionPlan ambientOcclusion{};
   GpuTimingReport gpuTiming{};
   TemporalFrameService *temporalFrameService = nullptr;
   const RenderSettings *settings = nullptr;

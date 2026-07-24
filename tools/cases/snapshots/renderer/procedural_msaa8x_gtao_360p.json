@@ -46,7 +46,9 @@
     },
     "ambientOcclusion": {
       "mode": "GTAO",
-      "preset": "Ultra"
+      "preset": "Ultra",
+      "inputMode": "DepthOnlyReconstructedNormal",
+      "workingResolution": "Half"
     },
     "shadow": {
       "enabled": false,

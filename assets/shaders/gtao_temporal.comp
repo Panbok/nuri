@@ -13,7 +13,7 @@ layout(push_constant) uniform constants {
   uint currentTexId;
   uint historyTexId;
   uint motionVectorTexId;
-  uint motionClassTexId;
+  uint reactiveMaskTexId;
   uint sceneDepthTexId;
   uint currentViewDepthTexId;
   uint previousSceneDepthTexId;
@@ -23,18 +23,24 @@ layout(push_constant) uniform constants {
   uint historySamplerId;
   uint width;
   uint height;
+  uint currentWidth;
+  uint currentHeight;
   uint flags;
   uint baseCurrentWeightBits;
   uint rejectedCurrentWeightBits;
   uint projectionType;
   float nearPlane;
   float farPlane;
+  uint forceInvalidGeometry;
+  uint provenStaticCameraOnly;
 }
 pc;
 
 const uint kTemporalFlagHistoryValid = 1u << 0u;
+const uint kMotionClassInvalid = 0u;
 const uint kMotionClassStaticCameraOnly = 1u;
 const uint kMotionClassFull = 2u;
+const uint kMotionClassBackgroundRotation = 3u;
 const float kMaxVisibilityReduction = 0.45;
 const float kVelocityRejectPixels = 2.0;
 const float kDepthEdgeRejectThreshold = 0.35;
@@ -74,10 +80,24 @@ float sampleSceneDepth(vec2 uv) {
       .r;
 }
 
-uint sampleMotionClass(ivec2 pos) {
-  float encoded =
-      texelFetch(kTextures2D[nonuniformEXT(pc.motionClassTexId)], pos, 0).r;
-  return uint(round(clamp(encoded, 0.0, 1.0) * 255.0));
+float sampleReactiveMask(vec2 uv) {
+  return texture(nonuniformEXT(sampler2D(kTextures2D[pc.reactiveMaskTexId],
+                                         kSamplers[pc.pointSamplerId])),
+                 uv)
+      .r;
+}
+
+uint classifyMotion(float sceneDepth, vec2 motion, float reactive) {
+  if (sceneDepth >= 0.999999) {
+    return kMotionClassBackgroundRotation;
+  }
+  if (pc.forceInvalidGeometry != 0u || any(isnan(motion)) ||
+      any(isinf(motion)) || any(greaterThan(abs(motion), vec2(8.0))) ||
+      reactive > (0.5 / 255.0)) {
+    return kMotionClassInvalid;
+  }
+  return pc.provenStaticCameraOnly != 0u ? kMotionClassStaticCameraOnly
+                                         : kMotionClassFull;
 }
 
 float sampleCurrentViewDepth(ivec2 pos) {
@@ -119,9 +139,103 @@ vec4 unpackEdges(float packedEdges) {
   return clamp(edgesLRTB, 0.0, 1.0);
 }
 
+float edgeForDirection(vec4 edges, vec2 direction) {
+  vec2 axisWeight = abs(direction);
+  float weightSum = axisWeight.x + axisWeight.y;
+  if (weightSum <= 1.0e-5) {
+    return 1.0;
+  }
+  float horizontal = direction.x < 0.0 ? edges.x : edges.y;
+  float vertical = direction.y < 0.0 ? edges.z : edges.w;
+  return (horizontal * axisWeight.x + vertical * axisWeight.y) / weightSum;
+}
+
+float representativeDepth(ivec2 currentPos) {
+  ivec2 outputSize = ivec2(int(pc.width), int(pc.height));
+  ivec2 currentSize = ivec2(int(pc.currentWidth), int(pc.currentHeight));
+  if (all(equal(outputSize, currentSize))) {
+    return sampleCurrentViewDepth(currentPos);
+  }
+
+  ivec2 basePos =
+      ivec2(floor(vec2(currentPos) * vec2(outputSize) / vec2(currentSize)));
+  ivec2 endPos = ivec2(floor(vec2(currentPos + ivec2(1)) * vec2(outputSize) /
+                             vec2(currentSize))) -
+                 ivec2(1);
+  basePos = clamp(basePos, ivec2(0), outputSize - ivec2(1));
+  endPos = clamp(max(endPos, basePos), ivec2(0), outputSize - ivec2(1));
+  float closestDepth = 0.0;
+  for (int y = basePos.y; y <= endPos.y; ++y) {
+    for (int x = basePos.x; x <= endPos.x; ++x) {
+      float candidateDepth = sampleCurrentViewDepth(ivec2(x, y));
+      if (candidateDepth > 1.0e-5 &&
+          (closestDepth <= 1.0e-5 || candidateDepth < closestDepth)) {
+        closestDepth = candidateDepth;
+      }
+    }
+  }
+  return closestDepth;
+}
+
+float spatialCurrent(ivec2 outputPos) {
+  ivec2 outputSize = ivec2(int(pc.width), int(pc.height));
+  ivec2 currentSize = ivec2(int(pc.currentWidth), int(pc.currentHeight));
+  if (all(equal(outputSize, currentSize))) {
+    return sampleCurrentTexel(outputPos);
+  }
+
+  float receiverDepth = sampleCurrentViewDepth(outputPos);
+  if (receiverDepth <= 1.0e-5) {
+    return 1.0;
+  }
+  vec2 currentCoord =
+      (vec2(outputPos) + vec2(0.5)) * vec2(currentSize) / vec2(outputSize) -
+      vec2(0.5);
+  ivec2 basePos = ivec2(floor(currentCoord));
+  vec2 fraction = fract(currentCoord);
+  vec4 receiverEdges = unpackEdges(samplePackedEdges(outputPos));
+  float visibilitySum = 0.0;
+  float weightSum = 0.0;
+  for (int y = 0; y < 2; ++y) {
+    for (int x = 0; x < 2; ++x) {
+      ivec2 candidatePos =
+          clamp(basePos + ivec2(x, y), ivec2(0), currentSize - ivec2(1));
+      float candidateDepth = representativeDepth(candidatePos);
+      if (candidateDepth <= 1.0e-5) {
+        continue;
+      }
+      vec2 axisWeight = vec2(x == 0 ? 1.0 - fraction.x : fraction.x,
+                             y == 0 ? 1.0 - fraction.y : fraction.y);
+      float weight = axisWeight.x * axisWeight.y;
+      float depthThreshold =
+          max(0.05, 0.02 * max(receiverDepth, candidateDepth));
+      weight *= 1.0 - smoothstep(depthThreshold, depthThreshold * 2.0,
+                                 abs(receiverDepth - candidateDepth));
+      vec2 candidateOutputPos = (vec2(candidatePos) + vec2(0.5)) *
+                                    vec2(outputSize) / vec2(currentSize) -
+                                vec2(0.5);
+      vec2 direction = candidateOutputPos - vec2(outputPos);
+      weight *= mix(0.15, 1.0, edgeForDirection(receiverEdges, direction));
+      visibilitySum += sampleCurrentTexel(candidatePos) * weight;
+      weightSum += weight;
+    }
+  }
+  if (weightSum > 1.0e-5) {
+    return visibilitySum / weightSum;
+  }
+  ivec2 nearestPos =
+      clamp(ivec2(round(currentCoord)), ivec2(0), currentSize - ivec2(1));
+  return sampleCurrentTexel(nearestPos);
+}
+
 void currentNeighborhood(ivec2 pos, float centerVisibility,
                          out float minVisibility, out float maxVisibility) {
-  ivec2 size = ivec2(int(pc.width), int(pc.height));
+  ivec2 outputSize = ivec2(int(pc.width), int(pc.height));
+  ivec2 currentSize = ivec2(int(pc.currentWidth), int(pc.currentHeight));
+  ivec2 centerPos = clamp(ivec2(round((vec2(pos) + vec2(0.5)) *
+                                          vec2(currentSize) / vec2(outputSize) -
+                                      vec2(0.5))),
+                          ivec2(0), currentSize - ivec2(1));
   minVisibility = centerVisibility;
   maxVisibility = centerVisibility;
   for (int y = -1; y <= 1; ++y) {
@@ -129,7 +243,8 @@ void currentNeighborhood(ivec2 pos, float centerVisibility,
       if (x == 0 && y == 0) {
         continue;
       }
-      ivec2 samplePos = clamp(pos + ivec2(x, y), ivec2(0), size - ivec2(1));
+      ivec2 samplePos =
+          clamp(centerPos + ivec2(x, y), ivec2(0), currentSize - ivec2(1));
       float visibility = sampleCurrentTexel(samplePos);
       minVisibility = min(minVisibility, visibility);
       maxVisibility = max(maxVisibility, visibility);
@@ -144,17 +259,23 @@ void main() {
     return;
   }
 
-  float currentVisibility = sampleCurrentTexel(pos);
+  float currentVisibility = spatialCurrent(pos);
   vec2 uv = (vec2(pos) + vec2(0.5)) / vec2(size);
+  if (!historyValid()) {
+    imageStore(kImagesR16[nonuniformEXT(pc.outputTexId)], pos,
+               vec4(currentVisibility, 0.0, 0.0, 0.0));
+    return;
+  }
 
   vec2 velocity = sampleVelocity(uv);
   vec2 historyUv = uv + velocity;
   float sceneDepth = sampleSceneDepth(uv);
-  uint motionClass = sampleMotionClass(pos);
+  uint motionClass =
+      classifyMotion(sceneDepth, velocity, sampleReactiveMask(uv));
   bool validMotionClass = motionClass == kMotionClassStaticCameraOnly ||
                           motionClass == kMotionClassFull;
-  bool validHistory = historyValid() && validMotionClass &&
-                      uvInBounds(historyUv) && sceneDepth < 0.999999;
+  bool validHistory =
+      validMotionClass && uvInBounds(historyUv) && sceneDepth < 0.999999;
   if (validHistory) {
     float previousDeviceDepth = samplePreviousSceneDepth(historyUv);
     float currentViewDepth = sampleCurrentViewDepth(pos);

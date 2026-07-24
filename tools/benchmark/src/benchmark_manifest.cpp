@@ -727,8 +727,10 @@ parseAntiAliasingSettings(yyjson_val *object, RenderSettings &settings,
 [[nodiscard]] Result<bool, std::string>
 parseAmbientOcclusionSettings(yyjson_val *object, RenderSettings &settings,
                               std::string_view path) {
-  static constexpr std::array keys{std::string_view("mode"),
-                                   std::string_view("preset")};
+  static constexpr std::array keys{
+      std::string_view("mode"), std::string_view("preset"),
+      std::string_view("temporalAccumulation"), std::string_view("inputMode"),
+      std::string_view("workingResolution")};
   auto keysResult = rejectUnknownKeys(object, keys, path);
   if (keysResult.hasError()) {
     return keysResult;
@@ -740,12 +742,48 @@ parseAmbientOcclusionSettings(yyjson_val *object, RenderSettings &settings,
   if (result.hasError()) {
     return result;
   }
-  return readEnumField(object, "preset", path, settings.ambientOcclusion.preset,
-                       {{"Low", AmbientOcclusionPreset::Low},
-                        {"Balanced", AmbientOcclusionPreset::Balanced},
-                        {"High", AmbientOcclusionPreset::High},
-                        {"Ultra", AmbientOcclusionPreset::Ultra},
-                        {"Custom", AmbientOcclusionPreset::Custom}});
+  result =
+      readEnumField(object, "preset", path, settings.ambientOcclusion.preset,
+                    {{"Low", AmbientOcclusionPreset::Low},
+                     {"Balanced", AmbientOcclusionPreset::Balanced},
+                     {"High", AmbientOcclusionPreset::High},
+                     {"Ultra", AmbientOcclusionPreset::Ultra},
+                     {"Custom", AmbientOcclusionPreset::Custom}});
+  if (result.hasError()) {
+    return result;
+  }
+  auto temporal = readBool(object, "temporalAccumulation", path,
+                           settings.ambientOcclusion.temporalAccumulation);
+  if (temporal.hasError()) {
+    return Result<bool, std::string>::makeError(temporal.error());
+  }
+  settings.ambientOcclusion.temporalAccumulation = temporal.value();
+  if (yyjson_obj_get(object, "inputMode") != nullptr) {
+    AmbientOcclusionInputMode inputMode =
+        AmbientOcclusionInputMode::MaterialNormalAndDepth;
+    result = readEnumField(
+        object, "inputMode", path, inputMode,
+        {{"MaterialNormalAndDepth",
+          AmbientOcclusionInputMode::MaterialNormalAndDepth},
+         {"DepthOnlyReconstructedNormal",
+          AmbientOcclusionInputMode::DepthOnlyReconstructedNormal}});
+    if (result.hasError()) {
+      return result;
+    }
+    settings.ambientOcclusion.inputModeOverride = inputMode;
+  }
+  if (yyjson_obj_get(object, "workingResolution") != nullptr) {
+    AmbientOcclusionWorkingResolution resolution =
+        AmbientOcclusionWorkingResolution::Full;
+    result = readEnumField(object, "workingResolution", path, resolution,
+                           {{"Full", AmbientOcclusionWorkingResolution::Full},
+                            {"Half", AmbientOcclusionWorkingResolution::Half}});
+    if (result.hasError()) {
+      return result;
+    }
+    settings.ambientOcclusion.workingResolutionOverride = resolution;
+  }
+  return Result<bool, std::string>::makeResult(true);
 }
 
 [[nodiscard]] Result<bool, std::string>

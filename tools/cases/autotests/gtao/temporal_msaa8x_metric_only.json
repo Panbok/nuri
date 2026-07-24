@@ -69,7 +69,9 @@
     },
     "ambientOcclusion": {
       "mode": "GTAO",
-      "preset": "Ultra"
+      "preset": "Ultra",
+      "inputMode": "DepthOnlyReconstructedNormal",
+      "workingResolution": "Half"
     },
     "shadow": {
       "enabled": true,
@@ -101,14 +103,64 @@
           "equals": 1
         },
         {
+          "id": "gtao_depth_only_input",
+          "metric": "renderer.ao.input_mode",
+          "equals": 1
+        },
+        {
+          "id": "gtao_input_draws",
+          "metric": "renderer.ao.input_pass_draws",
+          "greaterOrEqual": 1
+        },
+        {
+          "id": "gtao_normal_ring_absent",
+          "metric": "renderer.ao.normal_texture_count",
+          "equals": 0
+        },
+        {
+          "id": "gtao_depth_input_published",
+          "metric": "renderer.opaque.gtao_auxiliary_writes_single_sample_depth",
+          "equals": 1
+        },
+        {
+          "id": "gtao_allocated_bytes",
+          "metric": "renderer.ao.allocated_texture_bytes",
+          "equals": 6447360
+        },
+        {
+          "id": "gtao_half_resolution",
+          "metric": "renderer.ao.working_resolution",
+          "equals": 1
+        },
+        {
+          "id": "gtao_half_width",
+          "metric": "renderer.ao.working_width",
+          "equals": 320
+        },
+        {
+          "id": "gtao_half_height",
+          "metric": "renderer.ao.working_height",
+          "equals": 180
+        },
+        {
           "id": "gtao_temporal_pass",
           "metric": "renderer.ao.temporal_passes",
           "greaterOrEqual": 1
         },
         {
-          "id": "gtao_motion_class",
-          "metric": "renderer.ao.temporal_motion_class_consumed",
+          "id": "gtao_reactive_mask",
+          "metric": "renderer.ao.temporal_reactive_mask_consumed",
           "equals": 1
+        },
+        {
+          "id": "gtao_motion_class_not_consumed",
+          "metric": "renderer.ao.temporal_motion_class_consumed",
+          "equals": 0
+        },
+        {
+          "id": "motion_class_ring_absent",
+          "metric": "renderer.aa.motion_class_textures",
+          "equals": 0
         },
         {
           "id": "gtao_previous_depth",

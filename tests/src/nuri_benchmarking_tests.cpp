@@ -1495,6 +1495,11 @@ TEST(NuriBenchmarkingTest, ReportWritesReadsAndComputesMeasuredStats) {
       AmbientOcclusionMode::GTAO;
   report.benchmarkCase.settings.ambientOcclusion.preset =
       AmbientOcclusionPreset::Ultra;
+  report.benchmarkCase.settings.ambientOcclusion.temporalAccumulation = false;
+  report.benchmarkCase.settings.ambientOcclusion.workingResolutionOverride =
+      AmbientOcclusionWorkingResolution::Half;
+  report.benchmarkCase.settings.ambientOcclusion.inputModeOverride =
+      AmbientOcclusionInputMode::DepthOnlyReconstructedNormal;
   report.benchmarkCase.settings.shadow.qualityPreset =
       ShadowQualityPreset::Ultra;
   report.benchmarkCase.settings.ddgi.enabled = true;
@@ -1964,6 +1969,16 @@ TEST(NuriBenchmarkingTest, ReportWritesReadsAndComputesMeasuredStats) {
             AntiAliasingMode::TAA);
   EXPECT_EQ(loaded.value().benchmarkCase.settings.ambientOcclusion.preset,
             AmbientOcclusionPreset::Ultra);
+  EXPECT_FALSE(
+      loaded.value()
+          .benchmarkCase.settings.ambientOcclusion.temporalAccumulation);
+  EXPECT_EQ(
+      loaded.value()
+          .benchmarkCase.settings.ambientOcclusion.workingResolutionOverride,
+      AmbientOcclusionWorkingResolution::Half);
+  EXPECT_EQ(
+      loaded.value().benchmarkCase.settings.ambientOcclusion.inputModeOverride,
+      AmbientOcclusionInputMode::DepthOnlyReconstructedNormal);
   EXPECT_EQ(loaded.value().benchmarkCase.settings.shadow.qualityPreset,
             ShadowQualityPreset::Ultra);
 

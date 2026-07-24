@@ -2181,8 +2181,7 @@ void drawAmbientOcclusionSettings(
   ImGui::SliderFloat("Strength##AmbientOcclusion", &ao.strength, 0.0f, 1.0f,
                      "%.2f");
   const bool temporalAccumulationDisabled =
-      ao.mode == AmbientOcclusionMode::Disabled || !opaque.enabled ||
-      isMsaaMode(antiAliasing.mode);
+      ao.mode == AmbientOcclusionMode::Disabled || !opaque.enabled;
   ImGui::BeginDisabled(temporalAccumulationDisabled);
   ImGui::Checkbox("Temporal Accumulation##AmbientOcclusion",
                   &ao.temporalAccumulation);

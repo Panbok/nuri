@@ -1,10 +1,10 @@
 {
   "schemaVersion": 1,
-  "id": "aa.niagara_bistro.rapid_1080p.msaa8x_postaa",
-  "suite": "aa",
-  "comparisonGroup": "aa.niagara_bistro.rapid_1080p",
-  "variant": "msaa8x_postaa",
-  "description": "Niagara Bistro rapid-camera route: MSAA4x + full msaa8x_postaa at 1080p",
+  "id": "gtao.niagara_bistro.rapid_1080p.msaa8x_postaa.off",
+  "suite": "gtao",
+  "comparisonGroup": "gtao.niagara_bistro.rapid_1080p.msaa8x_postaa",
+  "variant": "off",
+  "description": "Niagara Bistro rapid-camera MSAA8x + Post-AA control with GTAO disabled",
   "scene": {
     "kind": "prefab",
     "pathBase": "modelsRoot",
@@ -182,11 +182,9 @@
       }
     },
     "ambientOcclusion": {
-      "mode": "GTAO",
+      "mode": "Disabled",
       "preset": "Ultra",
-      "temporalAccumulation": true,
-      "inputMode": "DepthOnlyReconstructedNormal",
-      "workingResolution": "Half"
+      "temporalAccumulation": true
     },
     "shadow": {
       "enabled": true,
@@ -231,16 +229,6 @@
     "gpu.scopes.opaque_main_ms",
     "gpu.scopes.msaa_resolve_ms",
     "gpu.scopes.spatial_aa_ms",
-    "renderer.ao.input_ms",
-    "renderer.ao.prefilter_edges_ms",
-    "renderer.ao.main_ms",
-    "renderer.ao.denoise_ms",
-    "renderer.ao.upscale_ms",
-    "renderer.ao.temporal_ms",
-    "renderer.ao.input_mode",
-    "renderer.ao.working_pixel_count",
-    "renderer.ao.allocated_texture_mb",
-    "renderer.ao.logical_active_texture_mb",
     "renderer.aa.msaa_sample_count",
     "renderer.aa.msaa_resolve_passes",
     "renderer.aa.msaa_color_resolves",

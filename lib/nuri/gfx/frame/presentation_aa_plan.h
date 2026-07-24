@@ -207,7 +207,6 @@ buildPresentationAAPlan(
   plan.gtaoTemporal = settings.ambientOcclusion.active &&
                       settings.ambientOcclusion.temporalAccumulation;
   plan.needsMotion = plan.needsMotion || plan.gtaoTemporal;
-  plan.needsMotionClass = plan.needsMotionClass || plan.gtaoTemporal;
   plan.needsReactiveMask = plan.needsReactiveMask || plan.gtaoTemporal;
   plan.postAA = resolvePostAAPlan(settings.antiAliasing, plan.coverage);
   plan.valid = true;

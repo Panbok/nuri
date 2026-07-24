@@ -120,6 +120,10 @@ enum class GpuTimingScope : uint8_t {
   OpaqueDepth = 26,
   OpaqueNormal = 27,
   OpaqueMain = 28,
+  GTAOPrefilterEdges = 29,
+  GTAOMain = 30,
+  GTAODenoise = 31,
+  GTAOUpscale = 32,
 };
 
 [[nodiscard]] constexpr uint32_t
@@ -144,6 +148,10 @@ gpuTimingParentScope(GpuTimingScope scope) noexcept {
   case GpuTimingScope::TemporalAACopyBack:
     return GpuTimingScope::TemporalAAResolve;
   case GpuTimingScope::GTAOTemporal:
+  case GpuTimingScope::GTAOPrefilterEdges:
+  case GpuTimingScope::GTAOMain:
+  case GpuTimingScope::GTAODenoise:
+  case GpuTimingScope::GTAOUpscale:
     return GpuTimingScope::GTAO;
   case GpuTimingScope::RayTracingBLAS:
   case GpuTimingScope::RayTracingTLAS:
@@ -213,6 +221,14 @@ constexpr uint32_t kGpuTimingScopeOpaqueNormalBit =
     gpuTimingScopeToBit(GpuTimingScope::OpaqueNormal);
 constexpr uint32_t kGpuTimingScopeOpaqueMainBit =
     gpuTimingScopeToBit(GpuTimingScope::OpaqueMain);
+constexpr uint32_t kGpuTimingScopeGTAOPrefilterEdgesBit =
+    gpuTimingScopeToBit(GpuTimingScope::GTAOPrefilterEdges);
+constexpr uint32_t kGpuTimingScopeGTAOMainBit =
+    gpuTimingScopeToBit(GpuTimingScope::GTAOMain);
+constexpr uint32_t kGpuTimingScopeGTAODenoiseBit =
+    gpuTimingScopeToBit(GpuTimingScope::GTAODenoise);
+constexpr uint32_t kGpuTimingScopeGTAOUpscaleBit =
+    gpuTimingScopeToBit(GpuTimingScope::GTAOUpscale);
 
 struct GpuTimingReport {
   uint64_t shadowSourceFrameIndex = std::numeric_limits<uint64_t>::max();
@@ -252,6 +268,11 @@ struct GpuTimingReport {
   uint64_t opaqueDepthSourceFrameIndex = std::numeric_limits<uint64_t>::max();
   uint64_t opaqueNormalSourceFrameIndex = std::numeric_limits<uint64_t>::max();
   uint64_t opaqueMainSourceFrameIndex = std::numeric_limits<uint64_t>::max();
+  uint64_t gtaoPrefilterEdgesSourceFrameIndex =
+      std::numeric_limits<uint64_t>::max();
+  uint64_t gtaoMainSourceFrameIndex = std::numeric_limits<uint64_t>::max();
+  uint64_t gtaoDenoiseSourceFrameIndex = std::numeric_limits<uint64_t>::max();
+  uint64_t gtaoUpscaleSourceFrameIndex = std::numeric_limits<uint64_t>::max();
   float shadowTimeMs = 0.0f;
   float shadowDepthTimeMs = 0.0f;
   float shadowSdsmTimeMs = 0.0f;
@@ -280,6 +301,10 @@ struct GpuTimingReport {
   float opaqueDepthTimeMs = 0.0f;
   float opaqueNormalTimeMs = 0.0f;
   float opaqueMainTimeMs = 0.0f;
+  float gtaoPrefilterEdgesTimeMs = 0.0f;
+  float gtaoMainTimeMs = 0.0f;
+  float gtaoDenoiseTimeMs = 0.0f;
+  float gtaoUpscaleTimeMs = 0.0f;
   bool opaquePipelineStatisticsRequested = false;
   bool opaquePipelineStatisticsAvailable = false;
   uint64_t opaquePipelineStatisticsSourceFrameIndex =
@@ -412,6 +437,19 @@ inline constexpr auto kGpuTimingScopeDescs =
         {GpuTimingScope::OpaqueMain, &GpuTimingReport::opaqueMainTimeMs,
          &GpuTimingReport::opaqueMainSourceFrameIndex,
          gpuTimingScopeToBit(GpuTimingScope::OpaqueMain)},
+        {GpuTimingScope::GTAOPrefilterEdges,
+         &GpuTimingReport::gtaoPrefilterEdgesTimeMs,
+         &GpuTimingReport::gtaoPrefilterEdgesSourceFrameIndex,
+         gpuTimingScopeToBit(GpuTimingScope::GTAOPrefilterEdges)},
+        {GpuTimingScope::GTAOMain, &GpuTimingReport::gtaoMainTimeMs,
+         &GpuTimingReport::gtaoMainSourceFrameIndex,
+         gpuTimingScopeToBit(GpuTimingScope::GTAOMain)},
+        {GpuTimingScope::GTAODenoise, &GpuTimingReport::gtaoDenoiseTimeMs,
+         &GpuTimingReport::gtaoDenoiseSourceFrameIndex,
+         gpuTimingScopeToBit(GpuTimingScope::GTAODenoise)},
+        {GpuTimingScope::GTAOUpscale, &GpuTimingReport::gtaoUpscaleTimeMs,
+         &GpuTimingReport::gtaoUpscaleSourceFrameIndex,
+         gpuTimingScopeToBit(GpuTimingScope::GTAOUpscale)},
     });
 
 [[nodiscard]] constexpr const GpuTimingScopeMergeDesc *

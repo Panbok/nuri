@@ -1,10 +1,10 @@
 {
   "schemaVersion": 1,
-  "id": "aa.niagara_bistro.rapid_1080p.msaa8x_postaa",
-  "suite": "aa",
-  "comparisonGroup": "aa.niagara_bistro.rapid_1080p",
-  "variant": "msaa8x_postaa",
-  "description": "Niagara Bistro rapid-camera route: MSAA4x + full msaa8x_postaa at 1080p",
+  "id": "gtao.niagara_bistro.rapid_1080p.msaa8x_postaa.ultra",
+  "suite": "gtao",
+  "comparisonGroup": "gtao.niagara_bistro.rapid_1080p.msaa8x_postaa",
+  "variant": "ultra",
+  "description": "Niagara Bistro rapid-camera MSAA8x + Post-AA with Ultra GTAO",
   "scene": {
     "kind": "prefab",
     "pathBase": "modelsRoot",

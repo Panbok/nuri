@@ -1017,8 +1017,10 @@ parseSettings(yyjson_val *object, RenderSettings &settings) {
   }
 
   if (yyjson_val *ao = optionalObject(object, "ambientOcclusion")) {
-    static constexpr std::array aoKeys{std::string_view("mode"),
-                                       std::string_view("preset")};
+    static constexpr std::array aoKeys{
+        std::string_view("mode"), std::string_view("preset"),
+        std::string_view("temporalAccumulation"), std::string_view("inputMode"),
+        std::string_view("workingResolution")};
     result = rejectUnknownKeys(ao, aoKeys, "settings.ambientOcclusion");
     if (result.hasError()) {
       return result;
@@ -1039,6 +1041,39 @@ parseSettings(yyjson_val *object, RenderSettings &settings) {
                             {"Custom", AmbientOcclusionPreset::Custom}});
     if (result.hasError()) {
       return result;
+    }
+    auto temporal =
+        readBool(ao, "temporalAccumulation", "settings.ambientOcclusion",
+                 settings.ambientOcclusion.temporalAccumulation);
+    if (temporal.hasError()) {
+      return Result<bool, std::string>::makeError(temporal.error());
+    }
+    settings.ambientOcclusion.temporalAccumulation = temporal.value();
+    if (yyjson_obj_get(ao, "inputMode") != nullptr) {
+      AmbientOcclusionInputMode inputMode =
+          AmbientOcclusionInputMode::MaterialNormalAndDepth;
+      result = readEnumField(
+          ao, "inputMode", "settings.ambientOcclusion", inputMode,
+          {{"MaterialNormalAndDepth",
+            AmbientOcclusionInputMode::MaterialNormalAndDepth},
+           {"DepthOnlyReconstructedNormal",
+            AmbientOcclusionInputMode::DepthOnlyReconstructedNormal}});
+      if (result.hasError()) {
+        return result;
+      }
+      settings.ambientOcclusion.inputModeOverride = inputMode;
+    }
+    if (yyjson_obj_get(ao, "workingResolution") != nullptr) {
+      AmbientOcclusionWorkingResolution resolution =
+          AmbientOcclusionWorkingResolution::Full;
+      result = readEnumField(
+          ao, "workingResolution", "settings.ambientOcclusion", resolution,
+          {{"Full", AmbientOcclusionWorkingResolution::Full},
+           {"Half", AmbientOcclusionWorkingResolution::Half}});
+      if (result.hasError()) {
+        return result;
+      }
+      settings.ambientOcclusion.workingResolutionOverride = resolution;
     }
   }
 

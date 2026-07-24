@@ -21,8 +21,8 @@ public:
   Result<bool, std::string> publishFrameData(FrameBuildContext &ctx);
   Result<bool, std::string> prepare(FrameBuildContext &ctx);
   Result<bool, std::string> build(FrameBuildContext &ctx);
-  void observeTemporalPolicy(
-      const RenderSettings::AmbientOcclusionSettings &ao) noexcept;
+  void observeTemporalPolicy(const AmbientOcclusionExecutionPlan &plan,
+                             float strength) noexcept;
   static constexpr uint32_t kViewDepthMipCount = 5u;
 
 private:
@@ -36,17 +36,20 @@ private:
   static constexpr std::size_t kPushConstantBufferSize = 128u;
   GPUDevice &gpu_;
   RuntimeOpaqueShaderConfig config_{};
-  std::array<ShaderHandle, 5> shaders_{};
-  std::array<ComputePipelineHandle, 5> pipelines_{};
+  std::array<ShaderHandle, 6> shaders_{};
+  std::array<ComputePipelineHandle, 6> pipelines_{};
   std::array<SamplerHandle, 2> samplers_{};
   std::string initializationError_{};
   std::vector<FrameScratchTextures> scratchTextures_{};
-  uint32_t scratchWidth_ = 0u;
-  uint32_t scratchHeight_ = 0u;
+  uint32_t scratchOutputWidth_ = 0u;
+  uint32_t scratchOutputHeight_ = 0u;
+  uint32_t scratchWorkingWidth_ = 0u;
+  uint32_t scratchWorkingHeight_ = 0u;
   uint32_t scratchRingCount_ = 0u;
   uint64_t lastTemporalPolicySignature_ = 0u;
   bool hasLastTemporalPolicySignature_ = false;
   bool temporalPolicyChanged_ = false;
+  TextureHandle reconstructedNormalDebugTexture_{};
   std::array<TextureHandle, 8> depthPrefilterDependencies_{};
   std::array<RenderGraphAccessMode, 8> depthPrefilterAccessModes_{};
   std::array<ComputeDispatchItem, 1> depthPrefilterDispatches_{};
@@ -62,15 +65,22 @@ private:
   std::array<TextureHandle, 9> temporalDependencies_{};
   std::array<RenderGraphAccessMode, 9> temporalAccessModes_{};
   std::array<ComputeDispatchItem, 1> temporalDispatches_{};
+  std::array<TextureHandle, 2> reconstructNormalDependencies_{};
+  std::array<RenderGraphAccessMode, 2> reconstructNormalAccessModes_{};
+  std::array<ComputeDispatchItem, 1> reconstructNormalDispatches_{};
   std::array<std::byte, kPushConstantBufferSize> depthPrefilterPushBytes_{};
   std::array<std::byte, kPushConstantBufferSize> edgePushBytes_{};
   std::array<std::byte, kPushConstantBufferSize> mainPushBytes_{};
   std::array<std::byte, kPushConstantBufferSize> denoisePushBytes_{};
   std::array<std::byte, kPushConstantBufferSize> temporalPushBytes_{};
+  std::array<std::byte, kPushConstantBufferSize> reconstructNormalPushBytes_{};
   Result<bool, std::string> initialize();
   Result<bool, std::string> ensureScratchTextures(FrameBuildContext &ctx);
-  Result<bool, std::string>
-  recreateScratchTextures(uint32_t width, uint32_t height, uint32_t ringCount);
+  Result<bool, std::string> recreateScratchTextures(uint32_t outputWidth,
+                                                    uint32_t outputHeight,
+                                                    uint32_t workingWidth,
+                                                    uint32_t workingHeight,
+                                                    uint32_t ringCount);
   void destroyResources();
   void destroyScratchTextures();
   [[nodiscard]] FrameScratchTextures &

@@ -40,7 +40,7 @@ TEST(TemporalFrameServiceTest,
   EXPECT_EQ(plan.reconstruction, ColorReconstruction::Off);
   EXPECT_TRUE(plan.gtaoTemporal);
   EXPECT_TRUE(plan.needsMotion);
-  EXPECT_TRUE(plan.needsMotionClass);
+  EXPECT_FALSE(plan.needsMotionClass);
   EXPECT_TRUE(plan.needsReactiveMask);
   EXPECT_FALSE(plan.jitterScene);
 
@@ -50,7 +50,7 @@ TEST(TemporalFrameServiceTest,
   EXPECT_EQ(plan.reconstruction, ColorReconstruction::Off);
   EXPECT_TRUE(plan.gtaoTemporal);
   EXPECT_TRUE(plan.needsMotion);
-  EXPECT_TRUE(plan.needsMotionClass);
+  EXPECT_FALSE(plan.needsMotionClass);
   EXPECT_TRUE(plan.needsReactiveMask);
   EXPECT_FALSE(plan.jitterScene);
 
@@ -60,7 +60,7 @@ TEST(TemporalFrameServiceTest,
   EXPECT_EQ(plan.reconstruction, ColorReconstruction::Off);
   EXPECT_TRUE(plan.gtaoTemporal);
   EXPECT_TRUE(plan.needsMotion);
-  EXPECT_TRUE(plan.needsMotionClass);
+  EXPECT_FALSE(plan.needsMotionClass);
   EXPECT_TRUE(plan.needsReactiveMask);
   EXPECT_FALSE(plan.jitterScene);
   EXPECT_EQ(plan.spatialCleanup, SpatialCleanupPoint::Off);
@@ -81,6 +81,7 @@ TEST(TemporalFrameServiceTest,
   EXPECT_EQ(plan.spatialCleanup, SpatialCleanupPoint::Off);
   EXPECT_TRUE(plan.needsMotion);
   EXPECT_TRUE(plan.needsReactiveMask);
+  EXPECT_TRUE(plan.needsMotionClass);
   EXPECT_TRUE(plan.jitterScene);
 }
 

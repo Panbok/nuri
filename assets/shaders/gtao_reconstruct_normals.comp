@@ -1,0 +1,114 @@
+#version 460
+
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_EXT_samplerless_texture_functions : require
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform texture2D kTextures2D[];
+layout(set = 0, binding = 2, rgba16f) uniform image2D kImagesRGBA16[];
+
+layout(push_constant) uniform constants {
+  uint depthTexId;
+  uint outputTexId;
+  uint width;
+  uint height;
+  float tanHalfFovY;
+  float aspectRatio;
+  float orthoHeight;
+  uint projectionType;
+}
+pc;
+
+vec3 reconstructViewPosition(vec2 uv, float viewDepth) {
+  vec2 ndc = uv * 2.0 - 1.0;
+  if (pc.projectionType != 0u) {
+    float halfHeight = max(pc.orthoHeight, 1.0e-4) * 0.5;
+    return vec3(ndc.x * halfHeight * max(pc.aspectRatio, 1.0e-4),
+                -ndc.y * halfHeight, -viewDepth);
+  }
+  float yScale = max(pc.tanHalfFovY, 1.0e-4);
+  return vec3(ndc.x * yScale * max(pc.aspectRatio, 1.0e-4) * viewDepth,
+              -ndc.y * yScale * viewDepth, -viewDepth);
+}
+
+float viewDepthAt(ivec2 pos, ivec2 size) {
+  return texelFetch(kTextures2D[nonuniformEXT(pc.depthTexId)],
+                    clamp(pos, ivec2(0), size - ivec2(1)), 0)
+      .r;
+}
+
+bool reconstructViewNormal(ivec2 pos, float centerDepth, out vec3 normal) {
+  ivec2 size = ivec2(int(pc.width), int(pc.height));
+  float leftDepth = viewDepthAt(pos + ivec2(-1, 0), size);
+  float rightDepth = viewDepthAt(pos + ivec2(1, 0), size);
+  float topDepth = viewDepthAt(pos + ivec2(0, -1), size);
+  float bottomDepth = viewDepthAt(pos + ivec2(0, 1), size);
+  bool leftValid = leftDepth > 1.0e-5;
+  bool rightValid = rightDepth > 1.0e-5;
+  bool topValid = topDepth > 1.0e-5;
+  bool bottomValid = bottomDepth > 1.0e-5;
+  if ((!leftValid && !rightValid) || (!topValid && !bottomValid)) {
+    normal = vec3(0.0);
+    return false;
+  }
+
+  bool useLeft =
+      leftValid &&
+      (!rightValid ||
+       abs(leftDepth - centerDepth) < abs(rightDepth - centerDepth));
+  bool useTop =
+      topValid &&
+      (!bottomValid ||
+       abs(topDepth - centerDepth) < abs(bottomDepth - centerDepth));
+  float horizontalDepth = useLeft ? leftDepth : rightDepth;
+  float verticalDepth = useTop ? topDepth : bottomDepth;
+  float discontinuityLimit = max(0.05, centerDepth * 0.10);
+  if (abs(horizontalDepth - centerDepth) > discontinuityLimit ||
+      abs(verticalDepth - centerDepth) > discontinuityLimit) {
+    normal = vec3(0.0);
+    return false;
+  }
+
+  vec2 centerUv = (vec2(pos) + vec2(0.5)) / vec2(size);
+  vec2 texel = 1.0 / vec2(size);
+  vec3 center = reconstructViewPosition(centerUv, centerDepth);
+  vec3 horizontal = reconstructViewPosition(
+      centerUv + vec2(useLeft ? -texel.x : texel.x, 0.0), horizontalDepth);
+  vec3 vertical = reconstructViewPosition(
+      centerUv + vec2(0.0, useTop ? -texel.y : texel.y), verticalDepth);
+  vec3 dx = useLeft ? center - horizontal : horizontal - center;
+  vec3 dy = useTop ? center - vertical : vertical - center;
+  float dxLengthSq = dot(dx, dx);
+  float dyLengthSq = dot(dy, dy);
+  if (!(dxLengthSq > 0.0) || !(dyLengthSq > 0.0) ||
+      isinf(dxLengthSq) || isinf(dyLengthSq)) {
+    normal = vec3(0.0);
+    return false;
+  }
+  normal = cross(dy, dx);
+  float normalLengthSq = dot(normal, normal);
+  if (!(normalLengthSq > 1.0e-6 * dxLengthSq * dyLengthSq) ||
+      isinf(normalLengthSq)) {
+    normal = vec3(0.0);
+    return false;
+  }
+  normal *= inversesqrt(normalLengthSq);
+  if (dot(normal, normalize(-center)) < 0.0) {
+    normal = -normal;
+  }
+  return true;
+}
+
+void main() {
+  ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+  ivec2 size = ivec2(int(pc.width), int(pc.height));
+  if (any(greaterThanEqual(pos, size))) {
+    return;
+  }
+  float depth = viewDepthAt(pos, size);
+  vec3 normal;
+  bool valid = depth > 1.0e-5 && reconstructViewNormal(pos, depth, normal);
+  imageStore(kImagesRGBA16[nonuniformEXT(pc.outputTexId)], pos,
+             valid ? vec4(normal * 0.5 + 0.5, 1.0) : vec4(0.0));
+}

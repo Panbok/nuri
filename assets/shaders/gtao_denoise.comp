@@ -12,8 +12,10 @@ layout(push_constant) uniform constants {
   uint sourceTexId;
   uint outputTexId;
   uint edgeTexId;
-  uint width;
-  uint height;
+  uint outputWidth;
+  uint outputHeight;
+  uint workingWidth;
+  uint workingHeight;
 }
 pc;
 
@@ -25,6 +27,15 @@ float sampleAo(ivec2 pos) {
 
 float samplePackedEdges(ivec2 pos) {
   return texelFetch(kTextures2D[nonuniformEXT(pc.edgeTexId)], pos, 0).r;
+}
+
+ivec2 fullResolutionRepresentative(ivec2 workingPos) {
+  vec2 outputSize = vec2(pc.outputWidth, pc.outputHeight);
+  vec2 workingSize = vec2(pc.workingWidth, pc.workingHeight);
+  ivec2 outputMax = ivec2(int(pc.outputWidth), int(pc.outputHeight)) - ivec2(1);
+  return clamp(
+      ivec2(floor((vec2(workingPos) + vec2(0.5)) * outputSize / workingSize)),
+      ivec2(0), outputMax);
 }
 
 vec4 unpackEdges(float packedEdges) {
@@ -59,7 +70,8 @@ float edgeWeightForOffset(ivec2 offset, vec4 centerEdges, vec4 neighborEdges) {
 void addSample(ivec2 pos, ivec2 offset, ivec2 maxPos, vec4 centerEdges,
                inout float visibilitySum, inout float weightSum) {
   ivec2 samplePos = clamp(pos + offset, ivec2(0), maxPos);
-  vec4 neighborEdges = unpackEdges(samplePackedEdges(samplePos));
+  vec4 neighborEdges =
+      unpackEdges(samplePackedEdges(fullResolutionRepresentative(samplePos)));
   float weight = edgeWeightForOffset(offset, centerEdges, neighborEdges);
   visibilitySum += sampleAo(samplePos) * weight;
   weightSum += weight;
@@ -67,13 +79,14 @@ void addSample(ivec2 pos, ivec2 offset, ivec2 maxPos, vec4 centerEdges,
 
 void main() {
   ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
-  ivec2 size = ivec2(int(pc.width), int(pc.height));
+  ivec2 size = ivec2(int(pc.workingWidth), int(pc.workingHeight));
   if (pos.x >= size.x || pos.y >= size.y) {
     return;
   }
 
   float center = sampleAo(pos);
-  vec4 centerEdges = unpackEdges(samplePackedEdges(pos));
+  vec4 centerEdges =
+      unpackEdges(samplePackedEdges(fullResolutionRepresentative(pos)));
   ivec2 maxPos = size - ivec2(1);
 
   const float centerWeight = 1.0;

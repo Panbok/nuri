@@ -915,17 +915,37 @@ void flattenAutotestRendererMetrics(std::map<std::string, double> &out,
   const AmbientOcclusionFrameMetrics &ao = metrics.ambientOcclusion;
   addBoolMetric(out, "renderer.ao.enabled", ao.enabled);
   addBoolMetric(out, "renderer.ao.active", ao.active);
+  addMetric(out, "renderer.ao.input_mode", static_cast<uint32_t>(ao.inputMode));
+  addMetric(out, "renderer.ao.working_resolution",
+            static_cast<uint32_t>(ao.workingResolution));
+  addMetric(out, "renderer.ao.output_width", ao.width);
+  addMetric(out, "renderer.ao.output_height", ao.height);
+  addMetric(out, "renderer.ao.working_width", ao.workingWidth);
+  addMetric(out, "renderer.ao.working_height", ao.workingHeight);
+  addMetric(out, "renderer.ao.working_pixel_count",
+            static_cast<uint64_t>(ao.workingWidth) *
+                static_cast<uint64_t>(ao.workingHeight));
+  addMetric(out, "renderer.ao.input_pass_draws", ao.inputPassDraws);
   addMetric(out, "renderer.ao.normal_prepass_draws", ao.normalPrepassDraws);
   addMetric(out, "renderer.ao.depth_prefilter_passes",
             ao.depthPrefilterPassCount);
   addMetric(out, "renderer.ao.main_passes", ao.mainPassCount);
   addMetric(out, "renderer.ao.temporal_passes", ao.temporalPassCount);
+  addBoolMetric(out, "renderer.ao.temporal_reactive_mask_consumed",
+                ao.temporalReactiveMaskConsumed);
   addBoolMetric(out, "renderer.ao.temporal_motion_class_consumed",
                 ao.temporalMotionClassConsumed);
   addBoolMetric(out, "renderer.ao.temporal_previous_depth_consumed",
                 ao.temporalPreviousDepthConsumed);
   addMetric(out, "renderer.ao.texture_count", ao.textureCount);
+  addMetric(out, "renderer.ao.normal_texture_count", ao.normalTextureCount);
+  addBoolMetric(out, "renderer.ao.normals_allocated", ao.normalsAllocated);
+  addMetric(out, "renderer.ao.allocated_texture_bytes", ao.totalTextureBytes);
+  addMetric(out, "renderer.ao.logical_active_texture_bytes",
+            ao.logicalActiveTextureBytes);
   addBytesAsMiB(out, "gpu.memory.ao.total_texture_mb", ao.totalTextureBytes);
+  addBytesAsMiB(out, "gpu.memory.ao.scratch_texture_mb",
+                ao.scratchTextureBytes);
 
   const HDRPostProcessFrameMetrics &hdr = metrics.hdrPostProcess;
   addBoolMetric(out, "renderer.hdr.bloom_enabled", hdr.bloomEnabled);

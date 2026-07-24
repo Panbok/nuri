@@ -1837,11 +1837,20 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   RenderSettings::AmbientOcclusionSettings ambientOcclusionSettings =
       settings.ambientOcclusion;
   const auto requestedAmbientOcclusionSettings = ambientOcclusionSettings;
-  sanitizeAmbientOcclusionSettings(ambientOcclusionSettings, settings.opaque,
-                                   settings.antiAliasing);
+  const AmbientOcclusionExecutionPlan &ambientOcclusionPlan =
+      frame.ambientOcclusion;
+  ambientOcclusionSettings.active = ambientOcclusionPlan.active;
+  ambientOcclusionSettings.temporalAccumulation = ambientOcclusionPlan.temporal;
+  ambientOcclusionSettings.preset = ambientOcclusionPlan.preset;
+  ambientOcclusionSettings.sliceCount = ambientOcclusionPlan.sliceCount;
+  ambientOcclusionSettings.stepCount = ambientOcclusionPlan.stepCount;
+  ambientOcclusionSettings.denoisePassCount =
+      ambientOcclusionPlan.denoisePassCount;
   AmbientOcclusionFrameMetrics &aoMetrics = frame.metrics.ambientOcclusion;
   aoMetrics.enabled =
       ambientOcclusionSettings.mode != AmbientOcclusionMode::Disabled;
+  aoMetrics.inputMode = ambientOcclusionPlan.inputMode;
+  aoMetrics.workingResolution = ambientOcclusionPlan.workingResolution;
   aoMetrics.activePreset = ambientOcclusionSettings.preset;
   aoMetrics.strength = ambientOcclusionSettings.strength;
   aoMetrics.requestedSliceCount = requestedAmbientOcclusionSettings.sliceCount;
@@ -3791,9 +3800,15 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   visibilityMeshletGpuDispatches_.clear();
   visibilityMeshletGpuDependencyBuffers_.clear();
   visibilityMeshletGpuDependencyBufferAccessModes_.clear();
+  const bool materialNormalInput =
+      ambientOcclusionPlan.inputMode ==
+      AmbientOcclusionInputMode::MaterialNormalAndDepth;
+  const bool depthOnlyInput =
+      ambientOcclusionPlan.inputMode ==
+      AmbientOcclusionInputMode::DepthOnlyReconstructedNormal;
   const bool normalPrepassRequested =
       ambientOcclusionSettings.active &&
-      nuri::isValid(frame.sharedResources.normalTexture) &&
+      (depthOnlyInput || nuri::isValid(frame.sharedResources.normalTexture)) &&
       !wireframeOnlyRequested && !baseDrawItems.empty();
   const bool msaaGtaoAuxiliaryPrepass =
       msaaSelected && normalPrepassRequested &&
@@ -3819,8 +3834,18 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       requiresDepthPyramid;
   bool meshletNormalPrepassEnabled =
       meshletActive && normalPrepassRequested && !drawItems_.empty() &&
-      std::ranges::all_of(meshletNormalPipelines_,
-                          [](auto pipeline) { return isValid(pipeline); });
+      (materialNormalInput
+           ? std::ranges::all_of(
+                 meshletNormalPipelines_,
+                 [](auto pipeline) { return isValid(pipeline); })
+           : nuri::isValid(selectMeshletDepthPipeline(CoverageMode::Sample1,
+                                                      false, false)) &&
+                 nuri::isValid(selectMeshletDepthPipeline(CoverageMode::Sample1,
+                                                          false, true)) &&
+                 nuri::isValid(selectMeshletDepthPipeline(CoverageMode::Sample1,
+                                                          true, false)) &&
+                 nuri::isValid(selectMeshletDepthPipeline(CoverageMode::Sample1,
+                                                          true, true)));
   const bool meshletNormalDepthMergeEligible =
       remapCount >= kMeshletNormalDepthMergeMinVisibleInstances;
   const bool meshletNormalProvidesRequestedDepth =
@@ -3834,7 +3859,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   bool depthPrepassEnabled =
       (!meshletActive || classicMeshletDepthPrepassEligible) &&
       (settings.opaque.enableDepthPrepass || visibilityDepthPrepassRequested ||
-       normalPrepassRequested || requiresDepthPyramid) &&
+       (normalPrepassRequested && !msaaGtaoAuxiliaryPrepass) ||
+       requiresDepthPyramid) &&
       !wireframeOnlyRequested && !baseDrawItems.empty();
   bool meshletDepthPrepassEnabled =
       meshletActive && meshletDepthPrepassRequested &&
@@ -4028,7 +4054,10 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     normalPrepassDrawItems_.reserve(normalPrepassSourceDrawItems.size());
     for (const DrawItem &source : normalPrepassSourceDrawItems) {
       const RenderPipelineHandle normalPipeline =
-          selectNormalPipeline(source.pipeline);
+          materialNormalInput
+              ? selectNormalPipeline(source.pipeline)
+              : selectDepthPipeline(source.pipeline, source.alphaMasked,
+                                    CoverageMode::Sample1);
       if (!nuri::isValid(normalPipeline)) {
         normalPrepassDrawItems_.clear();
         normalPrepassEnabled = false;
@@ -4048,7 +4077,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
                            .isDepthWriteEnabled = true}
               : DepthState{.compareOp = CompareOp::LessEqual,
                            .isDepthWriteEnabled = false};
-      normalDraw.debugLabel = "OpaqueMaterialNormals";
+      normalDraw.debugLabel =
+          materialNormalInput ? "OpaqueMaterialNormals" : "OpaqueGTAODepth";
       normalDraw.debugColor = 0xff66ddff;
       normalPrepassDrawItems_.push_back(normalDraw);
     }
@@ -4808,15 +4838,32 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     const CompareOp normalPrepassCompare = meshletNormalPrepassWritesDepth
                                                ? CompareOp::Less
                                                : CompareOp::LessEqual;
+    const MeshletPipelineHandle singleSidedInputPipeline =
+        materialNormalInput
+            ? meshletNormalPipelines_[0]
+            : selectMeshletDepthPipeline(CoverageMode::Sample1, false, false);
+    const MeshletPipelineHandle doubleSidedInputPipeline =
+        materialNormalInput
+            ? meshletNormalPipelines_[1]
+            : selectMeshletDepthPipeline(CoverageMode::Sample1, false, true);
+    const MeshletPipelineHandle alphaInputPipeline =
+        materialNormalInput
+            ? meshletNormalPipelines_[2]
+            : selectMeshletDepthPipeline(CoverageMode::Sample1, true, false);
+    const MeshletPipelineHandle alphaDoubleSidedInputPipeline =
+        materialNormalInput
+            ? meshletNormalPipelines_[3]
+            : selectMeshletDepthPipeline(CoverageMode::Sample1, true, true);
     buildMeshletDispatches(
         meshletNormalPrepassDispatchItems_, meshletNormalPrepassPushConstants_,
         meshletNormalPrepassDispatchDependencyBuffers_,
-        meshletNormalPipelines_[0], meshletNormalPipelines_[1],
-        meshletNormalPipelines_[2], meshletNormalPipelines_[3],
-        normalPrepassCompare, meshletNormalPrepassWritesDepth,
-        "OpaqueMeshletNormals", 0xff66ddff, MeshletOcclusionSource::Disabled,
-        0u, 0u, 0u, false, false,
-        MeshletSourceFilter{.materialNormalUsesAuxPipelines = true});
+        singleSidedInputPipeline, doubleSidedInputPipeline, alphaInputPipeline,
+        alphaDoubleSidedInputPipeline, normalPrepassCompare,
+        meshletNormalPrepassWritesDepth,
+        materialNormalInput ? "OpaqueMeshletNormals" : "OpaqueMeshletGTAODepth",
+        0xff66ddff, MeshletOcclusionSource::Disabled, 0u, 0u, 0u, false, false,
+        MeshletSourceFilter{.materialNormalUsesAuxPipelines =
+                                materialNormalInput});
     if (meshletNormalPrepassDispatchItems_.empty()) {
       meshletNormalPrepassEnabled = false;
       meshletNormalPrepassWritesDepth = false;
@@ -4996,9 +5043,11 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
        meshletNormalPrepassWritesDepth || classicNormalPrepassWritesDepth)
           ? 1u
           : 0u;
-  aoMetrics.normalPrepassDraws =
+  aoMetrics.inputPassDraws =
       saturateToU32(normalPrepassDrawItems_.size() +
                     meshletNormalPrepassDispatchItems_.size());
+  aoMetrics.normalPrepassDraws =
+      materialNormalInput ? aoMetrics.inputPassDraws : 0u;
   if (gpuMainCullingEnabled && !gpuVisibilityCandidateIndices.empty()) {
     VisibilityResolvedSettings mainVisibilitySettings = visibilitySettings;
     if (meshletActive) {
@@ -5181,17 +5230,23 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   const bool hasClassicNormalDepthPrepass =
       hasClassicNormalPrepass && classicNormalPrepassWritesDepth;
   if (hasMeshletNormalPrepass &&
-      nuri::isValid(frame.sharedResources.normalTexture)) {
-    PreparedGraphPass &normalPass =
-        makePreparedPass({}, meshletNormalPrepassDispatchItems_,
-                         meshletNormalPrepassDependencyBuffers_,
-                         meshletNormalPrepassDependencyBufferAccessModes_,
-                         passDependencyTextures_,
-                         "Opaque Meshlet Material Normal Pre-Pass", 0xff66ddff);
-    normalPass.desc.color = {.loadOp = LoadOp::Clear,
-                             .storeOp = StoreOp::Store,
-                             .clearColor = kFrameCompositionNormalClearValue};
-    normalPass.colorTextureHandle = frame.sharedResources.normalTexture;
+      (!materialNormalInput ||
+       nuri::isValid(frame.sharedResources.normalTexture))) {
+    PreparedGraphPass &normalPass = makePreparedPass(
+        {}, meshletNormalPrepassDispatchItems_,
+        meshletNormalPrepassDependencyBuffers_,
+        meshletNormalPrepassDependencyBufferAccessModes_,
+        passDependencyTextures_,
+        materialNormalInput ? "Opaque Meshlet Material Normal Pre-Pass"
+                            : "Opaque Meshlet GTAO Depth Input Pass",
+        0xff66ddff);
+    normalPass.desc.hasColorAttachment = materialNormalInput;
+    if (materialNormalInput) {
+      normalPass.desc.color = {.loadOp = LoadOp::Clear,
+                               .storeOp = StoreOp::Store,
+                               .clearColor = kFrameCompositionNormalClearValue};
+      normalPass.colorTextureHandle = frame.sharedResources.normalTexture;
+    }
     normalPass.desc.depth = {.loadOp = meshletNormalPrepassWritesDepth
                                            ? LoadOp::Clear
                                            : LoadOp::Load,
@@ -5213,18 +5268,26 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     normalPass.phase = PreparedPassPhase::PreLighting;
     normalPass.kind = PreparedPassKind::Normal;
     normalPass.publishesDepth = meshletNormalPrepassWritesDepth;
-    aoMetrics.normalPrepassDraws =
+    aoMetrics.inputPassDraws =
         saturateToU32(meshletNormalPrepassDispatchItems_.size());
+    aoMetrics.normalPrepassDraws =
+        materialNormalInput ? aoMetrics.inputPassDraws : 0u;
   } else if (hasClassicNormalPrepass &&
-             nuri::isValid(frame.sharedResources.normalTexture)) {
+             (!materialNormalInput ||
+              nuri::isValid(frame.sharedResources.normalTexture))) {
     PreparedGraphPass &normalPass = makePreparedPass(
         normalPrepassDrawItems_, {}, passDependencyBuffers_,
         passDependencyBufferAccessModes_, passDependencyTextures_,
-        "Opaque Material Normal Pre-Pass", 0xff66ddff);
-    normalPass.desc.color = {.loadOp = LoadOp::Clear,
-                             .storeOp = StoreOp::Store,
-                             .clearColor = kFrameCompositionNormalClearValue};
-    normalPass.colorTextureHandle = frame.sharedResources.normalTexture;
+        materialNormalInput ? "Opaque Material Normal Pre-Pass"
+                            : "Opaque GTAO Depth Input Pass",
+        0xff66ddff);
+    normalPass.desc.hasColorAttachment = materialNormalInput;
+    if (materialNormalInput) {
+      normalPass.desc.color = {.loadOp = LoadOp::Clear,
+                               .storeOp = StoreOp::Store,
+                               .clearColor = kFrameCompositionNormalClearValue};
+      normalPass.colorTextureHandle = frame.sharedResources.normalTexture;
+    }
     normalPass.desc.depth = {
         .loadOp = hasClassicNormalDepthPrepass ? LoadOp::Clear : LoadOp::Load,
         .storeOp = StoreOp::Store,
@@ -5247,8 +5310,9 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     normalPass.phase = PreparedPassPhase::PreLighting;
     normalPass.kind = PreparedPassKind::Normal;
     normalPass.publishesDepth = hasClassicNormalDepthPrepass;
+    aoMetrics.inputPassDraws = saturateToU32(normalPrepassDrawItems_.size());
     aoMetrics.normalPrepassDraws =
-        saturateToU32(normalPrepassDrawItems_.size());
+        materialNormalInput ? aoMetrics.inputPassDraws : 0u;
   } else if (ambientOcclusionSettings.active) {
     aoMetrics.active = false;
     aoMetrics.disabledReason = AmbientOcclusionDisabledReason::MissingResources;

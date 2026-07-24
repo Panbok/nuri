@@ -32,8 +32,10 @@ layout(push_constant) uniform constants {
   uint normalTexId;
   uint edgeTexId;
   uint outputTexId;
-  uint width;
-  uint height;
+  uint outputWidth;
+  uint outputHeight;
+  uint workingWidth;
+  uint workingHeight;
   uint noiseIndex;
   uint sliceCount;
   uint stepCount;
@@ -43,6 +45,7 @@ layout(push_constant) uniform constants {
   float aspectRatio;
   float orthoHeight;
   uint projectionType;
+  uint inputMode;
 }
 pc;
 
@@ -83,8 +86,9 @@ vec4 sampleTexture(uint texId, ivec2 pos) {
 }
 
 ivec2 mipSize(uint mipLevel) {
-  return max(ivec2(int(pc.width >> mipLevel), int(pc.height >> mipLevel)),
-             ivec2(1));
+  return max(
+      ivec2(int(pc.outputWidth >> mipLevel), int(pc.outputHeight >> mipLevel)),
+      ivec2(1));
 }
 
 float sampleViewDepthLevel(uint mipLevel, vec2 uv) {
@@ -165,25 +169,138 @@ vec3 reconstructViewPosition(vec2 uv, float viewDepth) {
               -ndc.y * yScale * viewDepth, -viewDepth);
 }
 
+float viewDepthAt(ivec2 pos, ivec2 size) {
+  return texelFetch(kTextures2D[nonuniformEXT(pc.depthTexIds[0])],
+                    clamp(pos, ivec2(0), size - ivec2(1)), 0)
+      .r;
+}
+
+bool reconstructViewNormal(ivec2 pos, float centerDepth, out vec3 normal) {
+  ivec2 size = ivec2(int(pc.outputWidth), int(pc.outputHeight));
+  float leftDepth = viewDepthAt(pos + ivec2(-1, 0), size);
+  float rightDepth = viewDepthAt(pos + ivec2(1, 0), size);
+  float topDepth = viewDepthAt(pos + ivec2(0, -1), size);
+  float bottomDepth = viewDepthAt(pos + ivec2(0, 1), size);
+  bool leftValid = leftDepth > 1.0e-5;
+  bool rightValid = rightDepth > 1.0e-5;
+  bool topValid = topDepth > 1.0e-5;
+  bool bottomValid = bottomDepth > 1.0e-5;
+  if ((!leftValid && !rightValid) || (!topValid && !bottomValid)) {
+    normal = vec3(0.0);
+    return false;
+  }
+
+  vec2 centerUv = (vec2(pos) + vec2(0.5)) / vec2(size);
+  vec2 texel = 1.0 / vec2(size);
+  vec3 center = reconstructViewPosition(centerUv, centerDepth);
+  bool useLeft = leftValid &&
+                 (!rightValid ||
+                  abs(leftDepth - centerDepth) < abs(rightDepth - centerDepth));
+  bool useTop = topValid &&
+                (!bottomValid ||
+                 abs(topDepth - centerDepth) < abs(bottomDepth - centerDepth));
+  float horizontalDepth = useLeft ? leftDepth : rightDepth;
+  float verticalDepth = useTop ? topDepth : bottomDepth;
+  float discontinuityLimit = max(0.05, centerDepth * 0.10);
+  if (abs(horizontalDepth - centerDepth) > discontinuityLimit ||
+      abs(verticalDepth - centerDepth) > discontinuityLimit) {
+    normal = vec3(0.0);
+    return false;
+  }
+
+  vec2 horizontalUv = centerUv + vec2(useLeft ? -texel.x : texel.x, 0.0);
+  vec2 verticalUv = centerUv + vec2(0.0, useTop ? -texel.y : texel.y);
+  vec3 horizontal = reconstructViewPosition(horizontalUv, horizontalDepth);
+  vec3 vertical = reconstructViewPosition(verticalUv, verticalDepth);
+  vec3 dx = useLeft ? center - horizontal : horizontal - center;
+  vec3 dy = useTop ? center - vertical : vertical - center;
+  float dxLengthSq = dot(dx, dx);
+  float dyLengthSq = dot(dy, dy);
+  if (!(dxLengthSq > 0.0) || !(dyLengthSq > 0.0) || isinf(dxLengthSq) ||
+      isinf(dyLengthSq)) {
+    normal = vec3(0.0);
+    return false;
+  }
+  normal = cross(dy, dx);
+  float normalLengthSq = dot(normal, normal);
+  if (!(normalLengthSq > 1.0e-6 * dxLengthSq * dyLengthSq) ||
+      isinf(normalLengthSq)) {
+    normal = vec3(0.0);
+    return false;
+  }
+  normal *= inversesqrt(normalLengthSq);
+  vec3 toCamera = normalize(-center);
+  if (dot(normal, toCamera) < 0.0) {
+    normal = -normal;
+  }
+  return true;
+}
+
+bool selectDepthRepresentative(ivec2 workingPos, out ivec2 fullPos,
+                               out float viewDepth, out vec4 normalSample) {
+  ivec2 outputSize = ivec2(int(pc.outputWidth), int(pc.outputHeight));
+  bool halfResolution =
+      pc.workingWidth != pc.outputWidth || pc.workingHeight != pc.outputHeight;
+  ivec2 footprint = halfResolution ? ivec2(2) : ivec2(1);
+  ivec2 basePos = halfResolution ? workingPos * 2 : workingPos;
+  bool found = false;
+  viewDepth = 0.0;
+  fullPos = clamp(basePos, ivec2(0), outputSize - ivec2(1));
+  normalSample = vec4(0.0);
+  for (int y = 0; y < footprint.y; ++y) {
+    for (int x = 0; x < footprint.x; ++x) {
+      ivec2 candidatePos =
+          clamp(basePos + ivec2(x, y), ivec2(0), outputSize - ivec2(1));
+      float candidateDepth =
+          texelFetch(kTextures2D[nonuniformEXT(pc.depthTexIds[0])],
+                     candidatePos, 0)
+              .r;
+      vec4 candidateNormal = vec4(0.0);
+      bool valid = candidateDepth > 1.0e-5;
+      if (valid && pc.inputMode == 0u) {
+        candidateNormal = sampleTexture(pc.normalTexId, candidatePos);
+        vec3 decodedNormal = candidateNormal.xyz * 2.0 - 1.0;
+        valid = candidateNormal.a > 0.0 &&
+                dot(decodedNormal, decodedNormal) > 1.0e-6;
+      } else if (valid) {
+        vec3 reconstructedNormal;
+        valid = reconstructViewNormal(candidatePos, candidateDepth,
+                                      reconstructedNormal);
+        candidateNormal =
+            vec4(reconstructedNormal * 0.5 + 0.5, valid ? 1.0 : 0.0);
+      }
+      if (valid && (!found || candidateDepth < viewDepth)) {
+        found = true;
+        viewDepth = candidateDepth;
+        fullPos = candidatePos;
+        normalSample = candidateNormal;
+      }
+    }
+  }
+  return found;
+}
+
 void main() {
   ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
-  ivec2 size = ivec2(int(pc.width), int(pc.height));
-  if (pos.x >= size.x || pos.y >= size.y) {
+  ivec2 workingSize = ivec2(int(pc.workingWidth), int(pc.workingHeight));
+  ivec2 outputSize = ivec2(int(pc.outputWidth), int(pc.outputHeight));
+  if (pos.x >= workingSize.x || pos.y >= workingSize.y) {
     return;
   }
 
-  vec2 invSize = 1.0 / vec2(size);
-  vec2 halfTexel = vec2(0.5) * invSize;
-  vec2 uv = (vec2(pos) + vec2(0.5)) * invSize;
-  float centerDepth = sampleViewDepthLevel(0u, uv);
-  vec4 normalSample = sampleTexture(pc.normalTexId, pos);
-  vec3 viewNormal = normalSample.xyz * 2.0 - 1.0;
-  float normalLenSq = dot(viewNormal, viewNormal);
-  if (normalSample.a <= 0.0 || normalLenSq <= 1.0e-6 || centerDepth <= 1.0e-5) {
+  ivec2 fullPos;
+  float centerDepth;
+  vec4 normalSample;
+  if (!selectDepthRepresentative(pos, fullPos, centerDepth, normalSample)) {
     imageStore(kImagesR16[nonuniformEXT(pc.outputTexId)], pos,
                vec4(1.0, 0.0, 0.0, 0.0));
     return;
   }
+  vec2 invWorkingSize = 1.0 / vec2(workingSize);
+  vec2 halfOutputTexel = vec2(0.5) / vec2(outputSize);
+  vec2 uv = (vec2(fullPos) + vec2(0.5)) / vec2(outputSize);
+  vec3 viewNormal = normalSample.xyz * 2.0 - 1.0;
+  float normalLenSq = dot(viewNormal, viewNormal);
   viewNormal *= inversesqrt(normalLenSq);
 
   uint slices = max(pc.sliceCount, 1u);
@@ -191,9 +308,9 @@ void main() {
   float effectRadius = max(unpackFloat(pc.radiusBits), 0.25);
   float viewUnitsPerPixel =
       pc.projectionType != 0u
-          ? max(pc.orthoHeight, 1.0e-4) / max(float(pc.height), 1.0)
+          ? max(pc.orthoHeight, 1.0e-4) / max(float(pc.workingHeight), 1.0)
           : (2.0 * max(pc.tanHalfFovY, 1.0e-4) * centerDepth) /
-                max(float(pc.height), 1.0);
+                max(float(pc.workingHeight), 1.0);
   float radiusPixels = min(effectRadius / max(viewUnitsPerPixel, 1.0e-4), 96.0);
   if (radiusPixels < kPixelTooCloseThreshold) {
     imageStore(kImagesR16[nonuniformEXT(pc.outputTexId)], pos,
@@ -208,7 +325,10 @@ void main() {
 
   vec2 noise = spatioTemporalNoise(pos, pc.noiseIndex);
   float minS = kPixelTooCloseThreshold / radiusPixels;
-  float centerMipBias = thinEdgeMipBias(pos, radiusPixels);
+  float resolutionScale = max(float(pc.outputWidth) / float(pc.workingWidth),
+                              float(pc.outputHeight) / float(pc.workingHeight));
+  float centerMipBias =
+      thinEdgeMipBias(fullPos, radiusPixels * resolutionScale);
   float falloffRange = max(kEffectFalloffRange * effectRadius, 1.0e-4);
   float falloffFrom = effectRadius * (1.0 - kEffectFalloffRange);
   float falloffMul = -1.0 / falloffRange;
@@ -266,14 +386,15 @@ void main() {
       vec2 sampleOffset =
           round(dir * max(stepRatio * radiusPixels, kPixelTooCloseThreshold));
       float offsetLength = max(length(sampleOffset), 1.0);
-      float mipLevel =
-          clamp(log2(offsetLength) - kDepthMipSamplingOffset - centerMipBias,
-                0.0, float(kViewDepthMipCount - 1u));
+      float fullResolutionOffsetLength = offsetLength * resolutionScale;
+      float mipLevel = clamp(log2(fullResolutionOffsetLength) -
+                                 kDepthMipSamplingOffset - centerMipBias,
+                             0.0, float(kViewDepthMipCount - 1u));
 
       for (int side = 0; side < 2; ++side) {
         vec2 signedOffset = side == 0 ? sampleOffset : -sampleOffset;
-        vec2 sampleUv =
-            clamp(uv + signedOffset * invSize, halfTexel, 1.0 - halfTexel);
+        vec2 sampleUv = clamp(uv + signedOffset * invWorkingSize,
+                              halfOutputTexel, 1.0 - halfOutputTexel);
         float sampleDepth = sampleViewDepth(mipLevel, sampleUv);
         if (sampleDepth <= 1.0e-5) {
           continue;
@@ -287,12 +408,14 @@ void main() {
                                foregroundDepthRejectEnd, foregroundDelta);
           float contactVisibility =
               1.0 - smoothstep(kForegroundContactStartPixels,
-                               kForegroundContactEndPixels, offsetLength);
+                               kForegroundContactEndPixels,
+                               fullResolutionOffsetLength);
           foregroundSilhouetteVisibility = contactVisibility;
           if (depthSeparatedVisibility > contactVisibility) {
-            float edgeSeparatedVisibility =
-                smoothstep(kForegroundSilhouetteEdgeThreshold, 1.0,
-                           pathEdgeVisibility(pos, signedOffset, size));
+            float edgeSeparatedVisibility = smoothstep(
+                kForegroundSilhouetteEdgeThreshold, 1.0,
+                pathEdgeVisibility(fullPos, signedOffset * resolutionScale,
+                                   outputSize));
             foregroundSilhouetteVisibility =
                 max(contactVisibility,
                     min(depthSeparatedVisibility, edgeSeparatedVisibility));

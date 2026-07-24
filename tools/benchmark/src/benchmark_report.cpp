@@ -713,6 +713,28 @@ ambientOcclusionPresetName(AmbientOcclusionPreset preset) {
   return "Unknown";
 }
 
+[[nodiscard]] const char *
+ambientOcclusionInputModeName(AmbientOcclusionInputMode mode) {
+  switch (mode) {
+  case AmbientOcclusionInputMode::MaterialNormalAndDepth:
+    return "MaterialNormalAndDepth";
+  case AmbientOcclusionInputMode::DepthOnlyReconstructedNormal:
+    return "DepthOnlyReconstructedNormal";
+  }
+  return "Unknown";
+}
+
+[[nodiscard]] const char *ambientOcclusionWorkingResolutionName(
+    AmbientOcclusionWorkingResolution resolution) {
+  switch (resolution) {
+  case AmbientOcclusionWorkingResolution::Full:
+    return "Full";
+  case AmbientOcclusionWorkingResolution::Half:
+    return "Half";
+  }
+  return "Unknown";
+}
+
 [[nodiscard]] const char *shadowQualityPresetName(ShadowQualityPreset preset) {
   switch (preset) {
   case ShadowQualityPreset::Custom:
@@ -1300,6 +1322,18 @@ yyjson_mut_val *makeSettingsObject(yyjson_mut_doc *doc,
             ambientOcclusionModeName(settings.ambientOcclusion.mode));
   addString(doc, ambientOcclusion, "preset",
             ambientOcclusionPresetName(settings.ambientOcclusion.preset));
+  yyjson_mut_obj_add_bool(doc, ambientOcclusion, "temporalAccumulation",
+                          settings.ambientOcclusion.temporalAccumulation);
+  if (settings.ambientOcclusion.inputModeOverride.has_value()) {
+    addString(doc, ambientOcclusion, "inputMode",
+              ambientOcclusionInputModeName(
+                  *settings.ambientOcclusion.inputModeOverride));
+  }
+  if (settings.ambientOcclusion.workingResolutionOverride.has_value()) {
+    addString(doc, ambientOcclusion, "workingResolution",
+              ambientOcclusionWorkingResolutionName(
+                  *settings.ambientOcclusion.workingResolutionOverride));
+  }
   yyjson_mut_obj_add_val(doc, object, "ambientOcclusion", ambientOcclusion);
 
   yyjson_mut_val *shadow = yyjson_mut_obj(doc);
@@ -2137,6 +2171,25 @@ readEnumValue(yyjson_val *object, const char *key, Enum defaultValue,
          {"High", AmbientOcclusionPreset::High},
          {"Ultra", AmbientOcclusionPreset::Ultra},
          {"Custom", AmbientOcclusionPreset::Custom}});
+    settings.ambientOcclusion.temporalAccumulation =
+        readBool(ambientOcclusion, "temporalAccumulation",
+                 settings.ambientOcclusion.temporalAccumulation);
+    if (yyjson_obj_get(ambientOcclusion, "inputMode") != nullptr) {
+      settings.ambientOcclusion.inputModeOverride = readEnumValue(
+          ambientOcclusion, "inputMode",
+          AmbientOcclusionInputMode::MaterialNormalAndDepth,
+          {{"MaterialNormalAndDepth",
+            AmbientOcclusionInputMode::MaterialNormalAndDepth},
+           {"DepthOnlyReconstructedNormal",
+            AmbientOcclusionInputMode::DepthOnlyReconstructedNormal}});
+    }
+    if (yyjson_obj_get(ambientOcclusion, "workingResolution") != nullptr) {
+      settings.ambientOcclusion.workingResolutionOverride =
+          readEnumValue(ambientOcclusion, "workingResolution",
+                        AmbientOcclusionWorkingResolution::Full,
+                        {{"Full", AmbientOcclusionWorkingResolution::Full},
+                         {"Half", AmbientOcclusionWorkingResolution::Half}});
+    }
   }
 
   yyjson_val *shadow = yyjson_obj_get(object, "shadow");

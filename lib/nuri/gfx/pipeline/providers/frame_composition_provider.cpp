@@ -187,7 +187,11 @@ FrameCompositionProvider::prepare(FrameBuildContext &ctx) {
   hdrMetrics.exposureHistoryAllocationCount = allocations(Ring::Exposure);
   hdrMetrics.exposureHistoryReallocationCount = reallocations(Ring::Exposure);
   AmbientOcclusionFrameMetrics &aoMetrics = ctx.frame.metrics.ambientOcclusion;
-  aoMetrics.normalFormat = kFrameCompositionNormalFormat;
+  aoMetrics.inputMode = ctx.frame.ambientOcclusion.inputMode;
+  aoMetrics.workingResolution = ctx.frame.ambientOcclusion.workingResolution;
+  aoMetrics.normalFormat = nuri::isValid(ctx.shared.normalTexture)
+                               ? kFrameCompositionNormalFormat
+                               : Format::Count;
   aoMetrics.ambientOcclusionFormat = kFrameCompositionAmbientOcclusionFormat;
   aoMetrics.width = framebufferWidth_;
   aoMetrics.height = framebufferHeight_;
@@ -224,6 +228,9 @@ FrameCompositionProvider::prepare(FrameBuildContext &ctx) {
           static_cast<uint64_t>(aoMetrics.normalTextureCount) +
       aoMetrics.ambientOcclusionTextureBytes *
           static_cast<uint64_t>(aoMetrics.ambientOcclusionTextureCount);
+  aoMetrics.providerTextureBytes = aoMetrics.totalTextureBytes;
+  aoMetrics.logicalActiveTextureBytes =
+      aoMetrics.normalTextureBytes + aoMetrics.ambientOcclusionTextureBytes;
   AntiAliasingFrameMetrics &aaMetrics = ctx.frame.metrics.antiAliasing;
   aaMetrics.postAAPlan = ctx.frame.presentationAA.postAA;
   aaMetrics.postAA.specularSelected =
