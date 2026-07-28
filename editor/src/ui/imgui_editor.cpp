@@ -88,8 +88,10 @@ constexpr std::array<const char *, 5> kTemporalAAQualityPresetLabels = {
     "Performance", "Balanced", "Quality", "Ultra", "Custom"};
 constexpr std::array<const char *, 2> kAmbientOcclusionModeLabels = {"Disabled",
                                                                      "GTAO"};
-constexpr std::array<const char *, 4> kDDGIQualityPresetLabels = {
-    "Low", "Balanced", "High", "Custom"};
+constexpr std::array<const char *, 3> kDDGIQualityPresetLabels = {
+    "Low", "Balanced", "High"};
+constexpr std::array<const char *, 2> kDDGICoveragePresetLabels = {"Authored",
+                                                                   "Automatic"};
 constexpr std::array<const char *, 13> kDDGIDebugViewLabels = {
     "None",           "Diffuse Indirect",  "Volume ID",
     "Probe Weights",  "Confidence",        "Visibility",
@@ -7328,266 +7330,305 @@ struct ImGuiEditor::Impl {
       ImGui::BeginDisabled();
     }
     ImGui::Checkbox("Enable Diffuse GI", &settings.enabled);
-    int preset = static_cast<int>(settings.preset);
+    int preset = std::min(static_cast<int>(settings.preset),
+                          static_cast<int>(DDGIQualityPreset::High));
     if (ImGui::Combo("Quality", &preset, kDDGIQualityPresetLabels.data(),
                      static_cast<int>(kDDGIQualityPresetLabels.size()))) {
       settings.preset = static_cast<DDGIQualityPreset>(preset);
+      settings.requestedPreset = settings.preset;
       applyDDGIQualityPreset(settings, settings.preset);
     }
-
-    ImGui::SeparatorText("Coverage");
-    DDGICoverageSettings &coverage = settings.coverage;
-    int coverageMode = static_cast<int>(coverage.mode);
-    if (ImGui::Combo("Coverage Mode", &coverageMode,
-                     kDDGICoverageModeLabels.data(),
-                     static_cast<int>(kDDGICoverageModeLabels.size()))) {
-      coverage.mode = static_cast<DDGICoverageMode>(coverageMode);
-    }
-    int constraintPolicy = static_cast<int>(coverage.constraintPolicy);
-    if (ImGui::Combo("Constraint Policy", &constraintPolicy,
-                     kDDGICoverageConstraintLabels.data(),
-                     static_cast<int>(kDDGICoverageConstraintLabels.size()))) {
-      coverage.constraintPolicy =
-          static_cast<DDGICoverageConstraintPolicy>(constraintPolicy);
-    }
-    int boundsSource = static_cast<int>(coverage.sceneBoundsSource);
-    if (ImGui::Combo("Scene Bounds", &boundsSource,
-                     kDDGISceneBoundsSourceLabels.data(),
-                     static_cast<int>(kDDGISceneBoundsSourceLabels.size()))) {
-      coverage.sceneBoundsSource =
-          static_cast<DDGISceneBoundsSource>(boundsSource);
-    }
-    ImGui::Checkbox("Include Authored Overrides",
-                    &coverage.includeAuthoredVolumes);
-    ImGui::Checkbox("Auto-refit on Topology Change",
-                    &coverage.autoRefitOnTopologyChange);
-    ImGui::InputScalar("Clipmap Cascades", ImGuiDataType_U32,
-                       &coverage.cascadeCount);
-    std::array<int, 3> cascadeCounts{
-        static_cast<int>(coverage.cascadeProbeCounts.x),
-        static_cast<int>(coverage.cascadeProbeCounts.y),
-        static_cast<int>(coverage.cascadeProbeCounts.z)};
-    if (ImGui::InputInt3("Cascade Probe Counts", cascadeCounts.data())) {
-      coverage.cascadeProbeCounts = glm::uvec3(std::max(cascadeCounts[0], 0),
-                                               std::max(cascadeCounts[1], 0),
-                                               std::max(cascadeCounts[2], 0));
-    }
-    ImGui::InputFloat3("Requested Near Spacing",
-                       glm::value_ptr(coverage.requestedNearSpacing), "%.3f");
-    ImGui::InputFloat("Cascade Spacing Ratio", &coverage.spacingRatio, 0.1f,
-                      0.5f, "%.3f");
-    ImGui::InputFloat3("Requested Coverage Half Extents",
-                       glm::value_ptr(coverage.requestedCoverageHalfExtents),
-                       "%.2f");
-    ImGui::InputScalar("Scene Padding Cells", ImGuiDataType_U32,
-                       &coverage.scenePaddingCells);
-    ImGui::InputScalar("Transition Cells", ImGuiDataType_U32,
-                       &coverage.transitionCells);
-    ImGui::InputInt("Generated Priority", &coverage.generatedPriority);
-    if (coverage.sceneBoundsSource == DDGISceneBoundsSource::Authored) {
-      bool authoredChanged = false;
-      authoredChanged |= ImGui::InputFloat3(
-          "Authored Bounds Minimum",
-          glm::value_ptr(coverage.authoredBounds.bounds.min_), "%.2f");
-      authoredChanged |= ImGui::InputFloat3(
-          "Authored Bounds Maximum",
-          glm::value_ptr(coverage.authoredBounds.bounds.max_), "%.2f");
-      if (authoredChanged) {
-        coverage.authoredBounds.valid = true;
-        coverage.authoredBounds.complete = true;
-        ++coverage.authoredBounds.generation;
-      }
-    }
-    sanitizeDDGICoverageSettings(coverage);
-
-    DDGISceneCoverageBounds previewBounds{};
-    if (scene != nullptr) {
-      switch (coverage.sceneBoundsSource) {
-      case DDGISceneBoundsSource::ActivationSnapshot:
-        previewBounds = scene->ddgiActivationCoverageBounds();
-        break;
-      case DDGISceneBoundsSource::StaticRayTracingGeometry:
-        previewBounds = coverage.autoRefitOnTopologyChange
-                            ? scene->ddgiPendingStaticCoverageBounds()
-                            : scene->ddgiStaticCoverageBounds();
-        break;
-      case DDGISceneBoundsSource::Authored:
-        previewBounds = coverage.authoredBounds;
-        break;
-      }
-    }
-    if (scene != nullptr) {
-      if (!scene->ddgiActivationCoverageBoundsSealed()) {
-        if (ImGui::Button("Seal Activation Bounds")) {
-          (void)scene->sealDDGIActivationCoverageBounds();
-        }
-      } else if (ImGui::Button("Refit Scene Bounds")) {
-        (void)scene->refitDDGIActivationCoverageBounds();
-      }
+    if (settings.preset == DDGIQualityPreset::Custom) {
       ImGui::SameLine();
-      if (ImGui::Button("Reset Activation Bounds")) {
-        (void)scene->resetDDGIActivationCoverageBounds();
-      }
+      ImGui::TextDisabled("(resolved Custom)");
+    }
+
+    int coveragePreset =
+        std::min(static_cast<int>(settings.coveragePreset),
+                 static_cast<int>(DDGICoveragePreset::Automatic));
+    if (ImGui::Combo("Coverage", &coveragePreset,
+                     kDDGICoveragePresetLabels.data(),
+                     static_cast<int>(kDDGICoveragePresetLabels.size()))) {
+      settings.coveragePreset = static_cast<DDGICoveragePreset>(coveragePreset);
+      settings.requestedCoveragePreset = settings.coveragePreset;
+      applyDDGICoveragePreset(settings, settings.coveragePreset);
+    }
+    if (settings.coveragePreset == DDGICoveragePreset::Custom) {
       ImGui::SameLine();
-      if (ImGui::Button("Apply Static Bounds Expansion")) {
-        (void)scene->refitDDGIStaticCoverageBounds();
-      }
-      ImGui::Text(
-          "Bounds generations [current/activation/static/pending]: %llu / "
-          "%llu / %llu / %llu",
-          static_cast<unsigned long long>(
-              scene->ddgiCurrentCoverageBounds().generation),
-          static_cast<unsigned long long>(
-              scene->ddgiActivationCoverageBounds().generation),
-          static_cast<unsigned long long>(
-              scene->ddgiStaticCoverageBounds().generation),
-          static_cast<unsigned long long>(
-              scene->ddgiPendingStaticCoverageBounds().generation));
+      ImGui::TextDisabled("(resolved Custom)");
     }
 
-    DDGICoverageSolveLimits previewLimits{};
-    previewLimits.maxTextureExtent =
-        glm::uvec2(std::max(gpu.getDeviceCaps().maxTextureDimension2D, 1u));
-    previewLimits.maxProbeUpdatesPerFrame = settings.maxProbeUpdatesPerFrame;
-    DDGIEffectiveVolumePlan previewPlan;
-    const Camera *previewCamera =
-        cameraSystem != nullptr ? cameraSystem->activeCamera() : nullptr;
-    const DDGICoverageResolveInput previewInput{
-        .sceneId = scene != nullptr ? scene->id() : 0u,
-        .coverageGeneration = 1u,
-        .sceneBounds = previewBounds,
-        .authoredVolumes = scene != nullptr
-                               ? scene->ddgiVolumes()
-                               : std::span<const RenderDDGIVolume>{},
-        .cameraWorldPosition = previewCamera != nullptr
-                                   ? previewCamera->position()
-                                   : glm::vec3(0.0f),
-        .settings = coverage,
-        .limits = previewLimits,
-    };
-    const auto preview =
-        resolveDDGIEffectiveVolumePlan(previewInput, previewPlan);
-    if (preview.hasValue()) {
-      ImGui::Text("Effective plan: %u / %u retained; %.2f MiB persistent",
-                  previewPlan.volumeCount, previewPlan.candidateCount,
-                  static_cast<double>(previewPlan.persistentBytes) /
-                      (1024.0 * 1024.0));
-      ImGui::Text("Scene coverage: %s; omitted %zu; failed %zu",
-                  previewPlan.fullSceneCoverage ? "full" : "partial/unused",
-                  previewPlan.omittedKeys.size(),
-                  previewPlan.failedKeys.size());
-      for (const DDGIEffectiveVolume &volume : previewPlan.activeVolumes()) {
-        ImGui::BulletText("%.*s: %ux%ux%u @ %.2f/%.2f/%.2f",
-                          static_cast<int>(volume.name.size()),
-                          volume.name.data(), volume.probeCounts.x,
-                          volume.probeCounts.y, volume.probeCounts.z,
-                          volume.probeSpacing.x, volume.probeSpacing.y,
-                          volume.probeSpacing.z);
+    if (ImGui::CollapsingHeader("Developer Coverage Settings")) {
+      DDGICoverageSettings &coverage = settings.coverage;
+      const DDGICoverageSettings coverageBefore = coverage;
+      int coverageMode = static_cast<int>(coverage.mode);
+      if (ImGui::Combo("Coverage Mode", &coverageMode,
+                       kDDGICoverageModeLabels.data(),
+                       static_cast<int>(kDDGICoverageModeLabels.size()))) {
+        coverage.mode = static_cast<DDGICoverageMode>(coverageMode);
       }
-    } else {
-      ImGui::TextColored(ImVec4(0.95f, 0.48f, 0.28f, 1.0f),
-                         "Coverage plan rejected: constraint %u axis %u",
-                         static_cast<uint32_t>(preview.error().limit),
-                         preview.error().axis);
-    }
-
-    const bool selectedAuthoredVolume =
-        scene != nullptr && selectionState != nullptr &&
-        selectionState->kind == SceneSelectionKind::DDGIVolume &&
-        isValid(selectionState->ddgiVolumeId);
-    ImGui::BeginDisabled(!selectedAuthoredVolume || !previewBounds.valid ||
-                         !previewBounds.complete);
-    if (ImGui::Button("Fit Selected Volume to Scene Bounds")) {
-      DDGIVolumeDesc fitted{};
-      if (scene->graph().getDDGIVolume(selectionState->ddgiVolumeId, fitted)) {
-        auto solution =
-            solveDDGISceneFit(previewBounds, coverage, previewLimits);
-        if (solution.hasValue()) {
-          fitted.probeCounts = solution->probeCounts;
-          fitted.probeSpacing = solution->achievedSpacing;
-          fitted.blendDistance =
-              static_cast<float>(coverage.scenePaddingCells) *
-              std::min({solution->achievedSpacing.x,
-                        solution->achievedSpacing.y,
-                        solution->achievedSpacing.z});
-          fitted.mode = DDGIVolumeMode::Authored;
-          deferredDDGIActions.push_back(DeferredDDGIAction{
-              .type = DeferredDDGIActionType::Fit,
-              .id = selectionState->ddgiVolumeId,
-              .desc = std::move(fitted),
-              .worldFromLocal =
-                  glm::translate(glm::mat4(1.0f), solution->worldCenter),
-          });
+      int constraintPolicy = static_cast<int>(coverage.constraintPolicy);
+      if (ImGui::Combo(
+              "Constraint Policy", &constraintPolicy,
+              kDDGICoverageConstraintLabels.data(),
+              static_cast<int>(kDDGICoverageConstraintLabels.size()))) {
+        coverage.constraintPolicy =
+            static_cast<DDGICoverageConstraintPolicy>(constraintPolicy);
+      }
+      int boundsSource = static_cast<int>(coverage.sceneBoundsSource);
+      if (ImGui::Combo("Scene Bounds", &boundsSource,
+                       kDDGISceneBoundsSourceLabels.data(),
+                       static_cast<int>(kDDGISceneBoundsSourceLabels.size()))) {
+        coverage.sceneBoundsSource =
+            static_cast<DDGISceneBoundsSource>(boundsSource);
+      }
+      ImGui::Checkbox("Include Authored Overrides",
+                      &coverage.includeAuthoredVolumes);
+      ImGui::Checkbox("Auto-refit on Topology Change",
+                      &coverage.autoRefitOnTopologyChange);
+      ImGui::InputScalar("Clipmap Cascades", ImGuiDataType_U32,
+                         &coverage.cascadeCount);
+      std::array<int, 3> cascadeCounts{
+          static_cast<int>(coverage.cascadeProbeCounts.x),
+          static_cast<int>(coverage.cascadeProbeCounts.y),
+          static_cast<int>(coverage.cascadeProbeCounts.z)};
+      if (ImGui::InputInt3("Cascade Probe Counts", cascadeCounts.data())) {
+        coverage.cascadeProbeCounts = glm::uvec3(std::max(cascadeCounts[0], 0),
+                                                 std::max(cascadeCounts[1], 0),
+                                                 std::max(cascadeCounts[2], 0));
+      }
+      ImGui::InputFloat3("Requested Near Spacing",
+                         glm::value_ptr(coverage.requestedNearSpacing), "%.3f");
+      ImGui::InputFloat("Cascade Spacing Ratio", &coverage.spacingRatio, 0.1f,
+                        0.5f, "%.3f");
+      ImGui::InputFloat3("Requested Coverage Half Extents",
+                         glm::value_ptr(coverage.requestedCoverageHalfExtents),
+                         "%.2f");
+      ImGui::InputScalar("Scene Padding Cells", ImGuiDataType_U32,
+                         &coverage.scenePaddingCells);
+      ImGui::InputScalar("Transition Cells", ImGuiDataType_U32,
+                         &coverage.transitionCells);
+      ImGui::InputInt("Generated Priority", &coverage.generatedPriority);
+      if (coverage.sceneBoundsSource == DDGISceneBoundsSource::Authored) {
+        bool authoredChanged = false;
+        authoredChanged |= ImGui::InputFloat3(
+            "Authored Bounds Minimum",
+            glm::value_ptr(coverage.authoredBounds.bounds.min_), "%.2f");
+        authoredChanged |= ImGui::InputFloat3(
+            "Authored Bounds Maximum",
+            glm::value_ptr(coverage.authoredBounds.bounds.max_), "%.2f");
+        if (authoredChanged) {
+          coverage.authoredBounds.valid = true;
+          coverage.authoredBounds.complete = true;
+          ++coverage.authoredBounds.generation;
         }
       }
-    }
-    ImGui::EndDisabled();
+      sanitizeDDGICoverageSettings(coverage);
 
-    ImGui::SeparatorText("Quality and Updates");
-    bool customChanged = false;
-    customChanged |= ImGui::InputScalar("Rays / Probe", ImGuiDataType_U32,
-                                        &settings.raysPerProbe);
-    customChanged |=
-        ImGui::InputScalar("Classification Rays / Probe", ImGuiDataType_U32,
-                           &settings.classificationRaysPerProbe);
-    customChanged |=
-        ImGui::InputScalar("Probe Updates / Frame", ImGuiDataType_U32,
-                           &settings.maxProbeUpdatesPerFrame);
-    customChanged |= ImGui::InputScalar("Total Query Cap", ImGuiDataType_U32,
-                                        &settings.maxRayQueriesPerFrame);
-    customChanged |= ImGui::SliderFloat("Irradiance Hysteresis",
-                                        &settings.irradianceHysteresis, 0.0f,
-                                        0.9999f, "%.4f");
-    customChanged |=
-        ImGui::SliderFloat("Distance Hysteresis", &settings.distanceHysteresis,
-                           0.0f, 0.9999f, "%.4f");
-    customChanged |=
-        ImGui::SliderFloat("Receiver Bias (spacing scale)",
-                           &settings.selfShadowBias, 0.0f, 2.0f, "%.3f");
-    customChanged |=
-        ImGui::SliderFloat("Primary Probe Bias (world)",
-                           &settings.primaryProbeBias, 0.0f, 0.25f, "%.5f");
-    customChanged |=
-        ImGui::SliderFloat("Local Shadow Bias (spacing scale)",
-                           &settings.localShadowBias, 0.0f, 2.0f, "%.3f");
-    customChanged |=
-        ImGui::SliderFloat("Directional Shadow Bias (spacing scale)",
-                           &settings.directionalShadowBias, 0.0f, 2.0f, "%.3f");
-    customChanged |=
-        ImGui::SliderFloat("Classification Bias (spacing scale)",
-                           &settings.classificationBias, 0.0f, 2.0f, "%.3f");
-    ImGui::Checkbox("Relocation", &settings.relocation);
-    ImGui::Checkbox("Classification", &settings.classification);
-    ImGui::Checkbox("Multi-bounce", &settings.multiBounce);
-    ImGui::Checkbox("Diagnostic Counters", &settings.diagnosticCounters);
-    ImGui::SliderFloat("Multi-bounce Luminance Clamp",
-                       &settings.multiBounceLuminanceClamp, 0.0f, 256.0f,
-                       "%.1f");
-    ImGui::Checkbox("Freeze Updates", &settings.freezeUpdates);
-    ImGui::Checkbox("Show Volume Bounds", &settings.showVolumes);
-    ImGui::Checkbox("Show Probe Billboards", &settings.showProbes);
-    ImGui::Checkbox("Show Selected Probe Rays",
-                    &settings.showSelectedProbeRays);
-    int debugView = static_cast<int>(settings.debugView);
-    if (ImGui::Combo("Surface Debug", &debugView, kDDGIDebugViewLabels.data(),
-                     static_cast<int>(kDDGIDebugViewLabels.size()))) {
-      settings.debugView = static_cast<DDGIDebugView>(debugView);
+      DDGISceneCoverageBounds previewBounds{};
+      if (scene != nullptr) {
+        switch (coverage.sceneBoundsSource) {
+        case DDGISceneBoundsSource::ActivationSnapshot:
+          previewBounds = scene->ddgiActivationCoverageBounds();
+          break;
+        case DDGISceneBoundsSource::StaticRayTracingGeometry:
+          previewBounds = coverage.autoRefitOnTopologyChange
+                              ? scene->ddgiPendingStaticCoverageBounds()
+                              : scene->ddgiStaticCoverageBounds();
+          break;
+        case DDGISceneBoundsSource::Authored:
+          previewBounds = coverage.authoredBounds;
+          break;
+        }
+      }
+      if (scene != nullptr) {
+        if (!scene->ddgiActivationCoverageBoundsSealed()) {
+          if (ImGui::Button("Seal Activation Bounds")) {
+            (void)scene->sealDDGIActivationCoverageBounds();
+          }
+        } else if (ImGui::Button("Refit Scene Bounds")) {
+          (void)scene->refitDDGIActivationCoverageBounds();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Reset Activation Bounds")) {
+          (void)scene->resetDDGIActivationCoverageBounds();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Apply Static Bounds Expansion")) {
+          (void)scene->refitDDGIStaticCoverageBounds();
+        }
+        ImGui::Text(
+            "Bounds generations [current/activation/static/pending]: %llu / "
+            "%llu / %llu / %llu",
+            static_cast<unsigned long long>(
+                scene->ddgiCurrentCoverageBounds().generation),
+            static_cast<unsigned long long>(
+                scene->ddgiActivationCoverageBounds().generation),
+            static_cast<unsigned long long>(
+                scene->ddgiStaticCoverageBounds().generation),
+            static_cast<unsigned long long>(
+                scene->ddgiPendingStaticCoverageBounds().generation));
+      }
+
+      DDGICoverageSolveLimits previewLimits{};
+      previewLimits.maxTextureExtent =
+          glm::uvec2(std::max(gpu.getDeviceCaps().maxTextureDimension2D, 1u));
+      previewLimits.maxProbeUpdatesPerFrame = settings.maxProbeUpdatesPerFrame;
+      DDGIEffectiveVolumePlan previewPlan;
+      const Camera *previewCamera =
+          cameraSystem != nullptr ? cameraSystem->activeCamera() : nullptr;
+      const DDGICoverageResolveInput previewInput{
+          .sceneId = scene != nullptr ? scene->id() : 0u,
+          .coverageGeneration = 1u,
+          .sceneBounds = previewBounds,
+          .authoredVolumes = scene != nullptr
+                                 ? scene->ddgiVolumes()
+                                 : std::span<const RenderDDGIVolume>{},
+          .cameraWorldPosition = previewCamera != nullptr
+                                     ? previewCamera->position()
+                                     : glm::vec3(0.0f),
+          .settings = coverage,
+          .limits = previewLimits,
+      };
+      const auto preview =
+          resolveDDGIEffectiveVolumePlan(previewInput, previewPlan);
+      if (preview.hasValue()) {
+        ImGui::Text("Effective plan: %u / %u retained; %.2f MiB persistent",
+                    previewPlan.volumeCount, previewPlan.candidateCount,
+                    static_cast<double>(previewPlan.persistentBytes) /
+                        (1024.0 * 1024.0));
+        ImGui::Text("Scene coverage: %s; omitted %zu; failed %zu",
+                    previewPlan.fullSceneCoverage ? "full" : "partial/unused",
+                    previewPlan.omittedKeys.size(),
+                    previewPlan.failedKeys.size());
+        for (const DDGIEffectiveVolume &volume : previewPlan.activeVolumes()) {
+          ImGui::BulletText("%.*s: %ux%ux%u @ %.2f/%.2f/%.2f",
+                            static_cast<int>(volume.name.size()),
+                            volume.name.data(), volume.probeCounts.x,
+                            volume.probeCounts.y, volume.probeCounts.z,
+                            volume.probeSpacing.x, volume.probeSpacing.y,
+                            volume.probeSpacing.z);
+        }
+      } else {
+        ImGui::TextColored(ImVec4(0.95f, 0.48f, 0.28f, 1.0f),
+                           "Coverage plan rejected: constraint %u axis %u",
+                           static_cast<uint32_t>(preview.error().limit),
+                           preview.error().axis);
+      }
+
+      const bool selectedAuthoredVolume =
+          scene != nullptr && selectionState != nullptr &&
+          selectionState->kind == SceneSelectionKind::DDGIVolume &&
+          isValid(selectionState->ddgiVolumeId);
+      ImGui::BeginDisabled(!selectedAuthoredVolume || !previewBounds.valid ||
+                           !previewBounds.complete);
+      if (ImGui::Button("Fit Selected Volume to Scene Bounds")) {
+        DDGIVolumeDesc fitted{};
+        if (scene->graph().getDDGIVolume(selectionState->ddgiVolumeId,
+                                         fitted)) {
+          auto solution =
+              solveDDGISceneFit(previewBounds, coverage, previewLimits);
+          if (solution.hasValue()) {
+            fitted.probeCounts = solution->probeCounts;
+            fitted.probeSpacing = solution->achievedSpacing;
+            fitted.blendDistance =
+                static_cast<float>(coverage.scenePaddingCells) *
+                std::min({solution->achievedSpacing.x,
+                          solution->achievedSpacing.y,
+                          solution->achievedSpacing.z});
+            fitted.mode = DDGIVolumeMode::Authored;
+            deferredDDGIActions.push_back(DeferredDDGIAction{
+                .type = DeferredDDGIActionType::Fit,
+                .id = selectionState->ddgiVolumeId,
+                .desc = std::move(fitted),
+                .worldFromLocal =
+                    glm::translate(glm::mat4(1.0f), solution->worldCenter),
+            });
+          }
+        }
+      }
+      ImGui::EndDisabled();
+      if (coverage != coverageBefore) {
+        settings.coveragePreset = DDGICoveragePreset::Custom;
+      }
     }
-    if (customChanged) {
-      settings.preset = DDGIQualityPreset::Custom;
+
+    if (ImGui::CollapsingHeader("Developer Quality Settings")) {
+      bool customChanged = false;
+      customChanged |= ImGui::InputScalar("Rays / Probe", ImGuiDataType_U32,
+                                          &settings.raysPerProbe);
+      customChanged |=
+          ImGui::InputScalar("Classification Rays / Probe", ImGuiDataType_U32,
+                             &settings.classificationRaysPerProbe);
+      customChanged |=
+          ImGui::InputScalar("Probe Updates / Frame", ImGuiDataType_U32,
+                             &settings.maxProbeUpdatesPerFrame);
+      customChanged |=
+          ImGui::InputScalar("Radiance Updates / Frame", ImGuiDataType_U32,
+                             &settings.maxRadianceProbeUpdatesPerFrame);
+      customChanged |=
+          ImGui::InputScalar("Maintenance Updates / Frame", ImGuiDataType_U32,
+                             &settings.maxMaintenanceProbeUpdatesPerFrame);
+      customChanged |= ImGui::InputScalar("Total Query Cap", ImGuiDataType_U32,
+                                          &settings.maxRayQueriesPerFrame);
+      customChanged |= ImGui::SliderFloat("Irradiance Hysteresis",
+                                          &settings.irradianceHysteresis, 0.0f,
+                                          0.9999f, "%.4f");
+      customChanged |= ImGui::SliderFloat("Distance Hysteresis",
+                                          &settings.distanceHysteresis, 0.0f,
+                                          0.9999f, "%.4f");
+      customChanged |=
+          ImGui::SliderFloat("Receiver Bias (world)", &settings.selfShadowBias,
+                             0.0f, 0.25f, "%.3f");
+      customChanged |=
+          ImGui::SliderFloat("Primary Probe Bias (world)",
+                             &settings.primaryProbeBias, 0.0f, 0.25f, "%.5f");
+      customChanged |=
+          ImGui::SliderFloat("Local Shadow Bias (spacing scale)",
+                             &settings.localShadowBias, 0.0f, 2.0f, "%.3f");
+      customChanged |= ImGui::SliderFloat(
+          "Directional Shadow Bias (spacing scale)",
+          &settings.directionalShadowBias, 0.0f, 2.0f, "%.3f");
+      customChanged |=
+          ImGui::SliderFloat("Classification Bias (spacing scale)",
+                             &settings.classificationBias, 0.0f, 2.0f, "%.3f");
+      customChanged |= ImGui::Checkbox("Relocation", &settings.relocation);
+      customChanged |=
+          ImGui::Checkbox("Classification", &settings.classification);
+      customChanged |= ImGui::Checkbox("Multi-bounce", &settings.multiBounce);
+      customChanged |= ImGui::SliderFloat("Multi-bounce Luminance Clamp",
+                                          &settings.multiBounceLuminanceClamp,
+                                          0.0f, 256.0f, "%.1f");
+      if (customChanged) {
+        settings.preset = DDGIQualityPreset::Custom;
+      }
+    }
+
+    if (ImGui::CollapsingHeader("Session Diagnostics")) {
+      ImGui::Checkbox("Diagnostic Counters", &settings.diagnosticCounters);
+      ImGui::Checkbox("Freeze Updates", &settings.freezeUpdates);
+      ImGui::Checkbox("Show Volume Bounds", &settings.showVolumes);
+      ImGui::Checkbox("Show Probe Billboards", &settings.showProbes);
+      ImGui::Checkbox("Show Selected Probe Rays",
+                      &settings.showSelectedProbeRays);
+      int debugView = static_cast<int>(settings.debugView);
+      if (ImGui::Combo("Surface Debug", &debugView, kDDGIDebugViewLabels.data(),
+                       static_cast<int>(kDDGIDebugViewLabels.size()))) {
+        settings.debugView = static_cast<DDGIDebugView>(debugView);
+      }
+      if (ImGui::Button("Reset History")) {
+        ++settings.requestedEpochs.resetHistory;
+      }
+      ImGui::SameLine();
+      if (ImGui::Button("Force Full Update")) {
+        ++settings.requestedEpochs.forceFullUpdate;
+      }
+      ImGui::SameLine();
+      if (ImGui::Button("Rebuild RT Scene")) {
+        ++settings.requestedEpochs.rebuildRayTracingScene;
+      }
     }
     sanitizeDDGISettings(settings);
-    if (ImGui::Button("Reset History")) {
-      ++settings.requestedEpochs.resetHistory;
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Force Full Update")) {
-      ++settings.requestedEpochs.forceFullUpdate;
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Rebuild RT Scene")) {
-      ++settings.requestedEpochs.rebuildRayTracingScene;
-    }
     if (ImGui::Button("Create DDGI Volume")) {
       queueCreateDDGIVolume();
     }

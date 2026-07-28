@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "transparency.ddgi.bistro_transmission_gather_probe_visibility_720p",
+  "suite": "transparency",
+  "comparisonGroup": "transparency.ddgi.bistro_transmission_gather_720p",
+  "variant": "transmission_gather_probe_visibility",
+  "description": "Diagnostic-only transmission gather through probe visibility",
+  "scene": {"kind": "prefab", "pathBase": "modelsRoot", "path": "NiagaraBistro/bistrox.gltf", "generator": "nuri.ddgi.volume.v1", "contentHash": "niagara-bistro-ddgi-transmission-gather-v1", "importOptions": {"mesh": {"generateMeshlets": true, "meshletMaxVertices": 64, "meshletMaxPrimitives": 124, "meshletConeWeight": 0.0}}},
+  "backend": "nvrhi", "resolution": [1280, 720], "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 90, "measurementFrames": 180, "cooldownFrames": 2, "maxDrainFrames": 180, "drainTimeoutMs": 8000, "samples": 5,
+  "authoritative": false, "presentMode": "immediate",
+  "renderGraph": {"workerCount": 1, "parallelCompile": false, "parallelRecording": false},
+  "camera": {"position": [-25.175787, 5.760150, 8.267586], "target": [-34.294270, 2.883850, 5.338666], "verticalFovDegrees": 60.0, "nearPlane": 0.05, "farPlane": 500.0},
+  "settings": {"ddgi": {"enabled": true, "qualityPreset": "Balanced", "coveragePreset": "Automatic", "gatherVariants": {"transmission": "ProbeVisibility"}}, "opaque": {"enabled": true, "meshletMode": "Disabled", "enableCpuFrustumCulling": true, "enableMeshletFrustumCulling": false, "enableMeshletConeCulling": false, "enableDepthPrepass": true, "enableInstanceAnimation": false, "forcedMeshLod": 0}, "antiAliasing": {"mode": "None"}, "ambientOcclusion": {"mode": "Disabled"}, "shadow": {"enabled": false}, "hdrPostProcess": {"bloomEnabled": false, "adaptationEnabled": false}, "transmission": {"enabled": true}, "transparent": {"enabled": true}, "textureFiltering": {"mode": "Anisotropic", "anisotropy": 8}},
+  "requirements": {"assets": ["modelsRoot:NiagaraBistro/bistrox.gltf"], "backends": ["nvrhi"], "allowVisibleWindow": true, "accelerationStructure": true, "rayQuery": true},
+  "thresholds": {"failPercent": 12.0, "failAbsoluteMs": 0.35, "warnPercent": 6.0, "warnAbsoluteMs": 0.18},
+  "requiredMetrics": ["cpu.render_submit_ms", "gpu.frame_ms", "gpu.scopes.transmission_ms", "gpu.scopes.ddgi_ms", "renderer.ddgi.transmission_gather_architecture", "renderer.ddgi.transmission_gather_variant"]
+}

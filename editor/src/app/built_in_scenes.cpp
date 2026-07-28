@@ -16,7 +16,7 @@ namespace {
 constexpr std::string_view kSampleDuckModelRelativePath =
     "rubber_duck/scene.gltf";
 constexpr std::string_view kNiagaraBistroModelRelativePath =
-    "NiagaraBistro/bistrox.gltf";
+    "NiagaraBistro/bistro-lights.gltf";
 constexpr std::string_view kDamagedHelmetModelRelativePath =
     "DamagedHelmet/DamagedHelmet.gltf";
 constexpr std::string_view kLightsPunctualLampModelRelativePath =
@@ -698,9 +698,24 @@ Result<void, std::string> registerBuiltInScenes(EditorSceneCatalog &catalog,
               runtime.renderSettings().textureFiltering.anisotropy = 8u;
             },
         .configureLoadedScene =
-            [](EditorRuntime &, StreamingSceneState &state) {
+            [](EditorRuntime &runtime, StreamingSceneState &state) {
               const float scale = glm::length(glm::vec3(state.baseModel[0]));
               NURI_LOG_INFO("Niagara Bistro reference setup scale=%.6f", scale);
+              LightDesc sun{};
+              sun.type = LightType::Directional;
+              sun.name = "Niagara Bistro Day Sun";
+              sun.rotation =
+                  glm::quat(0.7903252840042114f, -0.5507411956787109f,
+                            -0.2371416836977005f, -0.12583379447460175f);
+              sun.color = glm::vec3(1.0f);
+              sun.intensity = 10.0f;
+              sun.enabled = true;
+              auto addedSun = runtime.scene().graph().addLight(
+                  runtime.scene().graph().rootNode(), sun);
+              if (addedSun.hasError()) {
+                NURI_LOG_WARNING("Niagara Bistro daylight setup failed: %s",
+                                 addedSun.error().c_str());
+              }
             },
         .configureCamera =
             [](EditorRuntime &runtime, StreamingSceneState &state) {

@@ -1,10 +1,10 @@
 {
   "schemaVersion": 1,
-  "id": "renderer.ddgi.bistro_balanced_off_1080p",
+  "id": "renderer.ddgi.bistro_static_off_1080p",
   "suite": "renderer",
-  "comparisonGroup": "renderer.ddgi.bistro_balanced_1080p",
+  "comparisonGroup": "renderer.ddgi.bistro_static_1080p",
   "variant": "off",
-  "description": "Niagara Bistro 1080p governed DDGI-off comparison member",
+  "description": "Niagara Bistro 1080p governed static DDGI-off comparison member for the named Automatic coverage matrix",
   "scene": {
     "kind": "prefab",
     "pathBase": "modelsRoot",
@@ -27,7 +27,7 @@
   "renderGraph": {"workerCount": 1, "parallelCompile": false, "parallelRecording": false},
   "camera": {"position": [-28.5, 6.5, 4.5], "target": [-54.49, 6.5, -20.41], "verticalFovDegrees": 60.0, "nearPlane": 0.05, "farPlane": 500.0},
   "settings": {
-    "ddgi": {"enabled": false},
+    "ddgi": {"enabled": false, "qualityPreset": "Balanced", "coveragePreset": "Automatic"},
     "opaque": {"enabled": true, "meshletMode": "Required", "enableMeshletFrustumCulling": true, "enableMeshletConeCulling": true, "enableInstanceAnimation": false, "forcedMeshLod": 0},
     "antiAliasing": {"mode": "TAA", "temporalProvider": "Reference", "qualityPreset": "Ultra"},
     "ambientOcclusion": {"mode": "GTAO", "preset": "Ultra"},
@@ -41,8 +41,14 @@
   "thresholds": {"failPercent": 12.0, "failAbsoluteMs": 0.35, "warnPercent": 6.0, "warnAbsoluteMs": 0.18},
   "requiredMetrics": [
     "cpu.render_submit_ms", "gpu.frame_ms", "gpu.scopes_sum_ms",
+    "renderer.ddgi.quality_schema", "renderer.ddgi.quality_preset",
+    "renderer.ddgi.coverage_preset_schema", "renderer.ddgi.coverage_preset",
+    "renderer.ddgi.product_profile_schema",
+    "renderer.ddgi.opaque_gather_architecture", "renderer.ddgi.opaque_gather_variant",
+    "renderer.ddgi.transmission_gather_architecture", "renderer.ddgi.transmission_gather_variant",
+    "renderer.ddgi.trace_multibounce_gather_architecture", "renderer.ddgi.trace_multibounce_gather_variant",
     "renderer.ddgi.active_volumes", "renderer.ddgi.updated_probes",
     "renderer.ray_tracing.blas_builds", "renderer.ray_tracing.tlas_builds",
-    "gpu.memory.ddgi.persistent_mb"
+    "gpu.memory.ddgi.persistent_mb", "gpu.memory.ddgi.frame_ring_total_mb"
   ]
 }

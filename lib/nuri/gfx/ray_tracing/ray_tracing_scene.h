@@ -193,6 +193,7 @@ private:
   uint64_t animationVersion_ = 0u;
   uint64_t pendingAnimationVersion_ = 0u;
   uint64_t consumedRebuildEpoch_ = 0u;
+  uint64_t pendingRebuildEpoch_ = 0u;
   uint64_t scheduledFrameIndex_ = UINT64_MAX;
   uint32_t excludedDynamicInstances_ = 0u;
   uint32_t staticInstanceCount_ = 0u;

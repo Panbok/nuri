@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "id": "renderer.niagara_bistro.ddgi_high_volume_id_gtao_ultra_msaa8_540p",
+  "suite": "renderer",
+  "description": "High Automatic DDGI volume-ID stability with GTAO Ultra and MSAA8",
+  "scene": {
+    "kind": "prefab",
+    "pathBase": "modelsRoot",
+    "path": "NiagaraBistro/bistrox.gltf",
+    "generator": "nuri.ddgi.hybrid_bistro.v1",
+    "contentHash": "niagara-bistro-ddgi-volume-id-gtao-ultra-msaa8-v1",
+    "importOptions": {"mesh": {"generateMeshlets": true, "meshletMaxVertices": 64, "meshletMaxPrimitives": 124, "meshletConeWeight": 0.0}}
+  },
+  "backend": "nvrhi",
+  "resolution": [960, 540],
+  "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 300,
+  "captureFrame": 330,
+  "authoritative": false,
+  "presentMode": "immediate",
+  "windowMode": "visible",
+  "renderGraph": {"workerCount": 1, "parallelCompile": false, "parallelRecording": false},
+  "camera": {"position": [22.0, 7.0, 31.0], "direction": [-0.85, -0.15, -0.5], "verticalFovDegrees": 60.0, "nearPlane": 0.05, "farPlane": 500.0},
+  "settings": {
+    "ddgi": {
+      "enabled": true,
+      "qualityPreset": "High",
+      "coveragePreset": "Automatic",
+      "debugView": "VolumeId"
+    },
+    "opaque": {"enabled": true, "meshletMode": "Required", "enableMeshletFrustumCulling": true, "enableMeshletConeCulling": true, "enableInstanceAnimation": false, "forcedMeshLod": 0},
+    "antiAliasing": {
+      "mode": "MSAA8x",
+      "postAA": {
+        "enabled": true,
+        "specular": "BakedClean",
+        "spatial": "Smaa1x",
+        "materialVarianceScale": 1.0,
+        "geometricVarianceScale": 0.35,
+        "maxSlopeVariance": 0.25
+      }
+    },
+    "ambientOcclusion": {"mode": "GTAO", "preset": "Ultra"},
+    "shadow": {"enabled": true, "qualityPreset": "Ultra"},
+    "hdrPostProcess": {"bloomEnabled": false, "adaptationEnabled": false},
+    "transmission": {"enabled": false},
+    "transparent": {"enabled": false},
+    "textureFiltering": {"mode": "Anisotropic", "anisotropy": 8}
+  },
+  "requirements": {"assets": ["modelsRoot:NiagaraBistro/bistrox.gltf"], "backends": ["nvrhi"], "allowVisibleWindow": true, "msaaSamples": 8, "accelerationStructure": true, "rayQuery": true},
+  "captures": [{"target": "final_color", "profile": "ldr_color", "required": true}]
+}

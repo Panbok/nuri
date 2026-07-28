@@ -77,6 +77,7 @@ struct NURI_API RuntimeDDGIShaderConfig {
   std::filesystem::path blendIrradiance;
   std::filesystem::path blendDistance;
   std::filesystem::path updateProbeState;
+  std::filesystem::path opaqueSurfaceCache;
   std::filesystem::path probeDebugVertex;
   std::filesystem::path probeDebugFragment;
   std::filesystem::path rayDebugVertex;

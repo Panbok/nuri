@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "id": "stress.ddgi.bistro_rapid_balanced_automatic_1080p",
+  "suite": "stress",
+  "comparisonGroup": "stress.ddgi.bistro_rapid_1080p",
+  "variant": "balanced_automatic",
+  "description": "Niagara Bistro 1080p governed rapid-route Balanced quality and Automatic coverage DDGI member using the canonical shared DDGI route",
+  "scene": {"kind": "prefab", "pathBase": "modelsRoot", "path": "NiagaraBistro/bistrox.gltf", "generator": "nuri.ddgi.hybrid_bistro.v1", "contentHash": "niagara-bistro-ddgi-hybrid-full-route-v1", "importOptions": {"mesh": {"generateMeshlets": true, "meshletMaxVertices": 64, "meshletMaxPrimitives": 124, "meshletConeWeight": 0.0}}},
+  "backend": "nvrhi", "resolution": [1920, 1080], "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 24, "measurementFrames": 216, "cooldownFrames": 0, "maxDrainFrames": 180, "drainTimeoutMs": 8000, "samples": 5, "authoritative": false, "presentMode": "immediate",
+  "renderGraph": {"workerCount": 1, "parallelCompile": false, "parallelRecording": false},
+  "camera": {"position": [-42.0, 6.0, -10.0], "target": [-20.0, 3.0, 12.0], "verticalFovDegrees": 60.0, "nearPlane": 0.05, "farPlane": 500.0},
+  "timelineSource": {"pathBase": "repoRoot", "path": "tools/cases/autotests/stress/niagara_bistro_ddgi_hybrid_full_route.json"},
+  "settings": {
+    "ddgi": {"enabled": true, "qualityPreset": "Balanced", "coveragePreset": "Automatic", "debugView": "None"},
+    "opaque": {"enabled": true, "meshletMode": "Required", "enableMeshletFrustumCulling": true, "enableMeshletConeCulling": true, "enableDepthPrepass": false, "enableInstanceCompute": false, "enableInstanceAnimation": false, "enableMeshLod": false, "enableTessellation": false, "forcedMeshLod": 0},
+    "visibility": {"occlusionMode": "PreviousFrameHiZ", "visibleOnUncertain": true},
+    "antiAliasing": {"mode": "TAA", "temporalProvider": "Reference", "qualityPreset": "Ultra"},
+    "ambientOcclusion": {"mode": "GTAO", "preset": "Ultra"},
+    "shadow": {"enabled": true, "qualityPreset": "Ultra"},
+    "hdrPostProcess": {"bloomEnabled": false, "adaptationEnabled": false},
+    "transmission": {"enabled": false}, "transparent": {"enabled": false},
+    "textureFiltering": {"mode": "Anisotropic", "anisotropy": 8}
+  },
+  "requirements": {"assets": ["modelsRoot:NiagaraBistro/bistrox.gltf"], "backends": ["nvrhi"], "allowVisibleWindow": true, "accelerationStructure": true, "rayQuery": true},
+  "thresholds": {"failPercent": 12.0, "failAbsoluteMs": 0.35, "warnPercent": 6.0, "warnAbsoluteMs": 0.18},
+  "requiredMetrics": ["cpu.render_submit_ms", "gpu.frame_ms", "gpu.scopes_sum_ms", "gpu.scopes.ddgi_ms", "gpu.scopes.ddgi_trace_ms", "gpu.scopes.ddgi_update_ms", "gpu.scopes.ddgi_relocate_classify_ms", "gpu.scopes.ddgi_readback_ms", "cpu.ddgi.prepare_ms", "cpu.ddgi.schedule_ms", "cpu.ddgi.graph_build_ms", "cpu.ddgi.readback_poll_ms", "renderer.ddgi.quality_schema", "renderer.ddgi.quality_preset", "renderer.ddgi.coverage_preset_schema", "renderer.ddgi.coverage_preset", "renderer.ddgi.product_profile_schema", "renderer.ddgi.active_volumes", "renderer.ddgi.updated_probes", "renderer.ddgi.classification_probe_updates", "renderer.ddgi.irradiance_primary_queries", "renderer.ddgi.primary_queries", "renderer.ddgi.primary_queries_issued", "renderer.ddgi.secondary_queries_reserved", "renderer.ddgi.secondary_queries", "renderer.ddgi.total_queries_issued", "renderer.ddgi.trace_dispatches", "renderer.ddgi.trace_launched_lanes", "renderer.ddgi.trace_useful_lanes", "renderer.ddgi.irradiance_atlas_dispatches", "renderer.ddgi.distance_atlas_dispatches", "renderer.ddgi.update_reason_bits", "renderer.ddgi.readback_waits", "renderer.ddgi.readback_blocking_fallbacks", "gpu.memory.ddgi.persistent_mb", "gpu.memory.ddgi.frame_ring_total_mb"]
+}

@@ -1071,7 +1071,7 @@ populateSpecularMinificationToolScene(const ToolRuntimeDesc &desc,
 
 struct ToolRendererRuntime::Impl {
   explicit Impl(const ToolRuntimeDesc &desc)
-      : pipeline(&pipelineMemory), scene(&sceneMemory) {
+      : sceneDesc(desc.scene), pipeline(&pipelineMemory), scene(&sceneMemory) {
     env.push_back(std::make_unique<ScopedEnvVar>(
         "NURI_RENDER_GRAPH_WORKER_COUNT",
         std::to_string(desc.renderGraph.workerCount)));
@@ -1094,6 +1094,8 @@ struct ToolRendererRuntime::Impl {
   std::unique_ptr<Window> window{};
   std::unique_ptr<GPUDevice> gpu{};
   std::unique_ptr<Renderer> renderer{};
+  ToolSceneDesc sceneDesc{};
+  bool sceneBaseModelApplied = false;
   std::optional<AnimationSceneFrameData> externalAnimationSceneFrameData{};
   RenderPipeline pipeline;
   RenderScene scene;
@@ -1142,6 +1144,65 @@ ToolRendererRuntime::pumpAssetLoads() {
   return impl_->renderer->assets().prepareFrame(AssetPublicationContext{
       .scene = &impl_->scene,
   });
+}
+Result<bool, std::string> ToolRendererRuntime::applySceneBaseModel() {
+  if (impl_->sceneBaseModelApplied || impl_->sceneDesc.baseModelKind.empty()) {
+    impl_->sceneBaseModelApplied = true;
+    return Result<bool, std::string>::makeResult(true);
+  }
+  if (impl_->sceneDesc.kind != "prefab" ||
+      impl_->sceneDesc.baseModelKind != "fitRadius" ||
+      !isValid(impl_->sceneLoad)) {
+    return Result<bool, std::string>::makeError(
+        "tool scene base-model transform requires a loaded fitRadius prefab");
+  }
+
+  const ScenePrefab *prefab =
+      impl_->renderer->assets().tryGetScenePrefab(impl_->sceneLoad);
+  const std::optional<ScenePrefabAssets> assets =
+      impl_->renderer->assets().tryGetSceneAssets(impl_->sceneLoad);
+  const std::optional<SceneInstantiationMap> instantiation =
+      impl_->renderer->assets().tryGetSceneInstantiation(impl_->sceneLoad);
+  if (prefab == nullptr || !assets.has_value() || !instantiation.has_value() ||
+      assets->models.empty()) {
+    return Result<bool, std::string>::makeError(
+        "tool prefab base-model inputs are unavailable after scene load");
+  }
+
+  const ModelRecord *modelRecord =
+      impl_->renderer->resources().tryGet(assets->models.front());
+  if (modelRecord == nullptr || modelRecord->model == nullptr) {
+    return Result<bool, std::string>::makeError(
+        "tool prefab base-model reference model is unavailable");
+  }
+  const float rawRadius = std::max(
+      0.5f * glm::length(modelRecord->model->bounds().getSize()), 1.0e-3f);
+  const float scale = std::clamp(
+      static_cast<float>(impl_->sceneDesc.baseModelTargetRadius) / rawRadius,
+      static_cast<float>(impl_->sceneDesc.baseModelMinScale),
+      static_cast<float>(impl_->sceneDesc.baseModelMaxScale));
+  const glm::mat4 baseModel = glm::scale(glm::mat4(1.0f), glm::vec3(scale));
+
+  for (uint32_t nodeIndex = 0u; nodeIndex < prefab->nodes.size(); ++nodeIndex) {
+    if (prefab->nodes[nodeIndex].parentIndex != kInvalidScenePrefabIndex ||
+        nodeIndex >= instantiation->nodes.size() ||
+        !isValid(instantiation->nodes[nodeIndex])) {
+      continue;
+    }
+    if (!impl_->scene.graph().setNodeLocalTransform(
+            instantiation->nodes[nodeIndex],
+            baseModel * prefab->nodes[nodeIndex].localFromParent)) {
+      return Result<bool, std::string>::makeError(
+          "failed to apply tool prefab base-model transform");
+    }
+  }
+  (void)impl_->scene.graph().syncWorldTransforms();
+  auto committed = impl_->scene.commit();
+  if (committed.hasError()) {
+    return committed;
+  }
+  impl_->sceneBaseModelApplied = true;
+  return Result<bool, std::string>::makeResult(true);
 }
 Result<bool, std::string> ToolRendererRuntime::commitScene() {
   return impl_->scene.commit();

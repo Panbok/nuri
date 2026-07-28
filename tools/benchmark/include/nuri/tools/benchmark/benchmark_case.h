@@ -78,8 +78,26 @@ struct BenchmarkCameraPath {
   std::vector<BenchmarkCameraKeyframe> keyframes{};
 };
 
+enum class BenchmarkTimelineEventType : uint8_t {
+  ResetTemporalHistory = 0,
+  SetCamera,
+};
+
+struct BenchmarkTimelineEvent {
+  uint32_t frame = 0u;
+  BenchmarkTimelineEventType type =
+      BenchmarkTimelineEventType::ResetTemporalHistory;
+  BenchmarkCameraConfig camera{};
+  bool hasCamera = false;
+  bool preserveHistory = true;
+};
+
 struct BenchmarkTimeline {
+  // Empty for inline timelines. Shared routes retain their repo-relative source
+  // identity so reports can prove that paired cases used one authority.
+  std::string source{};
   std::vector<BenchmarkCameraPath> cameraPaths{};
+  std::vector<BenchmarkTimelineEvent> events{};
 };
 
 struct BenchmarkRequirements {

@@ -1,4 +1,9 @@
-const uint kDDGIFrameGpuDataVersion = 3u;
+const uint kDDGIFrameGpuDataVersion = 5u;
+const uint kDDGIGatherVariantProduct = 0u;
+const uint kDDGIGatherVariantBypass = 1u;
+const uint kDDGIGatherVariantCandidates = 2u;
+const uint kDDGIGatherVariantProbeVisibility = 3u;
+const uint kDDGIGatherVariantAtlas = 4u;
 const uint kDDGIMaxVolumes = 8u;
 const uint kDDGIMaxSampledVolumes = 2u;
 const uint kDDGIEffectiveKindAuthored = 0u;
@@ -11,9 +16,12 @@ const uint kDDGIProbeStateNewlyAwake = 3u;
 const uint kDDGIProbeStateAwake = 4u;
 const uint kDDGIProbeStateNewlyVigilant = 5u;
 const uint kDDGIProbeStateVigilant = 6u;
+const uint kDDGIProbeUpdateReasonBootstrap = 1u << 8u;
 
 struct DDGIProbeStateGpuData {
   vec4 relocation;
+  // x: state, y: last submitted sequence, z: classification iteration,
+  // w: reserved.
   uvec4 stateAgeFlags;
 };
 
@@ -42,7 +50,8 @@ struct DDGIVolumeGpuData {
   mat4 worldFromLocal;
   mat4 localFromWorld;
   DDGIProbeStateBuffer probeStates;
-  uvec2 resourceFlagsReserved;
+  // x: resource flags; y high/low 16: trace-light subset offset/count.
+  uvec2 resourceFlagsLocalLightSubset;
   vec4 probeSpacingAndBias;
   vec4 rayBiases;
   vec4 centerHalfExtentsAndMaxDistance;

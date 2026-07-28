@@ -29,6 +29,7 @@
       "blend_irradiance": "ddgi_blend_irradiance.comp",
       "blend_distance": "ddgi_blend_distance.comp",
       "update_probe_state": "ddgi_update_probe_state.comp",
+      "opaque_surface_cache": "ddgi_opaque_surface_cache.comp",
       "probe_debug_vertex": "ddgi_probe_debug.vert",
       "probe_debug_fragment": "ddgi_probe_debug.frag",
       "ray_debug_vertex": "ddgi_ray_debug.vert",

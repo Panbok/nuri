@@ -298,7 +298,10 @@ TEST(NuriSnapshotTestingTest, ManifestParsesStrictVersionedDDGICoverage) {
     "schemaVersion": 1,
     "id": "ddgi.coverage",
     "suite": "ddgi",
-    "settings": {"ddgi": {"coverage": {
+    "settings": {"ddgi": {"preset": "Custom",
+      "maxProbeUpdatesPerFrame": 333,
+      "maxRadianceProbeUpdatesPerFrame": 222,
+      "coverage": {
       "schemaVersion": 1,
       "mode": "Hybrid",
       "constraintPolicy": "PreserveNearSpacing",
@@ -319,6 +322,8 @@ TEST(NuriSnapshotTestingTest, ManifestParsesStrictVersionedDDGICoverage) {
 
   auto loaded = loadSnapshotCaseManifest(path);
   ASSERT_FALSE(loaded.hasError()) << loaded.error();
+  EXPECT_EQ(loaded.value().settings.ddgi.maxProbeUpdatesPerFrame, 333u);
+  EXPECT_EQ(loaded.value().settings.ddgi.maxRadianceProbeUpdatesPerFrame, 222u);
   const DDGICoverageSettings &coverage = loaded.value().settings.ddgi.coverage;
   EXPECT_EQ(coverage.mode, DDGICoverageMode::Hybrid);
   EXPECT_EQ(coverage.constraintPolicy,

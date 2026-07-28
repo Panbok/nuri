@@ -1033,8 +1033,12 @@ Result<bool, std::string> TransmissionRenderer::createShaders() {
   };
   for (size_t index = 0; index < shaders_.size(); ++index) {
     auto compiler = Shader::create(specs[index].name, gpu_);
+    constexpr std::string_view transmissionGatherPreamble =
+        "#define NURI_DDGI_SURFACE_GATHER_SHIFT 8u\n";
+    const std::string_view preamble =
+        index == 1u ? transmissionGatherPreamble : std::string_view{};
     auto result = compiler->compileFromFile(specs[index].path->string(),
-                                            specs[index].stage);
+                                            specs[index].stage, preamble);
     if (result.hasError()) {
       destroyShaders();
       return Result<bool, std::string>::makeError(result.error());
@@ -1095,10 +1099,10 @@ TransmissionRenderer::ensurePipelines(Format colorFormat, Format depthFormat,
   std::array<RenderPipelineHandle, 4> pipelines{};
   for (size_t index = 0; index < pipelines.size(); ++index) {
     const Variant &variant = variants[index];
-    auto result = gpu_.createRenderPipeline(
+    RenderPipelineDesc desc =
         meshPipelineDesc(colorFormat, depthFormat, shaders_[0], shaders_[1],
-                         variant.cull, variant.blend, targetRasterState),
-        variant.name);
+                         variant.cull, variant.blend, targetRasterState);
+    auto result = gpu_.createRenderPipeline(desc, variant.name);
     if (result.hasError()) {
       for (RenderPipelineHandle pipeline : pipelines) {
         if (nuri::isValid(pipeline)) {

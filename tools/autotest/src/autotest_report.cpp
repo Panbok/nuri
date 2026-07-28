@@ -1538,6 +1538,16 @@ autotestWorkloadFingerprint(const AutotestCase &testCase) {
       FingerprintField{"manifest", std::move(manifestDigest)},
       FingerprintField{"scene.kind", testCase.scene.kind},
       FingerprintField{"scene.content", testCase.scene.contentHash},
+      FingerprintField{"scene.baseModelKind", testCase.scene.baseModelKind},
+      FingerprintField{
+          "scene.baseModelTargetRadius",
+          std::format("{:.17g}", testCase.scene.baseModelTargetRadius)},
+      FingerprintField{
+          "scene.baseModelMinScale",
+          std::format("{:.17g}", testCase.scene.baseModelMinScale)},
+      FingerprintField{
+          "scene.baseModelMaxScale",
+          std::format("{:.17g}", testCase.scene.baseModelMaxScale)},
       FingerprintField{"resolution.width",
                        std::to_string(testCase.resolution[0])},
       FingerprintField{"resolution.height",

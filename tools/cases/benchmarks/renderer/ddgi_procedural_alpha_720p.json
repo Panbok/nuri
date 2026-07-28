@@ -1,18 +1,18 @@
 {
   "schemaVersion": 1,
-  "id": "renderer.ddgi.procedural_alpha_720p",
+  "id": "renderer.ddgi.procedural_alpha_custom_diagnostic_720p",
   "suite": "renderer",
-  "comparisonGroup": "renderer.ddgi.procedural_alpha_720p",
-  "variant": "on",
-  "description": "Alpha-mask foliage DDGI micro-scene for bounded candidate-loop and rejection cost",
+  "comparisonGroup": "renderer.ddgi.procedural_alpha_custom_720p",
+  "variant": "diagnostic_on",
+  "description": "Custom-quality diagnostic-counter alpha-mask foliage DDGI micro-scene for bounded candidate-loop and rejection cost",
   "scene": {"kind": "procedural", "generator": "nuri.procedural.ddgi_benchmark_alpha.v1", "seed": 1, "contentHash": "nuri.procedural.ddgi_benchmark_alpha.v1:1"},
   "backend": "nvrhi", "resolution": [1280, 720], "fixedDeltaSeconds": 0.016666667,
   "warmupFrames": 30, "measurementFrames": 60, "cooldownFrames": 2, "maxDrainFrames": 120, "drainTimeoutMs": 8000, "samples": 3,
   "authoritative": false, "presentMode": "immediate",
   "renderGraph": {"workerCount": 1, "parallelCompile": false, "parallelRecording": false},
   "camera": {"position": [0.0, 0.75, 4.2], "target": [0.0, 0.25, 0.0], "verticalFovDegrees": 60.0, "nearPlane": 0.05, "farPlane": 100.0},
-  "settings": {"ddgi": {"enabled": true, "preset": "Custom", "raysPerProbe": 64, "maxProbeUpdatesPerFrame": 512, "maxRayQueriesPerFrame": 32768, "debugView": "None"}, "opaque": {"enableInstanceAnimation": false}, "antiAliasing": {"mode": "None"}, "ambientOcclusion": {"mode": "Disabled"}, "shadow": {"enabled": false}, "hdrPostProcess": {"bloomEnabled": false, "adaptationEnabled": false}},
+  "settings": {"ddgi": {"enabled": true, "qualityPreset": "Custom", "raysPerProbe": 64, "maxProbeUpdatesPerFrame": 512, "maxRayQueriesPerFrame": 32768, "diagnosticCounters": true, "debugView": "None"}, "opaque": {"enableInstanceAnimation": false}, "antiAliasing": {"mode": "None"}, "ambientOcclusion": {"mode": "Disabled"}, "shadow": {"enabled": false}, "hdrPostProcess": {"bloomEnabled": false, "adaptationEnabled": false}},
   "requirements": {"assets": ["modelsRoot:common/flat_plane.obj"], "backends": ["nvrhi"], "allowVisibleWindow": true, "accelerationStructure": true, "rayQuery": true},
   "thresholds": {"failPercent": 15.0, "failAbsoluteMs": 0.5, "warnPercent": 8.0, "warnAbsoluteMs": 0.25},
-  "requiredMetrics": ["cpu.render_submit_ms", "gpu.frame_ms", "gpu.scopes.ddgi_ms", "gpu.scopes.ddgi_trace_ms", "gpu.scopes.ddgi_update_ms", "renderer.ddgi.active_volumes", "renderer.ddgi.updated_probes", "renderer.ddgi.primary_queries", "renderer.ddgi.secondary_queries_reserved", "renderer.ddgi.secondary_queries", "gpu.memory.ddgi.persistent_mb", "renderer.ddgi.alpha_candidate_rejections", "renderer.ddgi.primary_candidate_intersections"]
+  "requiredMetrics": ["cpu.render_submit_ms", "gpu.frame_ms", "gpu.scopes.ddgi_ms", "gpu.scopes.ddgi_trace_ms", "gpu.scopes.ddgi_irradiance_update_ms", "gpu.scopes.ddgi_distance_update_ms", "renderer.ddgi.active_volumes", "renderer.ddgi.updated_probes", "renderer.ddgi.primary_queries", "renderer.ddgi.secondary_queries_reserved", "renderer.ddgi.secondary_queries", "gpu.memory.ddgi.persistent_mb", "renderer.ddgi.alpha_candidate_rejections", "renderer.ddgi.primary_candidate_intersections"]
 }

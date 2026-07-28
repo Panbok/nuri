@@ -327,6 +327,51 @@ TEST(NuriAutotestingTest, ManifestRejectsUnknownKeys) {
   std::filesystem::remove(path, ec);
 }
 
+TEST(NuriAutotestingTest, ManifestParsesPrefabFitRadiusBaseModel) {
+  const std::filesystem::path path =
+      makeTempPath("autotest_prefab_base_model", ".json");
+  writeFile(path,
+            R"json({
+              "schemaVersion": 1,
+              "id": "scene.fit_radius",
+              "suite": "scene",
+              "scene": {
+                "kind": "prefab",
+                "pathBase": "modelsRoot",
+                "path": "NiagaraBistro/bistrox.gltf",
+                "baseModel": {
+                  "kind": "fitRadius",
+                  "targetRadius": 120.0,
+                  "minScale": 0.0005,
+                  "maxScale": 2.0
+                }
+              }
+            })json");
+
+  auto loaded = loadAutotestCaseManifest(path);
+  ASSERT_FALSE(loaded.hasError()) << loaded.error();
+  EXPECT_EQ(loaded.value().scene.baseModelKind, "fitRadius");
+  EXPECT_DOUBLE_EQ(loaded.value().scene.baseModelTargetRadius, 120.0);
+  EXPECT_DOUBLE_EQ(loaded.value().scene.baseModelMinScale, 0.0005);
+  EXPECT_DOUBLE_EQ(loaded.value().scene.baseModelMaxScale, 2.0);
+
+  writeFile(path,
+            R"json({
+              "schemaVersion": 1,
+              "id": "scene.bad_fit_radius",
+              "suite": "scene",
+              "scene": {
+                "kind": "procedural",
+                "baseModel": {"kind": "fitRadius"}
+              }
+            })json");
+  loaded = loadAutotestCaseManifest(path);
+  EXPECT_TRUE(loaded.hasError());
+
+  std::error_code ec;
+  std::filesystem::remove(path, ec);
+}
+
 TEST(NuriAutotestingTest, ManifestNormalizesLegacyAndPostAAWins) {
   const std::filesystem::path path = makeTempPath("autotest_post_aa", ".json");
   writeFile(path,
@@ -374,7 +419,10 @@ TEST(NuriAutotestingTest, ManifestParsesStrictVersionedDDGICoverage) {
     "schemaVersion": 1,
     "id": "ddgi.coverage",
     "suite": "ddgi",
-    "settings": {"ddgi": {"coverage": {
+    "settings": {"ddgi": {"preset": "Custom",
+      "maxProbeUpdatesPerFrame": 333,
+      "maxRadianceProbeUpdatesPerFrame": 222,
+      "coverage": {
       "schemaVersion": 1,
       "mode": "Hybrid",
       "constraintPolicy": "PreserveNearSpacing",
@@ -394,6 +442,8 @@ TEST(NuriAutotestingTest, ManifestParsesStrictVersionedDDGICoverage) {
 
   auto loaded = loadAutotestCaseManifest(path);
   ASSERT_FALSE(loaded.hasError()) << loaded.error();
+  EXPECT_EQ(loaded.value().settings.ddgi.maxProbeUpdatesPerFrame, 333u);
+  EXPECT_EQ(loaded.value().settings.ddgi.maxRadianceProbeUpdatesPerFrame, 222u);
   const DDGICoverageSettings &coverage = loaded.value().settings.ddgi.coverage;
   EXPECT_EQ(coverage.mode, DDGICoverageMode::Hybrid);
   EXPECT_EQ(coverage.constraintPolicy,

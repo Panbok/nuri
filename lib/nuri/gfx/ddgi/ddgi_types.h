@@ -13,9 +13,10 @@
 namespace nuri {
 
 inline constexpr uint32_t kDDGILayoutVersion = 1u;
-inline constexpr uint32_t kDDGIFrameGpuDataVersion = 3u;
-inline constexpr uint32_t kDDGICaptureSemanticsVersion = 3u;
-inline constexpr uint32_t kDDGIFrameMetricsVersion = 7u;
+inline constexpr uint32_t kDDGIFrameGpuDataVersion = 5u;
+inline constexpr uint32_t kDDGICaptureSemanticsVersion = 4u;
+inline constexpr uint32_t kDDGIFrameMetricsVersion = 9u;
+inline constexpr uint32_t kDDGIGatherIdentitySchemaVersion = 1u;
 inline constexpr uint32_t kMaxDDGIEffectiveVolumes = 8u;
 inline constexpr uint32_t kMaxDDGIClipmapCascades = 4u;
 inline constexpr uint32_t kMaxDDGIVolumesSampledPerSurface = 2u;
@@ -26,6 +27,21 @@ inline constexpr float kDDGIChebyshevExponent = 3.0f;
 inline constexpr float kDDGIProbeWeightCrushThreshold = 0.2f;
 inline constexpr uint32_t kDDGIMaxDiagnosticRays = 1024u;
 inline constexpr uint32_t kDDGIMaxDiagnosticCandidateEventsPerRay = 8u;
+
+[[nodiscard]] constexpr uint32_t
+ddgiUniformSubsetIndex(uint32_t totalCount, uint32_t sampleCount,
+                       uint64_t submittedSequence,
+                       uint32_t sampleIndex) noexcept {
+  if (totalCount == 0u || sampleCount == 0u) {
+    return 0u;
+  }
+  const uint32_t boundedSampleCount =
+      sampleCount < totalCount ? sampleCount : totalCount;
+  const uint32_t stride = totalCount / boundedSampleCount;
+  return static_cast<uint32_t>(
+      (submittedSequence + static_cast<uint64_t>(sampleIndex) * stride) %
+      totalCount);
+}
 
 enum class DDGIDebugView : uint8_t {
   None = 0,
@@ -93,6 +109,26 @@ enum class DDGIRayResultKind : uint8_t {
 
 enum class DDGISurfaceGatherArchitecture : uint8_t {
   ForwardFragment = 0,
+  ComputeSurfaceCache,
+};
+
+enum class DDGISurfaceGatherVariant : uint8_t {
+  Product = 0,
+  Bypass,
+  Candidates,
+  ProbeVisibility,
+  Atlas,
+};
+
+enum class DDGIUpdateReason : uint32_t {
+  Bootstrap = 1u << 0u,
+  Scroll = 1u << 1u,
+  DirtyGeometry = 1u << 2u,
+  RadiometricResponse = 1u << 3u,
+  Maintenance = 1u << 4u,
+  Force = 1u << 5u,
+  Wake = 1u << 6u,
+  Reclassification = 1u << 7u,
 };
 
 enum class DDGIFallbackReason : uint8_t {
@@ -243,6 +279,7 @@ struct DDGIFrameMetrics {
   uint32_t classificationPrimaryQueries = 0u;
   uint32_t irradiancePrimaryQueries = 0u;
   uint32_t primaryQueriesIssued = 0u;
+  uint32_t traceCountersAvailable = 0u;
   uint32_t traceCounterSourceFrame = 0u;
   uint32_t traceCounterStaleFrames = 0u;
   uint32_t secondaryQueriesReserved = 0u;
@@ -264,6 +301,22 @@ struct DDGIFrameMetrics {
   uint32_t multiBounceRadianceClamps = 0u;
   uint32_t finalRadianceClamps = 0u;
   uint32_t diagnosticCountersEnabled = 0u;
+  uint32_t qualitySchema = 0u;
+  uint32_t requestedQualityPreset = 0u;
+  uint32_t qualityPreset = 0u;
+  uint32_t coveragePresetSchema = 0u;
+  uint32_t requestedCoveragePreset = 0u;
+  uint32_t coveragePreset = 0u;
+  uint32_t productProfileSchema = 0u;
+  uint64_t productProfileFingerprint = 0u;
+  uint32_t opaqueGatherArchitecture = 0u;
+  uint32_t opaqueGatherVariant = 0u;
+  uint32_t transmissionGatherArchitecture = 0u;
+  uint32_t transmissionGatherVariant = 0u;
+  uint32_t traceMultiBounceGatherArchitecture = 0u;
+  uint32_t traceMultiBounceGatherVariant = 0u;
+  uint32_t gatherIdentitySchema = kDDGIGatherIdentitySchemaVersion;
+  // Compatibility alias. It is valid only while every consumer is forward.
   DDGISurfaceGatherArchitecture surfaceGatherArchitecture =
       DDGISurfaceGatherArchitecture::ForwardFragment;
   uint32_t surfaceGatherWidth = 0u;
@@ -272,10 +325,36 @@ struct DDGIFrameMetrics {
   uint32_t surfaceGatherMaxSampledVolumes = 0u;
   uint32_t surfaceGatherMaxStateLoadsPerPixel = 0u;
   uint32_t surfaceGatherMaxAtlasSamplesPerPixel = 0u;
+  uint32_t surfaceCacheFormat = 0u;
+  uint64_t surfaceCacheBytes = 0u;
   uint32_t rayQueryCapacity = 0u;
   uint32_t probeUpdateCapacity = 0u;
   uint32_t requestedProbeUpdateCapacity = 0u;
   uint32_t effectiveProbeUpdateCapacity = 0u;
+  uint32_t requestedMaintenanceProbeUpdateCapacity = 0u;
+  uint32_t effectiveMaintenanceProbeUpdateCapacity = 0u;
+  uint32_t maintenanceProbeUpdates = 0u;
+  uint32_t primaryResultCapacity = 0u;
+  uint32_t traceDispatches = 0u;
+  uint32_t traceLaunchedLanes = 0u;
+  uint32_t traceUsefulLanes = 0u;
+  uint32_t classificationLaunchedLanes = 0u;
+  uint32_t classificationUsefulLanes = 0u;
+  uint32_t irradianceAtlasDispatches = 0u;
+  uint32_t distanceAtlasDispatches = 0u;
+  uint64_t irradianceResultVisits = 0u;
+  uint64_t distanceResultVisits = 0u;
+  uint64_t irradianceTexelWrites = 0u;
+  uint64_t distanceTexelWrites = 0u;
+  uint32_t updateReasonBits = 0u;
+  uint32_t bootstrapUpdates = 0u;
+  uint32_t scrollUpdates = 0u;
+  uint32_t dirtyGeometryUpdates = 0u;
+  uint32_t radiometricResponseUpdates = 0u;
+  uint32_t maintenanceUpdates = 0u;
+  uint32_t forceUpdates = 0u;
+  uint32_t wakeUpdates = 0u;
+  uint32_t reclassificationUpdates = 0u;
   uint32_t readbackWaits = 0u;
   uint32_t readbackPendingSlots = 0u;
   uint32_t readbackDroppedSamples = 0u;
@@ -293,6 +372,14 @@ struct DDGIFrameMetrics {
   uint32_t redundantAuthoredVolumes = 0u;
   uint32_t redundantAuthoredProbes = 0u;
   uint32_t coverageMode = 0u;
+  uint32_t coverageSolveExecutions = 0u;
+  uint32_t coveragePlanCacheHits = 0u;
+  uint64_t stateHistoryScanCount = 0u;
+  uint64_t ageSampleCount = 0u;
+  uint64_t ageSelectionCount = 0u;
+  uint64_t coverageLatticeEvaluations = 0u;
+  uint32_t uploadSubmissionCount = 0u;
+  uint64_t lightDifferenceComparisons = 0u;
   DDGICoverageStatus coverageStatus = DDGICoverageStatus::SkyFallbackOnly;
   DDGICoverageLimit coverageError = DDGICoverageLimit::None;
   DDGICoverageLimit limitingConstraint = DDGICoverageLimit::None;
@@ -324,6 +411,10 @@ struct DDGIFrameMetrics {
   uint64_t readbackCopyBytes = 0u;
   uint64_t readbackPerSlotBytes = 0u;
   uint64_t readbackRingBytes = 0u;
+  uint32_t frameSlotCount = 0u;
+  uint64_t frameRingDeviceBytes = 0u;
+  uint64_t frameRingReadbackBytes = 0u;
+  uint64_t frameRingBytes = 0u;
   uint64_t committedAtlasBytes = 0u;
   uint64_t pendingAtlasBytes = 0u;
   uint64_t peakAtlasBytes = 0u;
@@ -336,17 +427,27 @@ struct DDGIFrameMetrics {
   float gpuTimeMs = 0.0f;
   float traceGpuTimeMs = 0.0f;
   float updateGpuTimeMs = 0.0f;
+  float irradianceUpdateGpuTimeMs = 0.0f;
+  float distanceUpdateGpuTimeMs = 0.0f;
   float relocateClassifyGpuTimeMs = 0.0f;
+  float readbackGpuTimeMs = 0.0f;
   uint64_t gpuTimingSourceFrameIndex = UINT64_MAX;
   uint32_t gpuTimingAvailable = 0u;
   uint32_t traceGpuTimingAvailable = 0u;
   uint32_t updateGpuTimingAvailable = 0u;
+  uint32_t irradianceUpdateGpuTimingAvailable = 0u;
+  uint32_t distanceUpdateGpuTimingAvailable = 0u;
   uint32_t relocateClassifyGpuTimingAvailable = 0u;
+  uint32_t readbackGpuTimingAvailable = 0u;
   float maxRelocation = 0.0f;
   glm::vec3 requestedCoverageHalfExtents{0.0f};
   glm::vec3 achievedCoverageHalfExtents{0.0f};
   float sceneCoverageRatio = 0.0f;
   float coverageResolveCpuTimeMs = 0.0f;
+  float prepareCpuTimeMs = 0.0f;
+  float scheduleCpuTimeMs = 0.0f;
+  float graphBuildCpuTimeMs = 0.0f;
+  float readbackPollCpuTimeMs = 0.0f;
   float skyRemainderOverThresholdPercentage = 1.0f;
   DDGIStartupPhase startupPhase = DDGIStartupPhase::ResourcesPending;
   DDGIFallbackReason fallbackReason = DDGIFallbackReason::Disabled;
@@ -363,6 +464,8 @@ struct DDGIVolumeBlendWeights {
 
 struct alignas(16) DDGIProbeStateGpuData {
   glm::vec4 relocation{0.0f};
+  // x: state, y: last submitted sequence, z: classification iteration,
+  // w: reserved.
   glm::uvec4 stateAgeFlags{static_cast<uint32_t>(DDGIProbeState::Vigilant), 0u,
                            0u, 0u};
 };
@@ -372,8 +475,10 @@ struct alignas(16) DDGIVolumeGpuData {
   glm::mat4 localFromWorld{1.0f};
   uint64_t probeStateBufferAddress = 0u;
   uint32_t resourceFlags = 0u;
-  uint32_t reserved0 = 0u;
-  glm::vec4 probeSpacingAndBias{1.0f, 1.0f, 1.0f, 0.3f};
+  // High 16 bits: trace-light subset offset; low 16 bits: subset count.
+  uint32_t localLightSubsetOffsetCount = 0u;
+  // xyz: probe spacing; w: absolute world-space receiver bias.
+  glm::vec4 probeSpacingAndBias{1.0f, 1.0f, 1.0f, 0.1f};
   // x: primary probe ray, y: local shadow, z: directional shadow,
   // w: classification/relocation. Shadow and classification values are
   // spacing-scaled; primary probe ray bias is an absolute world-space distance.
@@ -392,7 +497,8 @@ struct alignas(16) DDGIVolumeGpuData {
 };
 
 struct alignas(16) DDGIFrameGpuData {
-  // x: active count, y: debug view, z: record version, w: sampler index.
+  // x: active count; y: opaque/transmission/trace gather variants packed in
+  // successive bytes; z: record version; w: sampler index.
   glm::uvec4 activeCountDebugFlagsSampler{0u};
   std::array<DDGIVolumeGpuData, kMaxDDGIVolumes> volumes{};
 };

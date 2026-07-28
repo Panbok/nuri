@@ -15,6 +15,7 @@ using Aggregation = BenchmarkMetricAggregation;
 using Availability = BenchmarkMetricAvailability;
 using Phase = BenchmarkMetricSamplingPhase;
 using Gate = BenchmarkMetricGateRole;
+using Evidence = BenchmarkMetricEvidenceClass;
 
 constexpr Aggregation kFrameDistribution =
     Aggregation::MedianAndP95AcrossMeasuredFrames;
@@ -44,6 +45,30 @@ constexpr Aggregation kFrameDistribution =
       id, Unit::Count, Numeric::Uint64EncodedAsFloat64,                        \
       Direction::Informational, Availability::EveryMeasuredFrame,              \
       Phase::PostRenderMeasuredFrame, Gate::WorkloadCharacterization)
+
+#define NURI_DIAGNOSTIC_COUNTER(id)                                            \
+  {id,                                                                         \
+   Rule::Exact,                                                                \
+   Unit::Count,                                                                \
+   Numeric::Uint64EncodedAsFloat64,                                            \
+   Direction::Informational,                                                   \
+   kFrameDistribution,                                                         \
+   Availability::EveryMeasuredFrame,                                           \
+   Phase::DelayedGpuReadback,                                                  \
+   Gate::Diagnostic,                                                           \
+   Evidence::DiagnosticOnly}
+
+#define NURI_DIAGNOSTIC_CPU_COUNTER(id)                                        \
+  {id,                                                                         \
+   Rule::Exact,                                                                \
+   Unit::Count,                                                                \
+   Numeric::Uint64EncodedAsFloat64,                                            \
+   Direction::Informational,                                                   \
+   kFrameDistribution,                                                         \
+   Availability::EveryMeasuredFrame,                                           \
+   Phase::PostRenderMeasuredFrame,                                             \
+   Gate::Diagnostic,                                                           \
+   Evidence::DiagnosticOnly}
 
 #define NURI_RATIO(id)                                                         \
   NURI_EXACT_METRIC(id, Unit::Ratio, Numeric::Float64,                         \
@@ -115,6 +140,11 @@ constexpr BenchmarkMetricDescriptor kDescriptors[] = {
     NURI_CPU_TIMING("cpu.scene_commit_ms", Gate::Eligible),
     NURI_CPU_TIMING("cpu.render_submit_ms", Gate::Primary),
     NURI_CPU_TIMING("cpu.scene_resource_prepare_ms", Gate::Primary),
+    NURI_POST_CPU_TIMING("cpu.ray_tracing.prepare_ms"),
+    NURI_POST_CPU_TIMING("cpu.ray_tracing.topology_prepare_ms"),
+    NURI_POST_CPU_TIMING("cpu.ray_tracing.transform_prepare_ms"),
+    NURI_POST_CPU_TIMING("cpu.ray_tracing.deformation_prepare_ms"),
+    NURI_POST_CPU_TIMING("cpu.ray_tracing.tlas_prepare_ms"),
     NURI_CPU_TIMING("texture.artifact_build_ms", Gate::Eligible),
     NURI_CPU_TIMING("texture.normal_variance_artifact_build_ms",
                     Gate::Eligible),
@@ -160,7 +190,11 @@ constexpr BenchmarkMetricDescriptor kDescriptors[] = {
     NURI_GPU_TIMING("gpu.scopes.ddgi_ms", Gate::Eligible),
     NURI_GPU_TIMING("gpu.scopes.ddgi_trace_ms", Gate::Eligible),
     NURI_GPU_TIMING("gpu.scopes.ddgi_update_ms", Gate::Eligible),
+    NURI_GPU_TIMING("gpu.scopes.ddgi_irradiance_update_ms", Gate::Eligible),
+    NURI_GPU_TIMING("gpu.scopes.ddgi_distance_update_ms", Gate::Eligible),
     NURI_GPU_TIMING("gpu.scopes.ddgi_relocate_classify_ms", Gate::Eligible),
+    NURI_GPU_TIMING("gpu.scopes.ddgi_readback_ms", Gate::Eligible),
+    NURI_GPU_TIMING("gpu.scopes.ddgi_surface_cache_ms", Gate::Eligible),
 
     NURI_EXACT_METRIC(
         "benchmark.camera.position_delta", Unit::WorldUnits, Numeric::Float64,
@@ -620,6 +654,11 @@ constexpr BenchmarkMetricDescriptor kDescriptors[] = {
     NURI_COUNTER("renderer.ray_tracing.tlas_updates"),
     NURI_COUNTER("renderer.ray_tracing.dynamic_blas_updates"),
     NURI_COUNTER("renderer.ray_tracing.dynamic_vertex_dispatches"),
+    NURI_COUNTER("renderer.ray_tracing.no_as_work_frame"),
+    NURI_COUNTER("renderer.ray_tracing.indirect_submission_references"),
+    NURI_COUNTER("renderer.ray_tracing.indirect_texture_references"),
+    NURI_COUNTER(
+        "renderer.ray_tracing.graph_acceleration_structure_dependencies"),
     NURI_COUNTER("renderer.ray_tracing.readiness"),
     NURI_COUNTER("renderer.ray_tracing.consumed_rebuild_epoch"),
     NURI_MEMORY("gpu.memory.ray_tracing.decoded_positions_mb",
@@ -631,6 +670,8 @@ constexpr BenchmarkMetricDescriptor kDescriptors[] = {
     NURI_MEMORY("gpu.memory.ray_tracing.tlas_mb",
                 Availability::EveryMeasuredFrame),
     NURI_MEMORY("gpu.memory.ray_tracing.as_scratch_high_water_mb",
+                Availability::EveryMeasuredFrame),
+    NURI_MEMORY("gpu.memory.ray_tracing.as_scratch_current_mb",
                 Availability::EveryMeasuredFrame),
     NURI_COUNTER("renderer.ray_tracing.direct_binding_pool_high_water"),
     NURI_COUNTER("renderer.ddgi.requested"),
@@ -656,6 +697,7 @@ constexpr BenchmarkMetricDescriptor kDescriptors[] = {
     NURI_COUNTER("renderer.ddgi.classification_primary_queries"),
     NURI_COUNTER("renderer.ddgi.irradiance_primary_queries"),
     NURI_COUNTER("renderer.ddgi.primary_queries_issued"),
+    NURI_COUNTER("renderer.ddgi.trace_counters_available"),
     NURI_COUNTER("renderer.ddgi.trace_counter_source_frame"),
     NURI_COUNTER("renderer.ddgi.trace_counter_stale_frames"),
     NURI_COUNTER("renderer.ddgi.readback_waits"),
@@ -673,19 +715,33 @@ constexpr BenchmarkMetricDescriptor kDescriptors[] = {
     NURI_COUNTER("renderer.ddgi.directional_secondary_queries"),
     NURI_COUNTER("renderer.ddgi.local_secondary_queries"),
     NURI_COUNTER("renderer.ddgi.total_queries_issued"),
-    NURI_COUNTER("renderer.ddgi.primary_candidate_intersections"),
-    NURI_COUNTER("renderer.ddgi.secondary_candidate_intersections"),
-    NURI_COUNTER("renderer.ddgi.alpha_candidate_rejections"),
-    NURI_COUNTER("renderer.ddgi.backface_candidate_rejections"),
-    NURI_COUNTER("renderer.ddgi.candidate_overflows"),
-    NURI_COUNTER("renderer.ddgi.local_light_truncations"),
-    NURI_COUNTER("renderer.ddgi.non_finite_radiance_rejects"),
-    NURI_COUNTER("renderer.ddgi.emissive_radiance_clamps"),
-    NURI_COUNTER("renderer.ddgi.direct_radiance_clamps"),
-    NURI_COUNTER("renderer.ddgi.sky_radiance_clamps"),
-    NURI_COUNTER("renderer.ddgi.multi_bounce_radiance_clamps"),
-    NURI_COUNTER("renderer.ddgi.final_radiance_clamps"),
+    NURI_DIAGNOSTIC_COUNTER("renderer.ddgi.primary_candidate_intersections"),
+    NURI_DIAGNOSTIC_COUNTER("renderer.ddgi.secondary_candidate_intersections"),
+    NURI_DIAGNOSTIC_COUNTER("renderer.ddgi.alpha_candidate_rejections"),
+    NURI_DIAGNOSTIC_COUNTER("renderer.ddgi.backface_candidate_rejections"),
+    NURI_DIAGNOSTIC_COUNTER("renderer.ddgi.candidate_overflows"),
+    NURI_DIAGNOSTIC_COUNTER("renderer.ddgi.local_light_truncations"),
+    NURI_DIAGNOSTIC_COUNTER("renderer.ddgi.non_finite_radiance_rejects"),
+    NURI_DIAGNOSTIC_COUNTER("renderer.ddgi.emissive_radiance_clamps"),
+    NURI_DIAGNOSTIC_COUNTER("renderer.ddgi.direct_radiance_clamps"),
+    NURI_DIAGNOSTIC_COUNTER("renderer.ddgi.sky_radiance_clamps"),
+    NURI_DIAGNOSTIC_COUNTER("renderer.ddgi.multi_bounce_radiance_clamps"),
+    NURI_DIAGNOSTIC_COUNTER("renderer.ddgi.final_radiance_clamps"),
     NURI_COUNTER("renderer.ddgi.diagnostic_counters_enabled"),
+    NURI_COUNTER("renderer.ddgi.quality_schema"),
+    NURI_COUNTER("renderer.ddgi.requested_quality_preset"),
+    NURI_COUNTER("renderer.ddgi.quality_preset"),
+    NURI_COUNTER("renderer.ddgi.coverage_preset_schema"),
+    NURI_COUNTER("renderer.ddgi.requested_coverage_preset"),
+    NURI_COUNTER("renderer.ddgi.coverage_preset"),
+    NURI_COUNTER("renderer.ddgi.product_profile_schema"),
+    NURI_COUNTER("renderer.ddgi.gather_identity_schema"),
+    NURI_COUNTER("renderer.ddgi.opaque_gather_architecture"),
+    NURI_COUNTER("renderer.ddgi.opaque_gather_variant"),
+    NURI_COUNTER("renderer.ddgi.transmission_gather_architecture"),
+    NURI_COUNTER("renderer.ddgi.transmission_gather_variant"),
+    NURI_COUNTER("renderer.ddgi.trace_multibounce_gather_architecture"),
+    NURI_COUNTER("renderer.ddgi.trace_multibounce_gather_variant"),
     NURI_COUNTER("renderer.ddgi.surface_gather_architecture"),
     NURI_COUNTER("renderer.ddgi.surface_gather_width"),
     NURI_COUNTER("renderer.ddgi.surface_gather_height"),
@@ -693,10 +749,36 @@ constexpr BenchmarkMetricDescriptor kDescriptors[] = {
     NURI_COUNTER("renderer.ddgi.surface_gather_max_sampled_volumes"),
     NURI_COUNTER("renderer.ddgi.surface_gather_max_state_loads_per_pixel"),
     NURI_COUNTER("renderer.ddgi.surface_gather_max_atlas_samples_per_pixel"),
+    NURI_COUNTER("renderer.ddgi.surface_cache_format"),
+    NURI_COUNTER("renderer.ddgi.surface_cache_bytes"),
     NURI_COUNTER("renderer.ddgi.ray_query_capacity"),
     NURI_COUNTER("renderer.ddgi.probe_update_capacity"),
     NURI_COUNTER("renderer.ddgi.requested_probe_update_capacity"),
     NURI_COUNTER("renderer.ddgi.effective_probe_update_capacity"),
+    NURI_COUNTER("renderer.ddgi.requested_maintenance_probe_update_capacity"),
+    NURI_COUNTER("renderer.ddgi.effective_maintenance_probe_update_capacity"),
+    NURI_COUNTER("renderer.ddgi.maintenance_probe_updates"),
+    NURI_COUNTER("renderer.ddgi.primary_result_capacity"),
+    NURI_COUNTER("renderer.ddgi.trace_dispatches"),
+    NURI_COUNTER("renderer.ddgi.trace_launched_lanes"),
+    NURI_COUNTER("renderer.ddgi.trace_useful_lanes"),
+    NURI_COUNTER("renderer.ddgi.classification_launched_lanes"),
+    NURI_COUNTER("renderer.ddgi.classification_useful_lanes"),
+    NURI_COUNTER("renderer.ddgi.irradiance_atlas_dispatches"),
+    NURI_COUNTER("renderer.ddgi.distance_atlas_dispatches"),
+    NURI_COUNTER("renderer.ddgi.irradiance_result_visits"),
+    NURI_COUNTER("renderer.ddgi.distance_result_visits"),
+    NURI_COUNTER("renderer.ddgi.irradiance_texel_writes"),
+    NURI_COUNTER("renderer.ddgi.distance_texel_writes"),
+    NURI_COUNTER("renderer.ddgi.update_reason_bits"),
+    NURI_COUNTER("renderer.ddgi.reason.bootstrap"),
+    NURI_COUNTER("renderer.ddgi.reason.scroll"),
+    NURI_COUNTER("renderer.ddgi.reason.dirty_geometry"),
+    NURI_COUNTER("renderer.ddgi.reason.radiometric_response"),
+    NURI_COUNTER("renderer.ddgi.reason.maintenance"),
+    NURI_COUNTER("renderer.ddgi.reason.force"),
+    NURI_COUNTER("renderer.ddgi.reason.wake"),
+    NURI_COUNTER("renderer.ddgi.reason.reclassification"),
     NURI_COUNTER("renderer.ddgi.startup_phase"),
     NURI_RATIO("renderer.ddgi.sky_remainder_over_threshold_percentage"),
     NURI_COUNTER("renderer.ddgi.reset_count"),
@@ -709,6 +791,14 @@ constexpr BenchmarkMetricDescriptor kDescriptors[] = {
     NURI_COUNTER("renderer.ddgi.redundant_authored_volumes"),
     NURI_COUNTER("renderer.ddgi.redundant_authored_probes"),
     NURI_COUNTER("renderer.ddgi.coverage_mode"),
+    NURI_COUNTER("renderer.ddgi.coverage_solve_executions"),
+    NURI_COUNTER("renderer.ddgi.coverage_plan_cache_hits"),
+    NURI_COUNTER("renderer.ddgi.state_history_scan_count"),
+    NURI_DIAGNOSTIC_CPU_COUNTER("renderer.ddgi.age_sample_count"),
+    NURI_DIAGNOSTIC_CPU_COUNTER("renderer.ddgi.age_selection_count"),
+    NURI_DIAGNOSTIC_CPU_COUNTER("renderer.ddgi.coverage_lattice_evaluations"),
+    NURI_COUNTER("renderer.ddgi.upload_submission_count"),
+    NURI_DIAGNOSTIC_CPU_COUNTER("renderer.ddgi.light_difference_comparisons"),
     NURI_COUNTER("renderer.ddgi.coverage_status"),
     NURI_COUNTER("renderer.ddgi.coverage_error"),
     NURI_COUNTER("renderer.ddgi.limiting_constraint"),
@@ -720,6 +810,10 @@ constexpr BenchmarkMetricDescriptor kDescriptors[] = {
     NURI_WORLD("renderer.ddgi.achieved_half_extent_z"),
     NURI_RATIO("renderer.ddgi.scene_coverage_ratio"),
     NURI_POST_CPU_TIMING("renderer.ddgi.coverage_resolve_cpu_ms"),
+    NURI_POST_CPU_TIMING("cpu.ddgi.prepare_ms"),
+    NURI_POST_CPU_TIMING("cpu.ddgi.schedule_ms"),
+    NURI_POST_CPU_TIMING("cpu.ddgi.graph_build_ms"),
+    NURI_POST_CPU_TIMING("cpu.ddgi.readback_poll_ms"),
     NURI_COUNTER("renderer.ddgi.diagnostic_sample_count"),
     NURI_COUNTER("renderer.ddgi.uncovered_diagnostic_samples"),
     NURI_COUNTER("renderer.ddgi.sky_remainder_samples"),
@@ -754,6 +848,13 @@ constexpr BenchmarkMetricDescriptor kDescriptors[] = {
                 Availability::EveryMeasuredFrame),
     NURI_MEMORY("gpu.memory.ddgi.frame_batch_mb",
                 Availability::EveryMeasuredFrame),
+    NURI_MEMORY("gpu.memory.ddgi.frame_ring_device_mb",
+                Availability::EveryMeasuredFrame),
+    NURI_MEMORY("gpu.memory.ddgi.frame_ring_readback_mb",
+                Availability::EveryMeasuredFrame),
+    NURI_MEMORY("gpu.memory.ddgi.frame_ring_total_mb",
+                Availability::EveryMeasuredFrame),
+    NURI_COUNTER("renderer.ddgi.frame_slot_count"),
     NURI_MEMORY("gpu.memory.ddgi.committed_atlas_mb",
                 Availability::EveryMeasuredFrame),
     NURI_MEMORY("gpu.memory.ddgi.pending_atlas_mb",
@@ -1056,6 +1157,19 @@ benchmarkMetricGateRoleName(BenchmarkMetricGateRole role) noexcept {
     return "diagnostic";
   }
   return "diagnostic";
+}
+
+std::string_view benchmarkMetricEvidenceClassName(
+    BenchmarkMetricEvidenceClass evidenceClass) noexcept {
+  switch (evidenceClass) {
+  case Evidence::ProductSafe:
+    return "product-safe";
+  case Evidence::DiagnosticOnly:
+    return "diagnostic-only";
+  case Evidence::Derived:
+    return "derived";
+  }
+  return "product-safe";
 }
 
 } // namespace nuri::tools::benchmark

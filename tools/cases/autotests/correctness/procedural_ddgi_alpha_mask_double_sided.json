@@ -15,7 +15,7 @@
   "renderGraph": {"workerCount": 1, "parallelCompile": false, "parallelRecording": false},
   "camera": {"position": [0.0, 0.75, 4.2], "target": [0.0, 0.25, 0.0], "verticalFovDegrees": 60.0, "nearPlane": 0.05, "farPlane": 100.0},
   "settings": {
-    "ddgi": {"enabled": true, "preset": "Low", "raysPerProbe": 128, "maxProbeUpdatesPerFrame": 144, "maxRayQueriesPerFrame": 36864, "debugView": "Visibility"},
+    "ddgi": {"enabled": true, "qualityPreset": "Low", "raysPerProbe": 128, "maxProbeUpdatesPerFrame": 144, "maxRayQueriesPerFrame": 36864, "diagnosticCounters": true, "debugView": "Visibility"},
     "opaque": {"enableInstanceAnimation": false},
     "antiAliasing": {"mode": "None"},
     "ambientOcclusion": {"mode": "Disabled"},

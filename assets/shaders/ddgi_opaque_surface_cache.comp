@@ -1,0 +1,94 @@
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+#define NURI_CUSTOM_PUSH_CONSTANTS 1
+#include "common.sp"
+#include "ddgi_common.sp"
+
+layout(set = 0, binding = 0) uniform texture2D kTextures2D[];
+layout(set = 0, binding = 2, rgba16f) uniform image2D kImagesRGBA16F[];
+
+layout(push_constant) uniform PushConstants {
+  mat4 inverseView;
+  DDGIFrameBuffer ddgiFrame;
+  FrameDataBuffer sceneFrame;
+  uint depthTextureId;
+  uint normalTextureId;
+  uint outputTextureId;
+  uint width;
+  uint height;
+  uint projectionType;
+  float nearPlane;
+  float farPlane;
+  float tanHalfFovY;
+  float aspectRatio;
+  float orthoHeight;
+  uint reserved;
+}
+pc;
+
+void storeSkyFallback(ivec2 pixel) {
+  imageStore(kImagesRGBA16F[nonuniformEXT(pc.outputTextureId)], pixel,
+             vec4(0.0, 0.0, 0.0, 1.0));
+}
+
+float linearizeDepth(float deviceDepth) {
+  const float nearPlane = max(pc.nearPlane, 1.0e-4);
+  const float farPlane = max(pc.farPlane, nearPlane + 1.0e-3);
+  const float depth = clamp(deviceDepth, 0.0, 1.0);
+  if (pc.projectionType != 0u) {
+    return mix(nearPlane, farPlane, depth);
+  }
+  return (nearPlane * farPlane) /
+         max(farPlane - depth * (farPlane - nearPlane), 1.0e-4);
+}
+
+vec3 reconstructViewPosition(vec2 uv, float viewDepth) {
+  const vec2 ndc = uv * 2.0 - 1.0;
+  if (pc.projectionType != 0u) {
+    const float halfHeight = max(pc.orthoHeight, 1.0e-4) * 0.5;
+    return vec3(ndc.x * halfHeight * max(pc.aspectRatio, 1.0e-4),
+                -ndc.y * halfHeight, -viewDepth);
+  }
+  const float yScale = max(pc.tanHalfFovY, 1.0e-4);
+  return vec3(ndc.x * yScale * max(pc.aspectRatio, 1.0e-4) * viewDepth,
+              -ndc.y * yScale * viewDepth, -viewDepth);
+}
+
+void main() {
+  const ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+  const ivec2 extent = ivec2(int(pc.width), int(pc.height));
+  if (any(greaterThanEqual(pixel, extent))) {
+    return;
+  }
+
+  const vec4 encodedNormal =
+      texelFetch(kTextures2D[nonuniformEXT(pc.normalTextureId)], pixel, 0);
+  if (!(encodedNormal.a > 0.0)) {
+    storeSkyFallback(pixel);
+    return;
+  }
+  const float deviceDepth =
+      texelFetch(kTextures2D[nonuniformEXT(pc.depthTextureId)], pixel, 0).r;
+  const vec2 uv = (vec2(pixel) + vec2(0.5)) / vec2(extent);
+  const float viewDepth = linearizeDepth(deviceDepth);
+  const vec3 viewPoint = reconstructViewPosition(uv, viewDepth);
+  const vec3 worldPoint = (pc.inverseView * vec4(viewPoint, 1.0)).xyz;
+  if (any(isnan(worldPoint)) || any(isinf(worldPoint))) {
+    storeSkyFallback(pixel);
+    return;
+  }
+
+  const vec3 viewNormal = encodedNormal.xyz * 2.0 - 1.0;
+  const vec3 worldNormal = normalize(mat3(pc.inverseView) * viewNormal);
+  const vec3 toCamera = pc.sceneFrame.cameraPos.xyz - worldPoint;
+  const float toCameraLengthSquared = dot(toCamera, toCamera);
+  const vec3 viewDirection =
+      toCameraLengthSquared > 1.0e-8
+          ? toCamera * inversesqrt(toCameraLengthSquared)
+          : worldNormal;
+  const DDGIQueryResult ddgi =
+      queryDDGI(pc.ddgiFrame, worldPoint, worldNormal, viewDirection,
+                kDDGIGatherVariantProduct);
+  imageStore(kImagesRGBA16F[nonuniformEXT(pc.outputTextureId)], pixel,
+             vec4(ddgi.irradiance, ddgi.skyWeight));
+}

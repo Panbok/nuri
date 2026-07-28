@@ -152,6 +152,7 @@ void RayTracingScene::clearSceneResources(bool clearChangeTracking) noexcept {
   dynamicUpdateScheduled_ = false;
   transformUpdateScheduled_ = false;
   scheduledFrameIndex_ = UINT64_MAX;
+  pendingRebuildEpoch_ = consumedRebuildEpoch_;
   animationVersion_ = 0u;
   pendingAnimationVersion_ = 0u;
   pendingTransformVersion_ = 0u;
@@ -1547,8 +1548,22 @@ void RayTracingScene::publish(FrameBuildContext &ctx,
   asScratchHighWaterBytes_ =
       std::max(asScratchHighWaterBytes_, scheduledScratchBytes);
   metrics.asScratchHighWaterBytes = asScratchHighWaterBytes_;
+  metrics.asScratchCurrentBytes = scheduledScratchBytes;
   metrics.directBindingPoolHighWater =
       gpu_.getRayTracingBackendTelemetry().directBindingPoolHighWater;
+  metrics.indirectSubmissionReferences =
+      static_cast<uint32_t>(indirectReferences_.size());
+  metrics.indirectTextureReferences = static_cast<uint32_t>(
+      ctx.shared.sceneDrawDatabase->rayTracingMaterialTextures().size());
+  metrics.graphAccelerationStructureDependencies =
+      nuri::isValid(graphTlas) ? 1u : 0u;
+  metrics.noAsWorkFrame =
+      metrics.decodeDispatches == 0u && metrics.blasBuilds == 0u &&
+              metrics.tlasBuilds == 0u && metrics.tlasUpdates == 0u &&
+              metrics.dynamicBlasUpdates == 0u &&
+              metrics.dynamicVertexDispatches == 0u
+          ? 1u
+          : 0u;
   metrics.tableBytes =
       instanceRecords_.size() * sizeof(RtInstanceGpuData) +
       geometryRecords_.size() * sizeof(RtGeometryGpuData) +
@@ -1573,6 +1588,16 @@ Result<bool, std::string> RayTracingScene::prepare(FrameBuildContext &ctx) {
   NURI_PROFILER_FUNCTION();
   ctx.shared.rayTracingScene.reset();
   ctx.frame.metrics.rayTracingScene = {};
+  struct PrepareCpuTimer {
+    RayTracingSceneFrameMetrics &metrics;
+    std::chrono::steady_clock::time_point start =
+        std::chrono::steady_clock::now();
+    ~PrepareCpuTimer() {
+      metrics.prepareCpuTimeMs = std::chrono::duration<float, std::milli>(
+                                     std::chrono::steady_clock::now() - start)
+                                     .count();
+    }
+  } prepareCpuTimer{ctx.frame.metrics.rayTracingScene};
   ctx.frame.metrics.rayTracingScene.consumedRebuildEpoch =
       consumedRebuildEpoch_;
   topologyBuildScheduled_ = false;
@@ -1620,13 +1645,19 @@ Result<bool, std::string> RayTracingScene::prepare(FrameBuildContext &ctx) {
       (matchingAnimationData && animationVersion_ == 0u &&
        animationData->version != 0u);
   if (topologyChanged) {
+    const auto start = std::chrono::steady_clock::now();
     auto rebuild = rebuildStaticScene(ctx, *ctx.shared.sceneDrawDatabase);
+    ctx.frame.metrics.rayTracingScene.topologyPrepareCpuTimeMs =
+        std::chrono::duration<float, std::milli>(
+            std::chrono::steady_clock::now() - start)
+            .count();
     if (rebuild.hasError()) {
       failed_ = true;
       return rebuild;
     }
-    consumedRebuildEpoch_ = std::max(
+    pendingRebuildEpoch_ = std::max(
         consumedRebuildEpoch_, settings.requestedEpochs.rebuildRayTracingScene);
+    scheduledFrameIndex_ = ctx.frame.frameIndex;
     if (!nuri::isValid(tlas_.get())) {
       ctx.frame.metrics.rayTracingScene.readiness =
           ready_ ? RayTracingSceneReadiness::Ready
@@ -1647,7 +1678,12 @@ Result<bool, std::string> RayTracingScene::prepare(FrameBuildContext &ctx) {
   const bool transformsChanged =
       ready_ && transformVersion_ != scene.transformVersion();
   if (transformsChanged) {
+    const auto start = std::chrono::steady_clock::now();
     auto transforms = updateTransforms(ctx, *ctx.shared.sceneDrawDatabase);
+    ctx.frame.metrics.rayTracingScene.transformPrepareCpuTimeMs =
+        std::chrono::duration<float, std::milli>(
+            std::chrono::steady_clock::now() - start)
+            .count();
     if (transforms.hasError()) {
       return transforms;
     }
@@ -1658,6 +1694,7 @@ Result<bool, std::string> RayTracingScene::prepare(FrameBuildContext &ctx) {
                               matchingAnimationData &&
                               animationVersion_ != animationData->version;
   if (dynamicChanged) {
+    const auto start = std::chrono::steady_clock::now();
     rebuildSurfaceBounds(*ctx.shared.sceneDrawDatabase);
     beginGeometryChanges(ctx.frame.frameIndex, transformsChanged);
     prepareDeformationChangeRegions(animationData->version);
@@ -1666,10 +1703,21 @@ Result<bool, std::string> RayTracingScene::prepare(FrameBuildContext &ctx) {
     if (uploadBounds.hasError()) {
       return uploadBounds;
     }
-    return appendDynamicUpdatePasses(ctx, *animationData);
+    auto result = appendDynamicUpdatePasses(ctx, *animationData);
+    ctx.frame.metrics.rayTracingScene.deformationPrepareCpuTimeMs =
+        std::chrono::duration<float, std::milli>(
+            std::chrono::steady_clock::now() - start)
+            .count();
+    return result;
   }
   if (transformsChanged) {
-    return appendTlasUpdatePass(ctx);
+    const auto start = std::chrono::steady_clock::now();
+    auto result = appendTlasUpdatePass(ctx);
+    ctx.frame.metrics.rayTracingScene.tlasPrepareCpuTimeMs =
+        std::chrono::duration<float, std::milli>(
+            std::chrono::steady_clock::now() - start)
+            .count();
+    return result;
   }
   publish(ctx, graphTlas);
   return Result<bool, std::string>::makeResult(true);
@@ -1681,6 +1729,8 @@ void RayTracingScene::onFrameSubmitted(
   if (scheduledFrameIndex_ != frame.frameIndex) {
     return;
   }
+  consumedRebuildEpoch_ = std::max(consumedRebuildEpoch_, pendingRebuildEpoch_);
+  pendingRebuildEpoch_ = consumedRebuildEpoch_;
   if (frame.scene != nullptr) {
     (void)frame.scene->stageDDGIStaticCoverageBounds(
         currentStaticCoverageBounds_);
@@ -1726,6 +1776,7 @@ void RayTracingScene::onFrameAbandoned(
     pendingTransformVersion_ = transformVersion_;
   }
   if (scheduledFrameIndex_ == frame.frameIndex) {
+    pendingRebuildEpoch_ = consumedRebuildEpoch_;
     scheduledFrameIndex_ = UINT64_MAX;
   }
 }

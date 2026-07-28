@@ -13,7 +13,7 @@
   "resolution": [640, 360],
   "fixedDeltaSeconds": 0.016666667,
   "warmupFrames": 4,
-  "endFrame": 8,
+  "endFrame": 32,
   "authoritative": false,
   "presentMode": "immediate",
   "windowMode": "visible",
@@ -69,9 +69,18 @@
         {"id": "ddgi_scrolled", "metric": "renderer.ddgi.scroll_count", "equals": 1},
         {"id": "one_plane_invalidated", "metric": "renderer.ddgi.invalidated_probes", "equals": 24},
         {"id": "ddgi_volume_ready", "metric": "renderer.ddgi.ready_volumes", "equals": 1},
-        {"id": "ddgi_history_ready", "metric": "renderer.ddgi.history_ready", "equals": 1},
         {"id": "ddgi_no_fallback", "metric": "renderer.ddgi.fallback_reason", "equals": 0},
         {"id": "exposed_plane_prioritized", "metric": "renderer.ddgi.updated_probes", "greaterOrEqual": 24}
+      ]
+    },
+    {
+      "id": "history_settled",
+      "frame": 31,
+      "captures": [],
+      "assertions": [
+        {"id": "ddgi_volume_ready", "metric": "renderer.ddgi.ready_volumes", "equals": 1},
+        {"id": "ddgi_history_ready", "metric": "renderer.ddgi.history_ready", "equals": 1},
+        {"id": "ddgi_no_fallback", "metric": "renderer.ddgi.fallback_reason", "equals": 0}
       ]
     }
   ],

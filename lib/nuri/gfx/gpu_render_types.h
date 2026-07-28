@@ -124,13 +124,17 @@ enum class GpuTimingScope : uint8_t {
   GTAOMain = 30,
   GTAODenoise = 31,
   GTAOUpscale = 32,
+  DDGIIrradianceUpdate = 33,
+  DDGIDistanceUpdate = 34,
+  DDGIReadback = 35,
+  DDGIOpaqueSurfaceCache = 36,
 };
 
-[[nodiscard]] constexpr uint32_t
+[[nodiscard]] constexpr uint64_t
 gpuTimingScopeToBit(GpuTimingScope scope) noexcept {
   return scope == GpuTimingScope::None
-             ? 0u
-             : (1u << (static_cast<uint8_t>(scope) - 1u));
+             ? 0ull
+             : (1ull << (static_cast<uint8_t>(scope) - 1u));
 }
 
 [[nodiscard]] constexpr GpuTimingScope
@@ -144,6 +148,7 @@ gpuTimingParentScope(GpuTimingScope scope) noexcept {
   case GpuTimingScope::OpaqueDepth:
   case GpuTimingScope::OpaqueNormal:
   case GpuTimingScope::OpaqueMain:
+  case GpuTimingScope::DDGIOpaqueSurfaceCache:
     return GpuTimingScope::Opaque;
   case GpuTimingScope::TemporalAACopyBack:
     return GpuTimingScope::TemporalAAResolve;
@@ -160,75 +165,86 @@ gpuTimingParentScope(GpuTimingScope scope) noexcept {
   case GpuTimingScope::DDGIUpdate:
   case GpuTimingScope::DDGIRelocateClassify:
     return GpuTimingScope::DDGI;
+  case GpuTimingScope::DDGIIrradianceUpdate:
+  case GpuTimingScope::DDGIDistanceUpdate:
+    return GpuTimingScope::DDGIUpdate;
   default:
     return GpuTimingScope::None;
   }
 }
 
-constexpr uint32_t kGpuTimingScopeShadowBit =
+constexpr uint64_t kGpuTimingScopeShadowBit =
     gpuTimingScopeToBit(GpuTimingScope::Shadow);
-constexpr uint32_t kGpuTimingScopeShadowDepthBit =
+constexpr uint64_t kGpuTimingScopeShadowDepthBit =
     gpuTimingScopeToBit(GpuTimingScope::ShadowDepth);
-constexpr uint32_t kGpuTimingScopeShadowSdsmBit =
+constexpr uint64_t kGpuTimingScopeShadowSdsmBit =
     gpuTimingScopeToBit(GpuTimingScope::ShadowSdsm);
-constexpr uint32_t kGpuTimingScopeSceneColorDownsampleBit =
+constexpr uint64_t kGpuTimingScopeSceneColorDownsampleBit =
     gpuTimingScopeToBit(GpuTimingScope::SceneColorDownsample);
-constexpr uint32_t kGpuTimingScopeTransmissionBit =
+constexpr uint64_t kGpuTimingScopeTransmissionBit =
     gpuTimingScopeToBit(GpuTimingScope::Transmission);
-constexpr uint32_t kGpuTimingScopeTemporalAAResolveBit =
+constexpr uint64_t kGpuTimingScopeTemporalAAResolveBit =
     gpuTimingScopeToBit(GpuTimingScope::TemporalAAResolve);
-constexpr uint32_t kGpuTimingScopeTemporalAADebugBit =
+constexpr uint64_t kGpuTimingScopeTemporalAADebugBit =
     gpuTimingScopeToBit(GpuTimingScope::TemporalAADebug);
-constexpr uint32_t kGpuTimingScopeSpatialAABit =
+constexpr uint64_t kGpuTimingScopeSpatialAABit =
     gpuTimingScopeToBit(GpuTimingScope::SpatialAA);
-constexpr uint32_t kGpuTimingScopeOpaqueBit =
+constexpr uint64_t kGpuTimingScopeOpaqueBit =
     gpuTimingScopeToBit(GpuTimingScope::Opaque);
-constexpr uint32_t kGpuTimingScopeMsaaResolveBit =
+constexpr uint64_t kGpuTimingScopeMsaaResolveBit =
     gpuTimingScopeToBit(GpuTimingScope::MsaaResolve);
-constexpr uint32_t kGpuTimingScopeGTAOBit =
+constexpr uint64_t kGpuTimingScopeGTAOBit =
     gpuTimingScopeToBit(GpuTimingScope::GTAO);
-constexpr uint32_t kGpuTimingScopeHDRPostProcessBit =
+constexpr uint64_t kGpuTimingScopeHDRPostProcessBit =
     gpuTimingScopeToBit(GpuTimingScope::HDRPostProcess);
-constexpr uint32_t kGpuTimingScopeSkyboxBit =
+constexpr uint64_t kGpuTimingScopeSkyboxBit =
     gpuTimingScopeToBit(GpuTimingScope::Skybox);
-constexpr uint32_t kGpuTimingScopeVelocityBit =
+constexpr uint64_t kGpuTimingScopeVelocityBit =
     gpuTimingScopeToBit(GpuTimingScope::Velocity);
-constexpr uint32_t kGpuTimingScopeReactiveMaskBit =
+constexpr uint64_t kGpuTimingScopeReactiveMaskBit =
     gpuTimingScopeToBit(GpuTimingScope::ReactiveMask);
-constexpr uint32_t kGpuTimingScopeTemporalAACopyBackBit =
+constexpr uint64_t kGpuTimingScopeTemporalAACopyBackBit =
     gpuTimingScopeToBit(GpuTimingScope::TemporalAACopyBack);
-constexpr uint32_t kGpuTimingScopeGTAOTemporalBit =
+constexpr uint64_t kGpuTimingScopeGTAOTemporalBit =
     gpuTimingScopeToBit(GpuTimingScope::GTAOTemporal);
-constexpr uint32_t kGpuTimingScopeWholeFrameBit =
+constexpr uint64_t kGpuTimingScopeWholeFrameBit =
     gpuTimingScopeToBit(GpuTimingScope::WholeFrame);
-constexpr uint32_t kGpuTimingScopeRayTracingSceneBit =
+constexpr uint64_t kGpuTimingScopeRayTracingSceneBit =
     gpuTimingScopeToBit(GpuTimingScope::RayTracingScene);
-constexpr uint32_t kGpuTimingScopeRayTracingBLASBit =
+constexpr uint64_t kGpuTimingScopeRayTracingBLASBit =
     gpuTimingScopeToBit(GpuTimingScope::RayTracingBLAS);
-constexpr uint32_t kGpuTimingScopeRayTracingTLASBit =
+constexpr uint64_t kGpuTimingScopeRayTracingTLASBit =
     gpuTimingScopeToBit(GpuTimingScope::RayTracingTLAS);
-constexpr uint32_t kGpuTimingScopeDDGIBit =
+constexpr uint64_t kGpuTimingScopeDDGIBit =
     gpuTimingScopeToBit(GpuTimingScope::DDGI);
-constexpr uint32_t kGpuTimingScopeDDGITraceBit =
+constexpr uint64_t kGpuTimingScopeDDGITraceBit =
     gpuTimingScopeToBit(GpuTimingScope::DDGITrace);
-constexpr uint32_t kGpuTimingScopeDDGIUpdateBit =
+constexpr uint64_t kGpuTimingScopeDDGIUpdateBit =
     gpuTimingScopeToBit(GpuTimingScope::DDGIUpdate);
-constexpr uint32_t kGpuTimingScopeDDGIRelocateClassifyBit =
+constexpr uint64_t kGpuTimingScopeDDGIRelocateClassifyBit =
     gpuTimingScopeToBit(GpuTimingScope::DDGIRelocateClassify);
-constexpr uint32_t kGpuTimingScopeOpaqueDepthBit =
+constexpr uint64_t kGpuTimingScopeOpaqueDepthBit =
     gpuTimingScopeToBit(GpuTimingScope::OpaqueDepth);
-constexpr uint32_t kGpuTimingScopeOpaqueNormalBit =
+constexpr uint64_t kGpuTimingScopeOpaqueNormalBit =
     gpuTimingScopeToBit(GpuTimingScope::OpaqueNormal);
-constexpr uint32_t kGpuTimingScopeOpaqueMainBit =
+constexpr uint64_t kGpuTimingScopeOpaqueMainBit =
     gpuTimingScopeToBit(GpuTimingScope::OpaqueMain);
-constexpr uint32_t kGpuTimingScopeGTAOPrefilterEdgesBit =
+constexpr uint64_t kGpuTimingScopeGTAOPrefilterEdgesBit =
     gpuTimingScopeToBit(GpuTimingScope::GTAOPrefilterEdges);
-constexpr uint32_t kGpuTimingScopeGTAOMainBit =
+constexpr uint64_t kGpuTimingScopeGTAOMainBit =
     gpuTimingScopeToBit(GpuTimingScope::GTAOMain);
-constexpr uint32_t kGpuTimingScopeGTAODenoiseBit =
+constexpr uint64_t kGpuTimingScopeGTAODenoiseBit =
     gpuTimingScopeToBit(GpuTimingScope::GTAODenoise);
-constexpr uint32_t kGpuTimingScopeGTAOUpscaleBit =
+constexpr uint64_t kGpuTimingScopeGTAOUpscaleBit =
     gpuTimingScopeToBit(GpuTimingScope::GTAOUpscale);
+constexpr uint64_t kGpuTimingScopeDDGIIrradianceUpdateBit =
+    gpuTimingScopeToBit(GpuTimingScope::DDGIIrradianceUpdate);
+constexpr uint64_t kGpuTimingScopeDDGIDistanceUpdateBit =
+    gpuTimingScopeToBit(GpuTimingScope::DDGIDistanceUpdate);
+constexpr uint64_t kGpuTimingScopeDDGIReadbackBit =
+    gpuTimingScopeToBit(GpuTimingScope::DDGIReadback);
+constexpr uint64_t kGpuTimingScopeDDGIOpaqueSurfaceCacheBit =
+    gpuTimingScopeToBit(GpuTimingScope::DDGIOpaqueSurfaceCache);
 
 struct GpuTimingReport {
   uint64_t shadowSourceFrameIndex = std::numeric_limits<uint64_t>::max();
@@ -265,6 +281,13 @@ struct GpuTimingReport {
   uint64_t ddgiUpdateSourceFrameIndex = std::numeric_limits<uint64_t>::max();
   uint64_t ddgiRelocateClassifySourceFrameIndex =
       std::numeric_limits<uint64_t>::max();
+  uint64_t ddgiIrradianceUpdateSourceFrameIndex =
+      std::numeric_limits<uint64_t>::max();
+  uint64_t ddgiDistanceUpdateSourceFrameIndex =
+      std::numeric_limits<uint64_t>::max();
+  uint64_t ddgiReadbackSourceFrameIndex = std::numeric_limits<uint64_t>::max();
+  uint64_t ddgiOpaqueSurfaceCacheSourceFrameIndex =
+      std::numeric_limits<uint64_t>::max();
   uint64_t opaqueDepthSourceFrameIndex = std::numeric_limits<uint64_t>::max();
   uint64_t opaqueNormalSourceFrameIndex = std::numeric_limits<uint64_t>::max();
   uint64_t opaqueMainSourceFrameIndex = std::numeric_limits<uint64_t>::max();
@@ -298,6 +321,10 @@ struct GpuTimingReport {
   float ddgiTraceTimeMs = 0.0f;
   float ddgiUpdateTimeMs = 0.0f;
   float ddgiRelocateClassifyTimeMs = 0.0f;
+  float ddgiIrradianceUpdateTimeMs = 0.0f;
+  float ddgiDistanceUpdateTimeMs = 0.0f;
+  float ddgiReadbackTimeMs = 0.0f;
+  float ddgiOpaqueSurfaceCacheTimeMs = 0.0f;
   float opaqueDepthTimeMs = 0.0f;
   float opaqueNormalTimeMs = 0.0f;
   float opaqueMainTimeMs = 0.0f;
@@ -314,7 +341,7 @@ struct GpuTimingReport {
   uint64_t opaqueClippingInvocations = 0u;
   uint64_t opaqueClippingPrimitives = 0u;
   uint64_t opaqueFragmentShaderInvocations = 0u;
-  uint32_t availableScopeMask = 0u;
+  uint64_t availableScopeMask = 0u;
   struct PassTiming {
     std::string debugName{};
     uint64_t sourceFrameIndex = std::numeric_limits<uint64_t>::max();
@@ -342,7 +369,7 @@ struct GpuTimingScopeMergeDesc {
   GpuTimingScope scope = GpuTimingScope::None;
   float GpuTimingReport::*timeMs = nullptr;
   uint64_t GpuTimingReport::*sourceFrameIndex = nullptr;
-  uint32_t bit = 0u;
+  uint64_t bit = 0u;
 };
 
 inline constexpr auto kGpuTimingScopeDescs =
@@ -450,6 +477,21 @@ inline constexpr auto kGpuTimingScopeDescs =
         {GpuTimingScope::GTAOUpscale, &GpuTimingReport::gtaoUpscaleTimeMs,
          &GpuTimingReport::gtaoUpscaleSourceFrameIndex,
          gpuTimingScopeToBit(GpuTimingScope::GTAOUpscale)},
+        {GpuTimingScope::DDGIIrradianceUpdate,
+         &GpuTimingReport::ddgiIrradianceUpdateTimeMs,
+         &GpuTimingReport::ddgiIrradianceUpdateSourceFrameIndex,
+         gpuTimingScopeToBit(GpuTimingScope::DDGIIrradianceUpdate)},
+        {GpuTimingScope::DDGIDistanceUpdate,
+         &GpuTimingReport::ddgiDistanceUpdateTimeMs,
+         &GpuTimingReport::ddgiDistanceUpdateSourceFrameIndex,
+         gpuTimingScopeToBit(GpuTimingScope::DDGIDistanceUpdate)},
+        {GpuTimingScope::DDGIReadback, &GpuTimingReport::ddgiReadbackTimeMs,
+         &GpuTimingReport::ddgiReadbackSourceFrameIndex,
+         gpuTimingScopeToBit(GpuTimingScope::DDGIReadback)},
+        {GpuTimingScope::DDGIOpaqueSurfaceCache,
+         &GpuTimingReport::ddgiOpaqueSurfaceCacheTimeMs,
+         &GpuTimingReport::ddgiOpaqueSurfaceCacheSourceFrameIndex,
+         gpuTimingScopeToBit(GpuTimingScope::DDGIOpaqueSurfaceCache)},
     });
 
 [[nodiscard]] constexpr const GpuTimingScopeMergeDesc *

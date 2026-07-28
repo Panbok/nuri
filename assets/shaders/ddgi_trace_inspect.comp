@@ -122,7 +122,9 @@ void main() {
     pc.header.value.distanceSecondReserved = vec4(moments.y, 0.0, 0.0, 0.0);
   }
 
-  const vec3 direction = ddgiRayDirection(ray, pc.rayCount, pc.frameSeed);
+  const vec3 direction = ddgiRayDirection(
+      ray, pc.rayCount,
+      ddgiProbeUpdateRaySeed(volume, pc.probeId, pc.frameSeed));
   rayQueryEXT query;
   rayQueryInitializeEXT(query, kSceneTlas, gl_RayFlagsNoneEXT, 0xff, origin,
                         ddgiProbeRayTMin(volume), direction,

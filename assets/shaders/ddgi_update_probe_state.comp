@@ -55,7 +55,8 @@ uvec3 ddgiProbeCoordinate(uint probeId, uvec3 counts) {
 
 bool ddgiProbeIntersectsSurfaceBounds(DDGIVolumeGpuData volume, uint probeId,
                                       vec3 relocation, uint firstBound,
-                                      uint boundCount) {
+                                      uint boundCount,
+                                      float relocationAllowance) {
   const uvec3 counts = volume.probeCountsAndCount.xyz;
   const uvec3 physical = ddgiProbeCoordinate(probeId, counts);
   const uvec3 logical =
@@ -67,7 +68,10 @@ bool ddgiProbeIntersectsSurfaceBounds(DDGIVolumeGpuData volume, uint probeId,
   const float minSpacing = min(min(spacing.x, spacing.y), spacing.z);
   const float queryBias =
       min(0.75 * minSpacing * volume.rayBiases.w, 0.25 * minSpacing);
-  const vec3 localHalfExtent = 0.5 * spacing + vec3(queryBias);
+  // A probe is one of the eight trilinear neighbors for receivers up to one
+  // complete lattice spacing away on every axis.  Half-cell bounds discard
+  // valid neighbors and make camera-tracked cascade transitions expose holes.
+  const vec3 localHalfExtent = spacing + vec3(queryBias + relocationAllowance);
   const mat3 rotation = mat3(volume.worldFromLocal);
   const vec3 worldHalfExtent = abs(rotation[0]) * localHalfExtent.x +
                                abs(rotation[1]) * localHalfExtent.y +
@@ -91,11 +95,16 @@ void main() {
     return;
   const DDGIProbeUpdateEntryGpu update = pc.updates.values[index];
   DDGIProbeStateGpuData state = loadState(update.volumeSlot, update.probeId);
+  DDGIVolumeGpuData volume = pc.frame.volumes[update.volumeSlot];
+  // Generated coverage stays complete while camera clipmaps scroll. Authored
+  // volumes may still classify probes to conform to their explicit bounds.
+  const bool classificationActive =
+      pc.classificationEnabled != 0u &&
+      volume.effectiveIdentity.x == kDDGIEffectiveKindAuthored;
   if (pc.clearMode != 0u) {
     state.relocation = vec4(0.0);
-    const uint resetState = pc.classificationEnabled != 0u
-                                ? kDDGIProbeStateUninitialized
-                                : kDDGIProbeStateNewlyVigilant;
+    const uint resetState = classificationActive ? kDDGIProbeStateUninitialized
+                                                 : kDDGIProbeStateNewlyVigilant;
     state.stateAgeFlags = uvec4(resetState, 0u, 0u, 0u);
     storeState(update.volumeSlot, update.probeId, state);
     pc.updates.values[index].resultState = state.stateAgeFlags.x;
@@ -108,7 +117,9 @@ void main() {
   const uint incomingState = state.stateAgeFlags.x;
   if ((update.flags & 1u) != 0u) {
     state.relocation = vec4(0.0);
-    state.stateAgeFlags = uvec4(kDDGIProbeStateUninitialized, 0u, 0u, 0u);
+    const uint resetState = classificationActive ? kDDGIProbeStateUninitialized
+                                                 : kDDGIProbeStateNewlyVigilant;
+    state.stateAgeFlags = uvec4(resetState, 0u, 0u, 0u);
   } else if ((update.flags & 2u) != 0u &&
              state.stateAgeFlags.x == kDDGIProbeStateSleeping) {
     state.stateAgeFlags.x = kDDGIProbeStateNewlyAwake;
@@ -123,22 +134,20 @@ void main() {
     state.stateAgeFlags.x = kDDGIProbeStateVigilant;
   }
   if (state.stateAgeFlags.x != kDDGIProbeStateUninitialized) {
-    if (pc.classificationEnabled == 0u &&
-        state.stateAgeFlags.x != kDDGIProbeStateOff) {
+    if (!classificationActive && state.stateAgeFlags.x != kDDGIProbeStateOff) {
       state.stateAgeFlags.x = kDDGIProbeStateVigilant;
-    } else if (pc.classificationEnabled != 0u &&
+    } else if (classificationActive &&
                (state.stateAgeFlags.x == kDDGIProbeStateSleeping ||
                 state.stateAgeFlags.x == kDDGIProbeStateAwake)) {
-      DDGIVolumeGpuData volume = pc.frame.volumes[update.volumeSlot];
       const uint staticCount = pc.surfaceBoundsCountsFlags & 0x1fffu;
       const uint dynamicCount = (pc.surfaceBoundsCountsFlags >> 13u) & 0x1fffu;
       const bool dynamicAvailable =
           (pc.surfaceBoundsCountsFlags & (1u << 31u)) != 0u;
       if (!dynamicAvailable) {
         state.stateAgeFlags.x = kDDGIProbeStateNewlyVigilant;
-      } else if (ddgiProbeIntersectsSurfaceBounds(volume, update.probeId,
-                                                  state.relocation.xyz,
-                                                  staticCount, dynamicCount)) {
+      } else if (ddgiProbeIntersectsSurfaceBounds(
+                     volume, update.probeId, state.relocation.xyz, staticCount,
+                     dynamicCount, 0.0)) {
         if (state.stateAgeFlags.x == kDDGIProbeStateSleeping) {
           state.stateAgeFlags.x = kDDGIProbeStateNewlyAwake;
         }
@@ -154,21 +163,40 @@ void main() {
     return;
   }
 
-  DDGIVolumeGpuData volume = pc.frame.volumes[update.volumeSlot];
   const vec3 spacing = volume.probeSpacingAndBias.xyz;
   const float minSpacing = min(min(spacing.x, spacing.y), spacing.z);
+  if (classificationActive &&
+      (update.flags & kDDGIProbeUpdateReasonBootstrap) != 0u) {
+    const uint staticCount = pc.surfaceBoundsCountsFlags & 0x1fffu;
+    const bool staticAvailable =
+        (pc.surfaceBoundsCountsFlags & (1u << 30u)) != 0u;
+    const float relocationAllowance = 0.499 * minSpacing;
+    if (staticAvailable && !ddgiProbeIntersectsSurfaceBounds(
+                               volume, update.probeId, state.relocation.xyz, 0u,
+                               staticCount, relocationAllowance)) {
+      state.stateAgeFlags.x = kDDGIProbeStateSleeping;
+      state.stateAgeFlags.z = 5u;
+      storeState(update.volumeSlot, update.probeId, state);
+      pc.updates.values[index].resultState = state.stateAgeFlags.x;
+      pc.updates.values[index].resultSubmittedSequence = state.stateAgeFlags.y;
+      pc.updates.values[index].resultIteration = state.stateAgeFlags.z;
+      pc.updates.values[index].resultRelocation = state.relocation;
+      return;
+    }
+  }
   uint staticBackfaces = 0u;
   float closestBackface = 3.402823466e+38;
   float closestFront = 3.402823466e+38;
   vec3 closestBackDirection = vec3(0.0);
   vec3 closestFrontDirection = vec3(0.0);
+  const uint raySeed =
+      ddgiProbeUpdateRaySeed(volume, update.probeId, pc.frameSeed);
   for (uint ray = 0u; ray < update.rayCount; ++ray) {
     const DDGIRayResultGpuData result = pc.results.values[update.rayBase + ray];
     const bool staticGeometry = (result.metadata.w & 1u) == 0u;
     if (!staticGeometry)
       continue;
-    const vec3 worldDirection =
-        ddgiRayDirection(ray, update.rayCount, pc.frameSeed);
+    const vec3 worldDirection = ddgiRayDirection(ray, update.rayCount, raySeed);
     const vec3 localDirection =
         normalize(mat3(volume.localFromWorld) * worldDirection);
     if (result.metadata.x == 2u) {
@@ -207,7 +235,7 @@ void main() {
   }
   const uint iteration = min(state.stateAgeFlags.z + 1u, 5u);
   state.stateAgeFlags.z = iteration;
-  if (pc.classificationEnabled == 0u) {
+  if (!classificationActive) {
     state.stateAgeFlags.x = kDDGIProbeStateVigilant;
   } else if (iteration >= 5u) {
     const bool relocationStalled =
@@ -221,7 +249,7 @@ void main() {
       const bool relevant =
           !staticAvailable ||
           ddgiProbeIntersectsSurfaceBounds(volume, update.probeId, offset, 0u,
-                                           staticCount);
+                                           staticCount, 0.0);
       state.stateAgeFlags.x =
           relevant ? kDDGIProbeStateNewlyVigilant : kDDGIProbeStateSleeping;
     }

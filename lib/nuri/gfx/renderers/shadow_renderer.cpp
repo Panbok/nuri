@@ -1833,8 +1833,16 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
     resetSdsmState();
     return publishInactiveShadowFrame();
   }
-  uint32_t selectedLightIndex = 0u;
-  LightId selectedLightId = directionalLightIds.front();
+  const auto directionalEnergy = [](const DirectionalLightGpuData &light) {
+    const glm::vec3 color = glm::max(glm::vec3(light.colorReserved), 0.0f);
+    return std::max(light.directionIlluminance.w, 0.0f) *
+           glm::dot(color, glm::vec3(0.2126f, 0.7152f, 0.0722f));
+  };
+  const auto strongestLight =
+      std::ranges::max_element(directionalLights, {}, directionalEnergy);
+  uint32_t selectedLightIndex = static_cast<uint32_t>(
+      std::distance(directionalLights.begin(), strongestLight));
+  LightId selectedLightId = directionalLightIds[selectedLightIndex];
   if (frame.sharedResources.selectedShadowLightId.has_value() &&
       isValid(*frame.sharedResources.selectedShadowLightId)) {
     for (uint32_t i = 0u; i < directionalLightIds.size(); ++i) {

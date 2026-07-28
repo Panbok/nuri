@@ -86,6 +86,8 @@ struct RayTracingSceneFrameView {
   uint64_t geometryTableAddress = 0u;
   uint64_t materialTableAddress = 0u;
   uint64_t surfaceBoundsAddress = 0u;
+  // Producer-owned retention sets. RayTracingScene and SceneDrawDatabase
+  // publish only valid, duplicate-free handles.
   std::span<const BufferHandle> indirectSubmissionReferences{};
   std::span<const TextureHandle> indirectSubmissionTextureReferences{};
   uint64_t sceneId = 0u;
@@ -135,8 +137,18 @@ struct RayTracingSceneFrameMetrics {
   uint64_t blasAllocationBytes = 0u;
   uint64_t tlasAllocationBytes = 0u;
   uint64_t asScratchHighWaterBytes = 0u;
+  uint64_t asScratchCurrentBytes = 0u;
   uint32_t directBindingPoolHighWater = 0u;
+  uint32_t indirectSubmissionReferences = 0u;
+  uint32_t indirectTextureReferences = 0u;
+  uint32_t graphAccelerationStructureDependencies = 0u;
+  uint32_t noAsWorkFrame = 0u;
   uint64_t consumedRebuildEpoch = 0u;
+  float prepareCpuTimeMs = 0.0f;
+  float topologyPrepareCpuTimeMs = 0.0f;
+  float transformPrepareCpuTimeMs = 0.0f;
+  float deformationPrepareCpuTimeMs = 0.0f;
+  float tlasPrepareCpuTimeMs = 0.0f;
   float gpuTimeMs = 0.0f;
   float blasGpuTimeMs = 0.0f;
   float tlasGpuTimeMs = 0.0f;

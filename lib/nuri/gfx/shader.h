@@ -26,8 +26,9 @@ public:
   Result<std::string, std::string> load(std::string_view path);
   Result<ShaderHandle, std::string> compile(const std::string &code,
                                             ShaderStage stage);
-  Result<ShaderHandle, std::string> compileFromFile(std::string_view path,
-                                                    ShaderStage stage);
+  Result<ShaderHandle, std::string>
+  compileFromFile(std::string_view path, ShaderStage stage,
+                  std::string_view preamble = {});
   [[nodiscard]] ShaderHandle getHandle(ShaderStage stage) const;
 
 private:

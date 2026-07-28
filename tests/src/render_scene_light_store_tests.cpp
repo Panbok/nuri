@@ -135,7 +135,7 @@ TEST(RenderSceneLightStoreTests, LocalLightCapIsEnforced) {
 
   nuri::LightDesc light{};
   light.type = nuri::LightType::Point;
-  for (uint32_t i = 0; i < 64u; ++i) {
+  for (uint32_t i = 0; i < 128u; ++i) {
     auto addResult = graph.addLight(graph.rootNode(), light);
     ASSERT_FALSE(addResult.hasError()) << addResult.error();
   }

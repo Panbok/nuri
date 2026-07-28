@@ -12,6 +12,7 @@
 #include "nuri/scene/light.h"
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -399,6 +400,16 @@ enum class DDGIQualityPreset : uint8_t {
   Custom = 3,
 };
 
+inline constexpr uint32_t kDDGIQualitySchemaVersion = 5u;
+inline constexpr uint32_t kDDGICoveragePresetSchemaVersion = 1u;
+inline constexpr uint32_t kDDGIProductProfileSchemaVersion = 2u;
+
+enum class DDGICoveragePreset : uint8_t {
+  Authored = 0,
+  Automatic = 1,
+  Custom = 2,
+};
+
 struct DDGICommandEpochs {
   uint64_t resetHistory = 0u;
   uint64_t forceFullUpdate = 0u;
@@ -493,6 +504,8 @@ static constexpr Format kFrameCompositionMotionClassFormat = Format::R8_UNORM;
 static constexpr Format kFrameCompositionNormalFormat = Format::RGBA16_FLOAT;
 static constexpr Format kFrameCompositionAmbientOcclusionFormat =
     Format::R16_UNORM;
+static constexpr Format kFrameCompositionDDGIOpaqueSurfaceCacheFormat =
+    Format::RGBA16_FLOAT;
 static constexpr Format kFrameCompositionExposureFormat = Format::R32_FLOAT;
 static constexpr ClearColor kFrameCompositionMotionVectorClearValue{
     .r = 0.0f, .g = 0.0f, .b = 0.0f, .a = 0.0f};
@@ -686,6 +699,12 @@ sanitizeTemporalAAQualityPreset(TemporalAAQualityPreset preset) noexcept {
 sanitizeDDGIQualityPreset(DDGIQualityPreset preset) noexcept {
   return sanitizeContiguousEnum(preset, DDGIQualityPreset::Custom,
                                 DDGIQualityPreset::Balanced);
+}
+
+[[nodiscard]] constexpr DDGICoveragePreset
+sanitizeDDGICoveragePreset(DDGICoveragePreset preset) noexcept {
+  return sanitizeContiguousEnum(preset, DDGICoveragePreset::Custom,
+                                DDGICoveragePreset::Authored);
 }
 
 [[nodiscard]] constexpr DDGIDebugView
@@ -882,10 +901,15 @@ struct RenderSettings {
   };
   struct DDGISettings {
     bool enabled = false;
+    DDGIQualityPreset requestedPreset = DDGIQualityPreset::Balanced;
     DDGIQualityPreset preset = DDGIQualityPreset::Balanced;
+    DDGICoveragePreset requestedCoveragePreset = DDGICoveragePreset::Authored;
+    DDGICoveragePreset coveragePreset = DDGICoveragePreset::Authored;
     uint32_t raysPerProbe = 128u;
     uint32_t classificationRaysPerProbe = 16u;
     uint32_t maxProbeUpdatesPerFrame = 512u;
+    uint32_t maxRadianceProbeUpdatesPerFrame = 512u;
+    uint32_t maxMaintenanceProbeUpdatesPerFrame = 128u;
     uint32_t maxRayQueriesPerFrame = 65'536u;
     uint32_t maxLocalLightsPerHit = 8u;
     uint32_t maxCandidateIntersectionsPerRay = 64u;
@@ -893,8 +917,10 @@ struct RenderSettings {
     float distanceHysteresis = 0.98f;
     float changeIrradianceHysteresisScale = 0.50f;
     float changeDistanceHysteresisScale = 0.50f;
-    // Receiver reconstruction bias remains separate from ray-origin domains.
-    float selfShadowBias = 0.30f;
+    // Absolute world-space receiver reconstruction bias. Kept separate from
+    // spacing-relative ray-origin domains and invariant across clipmap
+    // cascades.
+    float selfShadowBias = 0.10f;
     float primaryProbeBias = 0.0001f;
     float localShadowBias = 0.30f;
     float directionalShadowBias = 0.30f;
@@ -903,7 +929,13 @@ struct RenderSettings {
     bool relocation = true;
     bool classification = true;
     bool multiBounce = true;
-    bool diagnosticCounters = true;
+    bool diagnosticCounters = false;
+    DDGISurfaceGatherVariant opaqueGatherVariant =
+        DDGISurfaceGatherVariant::Product;
+    DDGISurfaceGatherVariant transmissionGatherVariant =
+        DDGISurfaceGatherVariant::Product;
+    DDGISurfaceGatherVariant traceMultiBounceGatherVariant =
+        DDGISurfaceGatherVariant::Product;
     bool freezeUpdates = false;
     DDGIDebugView debugView = DDGIDebugView::None;
     bool showVolumes = false;
@@ -926,6 +958,85 @@ struct RenderSettings {
   HDRPostProcessSettings hdrPostProcess{};
   DDGISettings ddgi{};
 };
+
+[[nodiscard]] inline uint64_t ddgiProductProfileFingerprint(
+    const RenderSettings::DDGISettings &settings) noexcept {
+  uint64_t hash = 1469598103934665603ull;
+  const auto mix = [&hash](uint64_t value) {
+    hash ^= value;
+    hash *= 1099511628211ull;
+  };
+  mix(kDDGIProductProfileSchemaVersion);
+  mix(kDDGIQualitySchemaVersion);
+  mix(static_cast<uint32_t>(settings.requestedPreset));
+  mix(static_cast<uint32_t>(settings.preset));
+  mix(kDDGICoveragePresetSchemaVersion);
+  mix(static_cast<uint32_t>(settings.requestedCoveragePreset));
+  mix(static_cast<uint32_t>(settings.coveragePreset));
+  mix(settings.raysPerProbe);
+  mix(settings.classificationRaysPerProbe);
+  mix(settings.maxProbeUpdatesPerFrame);
+  mix(settings.maxRadianceProbeUpdatesPerFrame);
+  mix(settings.maxMaintenanceProbeUpdatesPerFrame);
+  mix(settings.maxRayQueriesPerFrame);
+  mix(settings.maxLocalLightsPerHit);
+  mix(settings.maxCandidateIntersectionsPerRay);
+  const auto mixFloat = [&mix](float value) {
+    mix(std::bit_cast<uint32_t>(value));
+  };
+  mixFloat(settings.irradianceHysteresis);
+  mixFloat(settings.distanceHysteresis);
+  mixFloat(settings.changeIrradianceHysteresisScale);
+  mixFloat(settings.changeDistanceHysteresisScale);
+  mixFloat(settings.selfShadowBias);
+  mixFloat(settings.primaryProbeBias);
+  mixFloat(settings.localShadowBias);
+  mixFloat(settings.directionalShadowBias);
+  mixFloat(settings.classificationBias);
+  mixFloat(settings.multiBounceLuminanceClamp);
+  mix(settings.enabled);
+  mix(settings.relocation);
+  mix(settings.classification);
+  mix(settings.multiBounce);
+  mix(settings.diagnosticCounters);
+  mix(static_cast<uint32_t>(settings.opaqueGatherVariant));
+  mix(static_cast<uint32_t>(settings.transmissionGatherVariant));
+  mix(static_cast<uint32_t>(settings.traceMultiBounceGatherVariant));
+  mix(settings.freezeUpdates);
+  mix(static_cast<uint32_t>(settings.debugView));
+  mix(settings.showVolumes);
+  mix(settings.showProbes);
+  mix(settings.showSelectedProbeRays);
+  mix(static_cast<uint32_t>(settings.coverage.mode));
+  mix(static_cast<uint32_t>(settings.coverage.constraintPolicy));
+  mix(static_cast<uint32_t>(settings.coverage.sceneBoundsSource));
+  mix(settings.coverage.cascadeCount);
+  mix(settings.coverage.cascadeProbeCounts.x);
+  mix(settings.coverage.cascadeProbeCounts.y);
+  mix(settings.coverage.cascadeProbeCounts.z);
+  mixFloat(settings.coverage.requestedNearSpacing.x);
+  mixFloat(settings.coverage.requestedNearSpacing.y);
+  mixFloat(settings.coverage.requestedNearSpacing.z);
+  mixFloat(settings.coverage.spacingRatio);
+  mixFloat(settings.coverage.requestedCoverageHalfExtents.x);
+  mixFloat(settings.coverage.requestedCoverageHalfExtents.y);
+  mixFloat(settings.coverage.requestedCoverageHalfExtents.z);
+  mix(settings.coverage.scenePaddingCells);
+  mix(settings.coverage.transitionCells);
+  mix(std::bit_cast<uint32_t>(settings.coverage.generatedPriority));
+  mix(settings.coverage.includeAuthoredVolumes);
+  mix(settings.coverage.autoRefitOnTopologyChange);
+  mixFloat(settings.coverage.authoredBounds.bounds.min_.x);
+  mixFloat(settings.coverage.authoredBounds.bounds.min_.y);
+  mixFloat(settings.coverage.authoredBounds.bounds.min_.z);
+  mixFloat(settings.coverage.authoredBounds.bounds.max_.x);
+  mixFloat(settings.coverage.authoredBounds.bounds.max_.y);
+  mixFloat(settings.coverage.authoredBounds.bounds.max_.z);
+  mix(settings.coverage.authoredBounds.generation);
+  mix(settings.coverage.authoredBounds.valid);
+  mix(settings.coverage.authoredBounds.complete);
+  return hash;
+}
 
 [[nodiscard]] constexpr VisibilityCullingMode
 sanitizeVisibilityCullingMode(VisibilityCullingMode mode) noexcept {
@@ -962,37 +1073,102 @@ inline void applyDDGIQualityPreset(RenderSettings::DDGISettings &settings,
     uint32_t raysPerProbe;
     uint32_t classificationRaysPerProbe;
     uint32_t maxProbeUpdatesPerFrame;
+    uint32_t maxRadianceProbeUpdatesPerFrame;
+    uint32_t maxMaintenanceProbeUpdatesPerFrame;
     uint32_t maxRayQueriesPerFrame;
     float irradianceHysteresis;
     float distanceHysteresis;
   };
   static constexpr std::array presets{
-      Preset{64u, 16u, 512u, 32'768u, 0.98f, 0.99f},
-      Preset{128u, 24u, 512u, 65'536u, 0.97f, 0.98f},
-      Preset{256u, 32u, 512u, 131'072u, 0.95f, 0.98f},
+      Preset{64u, 16u, 512u, 512u, 64u, 32'768u, 0.98f, 0.99f},
+      Preset{128u, 24u, 512u, 512u, 128u, 65'536u, 0.97f, 0.98f},
+      Preset{256u, 32u, 512u, 128u, 64u, 131'072u, 0.95f, 0.98f},
   };
   const Preset &values = presets[static_cast<uint8_t>(settings.preset)];
   settings.raysPerProbe = values.raysPerProbe;
   settings.classificationRaysPerProbe = values.classificationRaysPerProbe;
   settings.maxProbeUpdatesPerFrame = values.maxProbeUpdatesPerFrame;
+  settings.maxRadianceProbeUpdatesPerFrame =
+      values.maxRadianceProbeUpdatesPerFrame;
+  settings.maxMaintenanceProbeUpdatesPerFrame =
+      values.maxMaintenanceProbeUpdatesPerFrame;
   settings.maxRayQueriesPerFrame = values.maxRayQueriesPerFrame;
   settings.irradianceHysteresis = values.irradianceHysteresis;
   settings.distanceHysteresis = values.distanceHysteresis;
+}
+
+inline void applyDDGICoveragePreset(RenderSettings::DDGISettings &settings,
+                                    DDGICoveragePreset preset) noexcept {
+  settings.coveragePreset = sanitizeDDGICoveragePreset(preset);
+  if (settings.coveragePreset == DDGICoveragePreset::Custom) {
+    return;
+  }
+  DDGICoverageSettings coverage{};
+  if (settings.coveragePreset == DDGICoveragePreset::Automatic) {
+    coverage.mode = DDGICoverageMode::SceneFit;
+    coverage.constraintPolicy = DDGICoverageConstraintPolicy::PreserveCoverage;
+    coverage.sceneBoundsSource =
+        DDGISceneBoundsSource::StaticRayTracingGeometry;
+    coverage.cascadeCount = 3u;
+    coverage.cascadeProbeCounts = glm::uvec3(20u, 12u, 20u);
+    coverage.requestedNearSpacing = glm::vec3(2.0f);
+    coverage.spacingRatio = 2.0f;
+    coverage.requestedCoverageHalfExtents = glm::vec3(80.0f, 35.0f, 80.0f);
+    coverage.scenePaddingCells = 2u;
+    coverage.transitionCells = 1u;
+    coverage.includeAuthoredVolumes = false;
+  }
+  settings.coverage = coverage;
 }
 
 inline void
 sanitizeDDGISettings(RenderSettings::DDGISettings &settings,
                      uint32_t maxRayQueriesHardCap =
                          std::numeric_limits<uint32_t>::max()) noexcept {
+  settings.requestedPreset =
+      sanitizeDDGIQualityPreset(settings.requestedPreset);
   settings.preset = sanitizeDDGIQualityPreset(settings.preset);
+  if (settings.preset != DDGIQualityPreset::Custom &&
+      settings.requestedPreset != settings.preset) {
+    settings.requestedPreset = settings.preset;
+  }
   applyDDGIQualityPreset(settings, settings.preset);
+  settings.requestedCoveragePreset =
+      sanitizeDDGICoveragePreset(settings.requestedCoveragePreset);
+  settings.coveragePreset = sanitizeDDGICoveragePreset(settings.coveragePreset);
+  if (settings.coveragePreset != DDGICoveragePreset::Custom &&
+      settings.requestedCoveragePreset != settings.coveragePreset) {
+    settings.requestedCoveragePreset = settings.coveragePreset;
+  }
+  if (settings.coveragePreset == DDGICoveragePreset::Authored &&
+      settings.coverage != DDGICoverageSettings{}) {
+    // Legacy callers that authored the raw coverage record predate the
+    // independent public coverage axis. Preserve their exact policy as Custom.
+    settings.coveragePreset = DDGICoveragePreset::Custom;
+  }
+  applyDDGICoveragePreset(settings, settings.coveragePreset);
   settings.debugView = sanitizeDDGIDebugView(settings.debugView);
+  settings.opaqueGatherVariant = sanitizeContiguousEnum(
+      settings.opaqueGatherVariant, DDGISurfaceGatherVariant::Atlas,
+      DDGISurfaceGatherVariant::Product);
+  settings.transmissionGatherVariant = sanitizeContiguousEnum(
+      settings.transmissionGatherVariant, DDGISurfaceGatherVariant::Atlas,
+      DDGISurfaceGatherVariant::Product);
+  settings.traceMultiBounceGatherVariant = sanitizeContiguousEnum(
+      settings.traceMultiBounceGatherVariant, DDGISurfaceGatherVariant::Atlas,
+      DDGISurfaceGatherVariant::Product);
   sanitizeDDGICoverageSettings(settings.coverage);
   settings.raysPerProbe = std::clamp(settings.raysPerProbe, 16u, 1024u);
   settings.classificationRaysPerProbe = std::clamp(
       settings.classificationRaysPerProbe, 8u, settings.raysPerProbe);
   settings.maxProbeUpdatesPerFrame =
       std::clamp(settings.maxProbeUpdatesPerFrame, 1u, 65'536u);
+  settings.maxRadianceProbeUpdatesPerFrame =
+      std::clamp(settings.maxRadianceProbeUpdatesPerFrame, 1u,
+                 settings.maxProbeUpdatesPerFrame);
+  settings.maxMaintenanceProbeUpdatesPerFrame =
+      std::clamp(settings.maxMaintenanceProbeUpdatesPerFrame, 1u,
+                 settings.maxProbeUpdatesPerFrame);
   const uint32_t minimumQueries = 2u * settings.raysPerProbe;
   const uint32_t effectiveHardCap =
       std::max(maxRayQueriesHardCap, minimumQueries);
@@ -1011,7 +1187,7 @@ sanitizeDDGISettings(RenderSettings::DDGISettings &settings,
   settings.changeDistanceHysteresisScale =
       finiteClamp(settings.changeDistanceHysteresisScale, 0.0f, 1.0f, 0.50f);
   settings.selfShadowBias =
-      finiteClamp(settings.selfShadowBias, 0.0f, 2.0f, 0.30f);
+      finiteClamp(settings.selfShadowBias, 0.0f, 0.25f, 0.10f);
   settings.primaryProbeBias =
       finiteClamp(settings.primaryProbeBias, 0.0f, 0.25f, 0.0001f);
   settings.localShadowBias =
@@ -1033,13 +1209,14 @@ inline void
 copyDDGIQualityPresetToCustom(RenderSettings::DDGISettings &settings) noexcept {
   const DDGIQualityPreset preset = sanitizeDDGIQualityPreset(settings.preset);
   applyDDGIQualityPreset(settings, preset);
+  settings.requestedPreset = preset;
   settings.preset = DDGIQualityPreset::Custom;
 }
 
 inline void sanitizeAmbientOcclusionSettings(
     RenderSettings::AmbientOcclusionSettings &settings,
     const RenderSettings::OpaqueSettings &opaque,
-    const RenderSettings::AntiAliasingSettings &antiAliasing) {
+    const RenderSettings::AntiAliasingSettings &) {
   settings.mode = sanitizeAmbientOcclusionMode(settings.mode);
   settings.preset = sanitizeAmbientOcclusionPreset(settings.preset);
   if (settings.inputModeOverride.has_value()) {
@@ -3001,6 +3178,7 @@ enum class FrameTextureRequirementFlags : uint32_t {
   AmbientOcclusion = 1u << 11u,
   PresentCapture = 1u << 12u,
   MotionClass = 1u << 13u,
+  DDGIOpaqueSurfaceCache = 1u << 14u,
 };
 
 [[nodiscard]] constexpr FrameTextureRequirementFlags
@@ -3070,6 +3248,8 @@ struct FrameSharedResources {
   TextureHandle ambientOcclusionTexture{};
   TextureHandle previousAmbientOcclusionTexture{};
   RenderGraphTextureId ambientOcclusionGraphTexture{};
+  TextureHandle ddgiOpaqueSurfaceCacheTexture{};
+  RenderGraphTextureId ddgiOpaqueSurfaceCacheGraphTexture{};
   std::array<TextureHandle, kMaxSceneDepthPyramidLevels>
       sceneDepthPyramidTextures{};
   std::array<RenderGraphTextureId, kMaxSceneDepthPyramidLevels>

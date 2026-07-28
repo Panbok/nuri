@@ -4,6 +4,20 @@
 
 #include "ddgi_common.sp"
 
+#ifndef NURI_DDGI_SURFACE_GATHER_SHIFT
+#define NURI_DDGI_SURFACE_GATHER_SHIFT 0u
+#endif
+
+uint ddgiSurfaceGatherVariant() {
+  if (all(equal(pc.frameData.ddgiFrameBufferAddress, uvec2(0u)))) {
+    return kDDGIGatherVariantProduct;
+  }
+  DDGIFrameBuffer frame = DDGIFrameBuffer(pc.frameData.ddgiFrameBufferAddress);
+  return (frame.activeCountDebugFlagsSampler.y >>
+          NURI_DDGI_SURFACE_GATHER_SHIFT) &
+         0xffu;
+}
+
 float applyLegacySpecularAARoughnessBias(float roughness,
                                          vec3 shadingNormal) {
   vec3 dndx = dFdx(shadingNormal);
@@ -1048,7 +1062,7 @@ bool tryDDGIDebugColor(ShadedMaterial sm, vec3 worldPos,
   }
   const DDGIQueryResult ddgi = queryDDGI(
       DDGIFrameBuffer(pc.frameData.ddgiFrameBufferAddress), worldPos,
-      sm.ambientBentNormal, sm.v);
+      sm.nBase, sm.v, ddgiSurfaceGatherVariant());
   vec3 color = vec3(0.0);
   if (view == 1u || view == 6u) {
     color = ddgi.irradiance / (vec3(1.0) + ddgi.irradiance);
@@ -1129,10 +1143,26 @@ IblResult evaluateIbl(ShadedMaterial sm, vec3 worldPos) {
         : vec3(0.0);
     vec3 irradiance = skyIrradiance;
     if (hasDDGI) {
-      const DDGIQueryResult ddgi = queryDDGI(
-          DDGIFrameBuffer(pc.frameData.ddgiFrameBufferAddress), worldPos,
-          sm.ambientBentNormal, sm.v);
-      irradiance = ddgi.irradiance + skyIrradiance * ddgi.skyWeight;
+#if defined(NURI_DDGI_USE_OPAQUE_SURFACE_CACHE)
+      if (pc.frameData.ddgiReserved1 != 0u &&
+          pc.frameData.ddgiReserved0 != kInvalidTextureBindlessIndex) {
+        const ivec2 cacheExtent =
+            textureSize(kTextures2D[nonuniformEXT(pc.frameData.ddgiReserved0)],
+                        0);
+        const ivec2 cachePixel =
+            clamp(ivec2(gl_FragCoord.xy), ivec2(0), cacheExtent - ivec2(1));
+        const vec4 cached = texelFetch(
+            kTextures2D[nonuniformEXT(pc.frameData.ddgiReserved0)], cachePixel,
+            0);
+        irradiance = cached.rgb + skyIrradiance * cached.a;
+      } else
+#endif
+      {
+        const DDGIQueryResult ddgi = queryDDGI(
+            DDGIFrameBuffer(pc.frameData.ddgiFrameBufferAddress), worldPos,
+            sm.nBase, sm.v, ddgiSurfaceGatherVariant());
+        irradiance = ddgi.irradiance + skyIrradiance * ddgi.skyWeight;
+      }
     }
     if (!sm.iorCompatMode) {
       r.iblDiffuse = hasBrdfLut

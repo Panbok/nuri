@@ -3800,14 +3800,18 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   visibilityMeshletGpuDispatches_.clear();
   visibilityMeshletGpuDependencyBuffers_.clear();
   visibilityMeshletGpuDependencyBufferAccessModes_.clear();
+  const bool ddgiSurfaceCacheNormalInput = hasFrameTextureRequirementFlag(
+      frame.sharedResources.textureRequirements,
+      FrameTextureRequirementFlags::DDGIOpaqueSurfaceCache);
   const bool materialNormalInput =
       ambientOcclusionPlan.inputMode ==
-      AmbientOcclusionInputMode::MaterialNormalAndDepth;
+          AmbientOcclusionInputMode::MaterialNormalAndDepth ||
+      ddgiSurfaceCacheNormalInput;
   const bool depthOnlyInput =
       ambientOcclusionPlan.inputMode ==
       AmbientOcclusionInputMode::DepthOnlyReconstructedNormal;
   const bool normalPrepassRequested =
-      ambientOcclusionSettings.active &&
+      (ambientOcclusionSettings.active || ddgiSurfaceCacheNormalInput) &&
       (depthOnlyInput || nuri::isValid(frame.sharedResources.normalTexture)) &&
       !wireframeOnlyRequested && !baseDrawItems.empty();
   const bool msaaGtaoAuxiliaryPrepass =
@@ -5500,6 +5504,16 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   mainPassDependencyTextures_ = passDependencyTextures_;
   mainPassDependencyTextureAccessModes_.assign(
       mainPassDependencyTextures_.size(), RenderGraphAccessMode::Read);
+  if (sceneGpu->frameData.ddgiReserved1 != 0u &&
+      nuri::isValid(frame.sharedResources.ddgiOpaqueSurfaceCacheTexture)) {
+    const size_t oldTextureDependencyCount = mainPassDependencyTextures_.size();
+    appendUniqueDependency(mainPassDependencyTextures_,
+                           frame.sharedResources.ddgiOpaqueSurfaceCacheTexture);
+    if (mainPassDependencyTextures_.size() != oldTextureDependencyCount) {
+      mainPassDependencyTextureAccessModes_.push_back(
+          RenderGraphAccessMode::Read);
+    }
+  }
   if ((meshletCounterFlags & kMeshletCounterFlagEnabled) != 0u) {
     appendUniqueDependency(
         mainPassDependencyBuffers_, mainPassDependencyBufferAccessModes_,
@@ -8314,10 +8328,9 @@ Result<bool, std::string> OpaqueRenderer::createPipelines() {
     return createPipeline(desc, name, output).empty();
   };
   const Format depthFormat = kFrameCompositionDepthFormat;
-  const RenderPipelineDesc meshDesc =
-      withOpaqueMainDepthVariants(meshPipelineDesc(
-          kFrameCompositionSceneColorFormat, depthFormat, shaders_[MeshVertex],
-          {}, {}, {}, shaders_[MeshFragment], PolygonMode::Fill));
+  RenderPipelineDesc meshDesc = withOpaqueMainDepthVariants(meshPipelineDesc(
+      kFrameCompositionSceneColorFormat, depthFormat, shaders_[MeshVertex], {},
+      {}, {}, shaders_[MeshFragment], PolygonMode::Fill));
   auto meshResult = gpu_.createRenderPipeline(meshDesc, "opaque_mesh");
   if (meshResult.hasError()) {
     return Result<bool, std::string>::makeError(meshResult.error());
@@ -8521,12 +8534,12 @@ Result<bool, std::string> OpaqueRenderer::createPipelines() {
            nuri::isValid(shaders_[DepthAlphaFragment]);
   };
   if (canCreateTessPipeline) {
-    const RenderPipelineDesc tessDesc = withOpaqueMainDepthVariants(
-        meshPipelineDesc(kFrameCompositionSceneColorFormat, depthFormat,
-                         shaders_[MeshTessVertex], shaders_[MeshTessControl],
-                         shaders_[MeshTessEval], {}, shaders_[MeshFragment],
-                         PolygonMode::Fill, Topology::Patch,
-                         kTessellationPatchControlPoints));
+    RenderPipelineDesc tessDesc = withOpaqueMainDepthVariants(meshPipelineDesc(
+        kFrameCompositionSceneColorFormat, depthFormat,
+        shaders_[MeshTessVertex], shaders_[MeshTessControl],
+        shaders_[MeshTessEval], {}, shaders_[MeshFragment], PolygonMode::Fill,
+        Topology::Patch, kTessellationPatchControlPoints));
+    tessDesc.specInfo = meshDesc.specInfo;
     std::string tessError =
         createPipeline(tessDesc, "opaque_mesh_tess",
                        meshScenePipelines_[rasterVariantIndex(
@@ -8538,13 +8551,14 @@ Result<bool, std::string> OpaqueRenderer::createPipelines() {
             {"opaque_mesh_tess_msaa8x", "opaque_mesh_tess_alpha_msaa8x"}}});
     }
     if (tessError.empty()) {
-      const RenderPipelineDesc doubleSidedTessDesc =
+      RenderPipelineDesc doubleSidedTessDesc =
           withOpaqueMainDepthVariants(meshPipelineDesc(
               kFrameCompositionSceneColorFormat, depthFormat,
               shaders_[MeshTessVertex], shaders_[MeshTessControl],
               shaders_[MeshTessEval], {}, shaders_[MeshFragment],
               PolygonMode::Fill, Topology::Patch,
               kTessellationPatchControlPoints, false, CullMode::None));
+      doubleSidedTessDesc.specInfo = meshDesc.specInfo;
       tessError =
           createPipeline(doubleSidedTessDesc, "opaque_mesh_tess_double_sided",
                          meshScenePipelines_[rasterVariantIndex(

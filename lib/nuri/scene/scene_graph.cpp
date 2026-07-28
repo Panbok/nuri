@@ -6,7 +6,7 @@
 namespace nuri {
 namespace {
 constexpr uint32_t kMaxDirectionalLightCount = 4u;
-constexpr uint32_t kMaxLocalLightCount = 64u;
+constexpr uint32_t kMaxLocalLightCount = 128u;
 constexpr uint32_t kInvalidSceneGraphIndex =
     std::numeric_limits<uint32_t>::max();
 [[nodiscard]] Result<SlotReservation, std::string>

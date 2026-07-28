@@ -42,6 +42,7 @@ private:
     MotionClass,
     Normals,
     AmbientOcclusion,
+    DDGIOpaqueSurfaceCache,
     Exposure,
     PresentCapture,
     HistoryColor,

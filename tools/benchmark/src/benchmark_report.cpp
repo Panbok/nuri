@@ -133,6 +133,7 @@ validateBenchmarkReportV1(yyjson_val *root) {
       JsonField{"frames", JsonType::Array},
       JsonField{"sampleStats", JsonType::Array},
       JsonField{"stats", JsonType::Object},
+      JsonField{"metricCatalog", JsonType::Object, false},
       JsonField{"renderGraph", JsonType::Object},
       JsonField{"resourceStats", JsonType::Object},
       JsonField{"timingDrain", JsonType::Object},
@@ -511,6 +512,16 @@ void addString(yyjson_mut_doc *doc, yyjson_mut_val *object, const char *key,
   yyjson_mut_obj_add_strcpy(doc, object, key, value.c_str());
 }
 
+void addString(yyjson_mut_doc *doc, yyjson_mut_val *object, const char *key,
+               const char *value) {
+  yyjson_mut_obj_add_strcpy(doc, object, key, value);
+}
+
+void addString(yyjson_mut_doc *doc, yyjson_mut_val *object, const char *key,
+               std::string_view value) {
+  yyjson_mut_obj_add_strncpy(doc, object, key, value.data(), value.size());
+}
+
 [[nodiscard]] std::string pathToUtf8(const std::filesystem::path &value) {
   const std::u8string encoded = value.generic_u8string();
   return {reinterpret_cast<const char *>(encoded.data()), encoded.size()};
@@ -568,6 +579,35 @@ makeStatsMapObject(yyjson_mut_doc *doc,
                            makeStatsObject(doc, metricStats));
   }
   return object;
+}
+
+yyjson_mut_val *
+makeMetricCatalogObject(yyjson_mut_doc *doc,
+                        const std::map<std::string, MetricStats> &stats) {
+  yyjson_mut_val *catalog = yyjson_mut_obj(doc);
+  for (const auto &[metricId, unused] : stats) {
+    (void)unused;
+    const BenchmarkMetricDescriptor *descriptor =
+        findBenchmarkMetricDescriptor(metricId);
+    if (descriptor == nullptr) {
+      continue;
+    }
+    yyjson_mut_val *entry = yyjson_mut_obj(doc);
+    addString(doc, entry, "unit", benchmarkMetricUnitName(descriptor->unit));
+    addString(doc, entry, "availability",
+              benchmarkMetricAvailabilityName(descriptor->availability));
+    addString(doc, entry, "samplingPhase",
+              benchmarkMetricSamplingPhaseName(descriptor->samplingPhase));
+    addString(doc, entry, "gateRole",
+              benchmarkMetricGateRoleName(descriptor->gateRole));
+    addString(doc, entry, "evidenceClass",
+              benchmarkMetricEvidenceClassName(descriptor->evidenceClass));
+    yyjson_mut_obj_add_bool(doc, entry, "allowedInProductOracle",
+                            descriptor->evidenceClass ==
+                                BenchmarkMetricEvidenceClass::ProductSafe);
+    yyjson_mut_obj_add_val(doc, catalog, metricId.c_str(), entry);
+  }
+  return catalog;
 }
 
 template <typename Value>
@@ -817,6 +857,35 @@ visibilityOcclusionModeName(VisibilityOcclusionMode mode) {
   return "Unknown";
 }
 
+[[nodiscard]] const char *ddgiCoveragePresetName(DDGICoveragePreset preset) {
+  switch (preset) {
+  case DDGICoveragePreset::Authored:
+    return "Authored";
+  case DDGICoveragePreset::Automatic:
+    return "Automatic";
+  case DDGICoveragePreset::Custom:
+    return "Custom";
+  }
+  return "Unknown";
+}
+
+[[nodiscard]] const char *
+ddgiGatherVariantName(DDGISurfaceGatherVariant variant) {
+  switch (variant) {
+  case DDGISurfaceGatherVariant::Product:
+    return "Product";
+  case DDGISurfaceGatherVariant::Bypass:
+    return "Bypass";
+  case DDGISurfaceGatherVariant::Candidates:
+    return "Candidates";
+  case DDGISurfaceGatherVariant::ProbeVisibility:
+    return "ProbeVisibility";
+  case DDGISurfaceGatherVariant::Atlas:
+    return "Atlas";
+  }
+  return "Unknown";
+}
+
 [[nodiscard]] const char *ddgiDebugViewName(DDGIDebugView view) {
   switch (view) {
   case DDGIDebugView::None:
@@ -1023,12 +1092,27 @@ makeSettingsSignature(const RenderSettings &sourceSettings) {
     const RenderSettings::DDGISettings &ddgi = settings.ddgi;
     const DDGICoverageSettings &coverage = ddgi.coverage;
     appendSignatureField(out, "ddgi.enabled", true);
-    appendSignatureField(out, "ddgi.preset", enumValue(ddgi.preset));
+    appendSignatureField(out, "ddgi.productProfileSchema",
+                         kDDGIProductProfileSchemaVersion);
+    appendSignatureField(out, "ddgi.qualitySchema", kDDGIQualitySchemaVersion);
+    appendSignatureField(out, "ddgi.requestedQualityPreset",
+                         enumValue(ddgi.requestedPreset));
+    appendSignatureField(out, "ddgi.qualityPreset", enumValue(ddgi.preset));
+    appendSignatureField(out, "ddgi.coveragePresetSchema",
+                         kDDGICoveragePresetSchemaVersion);
+    appendSignatureField(out, "ddgi.requestedCoveragePreset",
+                         enumValue(ddgi.requestedCoveragePreset));
+    appendSignatureField(out, "ddgi.coveragePreset",
+                         enumValue(ddgi.coveragePreset));
     appendSignatureField(out, "ddgi.raysPerProbe", ddgi.raysPerProbe);
     appendSignatureField(out, "ddgi.classificationRaysPerProbe",
                          ddgi.classificationRaysPerProbe);
     appendSignatureField(out, "ddgi.maxProbeUpdatesPerFrame",
                          ddgi.maxProbeUpdatesPerFrame);
+    appendSignatureField(out, "ddgi.maxRadianceProbeUpdatesPerFrame",
+                         ddgi.maxRadianceProbeUpdatesPerFrame);
+    appendSignatureField(out, "ddgi.maxMaintenanceProbeUpdatesPerFrame",
+                         ddgi.maxMaintenanceProbeUpdatesPerFrame);
     appendSignatureField(out, "ddgi.maxRayQueriesPerFrame",
                          ddgi.maxRayQueriesPerFrame);
     appendSignatureField(out, "ddgi.maxLocalLightsPerHit",
@@ -1057,6 +1141,13 @@ makeSettingsSignature(const RenderSettings &sourceSettings) {
     appendSignatureField(out, "ddgi.multiBounce", ddgi.multiBounce);
     appendSignatureField(out, "ddgi.diagnosticCounters",
                          ddgi.diagnosticCounters);
+    appendSignatureField(out, "ddgi.gatherSchema", 1u);
+    appendSignatureField(out, "ddgi.gather.opaque",
+                         enumValue(ddgi.opaqueGatherVariant));
+    appendSignatureField(out, "ddgi.gather.transmission",
+                         enumValue(ddgi.transmissionGatherVariant));
+    appendSignatureField(out, "ddgi.gather.traceMultiBounce",
+                         enumValue(ddgi.traceMultiBounceGatherVariant));
     appendSignatureField(out, "ddgi.freezeUpdates", ddgi.freezeUpdates);
     appendSignatureField(out, "ddgi.debugView", enumValue(ddgi.debugView));
     appendSignatureField(out, "ddgi.showVolumes", ddgi.showVolumes);
@@ -1162,6 +1253,7 @@ makeConfigSignature(const BenchmarkCase &benchmarkCase,
   appendSignatureField(out, "scene.seed", benchmarkCase.scene.seed);
   appendSignatureField(out, "scene.contentHash",
                        benchmarkCase.scene.contentHash);
+  appendSignatureField(out, "timeline.source", benchmarkCase.timeline.source);
   appendSignatureField(out, "timeline.cameraPathCount",
                        benchmarkCase.timeline.cameraPaths.size());
   for (size_t pathIndex = 0u;
@@ -1186,6 +1278,39 @@ makeConfigSignature(const BenchmarkCase &benchmarkCase,
       appendSignatureField(out, keyframePrefix + "hasTarget",
                            keyframe.hasTarget);
       appendSignatureVec3(out, keyframePrefix + "target", keyframe.target);
+    }
+  }
+  appendSignatureField(out, "timeline.eventCount",
+                       benchmarkCase.timeline.events.size());
+  for (size_t eventIndex = 0u;
+       eventIndex < benchmarkCase.timeline.events.size(); ++eventIndex) {
+    const BenchmarkTimelineEvent &event =
+        benchmarkCase.timeline.events[eventIndex];
+    const std::string eventPrefix =
+        "timeline.event." + std::to_string(eventIndex) + ".";
+    appendSignatureField(out, eventPrefix + "frame", event.frame);
+    appendSignatureField(out, eventPrefix + "type",
+                         event.type == BenchmarkTimelineEventType::SetCamera
+                             ? std::string_view("setCamera")
+                             : std::string_view("resetTemporalHistory"));
+    appendSignatureField(out, eventPrefix + "hasCamera", event.hasCamera);
+    appendSignatureField(out, eventPrefix + "preserveHistory",
+                         event.preserveHistory);
+    if (event.hasCamera) {
+      appendSignatureVec3(out, eventPrefix + "camera.position",
+                          event.camera.position);
+      appendSignatureVec3(out, eventPrefix + "camera.direction",
+                          event.camera.direction);
+      appendSignatureVec3(out, eventPrefix + "camera.target",
+                          event.camera.target);
+      appendSignatureField(out, eventPrefix + "camera.hasTarget",
+                           event.camera.hasTarget);
+      appendSignatureField(out, eventPrefix + "camera.verticalFovDegrees",
+                           event.camera.verticalFovDegrees);
+      appendSignatureField(out, eventPrefix + "camera.nearPlane",
+                           event.camera.nearPlane);
+      appendSignatureField(out, eventPrefix + "camera.farPlane",
+                           event.camera.farPlane);
     }
   }
   appendSignatureList(out, "requirements.assets",
@@ -1220,6 +1345,7 @@ yyjson_mut_val *makeUVec3Array(yyjson_mut_doc *doc, const glm::uvec3 &value) {
 yyjson_mut_val *makeTimelineObject(yyjson_mut_doc *doc,
                                    const BenchmarkTimeline &timeline) {
   yyjson_mut_val *object = yyjson_mut_obj(doc);
+  addString(doc, object, "source", timeline.source);
   yyjson_mut_val *paths = yyjson_mut_arr(doc);
   for (const BenchmarkCameraPath &path : timeline.cameraPaths) {
     yyjson_mut_val *pathObject = yyjson_mut_obj(doc);
@@ -1243,6 +1369,35 @@ yyjson_mut_val *makeTimelineObject(yyjson_mut_doc *doc,
     yyjson_mut_arr_add_val(paths, pathObject);
   }
   yyjson_mut_obj_add_val(doc, object, "cameraPaths", paths);
+  yyjson_mut_val *events = yyjson_mut_arr(doc);
+  for (const BenchmarkTimelineEvent &event : timeline.events) {
+    yyjson_mut_val *eventObject = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_uint(doc, eventObject, "frame", event.frame);
+    addString(doc, eventObject, "type",
+              event.type == BenchmarkTimelineEventType::SetCamera
+                  ? std::string_view("setCamera")
+                  : std::string_view("resetTemporalHistory"));
+    yyjson_mut_obj_add_bool(doc, eventObject, "hasCamera", event.hasCamera);
+    yyjson_mut_obj_add_bool(doc, eventObject, "preserveHistory",
+                            event.preserveHistory);
+    if (event.hasCamera) {
+      yyjson_mut_val *camera = yyjson_mut_obj(doc);
+      yyjson_mut_obj_add_val(doc, camera, "position",
+                             makeVec3Array(doc, event.camera.position));
+      yyjson_mut_obj_add_val(doc, camera, "direction",
+                             makeVec3Array(doc, event.camera.direction));
+      yyjson_mut_obj_add_val(doc, camera, "target",
+                             makeVec3Array(doc, event.camera.target));
+      yyjson_mut_obj_add_bool(doc, camera, "hasTarget", event.camera.hasTarget);
+      yyjson_mut_obj_add_real(doc, camera, "verticalFovDegrees",
+                              event.camera.verticalFovDegrees);
+      yyjson_mut_obj_add_real(doc, camera, "nearPlane", event.camera.nearPlane);
+      yyjson_mut_obj_add_real(doc, camera, "farPlane", event.camera.farPlane);
+      yyjson_mut_obj_add_val(doc, eventObject, "camera", camera);
+    }
+    yyjson_mut_arr_add_val(events, eventObject);
+  }
+  yyjson_mut_obj_add_val(doc, object, "events", events);
   return object;
 }
 
@@ -1417,12 +1572,34 @@ yyjson_mut_val *makeSettingsObject(yyjson_mut_doc *doc,
   const RenderSettings::DDGISettings &ddgiSettings = settings.ddgi;
   yyjson_mut_val *ddgi = yyjson_mut_obj(doc);
   yyjson_mut_obj_add_bool(doc, ddgi, "enabled", ddgiSettings.enabled);
+  yyjson_mut_obj_add_uint(doc, ddgi, "productProfileSchema",
+                          kDDGIProductProfileSchemaVersion);
+  addString(
+      doc, ddgi, "productProfileFingerprint",
+      std::format("{:016x}", ddgiProductProfileFingerprint(ddgiSettings)));
+  yyjson_mut_obj_add_uint(doc, ddgi, "qualitySchema",
+                          kDDGIQualitySchemaVersion);
+  addString(doc, ddgi, "requestedQualityPreset",
+            ddgiQualityPresetName(ddgiSettings.requestedPreset));
+  addString(doc, ddgi, "qualityPreset",
+            ddgiQualityPresetName(ddgiSettings.preset));
+  yyjson_mut_obj_add_uint(doc, ddgi, "coveragePresetSchema",
+                          kDDGICoveragePresetSchemaVersion);
+  addString(doc, ddgi, "requestedCoveragePreset",
+            ddgiCoveragePresetName(ddgiSettings.requestedCoveragePreset));
+  addString(doc, ddgi, "coveragePreset",
+            ddgiCoveragePresetName(ddgiSettings.coveragePreset));
+  // Compatibility alias for v1 report readers.
   addString(doc, ddgi, "preset", ddgiQualityPresetName(ddgiSettings.preset));
   yyjson_mut_obj_add_uint(doc, ddgi, "raysPerProbe", ddgiSettings.raysPerProbe);
   yyjson_mut_obj_add_uint(doc, ddgi, "classificationRaysPerProbe",
                           ddgiSettings.classificationRaysPerProbe);
   yyjson_mut_obj_add_uint(doc, ddgi, "maxProbeUpdatesPerFrame",
                           ddgiSettings.maxProbeUpdatesPerFrame);
+  yyjson_mut_obj_add_uint(doc, ddgi, "maxRadianceProbeUpdatesPerFrame",
+                          ddgiSettings.maxRadianceProbeUpdatesPerFrame);
+  yyjson_mut_obj_add_uint(doc, ddgi, "maxMaintenanceProbeUpdatesPerFrame",
+                          ddgiSettings.maxMaintenanceProbeUpdatesPerFrame);
   yyjson_mut_obj_add_uint(doc, ddgi, "maxRayQueriesPerFrame",
                           ddgiSettings.maxRayQueriesPerFrame);
   yyjson_mut_obj_add_uint(doc, ddgi, "maxLocalLightsPerHit",
@@ -1455,6 +1632,15 @@ yyjson_mut_val *makeSettingsObject(yyjson_mut_doc *doc,
   yyjson_mut_obj_add_bool(doc, ddgi, "multiBounce", ddgiSettings.multiBounce);
   yyjson_mut_obj_add_bool(doc, ddgi, "diagnosticCounters",
                           ddgiSettings.diagnosticCounters);
+  yyjson_mut_val *gatherVariants = yyjson_mut_obj(doc);
+  yyjson_mut_obj_add_uint(doc, gatherVariants, "schemaVersion", 1u);
+  addString(doc, gatherVariants, "opaque",
+            ddgiGatherVariantName(ddgiSettings.opaqueGatherVariant));
+  addString(doc, gatherVariants, "transmission",
+            ddgiGatherVariantName(ddgiSettings.transmissionGatherVariant));
+  addString(doc, gatherVariants, "traceMultiBounce",
+            ddgiGatherVariantName(ddgiSettings.traceMultiBounceGatherVariant));
+  yyjson_mut_obj_add_val(doc, ddgi, "gatherVariants", gatherVariants);
   yyjson_mut_obj_add_bool(doc, ddgi, "freezeUpdates",
                           ddgiSettings.freezeUpdates);
   addString(doc, ddgi, "debugView", ddgiDebugViewName(ddgiSettings.debugView));
@@ -2319,11 +2505,32 @@ readEnumValue(yyjson_val *object, const char *key, Enum defaultValue,
     RenderSettings::DDGISettings &ddgiSettings = settings.ddgi;
     ddgiSettings.enabled = readBool(ddgi, "enabled", ddgiSettings.enabled);
     ddgiSettings.preset =
-        readEnumValue(ddgi, "preset", ddgiSettings.preset,
+        readEnumValue(ddgi, "qualityPreset",
+                      readEnumValue(ddgi, "preset", ddgiSettings.preset,
+                                    {{"Low", DDGIQualityPreset::Low},
+                                     {"Balanced", DDGIQualityPreset::Balanced},
+                                     {"High", DDGIQualityPreset::High},
+                                     {"Custom", DDGIQualityPreset::Custom}}),
                       {{"Low", DDGIQualityPreset::Low},
                        {"Balanced", DDGIQualityPreset::Balanced},
                        {"High", DDGIQualityPreset::High},
                        {"Custom", DDGIQualityPreset::Custom}});
+    ddgiSettings.requestedPreset =
+        readEnumValue(ddgi, "requestedQualityPreset", ddgiSettings.preset,
+                      {{"Low", DDGIQualityPreset::Low},
+                       {"Balanced", DDGIQualityPreset::Balanced},
+                       {"High", DDGIQualityPreset::High},
+                       {"Custom", DDGIQualityPreset::Custom}});
+    ddgiSettings.coveragePreset =
+        readEnumValue(ddgi, "coveragePreset", ddgiSettings.coveragePreset,
+                      {{"Authored", DDGICoveragePreset::Authored},
+                       {"Automatic", DDGICoveragePreset::Automatic},
+                       {"Custom", DDGICoveragePreset::Custom}});
+    ddgiSettings.requestedCoveragePreset = readEnumValue(
+        ddgi, "requestedCoveragePreset", ddgiSettings.coveragePreset,
+        {{"Authored", DDGICoveragePreset::Authored},
+         {"Automatic", DDGICoveragePreset::Automatic},
+         {"Custom", DDGICoveragePreset::Custom}});
     ddgiSettings.raysPerProbe =
         readU32(ddgi, "raysPerProbe", ddgiSettings.raysPerProbe);
     ddgiSettings.classificationRaysPerProbe =
@@ -2331,6 +2538,12 @@ readEnumValue(yyjson_val *object, const char *key, Enum defaultValue,
                 ddgiSettings.classificationRaysPerProbe);
     ddgiSettings.maxProbeUpdatesPerFrame = readU32(
         ddgi, "maxProbeUpdatesPerFrame", ddgiSettings.maxProbeUpdatesPerFrame);
+    ddgiSettings.maxRadianceProbeUpdatesPerFrame =
+        readU32(ddgi, "maxRadianceProbeUpdatesPerFrame",
+                ddgiSettings.maxRadianceProbeUpdatesPerFrame);
+    ddgiSettings.maxMaintenanceProbeUpdatesPerFrame =
+        readU32(ddgi, "maxMaintenanceProbeUpdatesPerFrame",
+                ddgiSettings.maxMaintenanceProbeUpdatesPerFrame);
     ddgiSettings.maxRayQueriesPerFrame = readU32(
         ddgi, "maxRayQueriesPerFrame", ddgiSettings.maxRayQueriesPerFrame);
     ddgiSettings.maxLocalLightsPerHit = readU32(
@@ -2369,6 +2582,23 @@ readEnumValue(yyjson_val *object, const char *key, Enum defaultValue,
         readBool(ddgi, "multiBounce", ddgiSettings.multiBounce);
     ddgiSettings.diagnosticCounters =
         readBool(ddgi, "diagnosticCounters", ddgiSettings.diagnosticCounters);
+    if (yyjson_val *gatherVariants = yyjson_obj_get(ddgi, "gatherVariants");
+        yyjson_is_obj(gatherVariants)) {
+      const auto values = {
+          std::pair<std::string_view, DDGISurfaceGatherVariant *>{
+              "opaque", &ddgiSettings.opaqueGatherVariant},
+          {"transmission", &ddgiSettings.transmissionGatherVariant},
+          {"traceMultiBounce", &ddgiSettings.traceMultiBounceGatherVariant}};
+      for (const auto [key, output] : values) {
+        *output = readEnumValue(
+            gatherVariants, key.data(), *output,
+            {{"Product", DDGISurfaceGatherVariant::Product},
+             {"Bypass", DDGISurfaceGatherVariant::Bypass},
+             {"Candidates", DDGISurfaceGatherVariant::Candidates},
+             {"ProbeVisibility", DDGISurfaceGatherVariant::ProbeVisibility},
+             {"Atlas", DDGISurfaceGatherVariant::Atlas}});
+      }
+    }
     ddgiSettings.freezeUpdates =
         readBool(ddgi, "freezeUpdates", ddgiSettings.freezeUpdates);
     ddgiSettings.debugView =
@@ -2490,43 +2720,79 @@ readPathArray(yyjson_val *array) {
   if (!yyjson_is_obj(object)) {
     return timeline;
   }
+  timeline.source = readString(object, "source");
   yyjson_val *paths = yyjson_obj_get(object, "cameraPaths");
-  if (!yyjson_is_arr(paths)) {
-    return timeline;
-  }
-  timeline.cameraPaths.reserve(yyjson_arr_size(paths));
-  yyjson_arr_iter pathIter;
-  yyjson_arr_iter_init(paths, &pathIter);
-  yyjson_val *pathValue = nullptr;
-  while ((pathValue = yyjson_arr_iter_next(&pathIter)) != nullptr) {
-    if (!yyjson_is_obj(pathValue)) {
-      continue;
-    }
-    BenchmarkCameraPath path{};
-    path.id = readString(pathValue, "id");
-    path.startFrame = readU32(pathValue, "startFrame");
-    path.endFrame = readU32(pathValue, "endFrame");
-    path.interpolation =
-        readString(pathValue, "interpolation", path.interpolation);
-    yyjson_val *keyframes = yyjson_obj_get(pathValue, "keyframes");
-    if (yyjson_is_arr(keyframes)) {
-      path.keyframes.reserve(yyjson_arr_size(keyframes));
-      yyjson_arr_iter keyframeIter;
-      yyjson_arr_iter_init(keyframes, &keyframeIter);
-      yyjson_val *keyframeValue = nullptr;
-      while ((keyframeValue = yyjson_arr_iter_next(&keyframeIter)) != nullptr) {
-        if (!yyjson_is_obj(keyframeValue)) {
-          continue;
-        }
-        BenchmarkCameraKeyframe keyframe{};
-        keyframe.frame = readU32(keyframeValue, "frame");
-        keyframe.position = readVec3(keyframeValue, "position");
-        keyframe.target = readVec3(keyframeValue, "target");
-        keyframe.hasTarget = readBool(keyframeValue, "hasTarget");
-        path.keyframes.push_back(keyframe);
+  if (yyjson_is_arr(paths)) {
+    timeline.cameraPaths.reserve(yyjson_arr_size(paths));
+    yyjson_arr_iter pathIter;
+    yyjson_arr_iter_init(paths, &pathIter);
+    yyjson_val *pathValue = nullptr;
+    while ((pathValue = yyjson_arr_iter_next(&pathIter)) != nullptr) {
+      if (!yyjson_is_obj(pathValue)) {
+        continue;
       }
+      BenchmarkCameraPath path{};
+      path.id = readString(pathValue, "id");
+      path.startFrame = readU32(pathValue, "startFrame");
+      path.endFrame = readU32(pathValue, "endFrame");
+      path.interpolation =
+          readString(pathValue, "interpolation", path.interpolation);
+      yyjson_val *keyframes = yyjson_obj_get(pathValue, "keyframes");
+      if (yyjson_is_arr(keyframes)) {
+        path.keyframes.reserve(yyjson_arr_size(keyframes));
+        yyjson_arr_iter keyframeIter;
+        yyjson_arr_iter_init(keyframes, &keyframeIter);
+        yyjson_val *keyframeValue = nullptr;
+        while ((keyframeValue = yyjson_arr_iter_next(&keyframeIter)) !=
+               nullptr) {
+          if (!yyjson_is_obj(keyframeValue)) {
+            continue;
+          }
+          BenchmarkCameraKeyframe keyframe{};
+          keyframe.frame = readU32(keyframeValue, "frame");
+          keyframe.position = readVec3(keyframeValue, "position");
+          keyframe.target = readVec3(keyframeValue, "target");
+          keyframe.hasTarget = readBool(keyframeValue, "hasTarget");
+          path.keyframes.push_back(keyframe);
+        }
+      }
+      timeline.cameraPaths.push_back(std::move(path));
     }
-    timeline.cameraPaths.push_back(std::move(path));
+  }
+  yyjson_val *events = yyjson_obj_get(object, "events");
+  if (yyjson_is_arr(events)) {
+    timeline.events.reserve(yyjson_arr_size(events));
+    yyjson_arr_iter eventIter;
+    yyjson_arr_iter_init(events, &eventIter);
+    yyjson_val *eventValue = nullptr;
+    while ((eventValue = yyjson_arr_iter_next(&eventIter)) != nullptr) {
+      if (!yyjson_is_obj(eventValue)) {
+        continue;
+      }
+      BenchmarkTimelineEvent event{};
+      event.frame = readU32(eventValue, "frame");
+      event.type = readString(eventValue, "type") == "setCamera"
+                       ? BenchmarkTimelineEventType::SetCamera
+                       : BenchmarkTimelineEventType::ResetTemporalHistory;
+      event.hasCamera = readBool(eventValue, "hasCamera");
+      event.preserveHistory =
+          readBool(eventValue, "preserveHistory", event.preserveHistory);
+      yyjson_val *camera = yyjson_obj_get(eventValue, "camera");
+      if (event.hasCamera && yyjson_is_obj(camera)) {
+        event.camera.position = readVec3(camera, "position");
+        event.camera.direction =
+            readVec3(camera, "direction", event.camera.direction);
+        event.camera.target = readVec3(camera, "target");
+        event.camera.hasTarget = readBool(camera, "hasTarget");
+        event.camera.verticalFovDegrees = static_cast<float>(readReal(
+            camera, "verticalFovDegrees", event.camera.verticalFovDegrees));
+        event.camera.nearPlane = static_cast<float>(
+            readReal(camera, "nearPlane", event.camera.nearPlane));
+        event.camera.farPlane = static_cast<float>(
+            readReal(camera, "farPlane", event.camera.farPlane));
+      }
+      timeline.events.push_back(event);
+    }
   }
   return timeline;
 }
@@ -2831,6 +3097,15 @@ readTracyZoneArray(yyjson_val *array) {
 
 std::string_view
 benchmarkDiagnosticLabel(const BenchmarkReport &report) noexcept {
+  if (report.benchmarkCase.settings.ddgi.diagnosticCounters) {
+    return "DDGI shader-counter";
+  }
+  const RenderSettings::DDGISettings &ddgi = report.benchmarkCase.settings.ddgi;
+  if (ddgi.opaqueGatherVariant != DDGISurfaceGatherVariant::Product ||
+      ddgi.transmissionGatherVariant != DDGISurfaceGatherVariant::Product ||
+      ddgi.traceMultiBounceGatherVariant != DDGISurfaceGatherVariant::Product) {
+    return "DDGI gather";
+  }
   if (report.environment.tracyDiagnostic) {
     return "Tracy";
   }
@@ -3061,6 +3336,8 @@ writeBenchmarkReportJson(const BenchmarkReport &report, bool verboseFrames) {
   yyjson_mut_obj_add_val(doc.get(), root, "sampleStats", samples);
   yyjson_mut_obj_add_val(doc.get(), root, "stats",
                          makeStatsMapObject(doc.get(), report.stats));
+  yyjson_mut_obj_add_val(doc.get(), root, "metricCatalog",
+                         makeMetricCatalogObject(doc.get(), report.stats));
 
   yyjson_mut_obj_add_val(doc.get(), root, "renderGraph",
                          yyjson_mut_obj(doc.get()));

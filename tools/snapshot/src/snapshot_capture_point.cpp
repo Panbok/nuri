@@ -198,6 +198,14 @@ constexpr std::array kCatalog{
         .coverageArea = "committed DDGI volume slot 0 irradiance atlas",
     },
     SnapshotCaptureCatalogEntry{
+        .name = "ddgi_opaque_surface_cache",
+        .kind = RenderCaptureValueKind::LinearHdrColor,
+        .defaultCompareProfile = "hdr_color",
+        .producer = "DDGIFeature",
+        .coverageArea =
+            "full-resolution opaque DDGI irradiance and sky remainder cache",
+    },
+    SnapshotCaptureCatalogEntry{
         .name = "ddgi_volume0_distance_atlas",
         .kind = RenderCaptureValueKind::Scalar,
         .lifetime = RenderCaptureLifetimeClass::FeaturePersistentTexture,

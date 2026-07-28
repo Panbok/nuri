@@ -47,6 +47,10 @@ struct AutotestSceneConfig {
   uint32_t meshletMaxVertices = 64u;
   uint32_t meshletMaxPrimitives = 124u;
   float meshletConeWeight = 0.0f;
+  std::string baseModelKind{};
+  double baseModelTargetRadius = 1.0;
+  double baseModelMinScale = 0.0001;
+  double baseModelMaxScale = 1000.0;
   std::string generator = "nuri.procedural.v1";
   uint32_t seed = 1u;
   std::string contentHash = "procedural-empty-v1";

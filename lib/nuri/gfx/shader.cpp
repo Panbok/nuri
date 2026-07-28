@@ -220,8 +220,9 @@ Result<ShaderHandle, std::string> Shader::compile(const std::string &code,
       shaderHandles_[stageIndex]);
 }
 
-Result<ShaderHandle, std::string> Shader::compileFromFile(std::string_view path,
-                                                          ShaderStage stage) {
+Result<ShaderHandle, std::string>
+Shader::compileFromFile(std::string_view path, ShaderStage stage,
+                        std::string_view preamble) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
   std::vector<std::filesystem::path> includeStack;
   std::string expandedCode;
@@ -234,6 +235,18 @@ Result<ShaderHandle, std::string> Shader::compileFromFile(std::string_view path,
         pathStr.c_str(), expandError.c_str());
     return Result<ShaderHandle, std::string>::makeError(
         "Failed to load/expand shader file '" + pathStr + "': " + expandError);
+  }
+  if (!preamble.empty()) {
+    size_t insertion = 0u;
+    if (expandedCode.starts_with("#version")) {
+      const size_t lineEnd = expandedCode.find('\n');
+      insertion =
+          lineEnd == std::string::npos ? expandedCode.size() : lineEnd + 1u;
+    }
+    expandedCode.insert(insertion, preamble);
+    if (preamble.back() != '\n') {
+      expandedCode.insert(insertion + preamble.size(), 1u, '\n');
+    }
   }
   auto compileResult = compile(expandedCode, stage);
   if (compileResult.hasError()) {

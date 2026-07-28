@@ -1,0 +1,100 @@
+{
+  "schemaVersion": 1,
+  "id": "renderer.ddgi.bistro_hotspot_high_automatic_mailbox_1858x1057",
+  "suite": "renderer",
+  "comparisonGroup": "renderer.ddgi.bistro_hotspot_mailbox_1858x1057",
+  "variant": "high_automatic",
+  "description": "User-reported Niagara Bistro hotspot with High DDGI and editor-default Mailbox present mode",
+  "scene": {
+    "kind": "prefab",
+    "pathBase": "modelsRoot",
+    "path": "NiagaraBistro/bistrox.gltf",
+    "contentHash": "niagara-bistro-editor-scene-v1",
+    "importOptions": {"mesh": {"generateMeshlets": true, "meshletMaxVertices": 64, "meshletMaxPrimitives": 124, "meshletConeWeight": 0.0}},
+    "baseModel": {"kind": "fitRadius", "targetRadius": 120.0, "minScale": 0.0005, "maxScale": 2.0}
+  },
+  "backend": "nvrhi",
+  "resolution": [1858, 1057],
+  "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 90,
+  "measurementFrames": 240,
+  "cooldownFrames": 2,
+  "maxDrainFrames": 180,
+  "drainTimeoutMs": 8000,
+  "samples": 5,
+  "authoritative": false,
+  "presentMode": "mailbox",
+  "renderGraph": {"workerCount": 1, "parallelCompile": false, "parallelRecording": false},
+  "camera": {
+    "position": [-42.1108932, 10.6209393, 23.3749199],
+    "direction": [0.947014093, -0.197934985, 0.25295499],
+    "verticalFovDegrees": 60.0000038,
+    "nearPlane": 0.0500000007,
+    "farPlane": 500
+  },
+  "settings": {
+    "ddgi": {
+      "enabled": true,
+      "qualityPreset": "High",
+      "coveragePreset": "Automatic",
+      "debugView": "None"
+    },
+    "opaque": {
+      "enabled": true,
+      "meshletMode": "Opportunistic",
+      "hybridClassicMaxMeshlets": 128,
+      "enableMeshletFrustumCulling": true,
+      "enableMeshletConeCulling": true,
+      "enableDepthPrepass": true,
+      "enableDepthPyramid": true,
+      "enableInstanceCompute": false,
+      "enableInstanceAnimation": false,
+      "enableMeshLod": false,
+      "enableTessellation": false,
+      "forcedMeshLod": 0
+    },
+    "visibility": {
+      "mainViewMode": "GpuDriven",
+      "occlusionMode": "CurrentFrameHiZExperimental",
+      "enableMeshletFrustumCulling": true,
+      "enableMeshletConeCulling": true,
+      "enableIndirectMeshDispatch": true,
+      "enableMeshletPreTaskCompaction": false,
+      "visibleOnUncertain": true
+    },
+    "antiAliasing": {
+      "mode": "MSAA8x",
+      "postAA": {
+        "enabled": true,
+        "specular": "BakedClean",
+        "spatial": "Smaa1x",
+        "materialVarianceScale": 1.0,
+        "geometricVarianceScale": 0.35,
+        "maxSlopeVariance": 0.25
+      }
+    },
+    "ambientOcclusion": {"mode": "GTAO", "preset": "Ultra"},
+    "shadow": {"enabled": true, "qualityPreset": "Ultra"},
+    "hdrPostProcess": {"bloomEnabled": false, "adaptationEnabled": false},
+    "transmission": {"enabled": false},
+    "transparent": {"enabled": false},
+    "textureFiltering": {"mode": "Anisotropic", "anisotropy": 8}
+  },
+  "requirements": {"assets": ["modelsRoot:NiagaraBistro/bistrox.gltf"], "backends": ["nvrhi"], "allowVisibleWindow": true, "msaaSamples": 8, "accelerationStructure": true, "rayQuery": true},
+  "thresholds": {"failPercent": 12.0, "failAbsoluteMs": 0.35, "warnPercent": 6.0, "warnAbsoluteMs": 0.18},
+  "requiredMetrics": [
+    "cpu.render_submit_ms", "gpu.frame_ms", "gpu.scopes_sum_ms",
+    "gpu.scopes.opaque_ms", "gpu.scopes.opaque_main_ms",
+    "gpu.scopes.msaa_resolve_ms", "gpu.scopes.spatial_aa_ms",
+    "gpu.scopes.ddgi_ms", "gpu.scopes.ddgi_trace_ms",
+    "gpu.scopes.ddgi_update_ms",
+    "gpu.scopes.ddgi_relocate_classify_ms",
+    "cpu.ddgi.prepare_ms", "cpu.ddgi.schedule_ms",
+    "cpu.ddgi.graph_build_ms", "renderer.ddgi.updated_probes",
+    "renderer.ddgi.total_queries_issued",
+    "renderer.ddgi.secondary_query_budget_overflows",
+    "renderer.ddgi.readback_waits",
+    "renderer.ddgi.readback_blocking_fallbacks",
+    "gpu.memory.ddgi.persistent_mb", "gpu.memory.ddgi.frame_ring_total_mb"
+  ]
+}

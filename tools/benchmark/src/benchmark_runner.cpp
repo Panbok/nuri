@@ -439,6 +439,167 @@ makeBenchmarkSuitePayload(const BenchmarkSuiteRunResult &result,
       yyjson_mut_arr_add_val(variantRows, row);
     }
     yyjson_mut_obj_add_val(document.get(), group, "variants", variantRows);
+
+    const BenchmarkRunResult *off = nullptr;
+    const BenchmarkRunResult *product = nullptr;
+    const BenchmarkRunResult *opaqueBypass = nullptr;
+    const BenchmarkRunResult *transmissionBypass = nullptr;
+    const BenchmarkRunResult *traceBypass = nullptr;
+    for (const BenchmarkRunResult *child : variants) {
+      const RenderSettings::DDGISettings &ddgi =
+          child->report.benchmarkCase.settings.ddgi;
+      if (!ddgi.enabled) {
+        off = child;
+      } else if (ddgi.opaqueGatherVariant == DDGISurfaceGatherVariant::Bypass &&
+                 ddgi.transmissionGatherVariant ==
+                     DDGISurfaceGatherVariant::Product &&
+                 ddgi.traceMultiBounceGatherVariant ==
+                     DDGISurfaceGatherVariant::Product) {
+        opaqueBypass = child;
+      } else if (ddgi.transmissionGatherVariant ==
+                     DDGISurfaceGatherVariant::Bypass &&
+                 ddgi.opaqueGatherVariant ==
+                     DDGISurfaceGatherVariant::Product &&
+                 ddgi.traceMultiBounceGatherVariant ==
+                     DDGISurfaceGatherVariant::Product) {
+        transmissionBypass = child;
+      } else if (ddgi.traceMultiBounceGatherVariant ==
+                     DDGISurfaceGatherVariant::Bypass &&
+                 ddgi.opaqueGatherVariant ==
+                     DDGISurfaceGatherVariant::Product &&
+                 ddgi.transmissionGatherVariant ==
+                     DDGISurfaceGatherVariant::Product) {
+        traceBypass = child;
+      } else if (ddgi.opaqueGatherVariant ==
+                     DDGISurfaceGatherVariant::Product &&
+                 ddgi.transmissionGatherVariant ==
+                     DDGISurfaceGatherVariant::Product &&
+                 ddgi.traceMultiBounceGatherVariant ==
+                     DDGISurfaceGatherVariant::Product &&
+                 !ddgi.diagnosticCounters) {
+        product = child;
+      }
+    }
+    yyjson_mut_val *reconciliation = yyjson_mut_obj(document.get());
+    yyjson_mut_obj_add_uint(document.get(), reconciliation, "schemaVersion",
+                            1u);
+    const bool reconciliationAvailable =
+        off != nullptr && product != nullptr &&
+        off->report.repeatObservations.independent &&
+        product->report.repeatObservations.independent;
+    yyjson_mut_obj_add_bool(document.get(), reconciliation, "available",
+                            reconciliationAvailable);
+    yyjson_mut_val *repetitionRows = yyjson_mut_arr(document.get());
+    if (reconciliationAvailable) {
+      const auto metric = [](const BenchmarkRunResult &child, uint32_t index,
+                             std::string_view id) -> std::optional<double> {
+        const auto sample =
+            std::ranges::find_if(child.report.sampleStats,
+                                 [index](const BenchmarkSampleStats &value) {
+                                   return value.sampleIndex == index;
+                                 });
+        if (sample == child.report.sampleStats.end()) {
+          return std::nullopt;
+        }
+        const auto found = sample->stats.find(std::string(id));
+        return found == sample->stats.end()
+                   ? std::nullopt
+                   : std::optional<double>{found->second.median};
+      };
+      const auto delta =
+          [&metric](const BenchmarkRunResult &a, const BenchmarkRunResult &b,
+                    uint32_t index,
+                    std::string_view id) -> std::optional<double> {
+        const auto av = metric(a, index, id);
+        const auto bv = metric(b, index, id);
+        return av.has_value() && bv.has_value()
+                   ? std::optional<double>{*av - *bv}
+                   : std::nullopt;
+      };
+      const auto addOptional = [&document](yyjson_mut_val *object,
+                                           const char *key,
+                                           std::optional<double> value) {
+        if (value.has_value()) {
+          yyjson_mut_obj_add_real(document.get(), object, key, *value);
+        } else {
+          yyjson_mut_obj_add_null(document.get(), object, key);
+        }
+      };
+      const uint32_t count = std::min(product->report.repeatObservations.count,
+                                      off->report.repeatObservations.count);
+      for (uint32_t index = 0u; index < count; ++index) {
+        yyjson_mut_val *row = yyjson_mut_obj(document.get());
+        yyjson_mut_obj_add_uint(document.get(), row, "repetitionIndex", index);
+        const auto frameIncrement =
+            delta(*product, *off, index, "gpu.frame_ms");
+        const auto productRt =
+            metric(*product, index, "gpu.scopes.ray_tracing_scene_ms");
+        const auto offRt =
+            metric(*off, index, "gpu.scopes.ray_tracing_scene_ms");
+        const std::optional<double> rtIncrement =
+            productRt.has_value()
+                ? std::optional<double>{*productRt -
+                                        (offRt.has_value() ? *offRt : 0.0)}
+                : std::nullopt;
+        const auto trace = metric(*product, index, "gpu.scopes.ddgi_trace_ms");
+        const auto update =
+            metric(*product, index, "gpu.scopes.ddgi_update_ms");
+        const auto state =
+            metric(*product, index, "gpu.scopes.ddgi_relocate_classify_ms");
+        const auto readback =
+            metric(*product, index, "gpu.scopes.ddgi_readback_ms");
+        const std::optional<double> probeUpdate =
+            trace && update && state && readback
+                ? std::optional<double>{*trace + *update + *state + *readback}
+                : std::nullopt;
+        const std::optional<double> opaqueGather =
+            opaqueBypass != nullptr
+                ? delta(*product, *opaqueBypass, index, "gpu.scopes.opaque_ms")
+                : std::nullopt;
+        const std::optional<double> transmissionGather =
+            !product->report.benchmarkCase.settings.transmission.enabled
+                ? std::optional<double>{0.0}
+                : (transmissionBypass != nullptr
+                       ? delta(*product, *transmissionBypass, index,
+                               "gpu.scopes.transmission_ms")
+                       : std::nullopt);
+        const std::optional<double> traceMultiBounceGather =
+            traceBypass != nullptr ? delta(*product, *traceBypass, index,
+                                           "gpu.scopes.ddgi_trace_ms")
+                                   : std::nullopt;
+        const std::optional<double> residual =
+            frameIncrement && rtIncrement && probeUpdate && opaqueGather &&
+                    transmissionGather
+                ? std::optional<double>{*frameIncrement - *rtIncrement -
+                                        *probeUpdate - *opaqueGather -
+                                        *transmissionGather}
+                : std::nullopt;
+        addOptional(row, "ddgiIncrementMs", frameIncrement);
+        addOptional(row, "rtIncrementMs", rtIncrement);
+        addOptional(row, "probeUpdateCostMs", probeUpdate);
+        addOptional(row, "opaqueGatherMs", opaqueGather);
+        addOptional(row, "transmissionGatherMs", transmissionGather);
+        addOptional(row, "traceMultiBounceGatherMs", traceMultiBounceGather);
+        addOptional(row, "gpuResidualMs", residual);
+        addOptional(row, "gpuResidualPercent",
+                    residual && frameIncrement &&
+                            std::abs(*frameIncrement) > 1.0e-9
+                        ? std::optional<double>{100.0 * *residual /
+                                                std::abs(*frameIncrement)}
+                        : std::nullopt);
+        const bool warning =
+            residual && frameIncrement &&
+            std::abs(*residual) >
+                std::max(0.15, 0.10 * std::abs(*frameIncrement));
+        yyjson_mut_obj_add_bool(document.get(), row, "residualWarning",
+                                warning);
+        yyjson_mut_arr_add_val(repetitionRows, row);
+      }
+    }
+    yyjson_mut_obj_add_val(document.get(), reconciliation, "repetitions",
+                           repetitionRows);
+    yyjson_mut_obj_add_val(document.get(), group, "costReconciliation",
+                           reconciliation);
     yyjson_mut_arr_add_val(groups, group);
   }
   yyjson_mut_obj_add_val(document.get(), root, "experimentGroups", groups);
@@ -2932,6 +3093,20 @@ void addRendererFrameMetrics(BenchmarkFrameMeasurements &measurements,
                metrics.transparent.pickDraws);
 
   const RayTracingSceneFrameMetrics &rt = metrics.rayTracingScene;
+  appendValue(measurements, NURI_BENCHMARK_METRIC("cpu.ray_tracing.prepare_ms"),
+              rt.prepareCpuTimeMs);
+  appendValue(measurements,
+              NURI_BENCHMARK_METRIC("cpu.ray_tracing.topology_prepare_ms"),
+              rt.topologyPrepareCpuTimeMs);
+  appendValue(measurements,
+              NURI_BENCHMARK_METRIC("cpu.ray_tracing.transform_prepare_ms"),
+              rt.transformPrepareCpuTimeMs);
+  appendValue(measurements,
+              NURI_BENCHMARK_METRIC("cpu.ray_tracing.deformation_prepare_ms"),
+              rt.deformationPrepareCpuTimeMs);
+  appendValue(measurements,
+              NURI_BENCHMARK_METRIC("cpu.ray_tracing.tlas_prepare_ms"),
+              rt.tlasPrepareCpuTimeMs);
   addIfNonzero(measurements, "renderer.ray_tracing.static_instances",
                rt.staticInstances);
   addIfNonzero(measurements, "renderer.ray_tracing.dynamic_instances",
@@ -2962,6 +3137,22 @@ void addRendererFrameMetrics(BenchmarkFrameMeasurements &measurements,
                rt.dynamicBlasUpdates);
   addIfNonzero(measurements, "renderer.ray_tracing.dynamic_vertex_dispatches",
                rt.dynamicVertexDispatches);
+  appendValue(measurements,
+              NURI_BENCHMARK_METRIC("renderer.ray_tracing.no_as_work_frame"),
+              rt.noAsWorkFrame);
+  appendValue(measurements,
+              NURI_BENCHMARK_METRIC(
+                  "renderer.ray_tracing.indirect_submission_references"),
+              rt.indirectSubmissionReferences);
+  appendValue(
+      measurements,
+      NURI_BENCHMARK_METRIC("renderer.ray_tracing.indirect_texture_references"),
+      rt.indirectTextureReferences);
+  appendValue(
+      measurements,
+      NURI_BENCHMARK_METRIC(
+          "renderer.ray_tracing.graph_acceleration_structure_dependencies"),
+      rt.graphAccelerationStructureDependencies);
   addIfNonzero(measurements, "renderer.ray_tracing.readiness",
                static_cast<uint32_t>(rt.readiness));
   addIfNonzero(measurements, "renderer.ray_tracing.consumed_rebuild_epoch",
@@ -2976,6 +3167,8 @@ void addRendererFrameMetrics(BenchmarkFrameMeasurements &measurements,
                 rt.tlasAllocationBytes);
   addBytesAsMiB(measurements, "gpu.memory.ray_tracing.as_scratch_high_water_mb",
                 rt.asScratchHighWaterBytes);
+  addBytesAsMiB(measurements, "gpu.memory.ray_tracing.as_scratch_current_mb",
+                rt.asScratchCurrentBytes);
   addIfNonzero(measurements,
                "renderer.ray_tracing.direct_binding_pool_high_water",
                rt.directBindingPoolHighWater);
@@ -3020,6 +3213,9 @@ void addRendererFrameMetrics(BenchmarkFrameMeasurements &measurements,
                ddgi.irradiancePrimaryQueries);
   addIfNonzero(measurements, "renderer.ddgi.primary_queries_issued",
                ddgi.primaryQueriesIssued);
+  appendValue(measurements,
+              NURI_BENCHMARK_METRIC("renderer.ddgi.trace_counters_available"),
+              ddgi.traceCountersAvailable);
   addIfNonzero(measurements, "renderer.ddgi.trace_counter_source_frame",
                ddgi.traceCounterSourceFrame);
   addIfNonzero(measurements, "renderer.ddgi.trace_counter_stale_frames",
@@ -3067,34 +3263,101 @@ void addRendererFrameMetrics(BenchmarkFrameMeasurements &measurements,
   addIfNonzero(measurements, "renderer.ddgi.total_queries_issued",
                static_cast<uint64_t>(ddgi.primaryQueriesIssued) +
                    ddgi.secondaryQueries);
-  addIfNonzero(measurements, "renderer.ddgi.primary_candidate_intersections",
-               ddgi.primaryCandidateIntersections);
-  addIfNonzero(measurements, "renderer.ddgi.secondary_candidate_intersections",
-               ddgi.secondaryCandidateIntersections);
-  addIfNonzero(measurements, "renderer.ddgi.alpha_candidate_rejections",
-               ddgi.alphaCandidateRejections);
-  addIfNonzero(measurements, "renderer.ddgi.backface_candidate_rejections",
-               ddgi.backfaceCandidateRejections);
-  addIfNonzero(measurements, "renderer.ddgi.candidate_overflows",
-               ddgi.candidateOverflows);
-  addIfNonzero(measurements, "renderer.ddgi.local_light_truncations",
-               ddgi.localLightTruncations);
-  addIfNonzero(measurements, "renderer.ddgi.non_finite_radiance_rejects",
-               ddgi.nonFiniteRadianceRejects);
-  addIfNonzero(measurements, "renderer.ddgi.emissive_radiance_clamps",
-               ddgi.emissiveRadianceClamps);
-  addIfNonzero(measurements, "renderer.ddgi.direct_radiance_clamps",
-               ddgi.directRadianceClamps);
-  addIfNonzero(measurements, "renderer.ddgi.sky_radiance_clamps",
-               ddgi.skyRadianceClamps);
-  addIfNonzero(measurements, "renderer.ddgi.multi_bounce_radiance_clamps",
-               ddgi.multiBounceRadianceClamps);
-  addIfNonzero(measurements, "renderer.ddgi.final_radiance_clamps",
-               ddgi.finalRadianceClamps);
+  if (ddgi.diagnosticCountersEnabled != 0u &&
+      ddgi.traceCountersAvailable != 0u) {
+    appendValue(
+        measurements,
+        NURI_BENCHMARK_METRIC("renderer.ddgi.primary_candidate_intersections"),
+        ddgi.primaryCandidateIntersections);
+    appendValue(measurements,
+                NURI_BENCHMARK_METRIC(
+                    "renderer.ddgi.secondary_candidate_intersections"),
+                ddgi.secondaryCandidateIntersections);
+    appendValue(
+        measurements,
+        NURI_BENCHMARK_METRIC("renderer.ddgi.alpha_candidate_rejections"),
+        ddgi.alphaCandidateRejections);
+    appendValue(
+        measurements,
+        NURI_BENCHMARK_METRIC("renderer.ddgi.backface_candidate_rejections"),
+        ddgi.backfaceCandidateRejections);
+    appendValue(measurements,
+                NURI_BENCHMARK_METRIC("renderer.ddgi.candidate_overflows"),
+                ddgi.candidateOverflows);
+    appendValue(measurements,
+                NURI_BENCHMARK_METRIC("renderer.ddgi.local_light_truncations"),
+                ddgi.localLightTruncations);
+    appendValue(
+        measurements,
+        NURI_BENCHMARK_METRIC("renderer.ddgi.non_finite_radiance_rejects"),
+        ddgi.nonFiniteRadianceRejects);
+    appendValue(measurements,
+                NURI_BENCHMARK_METRIC("renderer.ddgi.emissive_radiance_clamps"),
+                ddgi.emissiveRadianceClamps);
+    appendValue(measurements,
+                NURI_BENCHMARK_METRIC("renderer.ddgi.direct_radiance_clamps"),
+                ddgi.directRadianceClamps);
+    appendValue(measurements,
+                NURI_BENCHMARK_METRIC("renderer.ddgi.sky_radiance_clamps"),
+                ddgi.skyRadianceClamps);
+    appendValue(
+        measurements,
+        NURI_BENCHMARK_METRIC("renderer.ddgi.multi_bounce_radiance_clamps"),
+        ddgi.multiBounceRadianceClamps);
+    appendValue(measurements,
+                NURI_BENCHMARK_METRIC("renderer.ddgi.final_radiance_clamps"),
+                ddgi.finalRadianceClamps);
+  }
   appendValue(
       measurements,
       NURI_BENCHMARK_METRIC("renderer.ddgi.diagnostic_counters_enabled"),
       ddgi.diagnosticCountersEnabled);
+  appendValue(measurements,
+              NURI_BENCHMARK_METRIC("renderer.ddgi.quality_schema"),
+              ddgi.qualitySchema);
+  appendValue(measurements,
+              NURI_BENCHMARK_METRIC("renderer.ddgi.requested_quality_preset"),
+              ddgi.requestedQualityPreset);
+  appendValue(measurements,
+              NURI_BENCHMARK_METRIC("renderer.ddgi.quality_preset"),
+              ddgi.qualityPreset);
+  appendValue(measurements,
+              NURI_BENCHMARK_METRIC("renderer.ddgi.coverage_preset_schema"),
+              ddgi.coveragePresetSchema);
+  appendValue(measurements,
+              NURI_BENCHMARK_METRIC("renderer.ddgi.requested_coverage_preset"),
+              ddgi.requestedCoveragePreset);
+  appendValue(measurements,
+              NURI_BENCHMARK_METRIC("renderer.ddgi.coverage_preset"),
+              ddgi.coveragePreset);
+  appendValue(measurements,
+              NURI_BENCHMARK_METRIC("renderer.ddgi.product_profile_schema"),
+              ddgi.productProfileSchema);
+  appendValue(measurements,
+              NURI_BENCHMARK_METRIC("renderer.ddgi.gather_identity_schema"),
+              ddgi.gatherIdentitySchema);
+  appendValue(measurements,
+              NURI_BENCHMARK_METRIC("renderer.ddgi.opaque_gather_architecture"),
+              ddgi.opaqueGatherArchitecture);
+  appendValue(measurements,
+              NURI_BENCHMARK_METRIC("renderer.ddgi.opaque_gather_variant"),
+              ddgi.opaqueGatherVariant);
+  appendValue(
+      measurements,
+      NURI_BENCHMARK_METRIC("renderer.ddgi.transmission_gather_architecture"),
+      ddgi.transmissionGatherArchitecture);
+  appendValue(
+      measurements,
+      NURI_BENCHMARK_METRIC("renderer.ddgi.transmission_gather_variant"),
+      ddgi.transmissionGatherVariant);
+  appendValue(measurements,
+              NURI_BENCHMARK_METRIC(
+                  "renderer.ddgi.trace_multibounce_gather_architecture"),
+              ddgi.traceMultiBounceGatherArchitecture);
+  appendValue(
+      measurements,
+      NURI_BENCHMARK_METRIC("renderer.ddgi.trace_multibounce_gather_variant"),
+      ddgi.traceMultiBounceGatherVariant);
   appendValue(
       measurements,
       NURI_BENCHMARK_METRIC("renderer.ddgi.surface_gather_architecture"),
@@ -3114,6 +3377,10 @@ void addRendererFrameMetrics(BenchmarkFrameMeasurements &measurements,
   addIfNonzero(measurements,
                "renderer.ddgi.surface_gather_max_atlas_samples_per_pixel",
                ddgi.surfaceGatherMaxAtlasSamplesPerPixel);
+  addIfNonzero(measurements, "renderer.ddgi.surface_cache_format",
+               ddgi.surfaceCacheFormat);
+  addIfNonzero(measurements, "renderer.ddgi.surface_cache_bytes",
+               ddgi.surfaceCacheBytes);
   addIfNonzero(measurements, "renderer.ddgi.ray_query_capacity",
                ddgi.rayQueryCapacity);
   addIfNonzero(measurements, "renderer.ddgi.probe_update_capacity",
@@ -3126,6 +3393,82 @@ void addRendererFrameMetrics(BenchmarkFrameMeasurements &measurements,
       measurements,
       NURI_BENCHMARK_METRIC("renderer.ddgi.effective_probe_update_capacity"),
       ddgi.effectiveProbeUpdateCapacity);
+  appendValue(measurements,
+              NURI_BENCHMARK_METRIC(
+                  "renderer.ddgi.requested_maintenance_probe_update_capacity"),
+              ddgi.requestedMaintenanceProbeUpdateCapacity);
+  appendValue(measurements,
+              NURI_BENCHMARK_METRIC(
+                  "renderer.ddgi.effective_maintenance_probe_update_capacity"),
+              ddgi.effectiveMaintenanceProbeUpdateCapacity);
+  appendValue(measurements,
+              NURI_BENCHMARK_METRIC("renderer.ddgi.maintenance_probe_updates"),
+              ddgi.maintenanceProbeUpdates);
+  appendValue(measurements,
+              NURI_BENCHMARK_METRIC("renderer.ddgi.primary_result_capacity"),
+              ddgi.primaryResultCapacity);
+  appendValue(measurements,
+              NURI_BENCHMARK_METRIC("renderer.ddgi.trace_dispatches"),
+              ddgi.traceDispatches);
+  appendValue(measurements,
+              NURI_BENCHMARK_METRIC("renderer.ddgi.trace_launched_lanes"),
+              ddgi.traceLaunchedLanes);
+  appendValue(measurements,
+              NURI_BENCHMARK_METRIC("renderer.ddgi.trace_useful_lanes"),
+              ddgi.traceUsefulLanes);
+  appendValue(
+      measurements,
+      NURI_BENCHMARK_METRIC("renderer.ddgi.classification_launched_lanes"),
+      ddgi.classificationLaunchedLanes);
+  appendValue(
+      measurements,
+      NURI_BENCHMARK_METRIC("renderer.ddgi.classification_useful_lanes"),
+      ddgi.classificationUsefulLanes);
+  appendValue(
+      measurements,
+      NURI_BENCHMARK_METRIC("renderer.ddgi.irradiance_atlas_dispatches"),
+      ddgi.irradianceAtlasDispatches);
+  appendValue(measurements,
+              NURI_BENCHMARK_METRIC("renderer.ddgi.distance_atlas_dispatches"),
+              ddgi.distanceAtlasDispatches);
+  appendValue(measurements,
+              NURI_BENCHMARK_METRIC("renderer.ddgi.irradiance_result_visits"),
+              ddgi.irradianceResultVisits);
+  appendValue(measurements,
+              NURI_BENCHMARK_METRIC("renderer.ddgi.distance_result_visits"),
+              ddgi.distanceResultVisits);
+  appendValue(measurements,
+              NURI_BENCHMARK_METRIC("renderer.ddgi.irradiance_texel_writes"),
+              ddgi.irradianceTexelWrites);
+  appendValue(measurements,
+              NURI_BENCHMARK_METRIC("renderer.ddgi.distance_texel_writes"),
+              ddgi.distanceTexelWrites);
+  appendValue(measurements,
+              NURI_BENCHMARK_METRIC("renderer.ddgi.update_reason_bits"),
+              ddgi.updateReasonBits);
+  appendValue(measurements,
+              NURI_BENCHMARK_METRIC("renderer.ddgi.reason.bootstrap"),
+              ddgi.bootstrapUpdates);
+  appendValue(measurements,
+              NURI_BENCHMARK_METRIC("renderer.ddgi.reason.scroll"),
+              ddgi.scrollUpdates);
+  appendValue(measurements,
+              NURI_BENCHMARK_METRIC("renderer.ddgi.reason.dirty_geometry"),
+              ddgi.dirtyGeometryUpdates);
+  appendValue(
+      measurements,
+      NURI_BENCHMARK_METRIC("renderer.ddgi.reason.radiometric_response"),
+      ddgi.radiometricResponseUpdates);
+  appendValue(measurements,
+              NURI_BENCHMARK_METRIC("renderer.ddgi.reason.maintenance"),
+              ddgi.maintenanceUpdates);
+  appendValue(measurements, NURI_BENCHMARK_METRIC("renderer.ddgi.reason.force"),
+              ddgi.forceUpdates);
+  appendValue(measurements, NURI_BENCHMARK_METRIC("renderer.ddgi.reason.wake"),
+              ddgi.wakeUpdates);
+  appendValue(measurements,
+              NURI_BENCHMARK_METRIC("renderer.ddgi.reason.reclassification"),
+              ddgi.reclassificationUpdates);
   appendValue(measurements,
               NURI_BENCHMARK_METRIC("renderer.ddgi.startup_phase"),
               static_cast<uint32_t>(ddgi.startupPhase));
@@ -3152,6 +3495,32 @@ void addRendererFrameMetrics(BenchmarkFrameMeasurements &measurements,
   addBytesAsMiB(measurements, "gpu.memory.ddgi.redundant_authored_mb",
                 ddgi.redundantAuthoredBytes);
   addIfNonzero(measurements, "renderer.ddgi.coverage_mode", ddgi.coverageMode);
+  appendValue(measurements,
+              NURI_BENCHMARK_METRIC("renderer.ddgi.coverage_solve_executions"),
+              ddgi.coverageSolveExecutions);
+  appendValue(measurements,
+              NURI_BENCHMARK_METRIC("renderer.ddgi.coverage_plan_cache_hits"),
+              ddgi.coveragePlanCacheHits);
+  appendValue(measurements,
+              NURI_BENCHMARK_METRIC("renderer.ddgi.state_history_scan_count"),
+              ddgi.stateHistoryScanCount);
+  appendValue(measurements,
+              NURI_BENCHMARK_METRIC("renderer.ddgi.age_sample_count"),
+              ddgi.ageSampleCount);
+  appendValue(measurements,
+              NURI_BENCHMARK_METRIC("renderer.ddgi.age_selection_count"),
+              ddgi.ageSelectionCount);
+  appendValue(
+      measurements,
+      NURI_BENCHMARK_METRIC("renderer.ddgi.coverage_lattice_evaluations"),
+      ddgi.coverageLatticeEvaluations);
+  appendValue(measurements,
+              NURI_BENCHMARK_METRIC("renderer.ddgi.upload_submission_count"),
+              ddgi.uploadSubmissionCount);
+  appendValue(
+      measurements,
+      NURI_BENCHMARK_METRIC("renderer.ddgi.light_difference_comparisons"),
+      ddgi.lightDifferenceComparisons);
   addIfNonzero(measurements, "renderer.ddgi.coverage_status",
                static_cast<uint32_t>(ddgi.coverageStatus));
   addIfNonzero(measurements, "renderer.ddgi.coverage_error",
@@ -3182,6 +3551,14 @@ void addRendererFrameMetrics(BenchmarkFrameMeasurements &measurements,
   appendValue(measurements,
               NURI_BENCHMARK_METRIC("renderer.ddgi.coverage_resolve_cpu_ms"),
               ddgi.coverageResolveCpuTimeMs);
+  appendValue(measurements, NURI_BENCHMARK_METRIC("cpu.ddgi.prepare_ms"),
+              ddgi.prepareCpuTimeMs);
+  appendValue(measurements, NURI_BENCHMARK_METRIC("cpu.ddgi.schedule_ms"),
+              ddgi.scheduleCpuTimeMs);
+  appendValue(measurements, NURI_BENCHMARK_METRIC("cpu.ddgi.graph_build_ms"),
+              ddgi.graphBuildCpuTimeMs);
+  appendValue(measurements, NURI_BENCHMARK_METRIC("cpu.ddgi.readback_poll_ms"),
+              ddgi.readbackPollCpuTimeMs);
   addIfNonzero(measurements, "renderer.ddgi.diagnostic_sample_count",
                ddgi.diagnosticSampleCount);
   addIfNonzero(measurements, "renderer.ddgi.uncovered_diagnostic_samples",
@@ -3244,6 +3621,15 @@ void addRendererFrameMetrics(BenchmarkFrameMeasurements &measurements,
                 ddgi.persistentBytes);
   addBytesAsMiB(measurements, "gpu.memory.ddgi.frame_batch_mb",
                 ddgi.frameBatchBytes);
+  addBytesAsMiB(measurements, "gpu.memory.ddgi.frame_ring_device_mb",
+                ddgi.frameRingDeviceBytes);
+  addBytesAsMiB(measurements, "gpu.memory.ddgi.frame_ring_readback_mb",
+                ddgi.frameRingReadbackBytes);
+  addBytesAsMiB(measurements, "gpu.memory.ddgi.frame_ring_total_mb",
+                ddgi.frameRingBytes);
+  appendValue(measurements,
+              NURI_BENCHMARK_METRIC("renderer.ddgi.frame_slot_count"),
+              ddgi.frameSlotCount);
   addBytesAsMiB(measurements, "gpu.memory.ddgi.committed_atlas_mb",
                 ddgi.committedAtlasBytes);
   addBytesAsMiB(measurements, "gpu.memory.ddgi.pending_atlas_mb",
@@ -3469,6 +3855,7 @@ public:
 [[nodiscard]] Result<bool, BenchmarkExitCode>
 checkRequirements(const BenchmarkCase &benchmarkCase, std::string_view backend,
                   std::vector<std::string> &warnings, std::string &message) {
+  (void)warnings;
   if (backend != "nvrhi") {
     message = "unsupported backend '" + std::string(backend) +
               "'; nvrhi is the only available backend";
@@ -3516,12 +3903,6 @@ checkRequirements(const BenchmarkCase &benchmarkCase, std::string_view backend,
       return Result<bool, BenchmarkExitCode>::makeError(
           BenchmarkExitCode::EnvironmentUnavailable);
     }
-  }
-  if (benchmarkCase.scene.kind == "prefab" &&
-      benchmarkCase.scene.baseModelKind == "fitRadius") {
-    warnings.push_back(
-        "prefab fitRadius transforms are parsed but not enabled for benchmark "
-        "comparison in this slice");
   }
   return Result<bool, BenchmarkExitCode>::makeResult(true);
 }
@@ -3681,10 +4062,25 @@ void applyGpuTimingReport(BenchmarkReport &report,
   add(NURI_BENCHMARK_METRIC("gpu.scopes.ddgi_update_ms"),
       GpuTimingScope::DDGIUpdate, timingReport.ddgiUpdateSourceFrameIndex,
       timingReport.ddgiUpdateTimeMs);
+  add(NURI_BENCHMARK_METRIC("gpu.scopes.ddgi_irradiance_update_ms"),
+      GpuTimingScope::DDGIIrradianceUpdate,
+      timingReport.ddgiIrradianceUpdateSourceFrameIndex,
+      timingReport.ddgiIrradianceUpdateTimeMs);
+  add(NURI_BENCHMARK_METRIC("gpu.scopes.ddgi_distance_update_ms"),
+      GpuTimingScope::DDGIDistanceUpdate,
+      timingReport.ddgiDistanceUpdateSourceFrameIndex,
+      timingReport.ddgiDistanceUpdateTimeMs);
   add(NURI_BENCHMARK_METRIC("gpu.scopes.ddgi_relocate_classify_ms"),
       GpuTimingScope::DDGIRelocateClassify,
       timingReport.ddgiRelocateClassifySourceFrameIndex,
       timingReport.ddgiRelocateClassifyTimeMs);
+  add(NURI_BENCHMARK_METRIC("gpu.scopes.ddgi_readback_ms"),
+      GpuTimingScope::DDGIReadback, timingReport.ddgiReadbackSourceFrameIndex,
+      timingReport.ddgiReadbackTimeMs);
+  add(NURI_BENCHMARK_METRIC("gpu.scopes.ddgi_surface_cache_ms"),
+      GpuTimingScope::DDGIOpaqueSurfaceCache,
+      timingReport.ddgiOpaqueSurfaceCacheSourceFrameIndex,
+      timingReport.ddgiOpaqueSurfaceCacheTimeMs);
   if (const auto frameIt =
           frameByIndex.find(timingReport.wholeFrameSourceFrameIndex);
       frameIt != frameByIndex.end()) {
@@ -4068,6 +4464,70 @@ waitForBenchmarkAssets(Renderer &renderer, RenderScene &scene,
   }
 }
 
+[[nodiscard]] Result<bool, std::string>
+applyBenchmarkSceneBaseModel(const BenchmarkCase &benchmarkCase,
+                             Renderer &renderer, RenderScene &scene,
+                             SceneLoadHandle sceneLoad) {
+  if (benchmarkCase.scene.kind != "prefab" ||
+      benchmarkCase.scene.baseModelKind.empty()) {
+    return Result<bool, std::string>::makeResult(true);
+  }
+  if (benchmarkCase.scene.baseModelKind != "fitRadius") {
+    return Result<bool, std::string>::makeError(
+        "unsupported benchmark prefab base-model transform: " +
+        benchmarkCase.scene.baseModelKind);
+  }
+  if (!isValid(sceneLoad)) {
+    return Result<bool, std::string>::makeError(
+        "benchmark prefab base-model transform requires a valid scene load");
+  }
+
+  const ScenePrefab *prefab = renderer.assets().tryGetScenePrefab(sceneLoad);
+  const std::optional<ScenePrefabAssets> assets =
+      renderer.assets().tryGetSceneAssets(sceneLoad);
+  const std::optional<SceneInstantiationMap> instantiation =
+      renderer.assets().tryGetSceneInstantiation(sceneLoad);
+  if (prefab == nullptr || !assets.has_value() || !instantiation.has_value() ||
+      assets->models.empty()) {
+    return Result<bool, std::string>::makeError(
+        "benchmark prefab base-model inputs are unavailable after scene load");
+  }
+
+  const ModelRecord *modelRecord =
+      renderer.resources().tryGet(assets->models.front());
+  if (modelRecord == nullptr || modelRecord->model == nullptr) {
+    return Result<bool, std::string>::makeError(
+        "benchmark prefab base-model reference model is unavailable");
+  }
+  const float rawRadius = std::max(
+      0.5f * glm::length(modelRecord->model->bounds().getSize()), 1.0e-3f);
+  const float scale = std::clamp(
+      static_cast<float>(benchmarkCase.scene.baseModelTargetRadius) / rawRadius,
+      static_cast<float>(benchmarkCase.scene.baseModelMinScale),
+      static_cast<float>(benchmarkCase.scene.baseModelMaxScale));
+  const glm::mat4 baseModel = glm::scale(glm::mat4(1.0f), glm::vec3(scale));
+
+  for (uint32_t nodeIndex = 0u; nodeIndex < prefab->nodes.size(); ++nodeIndex) {
+    if (prefab->nodes[nodeIndex].parentIndex != kInvalidScenePrefabIndex ||
+        nodeIndex >= instantiation->nodes.size() ||
+        !isValid(instantiation->nodes[nodeIndex])) {
+      continue;
+    }
+    if (!scene.graph().setNodeLocalTransform(
+            instantiation->nodes[nodeIndex],
+            baseModel * prefab->nodes[nodeIndex].localFromParent)) {
+      return Result<bool, std::string>::makeError(
+          "failed to apply benchmark prefab base-model transform");
+    }
+  }
+  (void)scene.graph().syncWorldTransforms();
+  auto commitResult = scene.commit();
+  if (commitResult.hasError()) {
+    return Result<bool, std::string>::makeError(commitResult.error());
+  }
+  return Result<bool, std::string>::makeResult(true);
+}
+
 [[nodiscard]] glm::vec3 normalizedOrDefault(const glm::vec3 &value,
                                             const glm::vec3 &fallback) {
   return glm::length(value) > 1.0e-6f ? glm::normalize(value) : fallback;
@@ -4154,6 +4614,13 @@ evaluateBenchmarkCameraAtFrame(const BenchmarkCase &benchmarkCase,
       return evaluated;
     }
     camera = evaluated.value();
+  }
+  for (const BenchmarkTimelineEvent &event : benchmarkCase.timeline.events) {
+    if (event.frame == frame &&
+        event.type == BenchmarkTimelineEventType::SetCamera &&
+        event.hasCamera) {
+      camera = event.camera;
+    }
   }
   return Result<BenchmarkCameraConfig, std::string>::makeResult(camera);
 }
@@ -5643,10 +6110,19 @@ BenchmarkRunResult runBenchmarkCase(BenchmarkCase benchmarkCase,
       return finishDiagnosticsAndFinalize();
     }
     auto assetsReady = waitForBenchmarkAssets(*renderer, scene, sceneLoad);
-    const double sceneResourcePrepareMs = elapsedMs(sceneResourcePrepareBegin);
     if (assetsReady.hasError()) {
       result.exitCode = BenchmarkExitCode::RuntimeError;
       result.message = assetsReady.error();
+      report.run.validForComparison = false;
+      report.warnings.push_back(result.message);
+      return finishDiagnosticsAndFinalize();
+    }
+    auto baseModelApplied = applyBenchmarkSceneBaseModel(
+        benchmarkCase, *renderer, scene, sceneLoad);
+    const double sceneResourcePrepareMs = elapsedMs(sceneResourcePrepareBegin);
+    if (baseModelApplied.hasError()) {
+      result.exitCode = BenchmarkExitCode::RuntimeError;
+      result.message = baseModelApplied.error();
       report.run.validForComparison = false;
       report.warnings.push_back(result.message);
       return finishDiagnosticsAndFinalize();
@@ -5677,6 +6153,15 @@ BenchmarkRunResult runBenchmarkCase(BenchmarkCase benchmarkCase,
       window->pollEvents();
       if (renderDocDiagnostic) {
         renderDocSession.trigger(frameIndex, report);
+      }
+      for (const BenchmarkTimelineEvent &event :
+           benchmarkCase.timeline.events) {
+        if (event.frame != sampleFrame || event.preserveHistory) {
+          continue;
+        }
+        temporalFrameService.reset();
+        settings.antiAliasing.debug.resetHistoryRequested = true;
+        ++settings.ddgi.requestedEpochs.resetHistory;
       }
       auto evaluatedCamera =
           evaluateBenchmarkCameraAtFrame(benchmarkCase, sampleFrame);

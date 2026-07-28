@@ -1064,9 +1064,13 @@ parseDDGISettings(yyjson_val *object, RenderSettings &settings,
   static constexpr std::array keys{
       std::string_view("enabled"),
       std::string_view("preset"),
+      std::string_view("qualityPreset"),
+      std::string_view("coveragePreset"),
       std::string_view("raysPerProbe"),
       std::string_view("classificationRaysPerProbe"),
       std::string_view("maxProbeUpdatesPerFrame"),
+      std::string_view("maxRadianceProbeUpdatesPerFrame"),
+      std::string_view("maxMaintenanceProbeUpdatesPerFrame"),
       std::string_view("maxRayQueriesPerFrame"),
       std::string_view("maxLocalLightsPerHit"),
       std::string_view("maxCandidateIntersectionsPerRay"),
@@ -1089,6 +1093,7 @@ parseDDGISettings(yyjson_val *object, RenderSettings &settings,
       std::string_view("showProbes"),
       std::string_view("showSelectedProbeRays"),
       std::string_view("debugView"),
+      std::string_view("gatherVariants"),
       std::string_view("coverage")};
   auto result = rejectUnknownKeys(object, keys, path);
   if (result.hasError()) {
@@ -1099,7 +1104,17 @@ parseDDGISettings(yyjson_val *object, RenderSettings &settings,
     return Result<bool, std::string>::makeError(enabled.error());
   }
   settings.ddgi.enabled = enabled.value();
-  result = readEnumField(object, "preset", path, settings.ddgi.preset,
+  const bool hasLegacyPreset = yyjson_obj_get(object, "preset") != nullptr;
+  const bool hasQualityPreset =
+      yyjson_obj_get(object, "qualityPreset") != nullptr;
+  if (hasLegacyPreset && hasQualityPreset) {
+    return Result<bool, std::string>::makeError(
+        jsonPath(path, "qualityPreset") +
+        " cannot be combined with legacy preset");
+  }
+  const std::string_view qualityPresetKey =
+      hasQualityPreset ? "qualityPreset" : "preset";
+  result = readEnumField(object, qualityPresetKey, path, settings.ddgi.preset,
                          {{"Low", DDGIQualityPreset::Low},
                           {"Balanced", DDGIQualityPreset::Balanced},
                           {"High", DDGIQualityPreset::High},
@@ -1107,18 +1122,50 @@ parseDDGISettings(yyjson_val *object, RenderSettings &settings,
   if (result.hasError()) {
     return result;
   }
-  const bool hasPresetOwnedOverride =
+  settings.ddgi.requestedPreset = settings.ddgi.preset;
+  applyDDGIQualityPreset(settings.ddgi, settings.ddgi.preset);
+  result = readEnumField(object, "coveragePreset", path,
+                         settings.ddgi.coveragePreset,
+                         {{"Authored", DDGICoveragePreset::Authored},
+                          {"Automatic", DDGICoveragePreset::Automatic},
+                          {"Custom", DDGICoveragePreset::Custom}});
+  if (result.hasError()) {
+    return result;
+  }
+  settings.ddgi.requestedCoveragePreset = settings.ddgi.coveragePreset;
+  applyDDGICoveragePreset(settings.ddgi, settings.ddgi.coveragePreset);
+  const bool hasQualityOwnedOverride =
       yyjson_obj_get(object, "raysPerProbe") != nullptr ||
       yyjson_obj_get(object, "classificationRaysPerProbe") != nullptr ||
       yyjson_obj_get(object, "maxProbeUpdatesPerFrame") != nullptr ||
+      yyjson_obj_get(object, "maxRadianceProbeUpdatesPerFrame") != nullptr ||
+      yyjson_obj_get(object, "maxMaintenanceProbeUpdatesPerFrame") != nullptr ||
       yyjson_obj_get(object, "maxRayQueriesPerFrame") != nullptr ||
-      yyjson_obj_get(object, "coverage") != nullptr;
+      yyjson_obj_get(object, "maxLocalLightsPerHit") != nullptr ||
+      yyjson_obj_get(object, "maxCandidateIntersectionsPerRay") != nullptr ||
+      yyjson_obj_get(object, "irradianceHysteresis") != nullptr ||
+      yyjson_obj_get(object, "distanceHysteresis") != nullptr ||
+      yyjson_obj_get(object, "changeIrradianceHysteresisScale") != nullptr ||
+      yyjson_obj_get(object, "changeDistanceHysteresisScale") != nullptr ||
+      yyjson_obj_get(object, "selfShadowBias") != nullptr ||
+      yyjson_obj_get(object, "primaryProbeBias") != nullptr ||
+      yyjson_obj_get(object, "localShadowBias") != nullptr ||
+      yyjson_obj_get(object, "directionalShadowBias") != nullptr ||
+      yyjson_obj_get(object, "classificationBias") != nullptr ||
+      yyjson_obj_get(object, "multiBounceLuminanceClamp") != nullptr ||
+      yyjson_obj_get(object, "relocation") != nullptr ||
+      yyjson_obj_get(object, "classification") != nullptr ||
+      yyjson_obj_get(object, "multiBounce") != nullptr;
   for (const auto [key, output] :
        {std::pair<std::string_view, uint32_t *>{"raysPerProbe",
                                                 &settings.ddgi.raysPerProbe},
         {"classificationRaysPerProbe",
          &settings.ddgi.classificationRaysPerProbe},
         {"maxProbeUpdatesPerFrame", &settings.ddgi.maxProbeUpdatesPerFrame},
+        {"maxRadianceProbeUpdatesPerFrame",
+         &settings.ddgi.maxRadianceProbeUpdatesPerFrame},
+        {"maxMaintenanceProbeUpdatesPerFrame",
+         &settings.ddgi.maxMaintenanceProbeUpdatesPerFrame},
         {"maxRayQueriesPerFrame", &settings.ddgi.maxRayQueriesPerFrame},
         {"maxLocalLightsPerHit", &settings.ddgi.maxLocalLightsPerHit},
         {"maxCandidateIntersectionsPerRay",
@@ -1183,14 +1230,42 @@ parseDDGISettings(yyjson_val *object, RenderSettings &settings,
   if (result.hasError()) {
     return result;
   }
+  if (yyjson_val *variants = optionalObject(object, "gatherVariants")) {
+    static constexpr std::array variantKeys{
+        std::string_view("opaque"), std::string_view("transmission"),
+        std::string_view("traceMultiBounce")};
+    result = rejectUnknownKeys(variants, variantKeys,
+                               jsonPath(path, "gatherVariants"));
+    if (result.hasError()) {
+      return result;
+    }
+    const auto values = {
+        std::pair<std::string_view, DDGISurfaceGatherVariant *>{
+            "opaque", &settings.ddgi.opaqueGatherVariant},
+        {"transmission", &settings.ddgi.transmissionGatherVariant},
+        {"traceMultiBounce", &settings.ddgi.traceMultiBounceGatherVariant}};
+    for (const auto [key, output] : values) {
+      result = readEnumField(
+          variants, key, jsonPath(path, "gatherVariants"), *output,
+          {{"Product", DDGISurfaceGatherVariant::Product},
+           {"Bypass", DDGISurfaceGatherVariant::Bypass},
+           {"Candidates", DDGISurfaceGatherVariant::Candidates},
+           {"ProbeVisibility", DDGISurfaceGatherVariant::ProbeVisibility},
+           {"Atlas", DDGISurfaceGatherVariant::Atlas}});
+      if (result.hasError()) {
+        return result;
+      }
+    }
+  }
   if (yyjson_val *coverage = optionalObject(object, "coverage")) {
     result = parseDDGICoverageSettings(coverage, settings.ddgi.coverage,
                                        jsonPath(path, "coverage"));
     if (result.hasError()) {
       return result;
     }
+    settings.ddgi.coveragePreset = DDGICoveragePreset::Custom;
   }
-  if (hasPresetOwnedOverride &&
+  if (hasQualityOwnedOverride &&
       settings.ddgi.preset != DDGIQualityPreset::Custom) {
     settings.ddgi.preset = DDGIQualityPreset::Custom;
   }
@@ -1517,24 +1592,25 @@ parseTimeline(yyjson_val *root, const BenchmarkCameraConfig &baseCamera,
   if (object == nullptr) {
     return Result<BenchmarkTimeline, std::string>::makeResult(timeline);
   }
-  static constexpr std::array keys{std::string_view("cameraPaths")};
+  static constexpr std::array keys{std::string_view("cameraPaths"),
+                                   std::string_view("events")};
   auto result = rejectUnknownKeys(object, keys, "timeline");
   if (result.hasError()) {
     return Result<BenchmarkTimeline, std::string>::makeError(result.error());
   }
   yyjson_val *paths = optionalObject(object, "cameraPaths");
-  if (paths == nullptr) {
-    return Result<BenchmarkTimeline, std::string>::makeResult(timeline);
-  }
-  if (!yyjson_is_arr(paths)) {
+  if (paths != nullptr && !yyjson_is_arr(paths)) {
     return Result<BenchmarkTimeline, std::string>::makeError(
         "timeline.cameraPaths must be an array");
   }
 
-  yyjson_arr_iter pathIter;
-  yyjson_arr_iter_init(paths, &pathIter);
+  yyjson_arr_iter pathIter{};
+  if (paths != nullptr) {
+    yyjson_arr_iter_init(paths, &pathIter);
+  }
   yyjson_val *pathValue = nullptr;
-  while ((pathValue = yyjson_arr_iter_next(&pathIter)) != nullptr) {
+  while (paths != nullptr &&
+         (pathValue = yyjson_arr_iter_next(&pathIter)) != nullptr) {
     if (!yyjson_is_obj(pathValue)) {
       return Result<BenchmarkTimeline, std::string>::makeError(
           "timeline.cameraPaths entries must be objects");
@@ -1653,6 +1729,143 @@ parseTimeline(yyjson_val *root, const BenchmarkCameraConfig &baseCamera,
           "duplicate timeline camera path id '" + path.id + "'");
     }
   }
+  if (yyjson_val *events = optionalObject(object, "events")) {
+    if (!yyjson_is_arr(events)) {
+      return Result<BenchmarkTimeline, std::string>::makeError(
+          "timeline.events must be an array");
+    }
+    yyjson_arr_iter eventIter;
+    yyjson_arr_iter_init(events, &eventIter);
+    yyjson_val *eventValue = nullptr;
+    while ((eventValue = yyjson_arr_iter_next(&eventIter)) != nullptr) {
+      if (!yyjson_is_obj(eventValue)) {
+        return Result<BenchmarkTimeline, std::string>::makeError(
+            "timeline.events entries must be objects");
+      }
+      static constexpr std::array eventKeys{
+          std::string_view("frame"), std::string_view("type"),
+          std::string_view("camera"), std::string_view("preserveHistory"),
+          std::string_view("eventReason")};
+      result = rejectUnknownKeys(eventValue, eventKeys, "timeline.events[]");
+      if (result.hasError()) {
+        return Result<BenchmarkTimeline, std::string>::makeError(
+            result.error());
+      }
+      BenchmarkTimelineEvent event{};
+      auto frame = readU32(eventValue, "frame", "timeline.events[]", 0u);
+      if (frame.hasError()) {
+        return Result<BenchmarkTimeline, std::string>::makeError(frame.error());
+      }
+      event.frame = frame.value();
+      auto type = readString(eventValue, "type", "timeline.events[]", true);
+      if (type.hasError()) {
+        return Result<BenchmarkTimeline, std::string>::makeError(type.error());
+      }
+      if (type.value() == "resetTemporalHistory") {
+        event.type = BenchmarkTimelineEventType::ResetTemporalHistory;
+        event.preserveHistory = false;
+      } else if (type.value() == "setCamera") {
+        event.type = BenchmarkTimelineEventType::SetCamera;
+        yyjson_val *camera = optionalObject(eventValue, "camera");
+        if (!yyjson_is_obj(camera)) {
+          return Result<BenchmarkTimeline, std::string>::makeError(
+              "timeline.events[].camera is required for setCamera");
+        }
+        static constexpr std::array cameraKeys{
+            std::string_view("position"),
+            std::string_view("target"),
+            std::string_view("direction"),
+            std::string_view("verticalFovDegrees"),
+            std::string_view("nearPlane"),
+            std::string_view("farPlane")};
+        result =
+            rejectUnknownKeys(camera, cameraKeys, "timeline.events[].camera");
+        if (result.hasError()) {
+          return Result<BenchmarkTimeline, std::string>::makeError(
+              result.error());
+        }
+        event.camera = baseCamera;
+        auto position = readVec3(camera, "position", "timeline.events[].camera",
+                                 event.camera.position);
+        if (position.hasError()) {
+          return Result<BenchmarkTimeline, std::string>::makeError(
+              position.error());
+        }
+        event.camera.position = position.value();
+        if (optionalObject(camera, "target") != nullptr) {
+          auto target = readVec3(camera, "target", "timeline.events[].camera",
+                                 event.camera.target);
+          if (target.hasError()) {
+            return Result<BenchmarkTimeline, std::string>::makeError(
+                target.error());
+          }
+          event.camera.target = target.value();
+          event.camera.hasTarget = true;
+          const glm::vec3 direction =
+              event.camera.target - event.camera.position;
+          const float length = glm::length(direction);
+          if (std::isfinite(length) &&
+              length > std::numeric_limits<float>::epsilon()) {
+            event.camera.direction = direction / length;
+          }
+        } else if (optionalObject(camera, "direction") != nullptr) {
+          auto direction =
+              readVec3(camera, "direction", "timeline.events[].camera",
+                       event.camera.direction);
+          if (direction.hasError()) {
+            return Result<BenchmarkTimeline, std::string>::makeError(
+                direction.error());
+          }
+          const float length = glm::length(direction.value());
+          if (!std::isfinite(length) ||
+              length <= std::numeric_limits<float>::epsilon()) {
+            return Result<BenchmarkTimeline, std::string>::makeError(
+                "timeline.events[].camera.direction must be finite and "
+                "non-zero");
+          }
+          event.camera.direction = direction.value() / length;
+          event.camera.hasTarget = false;
+        }
+        auto value =
+            readDouble(camera, "verticalFovDegrees", "timeline.events[].camera",
+                       event.camera.verticalFovDegrees);
+        if (value.hasError()) {
+          return Result<BenchmarkTimeline, std::string>::makeError(
+              value.error());
+        }
+        event.camera.verticalFovDegrees = static_cast<float>(value.value());
+        value = readDouble(camera, "nearPlane", "timeline.events[].camera",
+                           event.camera.nearPlane);
+        if (value.hasError()) {
+          return Result<BenchmarkTimeline, std::string>::makeError(
+              value.error());
+        }
+        event.camera.nearPlane = static_cast<float>(value.value());
+        value = readDouble(camera, "farPlane", "timeline.events[].camera",
+                           event.camera.farPlane);
+        if (value.hasError()) {
+          return Result<BenchmarkTimeline, std::string>::makeError(
+              value.error());
+        }
+        event.camera.farPlane = static_cast<float>(value.value());
+        auto preserve =
+            readBool(eventValue, "preserveHistory", "timeline.events[]", true);
+        if (preserve.hasError()) {
+          return Result<BenchmarkTimeline, std::string>::makeError(
+              preserve.error());
+        }
+        event.preserveHistory = preserve.value();
+        event.hasCamera = true;
+      } else {
+        return Result<BenchmarkTimeline, std::string>::makeError(
+            "timeline.events[].type must be resetTemporalHistory or "
+            "setCamera");
+      }
+      timeline.events.push_back(event);
+    }
+    std::ranges::stable_sort(timeline.events, {},
+                             &BenchmarkTimelineEvent::frame);
+  }
   return Result<BenchmarkTimeline, std::string>::makeResult(
       std::move(timeline));
 }
@@ -1709,31 +1922,19 @@ loadBenchmarkCaseManifest(const std::filesystem::path &path) {
   }
   yyjson_val *root = yyjson_doc_get_root(doc.get());
   static constexpr std::array rootKeys{
-      std::string_view("schemaVersion"),
-      std::string_view("id"),
-      std::string_view("suite"),
-      std::string_view("comparisonGroup"),
-      std::string_view("variant"),
-      std::string_view("description"),
-      std::string_view("scene"),
-      std::string_view("backend"),
-      std::string_view("resolution"),
-      std::string_view("fixedDeltaSeconds"),
-      std::string_view("warmupFrames"),
-      std::string_view("measurementFrames"),
-      std::string_view("cooldownFrames"),
-      std::string_view("maxDrainFrames"),
-      std::string_view("drainTimeoutMs"),
-      std::string_view("samples"),
-      std::string_view("authoritative"),
-      std::string_view("presentMode"),
-      std::string_view("renderGraph"),
-      std::string_view("camera"),
-      std::string_view("timeline"),
-      std::string_view("settings"),
-      std::string_view("requirements"),
-      std::string_view("thresholds"),
-      std::string_view("requiredMetrics"),
+      std::string_view("schemaVersion"),  std::string_view("id"),
+      std::string_view("suite"),          std::string_view("comparisonGroup"),
+      std::string_view("variant"),        std::string_view("description"),
+      std::string_view("scene"),          std::string_view("backend"),
+      std::string_view("resolution"),     std::string_view("fixedDeltaSeconds"),
+      std::string_view("warmupFrames"),   std::string_view("measurementFrames"),
+      std::string_view("cooldownFrames"), std::string_view("maxDrainFrames"),
+      std::string_view("drainTimeoutMs"), std::string_view("samples"),
+      std::string_view("authoritative"),  std::string_view("presentMode"),
+      std::string_view("renderGraph"),    std::string_view("camera"),
+      std::string_view("timeline"),       std::string_view("timelineSource"),
+      std::string_view("settings"),       std::string_view("requirements"),
+      std::string_view("thresholds"),     std::string_view("requiredMetrics"),
   };
   auto keysResult = rejectUnknownKeys(root, rootKeys, "$");
   if (keysResult.hasError()) {
@@ -1907,10 +2108,61 @@ loadBenchmarkCaseManifest(const std::filesystem::path &path) {
       out.warmupFrames + out.measurementFrames + out.cooldownFrames > 0u
           ? out.warmupFrames + out.measurementFrames + out.cooldownFrames - 1u
           : 0u;
-  auto timeline = parseTimeline(root, out.camera, defaultTimelineEndFrame);
+  yyjson_val *timelineRoot = root;
+  JsonDocPtr timelineSourceDoc(nullptr, &yyjson_doc_free);
+  if (yyjson_val *timelineSource = optionalObject(root, "timelineSource")) {
+    if (yyjson_obj_get(root, "timeline") != nullptr) {
+      return Result<BenchmarkCase, std::string>::makeError(
+          "timeline and timelineSource cannot be combined");
+    }
+    static constexpr std::array sourceKeys{std::string_view("pathBase"),
+                                           std::string_view("path")};
+    auto sourceKeysResult =
+        rejectUnknownKeys(timelineSource, sourceKeys, "timelineSource");
+    if (sourceKeysResult.hasError()) {
+      return Result<BenchmarkCase, std::string>::makeError(
+          sourceKeysResult.error());
+    }
+    auto sourceBase =
+        readString(timelineSource, "pathBase", "timelineSource", true);
+    auto sourcePath =
+        readString(timelineSource, "path", "timelineSource", true);
+    if (sourceBase.hasError()) {
+      return Result<BenchmarkCase, std::string>::makeError(sourceBase.error());
+    }
+    if (sourcePath.hasError()) {
+      return Result<BenchmarkCase, std::string>::makeError(sourcePath.error());
+    }
+    auto resolvedSource =
+        resolveBenchmarkPath(sourceBase.value(), sourcePath.value());
+    if (resolvedSource.hasError()) {
+      return Result<BenchmarkCase, std::string>::makeError(
+          "timelineSource: " + resolvedSource.error());
+    }
+    std::ifstream sourceFile(resolvedSource.value(), std::ios::binary);
+    if (!sourceFile) {
+      return Result<BenchmarkCase, std::string>::makeError(
+          "timelineSource: failed to open " + resolvedSource.value().string());
+    }
+    std::string sourceJson((std::istreambuf_iterator<char>(sourceFile)),
+                           std::istreambuf_iterator<char>());
+    yyjson_read_err sourceError{};
+    timelineSourceDoc.reset(yyjson_read_opts(
+        sourceJson.data(), sourceJson.size(), 0, nullptr, &sourceError));
+    if (!timelineSourceDoc) {
+      return Result<BenchmarkCase, std::string>::makeError(
+          "timelineSource: JSON parse failed at byte " +
+          std::to_string(sourceError.pos) + ": " + sourceError.msg);
+    }
+    timelineRoot = yyjson_doc_get_root(timelineSourceDoc.get());
+    out.timeline.source = sourcePath.value();
+  }
+  auto timeline =
+      parseTimeline(timelineRoot, out.camera, defaultTimelineEndFrame);
   if (timeline.hasError()) {
     return Result<BenchmarkCase, std::string>::makeError(timeline.error());
   }
+  timeline.value().source = std::move(out.timeline.source);
   out.timeline = std::move(timeline.value());
 
   yyjson_val *settings = optionalObject(root, "settings");
@@ -2104,6 +2356,14 @@ loadBenchmarkCaseManifest(const std::filesystem::path &path) {
         requireBenchmarkMetricDescriptor(metricId, "requiredMetrics");
     if (descriptor.hasError()) {
       return Result<BenchmarkCase, std::string>::makeError(descriptor.error());
+    }
+    if (!out.settings.ddgi.diagnosticCounters &&
+        descriptor.value()->evidenceClass ==
+            BenchmarkMetricEvidenceClass::DiagnosticOnly) {
+      return Result<BenchmarkCase, std::string>::makeError(
+          "product benchmark requiredMetrics cannot require diagnostic-only "
+          "metric '" +
+          metricId + "'");
     }
   }
   return Result<BenchmarkCase, std::string>::makeResult(std::move(out));

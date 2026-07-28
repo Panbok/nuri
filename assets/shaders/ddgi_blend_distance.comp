@@ -68,6 +68,8 @@ void main() {
   const uint localLinear = gl_LocalInvocationIndex;
   const uvec2 tile = uvec2(update.probeId % volume.distanceAtlas.z,
                            update.probeId / volume.distanceAtlas.z);
+  const uint raySeed =
+      ddgiProbeUpdateRaySeed(volume, update.probeId, pc.frameSeed);
   for (uint texel = localLinear; texel < 256u; texel += 64u) {
     const uvec2 interior = uvec2(texel % 16u, texel / 16u);
     const uvec2 tilePixel = interior + 1u;
@@ -77,8 +79,7 @@ void main() {
     float second = 0.0;
     float weight = 0.0;
     for (uint ray = 0u; ray < update.rayCount; ++ray) {
-      const vec3 direction =
-          ddgiRayDirection(ray, update.rayCount, pc.frameSeed);
+      const vec3 direction = ddgiRayDirection(ray, update.rayCount, raySeed);
       const float w = max(dot(texelDirection, direction), 0.0);
       const DDGIRayResultGpuData result =
           pc.results.values[update.rayBase + ray];

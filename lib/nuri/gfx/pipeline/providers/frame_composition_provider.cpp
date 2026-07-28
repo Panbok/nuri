@@ -59,6 +59,7 @@ FrameCompositionProvider::prepare(FrameBuildContext &ctx) {
   ctx.shared.msaaSceneDepthGraphTexture = {};
   ctx.shared.normalGraphTexture = {};
   ctx.shared.ambientOcclusionGraphTexture = {};
+  ctx.shared.ddgiOpaqueSurfaceCacheGraphTexture = {};
   ctx.shared.previousAmbientOcclusionTexture = {};
   ctx.shared.sceneDepthPyramidGraphTextures = {};
   ctx.shared.motionVectorGraphTexture = {};
@@ -157,6 +158,8 @@ FrameCompositionProvider::prepare(FrameBuildContext &ctx) {
       currentTexture(Ring::Normals, ctx.frame.frameIndex);
   ctx.shared.ambientOcclusionTexture =
       currentTexture(Ring::AmbientOcclusion, historyLease.writeSlot);
+  ctx.shared.ddgiOpaqueSurfaceCacheTexture =
+      currentTexture(Ring::DDGIOpaqueSurfaceCache, ctx.frame.frameIndex);
   ctx.shared.previousAmbientOcclusionTexture =
       hasTemporalCameraContinuity(ctx.frame.camera) && declaredHistoryValid &&
               historyRequirementWasWritten(
@@ -457,6 +460,10 @@ Result<bool, std::string> FrameCompositionProvider::ensureTextures(
       {Ring::AmbientOcclusion, FrameTextureRequirementFlags::AmbientOcclusion,
        kFrameCompositionAmbientOcclusionFormat, TextureUsage::StorageSampled,
        "frame_ambient_occlusion"},
+      {Ring::DDGIOpaqueSurfaceCache,
+       FrameTextureRequirementFlags::DDGIOpaqueSurfaceCache,
+       kFrameCompositionDDGIOpaqueSurfaceCacheFormat,
+       TextureUsage::StorageSampled, "frame_ddgi_opaque_surface_cache"},
       {Ring::Exposure, FrameTextureRequirementFlags::Exposure,
        kFrameCompositionExposureFormat, TextureUsage::AttachmentSampled,
        "frame_exposure_ev", 0u, 1u, true},

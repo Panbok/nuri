@@ -606,9 +606,13 @@ parseSettings(yyjson_val *object, RenderSettings &settings) {
     static constexpr std::array ddgiKeys{
         std::string_view("enabled"),
         std::string_view("preset"),
+        std::string_view("qualityPreset"),
+        std::string_view("coveragePreset"),
         std::string_view("raysPerProbe"),
         std::string_view("classificationRaysPerProbe"),
         std::string_view("maxProbeUpdatesPerFrame"),
+        std::string_view("maxRadianceProbeUpdatesPerFrame"),
+        std::string_view("maxMaintenanceProbeUpdatesPerFrame"),
         std::string_view("maxRayQueriesPerFrame"),
         std::string_view("maxLocalLightsPerHit"),
         std::string_view("maxCandidateIntersectionsPerRay"),
@@ -631,6 +635,7 @@ parseSettings(yyjson_val *object, RenderSettings &settings) {
         std::string_view("showProbes"),
         std::string_view("showSelectedProbeRays"),
         std::string_view("debugView"),
+        std::string_view("gatherVariants"),
         std::string_view("coverage")};
     result = rejectUnknownKeys(ddgi, ddgiKeys, "settings.ddgi");
     if (result.hasError()) {
@@ -642,27 +647,51 @@ parseSettings(yyjson_val *object, RenderSettings &settings) {
       return Result<bool, std::string>::makeError(boolean.error());
     }
     settings.ddgi.enabled = boolean.value();
-    result =
-        readEnumField(ddgi, "preset", "settings.ddgi", settings.ddgi.preset,
-                      {{"Low", DDGIQualityPreset::Low},
-                       {"Balanced", DDGIQualityPreset::Balanced},
-                       {"High", DDGIQualityPreset::High},
-                       {"Custom", DDGIQualityPreset::Custom}});
+    const bool hasLegacyPreset = yyjson_obj_get(ddgi, "preset") != nullptr;
+    const bool hasQualityPreset =
+        yyjson_obj_get(ddgi, "qualityPreset") != nullptr;
+    if (hasLegacyPreset && hasQualityPreset) {
+      return Result<bool, std::string>::makeError(
+          "settings.ddgi.qualityPreset cannot be combined with legacy preset");
+    }
+    result = readEnumField(ddgi, hasQualityPreset ? "qualityPreset" : "preset",
+                           "settings.ddgi", settings.ddgi.preset,
+                           {{"Low", DDGIQualityPreset::Low},
+                            {"Balanced", DDGIQualityPreset::Balanced},
+                            {"High", DDGIQualityPreset::High},
+                            {"Custom", DDGIQualityPreset::Custom}});
     if (result.hasError()) {
       return result;
     }
-    const bool hasPresetOwnedOverride =
+    settings.ddgi.requestedPreset = settings.ddgi.preset;
+    applyDDGIQualityPreset(settings.ddgi, settings.ddgi.preset);
+    result = readEnumField(ddgi, "coveragePreset", "settings.ddgi",
+                           settings.ddgi.coveragePreset,
+                           {{"Authored", DDGICoveragePreset::Authored},
+                            {"Automatic", DDGICoveragePreset::Automatic},
+                            {"Custom", DDGICoveragePreset::Custom}});
+    if (result.hasError()) {
+      return result;
+    }
+    settings.ddgi.requestedCoveragePreset = settings.ddgi.coveragePreset;
+    applyDDGICoveragePreset(settings.ddgi, settings.ddgi.coveragePreset);
+    const bool hasQualityOwnedOverride =
         yyjson_obj_get(ddgi, "raysPerProbe") != nullptr ||
         yyjson_obj_get(ddgi, "classificationRaysPerProbe") != nullptr ||
         yyjson_obj_get(ddgi, "maxProbeUpdatesPerFrame") != nullptr ||
-        yyjson_obj_get(ddgi, "maxRayQueriesPerFrame") != nullptr ||
-        yyjson_obj_get(ddgi, "coverage") != nullptr;
+        yyjson_obj_get(ddgi, "maxRadianceProbeUpdatesPerFrame") != nullptr ||
+        yyjson_obj_get(ddgi, "maxMaintenanceProbeUpdatesPerFrame") != nullptr ||
+        yyjson_obj_get(ddgi, "maxRayQueriesPerFrame") != nullptr;
     for (const auto [key, output] :
          {std::pair<std::string_view, uint32_t *>{"raysPerProbe",
                                                   &settings.ddgi.raysPerProbe},
           {"classificationRaysPerProbe",
            &settings.ddgi.classificationRaysPerProbe},
           {"maxProbeUpdatesPerFrame", &settings.ddgi.maxProbeUpdatesPerFrame},
+          {"maxRadianceProbeUpdatesPerFrame",
+           &settings.ddgi.maxRadianceProbeUpdatesPerFrame},
+          {"maxMaintenanceProbeUpdatesPerFrame",
+           &settings.ddgi.maxMaintenanceProbeUpdatesPerFrame},
           {"maxRayQueriesPerFrame", &settings.ddgi.maxRayQueriesPerFrame},
           {"maxLocalLightsPerHit", &settings.ddgi.maxLocalLightsPerHit},
           {"maxCandidateIntersectionsPerRay",
@@ -728,14 +757,42 @@ parseSettings(yyjson_val *object, RenderSettings &settings) {
     if (result.hasError()) {
       return result;
     }
+    if (yyjson_val *variants = optionalObject(ddgi, "gatherVariants")) {
+      static constexpr std::array variantKeys{
+          std::string_view("opaque"), std::string_view("transmission"),
+          std::string_view("traceMultiBounce")};
+      result = rejectUnknownKeys(variants, variantKeys,
+                                 "settings.ddgi.gatherVariants");
+      if (result.hasError()) {
+        return result;
+      }
+      const auto values = {
+          std::pair<std::string_view, DDGISurfaceGatherVariant *>{
+              "opaque", &settings.ddgi.opaqueGatherVariant},
+          {"transmission", &settings.ddgi.transmissionGatherVariant},
+          {"traceMultiBounce", &settings.ddgi.traceMultiBounceGatherVariant}};
+      for (const auto [key, output] : values) {
+        result = readEnumField(
+            variants, key, "settings.ddgi.gatherVariants", *output,
+            {{"Product", DDGISurfaceGatherVariant::Product},
+             {"Bypass", DDGISurfaceGatherVariant::Bypass},
+             {"Candidates", DDGISurfaceGatherVariant::Candidates},
+             {"ProbeVisibility", DDGISurfaceGatherVariant::ProbeVisibility},
+             {"Atlas", DDGISurfaceGatherVariant::Atlas}});
+        if (result.hasError()) {
+          return result;
+        }
+      }
+    }
     if (yyjson_val *coverage = optionalObject(ddgi, "coverage")) {
       result = parseDDGICoverageSettings(coverage, settings.ddgi.coverage,
                                          "settings.ddgi.coverage");
       if (result.hasError()) {
         return result;
       }
+      settings.ddgi.coveragePreset = DDGICoveragePreset::Custom;
     }
-    if (hasPresetOwnedOverride &&
+    if (hasQualityOwnedOverride &&
         settings.ddgi.preset != DDGIQualityPreset::Custom) {
       settings.ddgi.preset = DDGIQualityPreset::Custom;
     }

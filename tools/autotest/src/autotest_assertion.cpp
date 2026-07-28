@@ -566,6 +566,24 @@ void flattenAutotestRendererMetrics(std::map<std::string, double> &out,
             ddgi.requestedProbeUpdateCapacity);
   addMetric(out, "renderer.ddgi.effective_probe_update_capacity",
             ddgi.effectiveProbeUpdateCapacity);
+  addMetric(out, "renderer.ddgi.requested_maintenance_probe_update_capacity",
+            ddgi.requestedMaintenanceProbeUpdateCapacity);
+  addMetric(out, "renderer.ddgi.effective_maintenance_probe_update_capacity",
+            ddgi.effectiveMaintenanceProbeUpdateCapacity);
+  addMetric(out, "renderer.ddgi.maintenance_probe_updates",
+            ddgi.maintenanceProbeUpdates);
+  addMetric(out, "renderer.ddgi.update_reason_bits", ddgi.updateReasonBits);
+  addMetric(out, "renderer.ddgi.reason.bootstrap", ddgi.bootstrapUpdates);
+  addMetric(out, "renderer.ddgi.reason.scroll", ddgi.scrollUpdates);
+  addMetric(out, "renderer.ddgi.reason.dirty_geometry",
+            ddgi.dirtyGeometryUpdates);
+  addMetric(out, "renderer.ddgi.reason.radiometric_response",
+            ddgi.radiometricResponseUpdates);
+  addMetric(out, "renderer.ddgi.reason.maintenance", ddgi.maintenanceUpdates);
+  addMetric(out, "renderer.ddgi.reason.force", ddgi.forceUpdates);
+  addMetric(out, "renderer.ddgi.reason.wake", ddgi.wakeUpdates);
+  addMetric(out, "renderer.ddgi.reason.reclassification",
+            ddgi.reclassificationUpdates);
   addMetric(out, "renderer.ddgi.startup_phase",
             static_cast<uint32_t>(ddgi.startupPhase));
   addMetric(out, "renderer.ddgi.sky_remainder_over_threshold_percentage",

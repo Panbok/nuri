@@ -572,6 +572,10 @@ makeToolSceneDesc(const AutotestSceneConfig &scene) {
       .meshletMaxVertices = scene.meshletMaxVertices,
       .meshletMaxPrimitives = scene.meshletMaxPrimitives,
       .meshletConeWeight = scene.meshletConeWeight,
+      .baseModelKind = scene.baseModelKind,
+      .baseModelTargetRadius = scene.baseModelTargetRadius,
+      .baseModelMinScale = scene.baseModelMinScale,
+      .baseModelMaxScale = scene.baseModelMaxScale,
       .generator = scene.generator,
       .seed = scene.seed,
       .contentHash = scene.contentHash,
@@ -1861,6 +1865,15 @@ AutotestRunResult runAutotestCase(AutotestCase testCase,
     if (assetsReady.hasError()) {
       result.exitCode = AutotestExitCode::RuntimeError;
       result.message = assetsReady.error();
+      report.errors.push_back(result.message);
+      writeReports(result, report, reportPath, htmlPath);
+      result.report = std::move(report);
+      return result;
+    }
+    auto baseModelApplied = runtime->applySceneBaseModel();
+    if (baseModelApplied.hasError()) {
+      result.exitCode = AutotestExitCode::RuntimeError;
+      result.message = baseModelApplied.error();
       report.errors.push_back(result.message);
       writeReports(result, report, reportPath, htmlPath);
       result.report = std::move(report);

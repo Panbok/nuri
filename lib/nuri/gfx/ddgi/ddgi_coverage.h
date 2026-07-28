@@ -69,6 +69,7 @@ struct DDGICoverageSolveLimits {
   uint64_t otherPersistentBytes = 0u;
   uint64_t retainedReplacementBytes = 0u;
   uint32_t maxProbeUpdatesPerFrame = 512u;
+  constexpr bool operator==(const DDGICoverageSolveLimits &) const = default;
 };
 
 struct DDGISceneFitSolution {

@@ -141,6 +141,9 @@ constexpr std::array kDDGIFields = {
         "update_probe_state", "ddgi_update_probe_state.comp",
         &RuntimeDDGIShaderConfig::updateProbeState},
     PathField<RuntimeDDGIShaderConfig>{
+        "opaque_surface_cache", "ddgi_opaque_surface_cache.comp",
+        &RuntimeDDGIShaderConfig::opaqueSurfaceCache},
+    PathField<RuntimeDDGIShaderConfig>{
         "probe_debug_vertex", "ddgi_probe_debug.vert",
         &RuntimeDDGIShaderConfig::probeDebugVertex},
     PathField<RuntimeDDGIShaderConfig>{

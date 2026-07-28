@@ -5,6 +5,7 @@
 #include "nuri/gfx/ddgi/ddgi_types.h"
 #include <array>
 #include <cstdint>
+#include <limits>
 #include <span>
 
 namespace nuri {
@@ -15,6 +16,10 @@ struct DDGIProbeScheduleCandidate {
   DDGIProbeState state = DDGIProbeState::Uninitialized;
   uint64_t lastSubmittedUpdate = 0u;
   bool invalidated = false;
+  uint32_t classificationIteration = 0u;
+  // Zero selects the scheduler limit. Non-zero permits a cheaper first
+  // radiance population while preserving the update's radiance work class.
+  uint32_t radianceRayCount = 0u;
 };
 
 struct alignas(16) DDGIProbeUpdateEntry {
@@ -38,6 +43,16 @@ inline constexpr uint32_t kDDGIProbeUpdateReclassify = 1u << 0u;
 inline constexpr uint32_t kDDGIProbeUpdateWake = 1u << 1u;
 inline constexpr uint32_t kDDGIProbeUpdateIrradianceResponse = 1u << 2u;
 inline constexpr uint32_t kDDGIProbeUpdateDistanceResponse = 1u << 3u;
+inline constexpr uint32_t kDDGIProbeUpdateClassificationGeometry = 1u << 4u;
+inline constexpr uint32_t kDDGIProbeUpdateReasonBootstrap = 1u << 8u;
+inline constexpr uint32_t kDDGIProbeUpdateReasonScroll = 1u << 9u;
+inline constexpr uint32_t kDDGIProbeUpdateReasonDirtyGeometry = 1u << 10u;
+inline constexpr uint32_t kDDGIProbeUpdateReasonRadiometric = 1u << 11u;
+inline constexpr uint32_t kDDGIProbeUpdateReasonMaintenance = 1u << 12u;
+inline constexpr uint32_t kDDGIProbeUpdateReasonForce = 1u << 13u;
+inline constexpr uint32_t kDDGIProbeUpdateReasonWake = 1u << 14u;
+inline constexpr uint32_t kDDGIProbeUpdateReasonReclassification = 1u << 15u;
+inline constexpr uint32_t kDDGIProbeUpdateReasonMask = 0xffu << 8u;
 
 struct DDGISchedulerLimits {
   uint32_t raysPerProbe = 128u;
@@ -45,6 +60,14 @@ struct DDGISchedulerLimits {
   // The renderer always supplies its separately sanitized low-ray count.
   uint32_t classificationRaysPerProbe = 0u;
   uint32_t maxProbeUpdates = 512u;
+  // Full irradiance/distance updates are the expensive work class. Cheap
+  // Uninitialized-probe classification may use the remaining total slots.
+  uint32_t maxRadianceProbeUpdates = std::numeric_limits<uint32_t>::max();
+  // Ordinary Vigilant/Awake maintenance may consume at most this many update
+  // slots. Bootstrap, invalidation, newly active, and forced work retain the
+  // full probe/query limits. Tier service can raise the effective bound just
+  // enough to serve one probe from each otherwise-unserved ready tier.
+  uint32_t maxMaintenanceProbeUpdates = std::numeric_limits<uint32_t>::max();
   uint32_t maxRayQueries = 65'536u;
   // Fixed-point upper bound for secondary visibility reservations. 1024 means
   // one secondary query per primary ray; lower values safely lend the
@@ -65,6 +88,9 @@ struct DDGIScheduleResult {
   uint32_t classificationProbeUpdates = 0u;
   uint32_t classificationPrimaryQueries = 0u;
   uint32_t irradiancePrimaryQueries = 0u;
+  uint32_t maintenanceProbeUpdates = 0u;
+  uint32_t requestedMaintenanceProbeCapacity = 0u;
+  uint32_t effectiveMaintenanceProbeCapacity = 0u;
   uint32_t secondaryQueriesReserved = 0u;
   uint32_t unusedProbeCapacity = 0u;
   uint32_t unusedQueryCapacity = 0u;
@@ -96,6 +122,8 @@ struct DDGITieredProbeScheduleCandidate {
   DDGIProbeState state = DDGIProbeState::Uninitialized;
   uint64_t lastSubmittedUpdate = 0u;
   bool invalidated = false;
+  uint32_t classificationIteration = 0u;
+  uint32_t radianceRayCount = 0u;
 };
 
 struct DDGITierScheduleResult {

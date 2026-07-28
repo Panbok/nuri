@@ -698,6 +698,11 @@ TEST(NuriBenchmarkingTest, ManifestParsesStrictVersionedDDGICoverage) {
 
   auto loaded = loadBenchmarkCaseManifest(path);
   ASSERT_FALSE(loaded.hasError()) << loaded.error();
+  EXPECT_EQ(loaded.value().settings.ddgi.preset, DDGIQualityPreset::Balanced);
+  EXPECT_EQ(loaded.value().settings.ddgi.requestedCoveragePreset,
+            DDGICoveragePreset::Authored);
+  EXPECT_EQ(loaded.value().settings.ddgi.coveragePreset,
+            DDGICoveragePreset::Custom);
   const DDGICoverageSettings &coverage = loaded.value().settings.ddgi.coverage;
   EXPECT_EQ(coverage.mode, DDGICoverageMode::Hybrid);
   EXPECT_EQ(coverage.constraintPolicy,
@@ -738,6 +743,42 @@ TEST(NuriBenchmarkingTest, ManifestParsesStrictVersionedDDGICoverage) {
   EXPECT_EQ(loaded.value().settings.ddgi.coverage.mode,
             DDGICoverageMode::Manual);
   EXPECT_FALSE(loaded.value().settings.ddgi.coverage.authoredBounds.valid);
+
+  writeFile(path,
+            R"json({
+              "schemaVersion": 1,
+              "id": "ddgi.independent-presets",
+              "suite": "ddgi",
+              "settings": {"ddgi": {
+                "enabled": true,
+                "qualityPreset": "High",
+                "coveragePreset": "Automatic",
+                "gatherVariants": {
+                  "opaque": "Candidates",
+                  "transmission": "ProbeVisibility",
+                  "traceMultiBounce": "Atlas"
+                }
+              }}
+            })json");
+  loaded = loadBenchmarkCaseManifest(path);
+  ASSERT_FALSE(loaded.hasError()) << loaded.error();
+  EXPECT_EQ(loaded.value().settings.ddgi.preset, DDGIQualityPreset::High);
+  EXPECT_EQ(loaded.value().settings.ddgi.requestedPreset,
+            DDGIQualityPreset::High);
+  EXPECT_EQ(loaded.value().settings.ddgi.raysPerProbe, 256u);
+  EXPECT_EQ(loaded.value().settings.ddgi.coveragePreset,
+            DDGICoveragePreset::Automatic);
+  EXPECT_EQ(loaded.value().settings.ddgi.requestedCoveragePreset,
+            DDGICoveragePreset::Automatic);
+  EXPECT_EQ(loaded.value().settings.ddgi.coverage.mode,
+            DDGICoverageMode::SceneFit);
+  EXPECT_EQ(loaded.value().settings.ddgi.coverage.cascadeCount, 3u);
+  EXPECT_EQ(loaded.value().settings.ddgi.opaqueGatherVariant,
+            DDGISurfaceGatherVariant::Candidates);
+  EXPECT_EQ(loaded.value().settings.ddgi.transmissionGatherVariant,
+            DDGISurfaceGatherVariant::ProbeVisibility);
+  EXPECT_EQ(loaded.value().settings.ddgi.traceMultiBounceGatherVariant,
+            DDGISurfaceGatherVariant::Atlas);
 
   const std::array invalidManifests{
       replaceFirst(manifest, "\"schemaVersion\": 1,\n      \"mode\"",
@@ -790,6 +831,64 @@ TEST(NuriBenchmarkingTest, ManifestRejectsRemovedBackends) {
 
   std::error_code ec;
   std::filesystem::remove(path, ec);
+}
+
+TEST(NuriBenchmarkingTest, ManifestLoadsOneSharedTimelineAuthority) {
+  const std::filesystem::path source =
+      makeTempPath("benchmark_timeline_source", ".json");
+  const std::filesystem::path manifest =
+      makeTempPath("benchmark_timeline_consumer", ".json");
+  writeFile(source,
+            R"json({
+              "timeline": {
+                "cameraPaths": [{
+                  "id": "shared_route",
+                  "startFrame": 0,
+                  "endFrame": 2,
+                  "interpolation": "linear",
+                  "keyframes": [
+                    {"frame": 0, "position": [0, 1, 2], "target": [0, 0, 0]},
+                    {"frame": 2, "position": [2, 1, 0], "target": [0, 0, 0]}
+                  ]
+                }],
+                "events": [
+                  {"frame": 1, "type": "resetTemporalHistory"},
+                  {"frame": 2, "type": "setCamera",
+                   "camera": {"position": [3, 2, 1],
+                              "direction": [0, 0, -1]},
+                   "preserveHistory": false}
+                ]
+              }
+            })json");
+  writeFile(manifest, std::string(R"json({
+              "schemaVersion": 1,
+              "id": "renderer.shared.timeline",
+              "suite": "renderer",
+              "warmupFrames": 1,
+              "measurementFrames": 2,
+              "timelineSource": {"pathBase": "repoRoot", "path": ")json") +
+                          source.generic_string() + R"json("}
+            })json");
+
+  auto loaded = loadBenchmarkCaseManifest(manifest);
+  ASSERT_FALSE(loaded.hasError()) << loaded.error();
+  EXPECT_EQ(loaded.value().timeline.source, source.generic_string());
+  ASSERT_EQ(loaded.value().timeline.cameraPaths.size(), 1u);
+  EXPECT_EQ(loaded.value().timeline.cameraPaths[0].id, "shared_route");
+  EXPECT_EQ(loaded.value().timeline.cameraPaths[0].keyframes.size(), 2u);
+  ASSERT_EQ(loaded.value().timeline.events.size(), 2u);
+  EXPECT_EQ(loaded.value().timeline.events[0].type,
+            BenchmarkTimelineEventType::ResetTemporalHistory);
+  EXPECT_EQ(loaded.value().timeline.events[1].type,
+            BenchmarkTimelineEventType::SetCamera);
+  EXPECT_TRUE(loaded.value().timeline.events[1].hasCamera);
+  EXPECT_FALSE(loaded.value().timeline.events[1].preserveHistory);
+  EXPECT_EQ(loaded.value().timeline.events[1].camera.position,
+            glm::vec3(3.0f, 2.0f, 1.0f));
+
+  std::error_code ec;
+  std::filesystem::remove(source, ec);
+  std::filesystem::remove(manifest, ec);
 }
 
 TEST(NuriBenchmarkingTest, CanonicalBistroStressUsesWideRapidUltraRoute) {
@@ -1481,6 +1580,19 @@ TEST(NuriBenchmarkingTest, ReportWritesReadsAndComputesMeasuredStats) {
                                             .target = {2.0f, 1.0f, 1.0f},
                                             .hasTarget = true,
                                         }}});
+  report.benchmarkCase.timeline.events.push_back(BenchmarkTimelineEvent{
+      .frame = 1u,
+      .type = BenchmarkTimelineEventType::SetCamera,
+      .camera =
+          BenchmarkCameraConfig{
+              .position = {3.0f, 2.0f, 1.0f},
+              .direction = {0.0f, 0.0f, -1.0f},
+              .target = {3.0f, 2.0f, 0.0f},
+              .hasTarget = true,
+          },
+      .hasCamera = true,
+      .preserveHistory = false,
+  });
   report.benchmarkCase.requirements.assets = {"modelsRoot:Test/Test.gltf"};
   report.benchmarkCase.requirements.msaaSamples = 4u;
   report.benchmarkCase.settings.opaque.meshletMode =
@@ -1506,6 +1618,8 @@ TEST(NuriBenchmarkingTest, ReportWritesReadsAndComputesMeasuredStats) {
   report.benchmarkCase.settings.ddgi.preset = DDGIQualityPreset::Custom;
   report.benchmarkCase.settings.ddgi.raysPerProbe = 96u;
   report.benchmarkCase.settings.ddgi.maxProbeUpdatesPerFrame = 321u;
+  report.benchmarkCase.settings.ddgi.maxRadianceProbeUpdatesPerFrame = 222u;
+  report.benchmarkCase.settings.ddgi.maxMaintenanceProbeUpdatesPerFrame = 123u;
   report.benchmarkCase.settings.ddgi.maxRayQueriesPerFrame = 30'000u;
   report.benchmarkCase.settings.ddgi.classification = false;
   report.benchmarkCase.settings.ddgi.debugView = DDGIDebugView::Confidence;
@@ -1736,6 +1850,7 @@ TEST(NuriBenchmarkingTest, ReportWritesReadsAndComputesMeasuredStats) {
   EXPECT_NE(reportJson.find("\"ddgi\""), std::string::npos);
   EXPECT_NE(reportJson.find("\"mode\": \"Hybrid\""), std::string::npos);
   EXPECT_NE(reportJson.find("\"cameraPaths\""), std::string::npos);
+  EXPECT_NE(reportJson.find("\"events\""), std::string::npos);
 
   auto loaded = readBenchmarkReportFile(path);
   ASSERT_FALSE(loaded.hasError()) << loaded.error();
@@ -1758,6 +1873,13 @@ TEST(NuriBenchmarkingTest, ReportWritesReadsAndComputesMeasuredStats) {
   ASSERT_EQ(
       loaded.value().benchmarkCase.timeline.cameraPaths[0].keyframes.size(),
       2u);
+  ASSERT_EQ(loaded.value().benchmarkCase.timeline.events.size(), 1u);
+  EXPECT_EQ(loaded.value().benchmarkCase.timeline.events[0].type,
+            BenchmarkTimelineEventType::SetCamera);
+  EXPECT_TRUE(loaded.value().benchmarkCase.timeline.events[0].hasCamera);
+  EXPECT_FALSE(loaded.value().benchmarkCase.timeline.events[0].preserveHistory);
+  EXPECT_EQ(loaded.value().benchmarkCase.timeline.events[0].camera.position,
+            glm::vec3(3.0f, 2.0f, 1.0f));
   ASSERT_EQ(loaded.value().benchmarkCase.requirements.assets.size(), 1u);
   EXPECT_EQ(loaded.value().benchmarkCase.requirements.assets[0],
             "modelsRoot:Test/Test.gltf");
@@ -1775,6 +1897,8 @@ TEST(NuriBenchmarkingTest, ReportWritesReadsAndComputesMeasuredStats) {
   EXPECT_EQ(loadedDDGI.preset, DDGIQualityPreset::Custom);
   EXPECT_EQ(loadedDDGI.raysPerProbe, 96u);
   EXPECT_EQ(loadedDDGI.maxProbeUpdatesPerFrame, 321u);
+  EXPECT_EQ(loadedDDGI.maxRadianceProbeUpdatesPerFrame, 222u);
+  EXPECT_EQ(loadedDDGI.maxMaintenanceProbeUpdatesPerFrame, 123u);
   EXPECT_EQ(loadedDDGI.maxRayQueriesPerFrame, 30'000u);
   EXPECT_FALSE(loadedDDGI.classification);
   EXPECT_EQ(loadedDDGI.debugView, DDGIDebugView::Confidence);
@@ -1806,6 +1930,9 @@ TEST(NuriBenchmarkingTest, ReportWritesReadsAndComputesMeasuredStats) {
             std::string::npos);
   EXPECT_NE(loaded.value().benchmarkCase.configSignature.find(
                 "timeline.cameraPath.0.id=test_path"),
+            std::string::npos);
+  EXPECT_NE(loaded.value().benchmarkCase.configSignature.find(
+                "timeline.event.0.type=setCamera"),
             std::string::npos);
   ASSERT_EQ(loaded.value().stats.count("cpu.render_submit_ms"), 1u);
   EXPECT_DOUBLE_EQ(loaded.value().stats["cpu.render_submit_ms"].median, 2.0);

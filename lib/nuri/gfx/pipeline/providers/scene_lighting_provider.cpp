@@ -308,6 +308,17 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
   const DDGIFrameGpuDataHandle *ddgiFrame =
       ctx.shared.ddgiFrameGpuData.has_value() ? &*ctx.shared.ddgiFrameGpuData
                                               : nullptr;
+  const bool ddgiOpaqueSurfaceCacheValid =
+      ddgiFrame != nullptr && ddgiFrame->debugView == DDGIDebugView::None &&
+      renderSettings.ddgi.opaqueGatherVariant ==
+          DDGISurfaceGatherVariant::Product &&
+      ctx.frame.presentationAA.coverage != CoverageMode::Sample1 &&
+      nuri::isValid(ctx.shared.ddgiOpaqueSurfaceCacheTexture);
+  const uint32_t ddgiOpaqueSurfaceCacheTexId =
+      ddgiOpaqueSurfaceCacheValid
+          ? gpu_.getTextureBindlessIndex(
+                ctx.shared.ddgiOpaqueSurfaceCacheTexture)
+          : kInvalidTextureBindlessIndex;
   const PostAAPlan &postAA = frame.presentationAA.postAA;
   const uint32_t specularAAStatePacked =
       static_cast<uint32_t>(postAA.resolvedMaterialSpecularAA) |
@@ -362,6 +373,9 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
       .ddgiDebugView = ddgiFrame != nullptr
                            ? static_cast<uint32_t>(ddgiFrame->debugView)
                            : 0u,
+      .ddgiReserved0 = ddgiOpaqueSurfaceCacheTexId,
+      .ddgiReserved1 =
+          ddgiOpaqueSurfaceCacheTexId != kInvalidTextureBindlessIndex ? 1u : 0u,
       .previousViewProj = ctx.shared.sceneDepthPyramidSourceViewProj.value_or(
           frame.camera.currentUnjitteredViewProj),
       .sceneDepthPyramidInfo = sceneDepthPyramidInfo,

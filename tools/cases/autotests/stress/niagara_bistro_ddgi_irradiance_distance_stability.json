@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 1,
+  "id": "stress.niagara_bistro.ddgi_irradiance_distance_stability",
+  "suite": "stress",
+  "description": "Converged High Automatic DDGI irradiance under a fixed-angle in/out camera sweep through the reported Bistro courtyard",
+  "scene": {"kind": "prefab", "pathBase": "modelsRoot", "path": "NiagaraBistro/bistrox.gltf", "generator": "nuri.ddgi.bistro_irradiance_distance_stability.v1", "contentHash": "niagara-bistro-ddgi-irradiance-distance-stability-v1", "importOptions": {"mesh": {"generateMeshlets": true, "meshletMaxVertices": 64, "meshletMaxPrimitives": 124, "meshletConeWeight": 0.0}}, "baseModel": {"kind": "fitRadius", "targetRadius": 120.0, "minScale": 0.0005, "maxScale": 2.0}},
+  "environment": {
+    "cubemap": {"pathBase": "texturesRoot", "path": "qwantani_moon_noon_puresky_4k.hdr", "kind": "EquirectHdrCubemap", "debugName": "tool_qwantani_cubemap", "required": true},
+    "irradiance": {"pathBase": "texturesRoot", "path": "qwantani_moon_noon_puresky_4k_irradiance.ktx2", "kind": "Ktx2Cubemap", "debugName": "tool_qwantani_irradiance"},
+    "prefilteredGgx": {"pathBase": "texturesRoot", "path": "qwantani_moon_noon_puresky_4k_prefilter_ggx.ktx2", "kind": "Ktx2Cubemap", "debugName": "tool_qwantani_prefilter_ggx"},
+    "prefilteredCharlie": {"pathBase": "texturesRoot", "path": "qwantani_moon_noon_puresky_4k_prefilter_charlie.ktx2", "kind": "Ktx2Cubemap", "debugName": "tool_qwantani_prefilter_charlie"}
+  },
+  "backend": "nvrhi",
+  "resolution": [1858, 1057],
+  "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 220,
+  "endFrame": 300,
+  "authoritative": false,
+  "presentMode": "immediate",
+  "windowMode": "visible",
+  "renderGraph": {"workerCount": 1, "parallelCompile": false, "parallelRecording": false},
+  "camera": {"position": [-33.3505058, 16.266819, 7.60878944], "target": [-35.88716414, 5.52893614, 24.29001236], "verticalFovDegrees": 60.0000038, "nearPlane": 0.0500000007, "farPlane": 500.0},
+  "settings": {
+    "ddgi": {"enabled": true, "qualityPreset": "High", "coveragePreset": "Automatic", "debugView": "Irradiance", "gatherVariants": {"opaque": "Product"}},
+    "opaque": {"enabled": true, "meshletMode": "Required", "enableMeshletFrustumCulling": true, "enableMeshletConeCulling": true, "enableDepthPrepass": false, "enableInstanceCompute": false, "enableInstanceAnimation": false, "enableMeshLod": false, "enableTessellation": false, "forcedMeshLod": 0},
+    "visibility": {"occlusionMode": "PreviousFrameHiZ", "visibleOnUncertain": true},
+    "antiAliasing": {"mode": "MSAA8x", "postAA": {"enabled": true, "specular": "BakedClean", "spatial": "Smaa1x", "materialVarianceScale": 1.0, "geometricVarianceScale": 0.35, "maxSlopeVariance": 0.25}},
+    "ambientOcclusion": {"mode": "GTAO", "preset": "Ultra"},
+    "shadow": {"enabled": true, "qualityPreset": "Ultra"},
+    "hdrPostProcess": {"bloomEnabled": false, "adaptationEnabled": false},
+    "transmission": {"enabled": false},
+    "transparent": {"enabled": false},
+    "textureFiltering": {"mode": "Anisotropic", "anisotropy": 8}
+  },
+  "timeline": {"cameraPaths": [{"id": "fixed_angle_distance_sweep", "startFrame": 220, "endFrame": 300, "interpolation": "smoothstep", "keyframes": [
+    {"frame": 220, "position": [-33.3505058, 16.266819, 7.60878944], "target": [-35.88716414, 5.52893614, 24.29001236]},
+    {"frame": 244, "position": [-34.872500804, 9.824089284, 17.617523192], "target": [-37.409159144, -0.913793576, 34.298746112]},
+    {"frame": 276, "position": [-32.335842464, 20.561972144, 0.936300272], "target": [-34.872500804, 9.824089284, 17.617523192]},
+    {"frame": 300, "position": [-33.3505058, 16.266819, 7.60878944], "target": [-35.88716414, 5.52893614, 24.29001236]}
+  ]}]},
+  "checkpoints": [
+    {"id": "origin_00", "frame": 220, "captures": [{"target": "frame_color_hdr", "profile": "hdr_color", "required": true, "compare": false}, {"target": "scene_depth", "profile": "depth", "required": true, "compare": false}, {"target": "ddgi_volume0_irradiance_atlas", "profile": "hdr_color", "required": true, "compare": false}, {"target": "ddgi_volume1_irradiance_atlas", "profile": "hdr_color", "required": true, "compare": false}, {"target": "ddgi_volume2_irradiance_atlas", "profile": "hdr_color", "required": true, "compare": false}, {"target": "ddgi_volume3_irradiance_atlas", "profile": "hdr_color", "required": true, "compare": false}], "assertions": [{"id": "scene_history_ready", "metric": "renderer.ddgi.history_ready", "equals": 1}, {"id": "fine_history_ready", "metric": "renderer.ddgi.volume0.history_ready_percentage", "min": 99}, {"id": "middle_history_usable", "metric": "renderer.ddgi.volume1.history_ready_percentage", "min": 70}]},
+    {"id": "toward_08", "frame": 228, "captures": [{"target": "frame_color_hdr", "profile": "hdr_color", "required": true, "compare": false}, {"target": "scene_depth", "profile": "depth", "required": true, "compare": false}], "assertions": []},
+    {"id": "toward_16", "frame": 236, "captures": [{"target": "frame_color_hdr", "profile": "hdr_color", "required": true, "compare": false}, {"target": "scene_depth", "profile": "depth", "required": true, "compare": false}], "assertions": []},
+    {"id": "near_24", "frame": 244, "captures": [{"target": "frame_color_hdr", "profile": "hdr_color", "required": true, "compare": false}, {"target": "scene_depth", "profile": "depth", "required": true, "compare": false}, {"target": "ddgi_volume0_irradiance_atlas", "profile": "hdr_color", "required": true, "compare": false}, {"target": "ddgi_volume1_irradiance_atlas", "profile": "hdr_color", "required": true, "compare": false}, {"target": "ddgi_volume2_irradiance_atlas", "profile": "hdr_color", "required": true, "compare": false}, {"target": "ddgi_volume3_irradiance_atlas", "profile": "hdr_color", "required": true, "compare": false}], "assertions": []},
+    {"id": "away_32", "frame": 252, "captures": [{"target": "frame_color_hdr", "profile": "hdr_color", "required": true, "compare": false}, {"target": "scene_depth", "profile": "depth", "required": true, "compare": false}], "assertions": []},
+    {"id": "away_40", "frame": 260, "captures": [{"target": "frame_color_hdr", "profile": "hdr_color", "required": true, "compare": false}, {"target": "scene_depth", "profile": "depth", "required": true, "compare": false}], "assertions": []},
+    {"id": "away_48", "frame": 268, "captures": [{"target": "frame_color_hdr", "profile": "hdr_color", "required": true, "compare": false}, {"target": "scene_depth", "profile": "depth", "required": true, "compare": false}], "assertions": []},
+    {"id": "far_56", "frame": 276, "captures": [{"target": "frame_color_hdr", "profile": "hdr_color", "required": true, "compare": false}, {"target": "scene_depth", "profile": "depth", "required": true, "compare": false}, {"target": "ddgi_volume0_irradiance_atlas", "profile": "hdr_color", "required": true, "compare": false}, {"target": "ddgi_volume1_irradiance_atlas", "profile": "hdr_color", "required": true, "compare": false}, {"target": "ddgi_volume2_irradiance_atlas", "profile": "hdr_color", "required": true, "compare": false}, {"target": "ddgi_volume3_irradiance_atlas", "profile": "hdr_color", "required": true, "compare": false}], "assertions": []},
+    {"id": "return_64", "frame": 284, "captures": [{"target": "frame_color_hdr", "profile": "hdr_color", "required": true, "compare": false}, {"target": "scene_depth", "profile": "depth", "required": true, "compare": false}], "assertions": []},
+    {"id": "return_72", "frame": 292, "captures": [{"target": "frame_color_hdr", "profile": "hdr_color", "required": true, "compare": false}, {"target": "scene_depth", "profile": "depth", "required": true, "compare": false}], "assertions": []},
+    {"id": "origin_80", "frame": 300, "captures": [{"target": "frame_color_hdr", "profile": "hdr_color", "required": true, "compare": false}, {"target": "scene_depth", "profile": "depth", "required": true, "compare": false}], "assertions": [{"id": "scene_history_still_ready", "metric": "renderer.ddgi.history_ready", "equals": 1}, {"id": "no_failed_volumes", "metric": "renderer.ddgi.failed_volumes", "equals": 0}]}
+  ],
+  "metricWindows": [{"id": "distance_stability", "frames": [220, 300], "assertions": [{"id": "stable_resources", "metric": "renderer.ddgi.resource_generation", "varianceMax": 0}, {"id": "no_query_overflow", "metric": "renderer.ddgi.secondary_query_budget_overflows", "max": 0}, {"id": "bounded_updates", "metric": "renderer.ddgi.updated_probes", "max": 512}]}],
+  "requirements": {"assets": ["modelsRoot:NiagaraBistro/bistrox.gltf", "texturesRoot:qwantani_moon_noon_puresky_4k.hdr"], "backends": ["nvrhi"], "allowVisibleWindow": true, "msaaSamples": 8, "accelerationStructure": true, "rayQuery": true}
+}

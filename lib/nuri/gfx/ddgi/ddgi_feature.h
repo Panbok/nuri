@@ -30,6 +30,10 @@ public:
   DDGIFeature(const DDGIFeature &) = delete;
   DDGIFeature &operator=(const DDGIFeature &) = delete;
   [[nodiscard]] Result<bool, std::string> prepare(FrameBuildContext &ctx);
+  [[nodiscard]] bool
+  opaqueSurfaceCacheActive(const FrameBuildContext &ctx) const noexcept;
+  [[nodiscard]] Result<bool, std::string>
+  buildOpaqueSurfaceCache(FrameBuildContext &ctx);
   void onFrameSubmitted(const RenderFrameContext &frame) noexcept;
   void onFrameAbandoned(const RenderFrameContext &frame) noexcept;
 
@@ -40,6 +44,7 @@ private:
     BlendIrradiance,
     BlendDistance,
     UpdateProbeState,
+    OpaqueSurfaceCache,
     PipelineCount,
   };
   struct VolumeResource {
@@ -183,6 +188,24 @@ private:
     uint32_t submissionSequence = 0u;
   };
   static_assert(sizeof(InspectPushConstants) == 128u);
+  struct OpaqueSurfaceCachePushConstants {
+    glm::mat4 inverseView{1.0f};
+    uint64_t ddgiFrame = 0u;
+    uint64_t sceneFrame = 0u;
+    uint32_t depthTextureId = kInvalidTextureBindlessIndex;
+    uint32_t normalTextureId = kInvalidTextureBindlessIndex;
+    uint32_t outputTextureId = kInvalidTextureBindlessIndex;
+    uint32_t width = 0u;
+    uint32_t height = 0u;
+    uint32_t projectionType = 0u;
+    float nearPlane = 0.1f;
+    float farPlane = 1000.0f;
+    float tanHalfFovY = 1.0f;
+    float aspectRatio = 1.0f;
+    float orthoHeight = 10.0f;
+    uint32_t reserved = 0u;
+  };
+  static_assert(sizeof(OpaqueSurfaceCachePushConstants) == 128u);
 
   [[nodiscard]] Result<bool, std::string> initialize();
   [[nodiscard]] Result<bool, std::string>
@@ -205,8 +228,7 @@ private:
   [[nodiscard]] Result<bool, std::string>
   appendInspectionPass(FrameBuildContext &ctx, FrameSlot &slot);
   [[nodiscard]] Result<DDGIScheduleResult, std::string>
-  buildSchedule(const RenderSettings::DDGISettings &settings,
-                bool conservativeSecondaryBudget);
+  buildSchedule(const RenderSettings::DDGISettings &settings);
   void publishFrameData(FrameBuildContext &ctx, FrameSlot &slot, bool rtReady);
   void collectCompletedProbeStates(FrameSlot &slot);
   void collectCompletedTraceMetrics(FrameSlot &slot, DDGIFrameMetrics &metrics);
@@ -224,8 +246,14 @@ private:
   void stageCompatiblePlan(const DDGIEffectiveVolumePlan &plan,
                            const DDGICoverageSettings &coverageSettings,
                            const RenderScene &scene) noexcept;
+  [[nodiscard]] const DDGIEffectiveVolume &
+  frameEffectiveVolume(size_t index) const noexcept;
+  [[nodiscard]] const DDGICoverageSettings &
+  frameCoverageSettings() const noexcept;
   void commitDirtyResponses() noexcept;
   void commitRadiometricSnapshot(const RenderScene &scene) noexcept;
+  void stagePendingRadiometricSnapshot(const RenderScene &scene) noexcept;
+  void clearPendingDirtySourceFacts() noexcept;
   void clearVolumes() noexcept;
   void clearPendingVolumes() noexcept;
   void clearFrameSlots() noexcept;
@@ -246,25 +274,36 @@ private:
   std::pmr::vector<VolumeResource> pendingVolumes_;
   std::pmr::vector<FrameSlot> frameSlots_;
   std::pmr::vector<DDGIProbeUpdateEntry> scheduledEntries_;
+  std::pmr::vector<DDGIProbeUpdateEntry> dispatchEntries_;
   std::pmr::vector<DDGIProbeUpdateEntry> scrollInvalidations_;
   std::pmr::vector<DDGIVolumeLayout> pendingScrollLayouts_;
   std::pmr::vector<ComputeDispatchItem> dispatches_;
+  std::pmr::vector<ComputeDispatchItem> irradianceDispatches_;
+  std::pmr::vector<ComputeDispatchItem> distanceDispatches_;
   std::pmr::vector<BlendPushConstants> blendPushConstants_;
   std::pmr::vector<BufferHandle> dependencyBuffers_;
   std::pmr::vector<RenderGraphAccessMode> dependencyBufferModes_;
   std::pmr::vector<TextureHandle> dependencyTextures_;
   std::pmr::vector<RenderGraphAccessMode> dependencyTextureModes_;
+  std::pmr::vector<TextureHandle> irradianceDependencyTextures_;
+  std::pmr::vector<RenderGraphAccessMode> irradianceDependencyTextureModes_;
+  std::pmr::vector<TextureHandle> distanceDependencyTextures_;
+  std::pmr::vector<RenderGraphAccessMode> distanceDependencyTextureModes_;
   std::pmr::vector<BufferHandle> forwardDependencyBuffers_;
   std::pmr::vector<TextureHandle> forwardDependencyTextures_;
   std::pmr::vector<LocalLightGpuData> selectedLocalLights_;
   std::pmr::vector<LocalLightSnapshot> submittedLocalLights_;
   std::pmr::vector<DirectionalLightGpuData> submittedDirectionalLights_;
+  std::pmr::vector<LocalLightSnapshot> pendingLocalLights_;
+  std::pmr::vector<DirectionalLightGpuData> pendingDirectionalLights_;
   DDGIFrameGpuData frameData_{};
   DDGITieredScheduleResult pendingTierSchedule_{};
   DDGIDirtyRegionRing dirtyRegions_{};
-  TracePushConstants tracePushConstants_{};
+  DDGIEffectiveVolumePlan coveragePlan_;
+  std::array<TracePushConstants, 2> tracePushConstants_{};
   ProbeStatePushConstants statePushConstants_{};
   InspectPushConstants inspectPushConstants_{};
+  OpaqueSurfaceCachePushConstants opaqueSurfaceCachePushConstants_{};
   std::optional<DDGIProbeInspectResult> latestInspectionResult_{};
   DDGITraceCountersGpuData latestTraceCounters_{};
   std::array<uint64_t, kMaxDDGIVolumes>
@@ -280,6 +319,13 @@ private:
   uint64_t lightTransformVersion_ = UINT64_MAX;
   uint64_t materialVersion_ = UINT64_MAX;
   uint64_t environmentVersion_ = UINT64_MAX;
+  uint64_t pendingGeometryTopologyVersion_ = UINT64_MAX;
+  uint64_t pendingGeometryTransformVersion_ = UINT64_MAX;
+  uint64_t pendingGeometryDeformationVersion_ = UINT64_MAX;
+  uint64_t pendingLightTopologyVersion_ = UINT64_MAX;
+  uint64_t pendingLightTransformVersion_ = UINT64_MAX;
+  uint64_t pendingMaterialVersion_ = UINT64_MAX;
+  uint64_t pendingEnvironmentVersion_ = UINT64_MAX;
   uint64_t pendingSceneId_ = 0u;
   uint32_t selectedLocalLightCount_ = 0u;
   uint32_t totalLocalLightCount_ = 0u;
@@ -289,8 +335,15 @@ private:
   uint64_t pendingVolumeTransformVersion_ = UINT64_MAX;
   uint64_t pendingVolumeSettingsVersion_ = UINT64_MAX;
   DDGICoverageSettings coverageSettings_{};
+  DDGICoverageSettings coveragePlanSettings_{};
+  DDGICoverageSolveLimits coveragePlanLimits_{};
   DDGICoverageSettings pendingCoverageSettings_{};
   uint64_t coverageGeneration_ = 0u;
+  uint64_t coveragePlanSceneId_ = 0u;
+  uint64_t coveragePlanBoundsGeneration_ = 0u;
+  uint64_t coveragePlanVolumeTopologyVersion_ = UINT64_MAX;
+  uint64_t coveragePlanVolumeTransformVersion_ = UINT64_MAX;
+  uint64_t coveragePlanVolumeSettingsVersion_ = UINT64_MAX;
   uint64_t pendingCoverageGeneration_ = 0u;
   uint64_t sceneBoundsGeneration_ = 0u;
   uint64_t pendingSceneBoundsGeneration_ = 0u;
@@ -338,10 +391,14 @@ private:
   bool updatesScheduled_ = false;
   bool radiometricResponseScheduled_ = false;
   bool geometryResponseScheduled_ = false;
+  bool pendingGeometrySourceFacts_ = false;
+  bool pendingRadiometricSourceFacts_ = false;
   bool inspectionScheduled_ = false;
   bool dirtyConsumptionScheduled_ = false;
   bool probeStateMirrorAvailable_ = false;
   bool latestTraceCountersAvailable_ = false;
+  bool coveragePlanValid_ = false;
+  bool coveragePlanSucceeded_ = false;
 };
 
 } // namespace nuri

@@ -129,7 +129,7 @@ registerDefaultRenderPipeline(RenderPipeline &pipeline, GPUDevice &gpu,
       pipeline.addProvider(std::make_unique<SceneDrawDatabase>(gpu, memory));
   pipeline.addProvider(
       std::make_unique<RayTracingScene>(gpu, shaderConfig.ddgi, memory));
-  pipeline.addProvider(
+  auto *ddgiFeature = pipeline.addProvider(
       std::make_unique<DDGIFeature>(gpu, shaderConfig.ddgi, memory));
   pipeline.addProvider(std::make_unique<FrameCompositionProvider>(gpu, memory));
   pipeline.addProvider(std::make_unique<SceneLightingProvider>(gpu));
@@ -138,6 +138,21 @@ registerDefaultRenderPipeline(RenderPipeline &pipeline, GPUDevice &gpu,
       pipeline, gpu, shaderConfig.opaque, memory, drawDatabase);
   registerTemporalInputStages(pipeline, gpu, shaderConfig.composite);
   registerGTAOStage(pipeline, gpu, shaderConfig.opaque);
+  pipeline.addStage(PipelineStageDesc{
+      .componentName = "DDGIFeature",
+      .name = "DDGIOpaqueSurfaceCache",
+      .state = ddgiFeature,
+      .enabled =
+          [](const void *state, const FrameBuildContext &ctx) {
+            return static_cast<const DDGIFeature *>(state)
+                ->opaqueSurfaceCacheActive(ctx);
+          },
+      .build =
+          [](void *state, FrameBuildContext &ctx) {
+            return static_cast<DDGIFeature *>(state)->buildOpaqueSurfaceCache(
+                ctx);
+          },
+  });
   registerOpaqueMainStage(pipeline, *opaqueRenderer);
   registerSkyboxStage(pipeline, gpu, shaderConfig.skybox);
   registerMsaaResolveStage(pipeline, gpu);

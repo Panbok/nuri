@@ -62,6 +62,12 @@ enum class BenchmarkMetricGateRole : uint8_t {
   Diagnostic,
 };
 
+enum class BenchmarkMetricEvidenceClass : uint8_t {
+  ProductSafe,
+  DiagnosticOnly,
+  Derived,
+};
+
 struct BenchmarkMetricDescriptor {
   // Exact metric ID, or the documented rule text when idRule is not Exact.
   std::string_view idOrRule{};
@@ -76,6 +82,8 @@ struct BenchmarkMetricDescriptor {
   BenchmarkMetricSamplingPhase samplingPhase =
       BenchmarkMetricSamplingPhase::PostRenderMeasuredFrame;
   BenchmarkMetricGateRole gateRole = BenchmarkMetricGateRole::Diagnostic;
+  BenchmarkMetricEvidenceClass evidenceClass =
+      BenchmarkMetricEvidenceClass::ProductSafe;
 };
 
 struct BenchmarkMetricIndex {
@@ -119,5 +127,7 @@ benchmarkMetricAggregationName(BenchmarkMetricAggregation aggregation) noexcept;
 benchmarkMetricSamplingPhaseName(BenchmarkMetricSamplingPhase phase) noexcept;
 [[nodiscard]] std::string_view
 benchmarkMetricGateRoleName(BenchmarkMetricGateRole role) noexcept;
+[[nodiscard]] std::string_view benchmarkMetricEvidenceClassName(
+    BenchmarkMetricEvidenceClass evidenceClass) noexcept;
 
 } // namespace nuri::tools::benchmark
