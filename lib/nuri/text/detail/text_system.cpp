@@ -1,11 +1,10 @@
 #include "nuri/text/text_system.h"
 #include "nuri/core/log.h"
 #include "nuri/gfx/pipeline/render_pipeline.h"
-#include "nuri/pch.h"
-#include "nuri/text/font_manager.h"
-#include "nuri/text/text_layouter.h"
-#include "nuri/text/text_renderer.h"
-#include "nuri/text/text_shaper.h"
+#include "nuri/text/detail/font_manager.h"
+#include "nuri/text/detail/text_layouter.h"
+#include "nuri/text/detail/text_renderer.h"
+#include "nuri/text/detail/text_shaper.h"
 namespace nuri {
 namespace {
 constexpr float MIN_FONT_SIZE_PX = 8.0f;
@@ -159,6 +158,15 @@ void registerText3DStage(RenderPipeline &pipeline, TextSystem &text) {
                 return Result<bool, std::string>::makeResult(true);
               },
           .prepare = beginTextFrame,
+          .submitted =
+              [](void *state, const RenderFrameContext &frame) noexcept {
+                static_cast<TextSystem *>(state)->renderer_->onFrameSubmitted(
+                    frame.submission);
+              },
+          .abandoned =
+              [](void *state, const RenderFrameContext &) noexcept {
+                static_cast<TextSystem *>(state)->renderer_->onFrameAbandoned();
+              },
       });
   pipeline.addStage(PipelineStageDesc{
       .componentName = "Text3DFeature",
@@ -173,16 +181,28 @@ void registerText3DStage(RenderPipeline &pipeline, TextSystem &text) {
             return static_cast<TextSystem *>(state)
                 ->renderer_->append3DGraphPass(
                     ctx.frame, ctx.graph,
-                    ctx.frame.sharedResources.sceneDepthGraphTexture,
+                    ctx.frame.sharedResources[FrameTextureSlot::SceneDepth]
+                        .graph,
                     ctx.graph.passCount() > 0u);
           },
   });
 }
 
 void registerText2DStage(RenderPipeline &pipeline, TextSystem &text) {
-  pipeline.addBorrowedComponent(&text, PipelineComponentDesc{
-                                           .prepare = beginTextFrame,
-                                       });
+  pipeline.addBorrowedComponent(
+      &text,
+      PipelineComponentDesc{
+          .prepare = beginTextFrame,
+          .submitted =
+              [](void *state, const RenderFrameContext &frame) noexcept {
+                static_cast<TextSystem *>(state)->renderer_->onFrameSubmitted(
+                    frame.submission);
+              },
+          .abandoned =
+              [](void *state, const RenderFrameContext &) noexcept {
+                static_cast<TextSystem *>(state)->renderer_->onFrameAbandoned();
+              },
+      });
   pipeline.addStage(PipelineStageDesc{
       .componentName = "Text2DFeature",
       .name = "Text2DPass",

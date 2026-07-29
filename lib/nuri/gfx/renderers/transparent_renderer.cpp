@@ -5,7 +5,6 @@
 #include "nuri/gfx/renderers/detail/animation_rendering.h"
 #include "nuri/gfx/renderers/detail/forward_rendering.h"
 #include "nuri/gfx/shader.h"
-#include "nuri/pch.h"
 #include "nuri/resources/gpu/resource_manager.h"
 namespace nuri {
 namespace {
@@ -70,10 +69,6 @@ RenderPipelineDesc meshPipelineDesc(Format colorFormat, Format depthFormat,
                          : RasterPipelineState{},
   };
 }
-[[nodiscard]] const RenderSettings &
-settingsOrDefault(const RenderFrameContext &frame) {
-  return renderSettingsOrDefault(frame);
-}
 [[nodiscard]] bool
 isAntiAliasingDebugOutputView(AntiAliasingDebugView view) noexcept {
   return view != AntiAliasingDebugView::None &&
@@ -102,12 +97,10 @@ TransparentRenderer::TransparentRenderer(GPUDevice &gpu,
                                          TransparentRendererConfig config,
                                          std::pmr::memory_resource *memory)
     : gpu_(gpu), config_(std::move(config)),
-      memory_(resolveMemoryResource(memory)), instanceMatricesRing_(memory_),
-      instanceRemapRing_(memory_), meshDrawTemplates_(memory_),
-      instanceMatrices_(memory_), instanceRemap_(memory_),
-      instanceDataRingUploadVersions_(memory_),
-      materialTextureAccessHandles_(memory_),
-      environmentTextureAccessHandles_(memory_),
+      memory_(resolveMemoryResource(memory)),
+      instanceBuffers_(std::make_unique<ForwardInstanceBuffers>(
+          gpu_, "transparent", memory_)),
+      sceneCache_(memory_), meshDrawTemplates_(memory_),
       contributorSortableDraws_(memory_), contributorFixedDraws_(memory_),
       contributorTextureReads_(memory_), contributorDependencyBuffers_(memory_),
       drawPushConstants_(memory_), pickPushConstants_(memory_),
@@ -146,12 +139,23 @@ void TransparentRenderer::publishFrameData(RenderFrameContext &frame) {
   frame.sharedResources.transparentStageEnabled = true;
 }
 
+void TransparentRenderer::onFrameSubmitted(
+    const RenderFrameContext &frame) noexcept {
+  instanceBuffers_->onFrameSubmitted(frame);
+}
+
+void TransparentRenderer::onFrameAbandoned(
+    const RenderFrameContext &frame) noexcept {
+  instanceBuffers_->onFrameAbandoned(frame);
+}
+
 Result<bool, std::string>
 TransparentRenderer::prepareTransparentPasses(RenderFrameContext &frame) {
   NURI_PROFILER_FUNCTION();
+  instanceBuffers_->abandonPrepared();
   frame.metrics.transparent = {};
   resetFrameBuildState();
-  const RenderSettings &settings = settingsOrDefault(frame);
+  const RenderSettings &settings = frame.settings;
   auto contributorResult = collectContributorDraws(frame);
   if (contributorResult.hasError())
     return contributorResult;
@@ -178,16 +182,17 @@ TransparentRenderer::prepareTransparentPasses(RenderFrameContext &frame) {
   const MaterialTableSnapshot materialSnapshot =
       frame.resources->materialSnapshot();
   const bool topologyDirty =
-      cachedScene_ != frame.scene ||
-      cachedTopologyVersion_ != frame.scene->topologyVersion();
+      sceneCache_.scene != frame.scene ||
+      sceneCache_.topologyVersion != frame.scene->topologyVersion();
   const uint64_t modelMaterialBindingVersion =
       frame.resources->modelMaterialBindingVersion();
   const bool materialDirty =
-      topologyDirty || cachedMaterialVersion_ != materialSnapshot.version ||
-      cachedModelMaterialBindingVersion_ != modelMaterialBindingVersion;
+      topologyDirty ||
+      sceneCache_.materialVersion != materialSnapshot.version ||
+      sceneCache_.modelMaterialBindingVersion != modelMaterialBindingVersion;
   const bool transformDirty =
       topologyDirty ||
-      cachedTransformVersion_ != frame.scene->transformVersion();
+      sceneCache_.transformVersion != frame.scene->transformVersion();
   const bool excludeTransmissionBlend =
       frame.sharedResources.transparentTransmissionStageEnabled;
   const bool transmissionBlendPolicyDirty =
@@ -195,33 +200,26 @@ TransparentRenderer::prepareTransparentPasses(RenderFrameContext &frame) {
   const uint64_t geometryMutationVersion = gpu_.geometryMutationVersion();
   const bool geometryDirty =
       geometryMutationVersion != 0u &&
-      geometryMutationVersion != cachedGeometryMutationVersion_;
+      geometryMutationVersion != sceneCache_.geometryMutationVersion;
   const bool needsGeometryRebuild =
       geometryDirty && !meshDrawTemplates_.empty();
   if (topologyDirty || materialDirty || needsGeometryRebuild ||
       transmissionBlendPolicyDirty) {
     rebuildSceneCache(*frame.sharedResources.sceneDrawDatabase, *frame.scene,
                       excludeTransmissionBlend);
-    cachedMaterialVersion_ = materialSnapshot.version;
-    cachedModelMaterialBindingVersion_ = modelMaterialBindingVersion;
+    sceneCache_.materialVersion = materialSnapshot.version;
+    sceneCache_.modelMaterialBindingVersion = modelMaterialBindingVersion;
   } else if (geometryDirty) {
-    cachedGeometryMutationVersion_ = geometryMutationVersion;
+    sceneCache_.geometryMutationVersion = geometryMutationVersion;
   }
   if (meshDrawTemplates_.empty()) {
     return publishContributors();
   }
-  const std::array rings{&instanceMatricesRing_, &instanceRemapRing_};
-  const uint32_t ringCount =
-      growDynamicBufferRings(gpu_.getSwapchainImageCount(), rings);
-  instanceDataRingUploadVersions_.resize(ringCount,
-                                         std::numeric_limits<uint64_t>::max());
-  const uint32_t frameSlot =
-      static_cast<uint32_t>(frame.frameIndex % instanceMatricesRing_.size());
   const std::span<const Renderable> renderables = frame.scene->renderables();
   if (transformDirty) {
-    rebuildForwardInstances(renderables, instanceMatrices_, instanceRemap_,
-                            instanceDataRingUploadVersions_);
-    cachedTransformVersion_ = frame.scene->transformVersion();
+    rebuildForwardInstances(renderables, sceneCache_.instanceMatrices,
+                            sceneCache_.instanceRemap);
+    sceneCache_.transformVersion = frame.scene->transformVersion();
   }
   const ForwardSceneGpuData *sceneGpu =
       &*frame.sharedResources.forwardSceneGpuData;
@@ -229,51 +227,42 @@ TransparentRenderer::prepareTransparentPasses(RenderFrameContext &frame) {
       &*frame.sharedResources.materialTableGpuData;
   const AnimationSceneFrameData *animationSceneData =
       resolveAnimationSceneFrameData(frame);
-  if (animationSceneData == nullptr) {
-    auto matricesBufferResult = ensureInstanceMatricesRingCapacity(std::max(
-        instanceMatrices_.size() * sizeof(InstanceData), sizeof(InstanceData)));
-    if (matricesBufferResult.hasError()) {
-      return matricesBufferResult;
-    }
-  }
-  auto remapBufferResult = ensureInstanceRemapRingCapacity(
-      std::max(instanceRemap_.size() * sizeof(uint32_t), sizeof(uint32_t)));
-  if (remapBufferResult.hasError()) {
-    return remapBufferResult;
-  }
-  collectForwardEnvironmentTextures(*frame.scene, *frame.resources,
-                                    environmentTextureAccessHandles_);
-  if (materialDirty || materialTextureAccessHandles_.empty()) {
+  collectForwardEnvironmentTextures(
+      *frame.scene, *frame.resources,
+      sceneCache_.environmentTextureAccessHandles);
+  if (materialDirty || sceneCache_.materialTextureAccessHandles.empty()) {
     collectForwardMaterialTextures(*frame.resources, meshDrawTemplates_,
-                                   materialTextureAccessHandles_);
+                                   sceneCache_.materialTextureAccessHandles);
   }
   if (materialDirty) {
-    cachedMaterialVersion_ = materialSnapshot.version;
+    sceneCache_.materialVersion = materialSnapshot.version;
   }
-  auto instanceUpload = uploadForwardInstances(
-      gpu_, instanceMatricesRing_, instanceRemapRing_, instanceMatrices_,
-      instanceRemap_, instanceDataRingUploadVersions_, frameSlot,
-      cachedTransformVersion_, animationSceneData != nullptr);
-  if (instanceUpload.hasError()) {
-    return instanceUpload;
+  auto instanceBufferResult = instanceBuffers_->prepare(
+      frame.frameIndex, std::max(gpu_.getSwapchainImageCount(), 1u),
+      sceneCache_.instanceMatrices, sceneCache_.instanceRemap,
+      sceneCache_.transformVersion, animationSceneData != nullptr);
+  if (instanceBufferResult.hasError()) {
+    return Result<bool, std::string>::makeError(instanceBufferResult.error());
   }
+  const ForwardInstanceBufferView instanceBuffers =
+      instanceBufferResult.value();
   const uint64_t frameDataAddress = sceneGpu->postTaaFrameDataAddress != 0u
                                         ? sceneGpu->postTaaFrameDataAddress
                                         : sceneGpu->frameDataAddress;
   transparentUsesJitteredProjection_ =
       frameDataAddress == sceneGpu->frameDataAddress;
   const BufferHandle instanceMatricesBufferHandle =
-      animationSceneData != nullptr
-          ? animationSceneData->instanceMatricesBuffer
-          : instanceMatricesRing_[frameSlot].buffer->handle();
+      animationSceneData != nullptr ? animationSceneData->instanceMatricesBuffer
+                                    : instanceBuffers.matrices;
   const uint64_t instanceMatricesAddress =
       animationSceneData != nullptr
           ? animationSceneData->instanceMatricesAddress
           : gpu_.getBufferDeviceAddress(instanceMatricesBufferHandle);
-  const uint64_t instanceRemapAddress = gpu_.getBufferDeviceAddress(
-      instanceRemapRing_[frameSlot].buffer->handle());
+  const uint64_t instanceRemapAddress =
+      gpu_.getBufferDeviceAddress(instanceBuffers.remap);
   const TextureHandle depthTexture = resolveFrameDepthTexture(frame);
-  const TextureHandle colorTexture = frame.sharedResources.frameColorTexture;
+  const TextureHandle colorTexture =
+      frame.sharedResources[FrameTextureSlot::FrameColor].texture;
   const Format depthFormat = nuri::isValid(depthTexture)
                                  ? gpu_.getTextureFormat(depthTexture)
                                  : Format::Count;
@@ -390,10 +379,11 @@ TransparentRenderer::prepareTransparentPasses(RenderFrameContext &frame) {
   for (const TransparentStageSortableDraw &draw : meshSortableDraws_) {
     sortableDraws_.push_back(draw);
   }
-  for (const TextureHandle handle : environmentTextureAccessHandles_) {
+  for (const TextureHandle handle :
+       sceneCache_.environmentTextureAccessHandles) {
     appendUniqueForwardHandle(passTextureReads_, handle);
   }
-  for (const TextureHandle handle : materialTextureAccessHandles_) {
+  for (const TextureHandle handle : sceneCache_.materialTextureAccessHandles) {
     appendUniqueForwardHandle(passTextureReads_, handle);
   }
   for (const TextureHandle handle : sceneGpu->indirectDependencyTextures) {
@@ -414,22 +404,16 @@ TransparentRenderer::prepareTransparentPasses(RenderFrameContext &frame) {
       sortableDraws_.data(), sortableDraws_.size()));
   passDependencyBuffers_.clear();
   appendUniqueForwardHandle(passDependencyBuffers_, sceneGpu->buffer);
-  appendUniqueForwardHandle(passDependencyBuffers_, materialGpu->headerBuffer);
-  appendUniqueForwardHandle(passDependencyBuffers_,
-                            materialGpu->clearcoatBuffer);
-  appendUniqueForwardHandle(passDependencyBuffers_, materialGpu->sheenBuffer);
-  appendUniqueForwardHandle(passDependencyBuffers_,
-                            materialGpu->transmissionBuffer);
-  appendUniqueForwardHandle(passDependencyBuffers_,
-                            materialGpu->specularBuffer);
+  for (const MaterialTableGpuRegion &region : materialGpu->regions) {
+    appendUniqueForwardHandle(passDependencyBuffers_, region.buffer);
+  }
   appendUniqueForwardHandle(passDependencyBuffers_,
                             instanceMatricesBufferHandle);
-  appendUniqueForwardHandle(passDependencyBuffers_,
-                            instanceRemapRing_[frameSlot].buffer->handle());
+  appendUniqueForwardHandle(passDependencyBuffers_, instanceBuffers.remap);
   for (const BufferHandle handle : sceneGpu->indirectDependencyBuffers) {
     appendUniqueForwardHandle(passDependencyBuffers_, handle);
   }
-  if ((sceneGpu->shadowFlags & kShadowFrameFlagEnabled) != 0u) {
+  if ((sceneGpu->frameData.shadowFlags & kShadowFrameFlagEnabled) != 0u) {
     const auto &shadowFrameGpuData = frame.sharedResources.shadowFrameGpuData;
     appendUniqueForwardHandle(passDependencyBuffers_,
                               shadowFrameGpuData->buffer);
@@ -451,15 +435,16 @@ TransparentRenderer::prepareTransparentPasses(RenderFrameContext &frame) {
 Result<bool, std::string>
 TransparentRenderer::appendTransparentMainPass(RenderFrameContext &frame,
                                                RenderGraphBuilder &graph) {
-  const AntiAliasingDebugView debugView = sanitizeAntiAliasingDebugView(
-      settingsOrDefault(frame).antiAliasing.debug.view);
+  const AntiAliasingDebugView debugView =
+      frame.settings.antiAliasing.debug.view;
   if (isAntiAliasingDebugOutputView(debugView)) {
     return Result<bool, std::string>::makeResult(true);
   }
   const TextureHandle depthTexture = resolveFrameDepthTexture(frame);
-  const TextureHandle colorTexture = frame.sharedResources.frameColorTexture;
+  const TextureHandle colorTexture =
+      frame.sharedResources[FrameTextureSlot::FrameColor].texture;
   const RenderGraphTextureId sceneDepthGraphTexture =
-      frame.sharedResources.sceneDepthGraphTexture;
+      frame.sharedResources[FrameTextureSlot::SceneDepth].graph;
   const uint32_t transparentDrawCount =
       saturateToU32(sortableDraws_.size() + fixedDraws_.size());
   AntiAliasingFrameMetrics &aaMetrics = frame.metrics.antiAliasing;
@@ -516,9 +501,9 @@ Result<bool, std::string> TransparentRenderer::createShaders() {
                  ShaderStage::Fragment},
   };
   for (size_t index = 0; index < specs.size(); ++index) {
-    auto compiler = Shader::create(specs[index].name, gpu_);
-    auto result = compiler->compileFromFile(specs[index].path->string(),
-                                            specs[index].stage);
+    auto result =
+        compileShaderFile(gpu_, specs[index].name, specs[index].path->string(),
+                          specs[index].stage);
     if (result.hasError()) {
       destroyShaders();
       return Result<bool, std::string>::makeError(result.error());
@@ -584,44 +569,23 @@ TransparentRenderer::ensurePipelines(Format colorFormat, Format depthFormat) {
   return Result<bool, std::string>::makeResult(true);
 }
 
-Result<bool, std::string>
-TransparentRenderer::ensureInstanceMatricesRingCapacity(size_t requiredBytes) {
-  return ensureDynamicBufferRingCapacity(
-      gpu_, instanceMatricesRing_,
-      BufferDesc{.usage = BufferUsage::Storage,
-                 .storage = Storage::Device,
-                 .size = requiredBytes},
-      "transparent_instance_matrices", [this](size_t i) {
-        instanceDataRingUploadVersions_[i] =
-            std::numeric_limits<uint64_t>::max();
-      });
-}
-
-Result<bool, std::string>
-TransparentRenderer::ensureInstanceRemapRingCapacity(size_t requiredBytes) {
-  return ensureDynamicBufferRingCapacity(
-      gpu_, instanceRemapRing_,
-      BufferDesc{.usage = BufferUsage::Storage,
-                 .storage = Storage::Device,
-                 .size = requiredBytes},
-      "transparent_instance_remap", [this](size_t i) {
-        instanceDataRingUploadVersions_[i] =
-            std::numeric_limits<uint64_t>::max();
-      });
-}
-
 void TransparentRenderer::rebuildSceneCache(const SceneDrawDatabase &database,
                                             const RenderScene &scene,
                                             bool excludeTransmissionBlend) {
   meshDrawTemplates_.clear();
-  for (const SceneDrawRecord &draw : database.draws()) {
-    if (draw.alphaBlended && !(draw.transmission && excludeTransmissionBlend)) {
-      meshDrawTemplates_.push_back(draw);
+  const auto append = [&](std::span<const uint32_t> indices) {
+    for (uint32_t index : indices) {
+      const SceneDrawRecord &draw = database.draws()[index];
+      if (draw.alphaBlended &&
+          !(draw.transmission && excludeTransmissionBlend)) {
+        meshDrawTemplates_.push_back(draw);
+      }
     }
-  }
-  cachedScene_ = &scene;
-  cachedTopologyVersion_ = scene.topologyVersion();
-  cachedGeometryMutationVersion_ = gpu_.geometryMutationVersion();
+  };
+  append(database.category(SceneDrawCategory::AlphaBlended));
+  sceneCache_.scene = &scene;
+  sceneCache_.topologyVersion = scene.topologyVersion();
+  sceneCache_.geometryMutationVersion = gpu_.geometryMutationVersion();
   cachedExcludeTransmissionBlend_ = excludeTransmissionBlend;
 }
 
@@ -651,6 +615,11 @@ TransparentRenderer::collectContributorDraws(RenderFrameContext &frame) {
         return Result<bool, std::string>::makeError(
             "TransparentRenderer::collectContributorDraws: multiple feedback "
             "refresh owners are unsupported in one sorted stream");
+      }
+      if (contribution.feedbackRefresh.applyDrawBindings == nullptr) {
+        return Result<bool, std::string>::makeError(
+            "TransparentRenderer::collectContributorDraws: feedback binding "
+            "callback is missing");
       }
       feedbackRefresh_ = contribution.feedbackRefresh;
     }
@@ -829,7 +798,12 @@ Result<bool, std::string> TransparentRenderer::appendTransparentPass(
       if (dependencyResult.hasError()) {
         return dependencyResult;
       }
-      transparentRunDrawItems_.push_back(draw.draw);
+      DrawItem boundDraw = draw.draw;
+      auto bindingResult =
+          feedbackRefresh_.applyDrawBindings(feedbackRefresh_.user, boundDraw);
+      if (bindingResult.hasError())
+        return bindingResult;
+      transparentRunDrawItems_.push_back(boundDraw);
       continue;
     }
     auto flushResult = flushTransparentRun(kTransparentPassLabel);
@@ -846,9 +820,14 @@ Result<bool, std::string> TransparentRenderer::appendTransparentPass(
     if (dependencyResult.hasError()) {
       return dependencyResult;
     }
+    DrawItem boundDraw = draw.draw;
+    auto bindingResult =
+        feedbackRefresh_.applyDrawBindings(feedbackRefresh_.user, boundDraw);
+    if (bindingResult.hasError())
+      return bindingResult;
     auto drawResult = appendTransparentDrawRun(
         graph, colorTexture, depthTexture, sceneDepthGraphTexture,
-        std::span<const DrawItem>(&draw.draw, 1u), textureReads,
+        std::span<const DrawItem>(&boundDraw, 1u), textureReads,
         std::span<const BufferHandle>(transparentRunDependencyBuffers_.data(),
                                       transparentRunDependencyBuffers_.size()),
         kTransparentTransmissionPassLabel);
@@ -995,7 +974,7 @@ TransparentRenderer::appendTransparentPickPass(RenderFrameContext &frame,
   if (addResult.hasError()) {
     return Result<bool, std::string>::makeError(addResult.error());
   }
-  for (const TextureHandle handle : materialTextureAccessHandles_) {
+  for (const TextureHandle handle : sceneCache_.materialTextureAccessHandles) {
     auto importResult =
         graph.importTexture(handle, "transparent_pick_texture_read");
     if (importResult.hasError()) {
@@ -1011,19 +990,9 @@ TransparentRenderer::appendTransparentPickPass(RenderFrameContext &frame,
 }
 
 void TransparentRenderer::resetCachedState() {
-  cachedScene_ = nullptr;
-  cachedTopologyVersion_ = std::numeric_limits<uint64_t>::max();
-  cachedMaterialVersion_ = std::numeric_limits<uint64_t>::max();
-  cachedModelMaterialBindingVersion_ = std::numeric_limits<uint64_t>::max();
-  cachedTransformVersion_ = std::numeric_limits<uint64_t>::max();
-  cachedGeometryMutationVersion_ = std::numeric_limits<uint64_t>::max();
+  sceneCache_.reset();
   cachedExcludeTransmissionBlend_ = true;
   meshDrawTemplates_.clear();
-  instanceMatrices_.clear();
-  instanceRemap_.clear();
-  instanceDataRingUploadVersions_.clear();
-  materialTextureAccessHandles_.clear();
-  environmentTextureAccessHandles_.clear();
 }
 
 void TransparentRenderer::resetFrameBuildState() {
@@ -1078,13 +1047,7 @@ void TransparentRenderer::destroyShaders() {
   }
 }
 
-void TransparentRenderer::destroyBuffers() {
-  retireDynamicBufferRing(instanceMatricesRing_);
-  retireDynamicBufferRing(instanceRemapRing_);
-  instanceMatricesRing_.clear();
-  instanceRemapRing_.clear();
-  instanceDataRingUploadVersions_.clear();
-}
+void TransparentRenderer::destroyBuffers() { instanceBuffers_->reset(); }
 
 void TransparentRenderer::sortTransparentDraws(
     std::span<TransparentStageSortableDraw> draws) {
@@ -1133,10 +1096,19 @@ void registerTransparentStages(RenderPipeline &pipeline, GPUDevice &gpu,
                 return static_cast<TransparentRenderer *>(state)
                     ->prepareTransparentPasses(ctx.frame);
               },
+          .submitted =
+              [](void *state, const RenderFrameContext &frame) noexcept {
+                static_cast<TransparentRenderer *>(state)->onFrameSubmitted(
+                    frame);
+              },
+          .abandoned =
+              [](void *state, const RenderFrameContext &frame) noexcept {
+                static_cast<TransparentRenderer *>(state)->onFrameAbandoned(
+                    frame);
+              },
       });
   const auto meshEnabled = [](const void *, const FrameBuildContext &ctx) {
-    return !ctx.frame.settings ||
-           renderSettingsOrDefault(ctx.frame).transparent.enabled;
+    return ctx.frame.settings.transparent.enabled;
   };
   pipeline.addStage(PipelineStageDesc{
       .componentName = "TransparentFeature",

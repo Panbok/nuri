@@ -329,6 +329,9 @@ public:
   createBuffer(const BufferDesc &desc, std::string_view debugName) override;
   Result<TextureHandle, std::string>
   createTexture(const TextureDesc &desc, std::string_view debugName) override;
+  Result<bool, std::string> retainGraphicsRecordingReferences(
+      RecordingContextHandle ctx,
+      const GraphicsRecordingReferences &references) override;
   Result<SubmittedGraphicsFrame, std::string> submitRecordedGraphicsFrame(
       std::span<const RecordedCommandBufferHandle> commandBuffers,
       std::span<const SubmitBatchMeta> batches) override;
@@ -339,6 +342,14 @@ public:
   BufferHandle lastDependencyBuffer{};
   BufferHandle lastPreDispatchDependencyBuffer{};
   BufferHandle lastDrawVertexBuffer{};
+  uint32_t retainReferencesCallCount = 0u;
+  std::vector<BufferHandle> retainedBuffers{};
+  std::vector<TextureHandle> retainedTextures{};
+  std::vector<AccelerationStructureHandle> retainedAccelerationStructures{};
+  std::vector<RenderPipelineHandle> retainedRenderPipelines{};
+  std::vector<ComputePipelineHandle> retainedComputePipelines{};
+  std::vector<MeshletPipelineHandle> retainedMeshletPipelines{};
+  std::vector<RayQueryBindingHandle> retainedRayQueryBindings{};
   uint32_t failCreateBufferAtCall = 0u;
   uint32_t failCreateTextureAtCall = 0u;
   bool failSubmitFrame = false;

@@ -1,6 +1,5 @@
 #include "nuri/gfx/pipeline/providers/material_table_gpu_provider.h"
 #include "nuri/core/profiling.h"
-#include "nuri/pch.h"
 #include "nuri/resources/gpu/material.h"
 #include "nuri/resources/gpu/resource_manager.h"
 namespace nuri {
@@ -23,10 +22,20 @@ TableView tableView(std::span<const T> values, MaterialTableDirtyRange dirty,
 }
 } // namespace
 
-MaterialTableGpuProvider::MaterialTableGpuProvider(GPUDevice &gpu)
-    : gpu_(gpu) {}
+MaterialTableGpuProvider::MaterialTableGpuProvider(GPUDevice &gpu) : gpu_(gpu) {
+  constexpr std::array names{"material_header_table",
+                             "material_clearcoat_table", "material_sheen_table",
+                             "material_transmission_table",
+                             "material_specular_table"};
+  const BufferDesc policy{.usage = BufferUsage::Storage,
+                          .storage = Storage::Device};
+  for (size_t i = 0; i < tables_.size(); ++i) {
+    tables_[i].ring =
+        std::make_unique<DynamicBufferRing>(gpu_, policy, names[i]);
+  }
+}
 
-MaterialTableGpuProvider::~MaterialTableGpuProvider() { destroyBuffers(); }
+MaterialTableGpuProvider::~MaterialTableGpuProvider() = default;
 
 Result<bool, std::string>
 MaterialTableGpuProvider::prepare(FrameBuildContext &ctx) {
@@ -43,77 +52,80 @@ MaterialTableGpuProvider::prepare(FrameBuildContext &ctx) {
       tableView(snapshot.specular, snapshot.dirtySpecular,
                 "material_specular_table"),
   };
+  std::array<DynamicBufferAcquisition, 5> acquisitions{};
+  const size_t laneCount = std::max(1u, gpu_.getSwapchainImageCount());
   for (size_t i = 0; i < tables.size(); ++i) {
-    auto ensured =
-        ensureDynamicBufferCapacity(gpu_, buffers_[i],
-                                    BufferDesc{.usage = BufferUsage::Storage,
-                                               .storage = Storage::Device,
-                                               .size = tables[i].bytes.size()},
-                                    tables[i].name);
-    if (ensured.hasError()) {
-      return ensured;
+    auto acquired = tables_[i].ring->acquire(ctx.frame.frameIndex,
+                                             tables[i].bytes.size(), laneCount);
+    if (acquired.hasError()) {
+      abandonPrepared();
+      return Result<bool, std::string>::makeError(acquired.error());
     }
-    if (ensured.value()) {
-      uploadedVersion_ = kNoVersionUploaded;
+    acquisitions[i] = acquired.value();
+    tables_[i].laneVersions.resize(acquisitions[i].lane + 1u,
+                                   kNoVersionUploaded);
+    if (acquisitions[i].replaced) {
+      tables_[i].laneVersions[acquisitions[i].lane] = kNoVersionUploaded;
     }
   }
-  if (uploadedVersion_ != snapshot.version) {
-    const bool fullUpload = uploadedVersion_ == kNoVersionUploaded ||
-                            uploadedVersion_ != snapshot.dirtyBaseVersion;
-    std::vector<BufferUpdate> updates;
-    updates.reserve(tables.size());
-    for (size_t i = 0; i < tables.size(); ++i) {
-      const TableView &table = tables[i];
-      if (!fullUpload && table.dirty.empty()) {
-        continue;
-      }
-      const size_t offset =
-          fullUpload ? 0u : table.dirty.first * table.elementSize;
-      const std::span<const std::byte> bytes =
-          fullUpload ? table.bytes
-                     : table.bytes.subspan(offset, table.dirty.count *
-                                                       table.elementSize);
-      updates.push_back(BufferUpdate{
-          .buffer = buffers_[i].buffer->handle(),
-          .data = bytes,
-          .offset = offset,
-      });
+  std::vector<BufferUpdate> updates;
+  updates.reserve(tables.size());
+  for (size_t i = 0; i < tables.size(); ++i) {
+    const TableView &table = tables[i];
+    const uint64_t laneVersion = tables_[i].laneVersions[acquisitions[i].lane];
+    if (laneVersion == snapshot.version) {
+      continue;
     }
-    if (!updates.empty()) {
-      auto updateResult = gpu_.updateBuffers(updates);
-      if (updateResult.hasError()) {
-        return updateResult;
-      }
+    const bool fullUpload = laneVersion == kNoVersionUploaded ||
+                            laneVersion != snapshot.dirtyBaseVersion;
+    if (!fullUpload && table.dirty.empty()) {
+      continue;
     }
-    uploadedVersion_ = snapshot.version;
+    const size_t offset =
+        fullUpload ? 0u : table.dirty.first * table.elementSize;
+    updates.push_back(BufferUpdate{
+        .buffer = acquisitions[i].buffer,
+        .data = fullUpload ? table.bytes
+                           : table.bytes.subspan(offset, table.dirty.count *
+                                                             table.elementSize),
+        .offset = offset,
+    });
   }
-  std::array<BufferHandle, 5> handles{};
-  std::array<uint64_t, 5> addresses{};
-  for (size_t i = 0; i < buffers_.size(); ++i) {
-    handles[i] = buffers_[i].buffer->handle();
-    addresses[i] = gpu_.getBufferDeviceAddress(handles[i]);
+  if (!updates.empty()) {
+    auto updateResult = gpu_.updateBuffers(updates);
+    if (updateResult.hasError()) {
+      abandonPrepared();
+      return updateResult;
+    }
   }
-  ctx.shared.materialTableGpuData = MaterialTableGpuData{
-      .headerBuffer = handles[0],
-      .clearcoatBuffer = handles[1],
-      .sheenBuffer = handles[2],
-      .transmissionBuffer = handles[3],
-      .specularBuffer = handles[4],
-      .headerBufferAddress = addresses[0],
-      .clearcoatBufferAddress = addresses[1],
-      .sheenBufferAddress = addresses[2],
-      .transmissionBufferAddress = addresses[3],
-      .specularBufferAddress = addresses[4],
-      .version = snapshot.version,
-  };
+  MaterialTableGpuData gpuData{};
+  for (size_t i = 0; i < tables_.size(); ++i) {
+    MaterialTableGpuRegion &region = gpuData.regions[i];
+    region.buffer = acquisitions[i].buffer;
+    region.address = gpu_.getBufferDeviceAddress(region.buffer);
+    tables_[i].laneVersions[acquisitions[i].lane] = snapshot.version;
+  }
+  gpuData.version = snapshot.version;
+  ctx.shared.materialTableGpuData = gpuData;
   return Result<bool, std::string>::makeResult(true);
 }
 
-void MaterialTableGpuProvider::destroyBuffers() {
-  for (DynamicBufferSlot &buffer : buffers_) {
-    retireDynamicBuffer(buffer);
+void MaterialTableGpuProvider::onFrameSubmitted(
+    const RenderFrameContext &frame) noexcept {
+  for (TableState &table : tables_) {
+    table.ring->submitPrepared(frame.submission);
   }
-  uploadedVersion_ = kNoVersionUploaded;
+}
+
+void MaterialTableGpuProvider::onFrameAbandoned(
+    const RenderFrameContext &) noexcept {
+  abandonPrepared();
+}
+
+void MaterialTableGpuProvider::abandonPrepared() noexcept {
+  for (TableState &table : tables_) {
+    table.ring->abandonPrepared();
+  }
 }
 
 } // namespace nuri

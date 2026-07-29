@@ -135,4 +135,8 @@ private:
   bool stopping_ = false;
 };
 
+// Shared low-priority executor for asset work initiated outside AssetSystem.
+// Its process-lifetime owner drains accepted work before scheduler shutdown.
+NURI_API AssetCpuScheduler &backgroundAssetCpuScheduler();
+
 } // namespace nuri

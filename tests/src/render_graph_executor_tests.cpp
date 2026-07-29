@@ -22,21 +22,22 @@ using FakeGPUDevice = FakeExecutorGPUDevice;
 
 class RenderGraphExecutorTest : public ::testing::Test {};
 
-Result<RenderGraphCompileResult, std::string>
+Result<CompiledRenderGraph, std::string>
 compileBuilder(RenderGraphBuilder &builder) {
   RenderGraphRuntime runtime;
   return builder.compile(runtime);
 }
 
-Result<bool, std::string>
-executeCompiled(RenderGraphExecutor &executor, GPUDevice &gpu,
-                const RenderGraphCompileResult &compiled) {
-  auto beginResult = gpu.beginFrame(compiled.frameIndex);
+Result<bool, std::string> executeCompiled(RenderGraphExecutor &executor,
+                                          GPUDevice &gpu,
+                                          CompiledRenderGraph &compiled) {
+  auto beginResult = gpu.beginFrame(compiled.commands.frameIndex);
   if (beginResult.hasError()) {
     return Result<bool, std::string>::makeError(beginResult.error());
   }
   RenderGraphRuntime runtime;
-  auto result = executor.execute(runtime, gpu, compiled);
+  auto result =
+      executor.execute(runtime, gpu, {compiled.plan, compiled.commands});
   if (result.hasError()) {
     return Result<bool, std::string>::makeError(result.error());
   }
@@ -45,16 +46,17 @@ executeCompiled(RenderGraphExecutor &executor, GPUDevice &gpu,
 
 Result<RenderGraphExecutionMetadata, std::string>
 executeCompiledWithConfig(RenderGraphExecutor &executor, GPUDevice &gpu,
-                          const RenderGraphCompileResult &compiled,
+                          CompiledRenderGraph &compiled,
                           const RenderGraphRuntimeConfig &config,
                           RenderGraphExecutionOptions options = {}) {
-  auto beginResult = gpu.beginFrame(compiled.frameIndex);
+  auto beginResult = gpu.beginFrame(compiled.commands.frameIndex);
   if (beginResult.hasError()) {
     return Result<RenderGraphExecutionMetadata, std::string>::makeError(
         beginResult.error());
   }
   RenderGraphRuntime runtime(config);
-  return executor.execute(runtime, gpu, compiled, options);
+  return executor.execute(runtime, gpu, {compiled.plan, compiled.commands},
+                          options);
 }
 
 bool hasExecutionFailureStage(const std::string &error,
@@ -64,7 +66,7 @@ bool hasExecutionFailureStage(const std::string &error,
   return error.find(expectedTag) != std::string::npos;
 }
 
-Result<RenderGraphCompileResult, std::string>
+Result<CompiledRenderGraph, std::string>
 buildExecutorCompiledFrame(uint64_t frameIndex) {
   RenderGraphBuilder builder;
   builder.beginFrame(frameIndex);
@@ -76,17 +78,17 @@ buildExecutorCompiledFrame(uint64_t frameIndex) {
   auto transientBufResult =
       builder.createTransientBuffer(makeTransientBufferDesc(64u), "exec_buf");
   if (colorTexResult.hasError()) {
-    return Result<RenderGraphCompileResult, std::string>::makeError(
+    return Result<CompiledRenderGraph, std::string>::makeError(
         "buildExecutorCompiledFrame: createTransientTexture(color) failed: " +
         colorTexResult.error());
   }
   if (depthTexResult.hasError()) {
-    return Result<RenderGraphCompileResult, std::string>::makeError(
+    return Result<CompiledRenderGraph, std::string>::makeError(
         "buildExecutorCompiledFrame: createTransientTexture(depth) failed: " +
         depthTexResult.error());
   }
   if (transientBufResult.hasError()) {
-    return Result<RenderGraphCompileResult, std::string>::makeError(
+    return Result<CompiledRenderGraph, std::string>::makeError(
         "buildExecutorCompiledFrame: createTransientBuffer failed: " +
         transientBufResult.error());
   }
@@ -94,10 +96,15 @@ buildExecutorCompiledFrame(uint64_t frameIndex) {
   std::array<BufferHandle, 1> passDeps = {BufferHandle{}};
   std::array<BufferHandle, 1> dispatchDeps = {BufferHandle{}};
   ComputeDispatchItem dispatch{};
+  dispatch.pipeline = ComputePipelineHandle{.index = 82u, .generation = 1u};
+  dispatch.rayQueryBinding =
+      RayQueryBindingHandle{.index = 83u, .generation = 1u};
   dispatch.dependencyBuffers =
       std::span<const BufferHandle>(dispatchDeps.data(), dispatchDeps.size());
   std::array<ComputeDispatchItem, 1> preDispatches = {dispatch};
-  std::array<DrawItem, 1> draws = {DrawItem{}};
+  DrawItem draw{};
+  draw.pipeline = RenderPipelineHandle{.index = 81u, .generation = 1u};
+  std::array<DrawItem, 1> draws = {draw};
 
   RenderPass pass{};
   pass.dependencyBuffers =
@@ -109,7 +116,7 @@ buildExecutorCompiledFrame(uint64_t frameIndex) {
 
   auto addPassResult = addTestGraphicsPass(builder, pass, pass.debugLabel);
   if (addPassResult.hasError()) {
-    return Result<RenderGraphCompileResult, std::string>::makeError(
+    return Result<CompiledRenderGraph, std::string>::makeError(
         "buildExecutorCompiledFrame: addLegacyRenderPass failed: " +
         addPassResult.error());
   }
@@ -117,37 +124,36 @@ buildExecutorCompiledFrame(uint64_t frameIndex) {
   auto bindResult = builder.bindPassColorTexture(addPassResult.value(),
                                                  colorTexResult.value());
   if (bindResult.hasError()) {
-    return Result<RenderGraphCompileResult, std::string>::makeError(
+    return Result<CompiledRenderGraph, std::string>::makeError(
         "buildExecutorCompiledFrame: bindPassColorTexture failed: " +
         bindResult.error());
   }
   bindResult = builder.bindPassDepthTexture(addPassResult.value(),
                                             depthTexResult.value());
   if (bindResult.hasError()) {
-    return Result<RenderGraphCompileResult, std::string>::makeError(
+    return Result<CompiledRenderGraph, std::string>::makeError(
         "buildExecutorCompiledFrame: bindPassDepthTexture failed: " +
         bindResult.error());
   }
   bindResult = builder.bindPassDependencyBuffer(addPassResult.value(), 0u,
                                                 transientBufResult.value());
   if (bindResult.hasError()) {
-    return Result<RenderGraphCompileResult, std::string>::makeError(
+    return Result<CompiledRenderGraph, std::string>::makeError(
         "buildExecutorCompiledFrame: bindPassDependencyBuffer failed: " +
         bindResult.error());
   }
   bindResult = builder.bindPreDispatchDependencyBuffer(
       addPassResult.value(), 0u, 0u, transientBufResult.value());
   if (bindResult.hasError()) {
-    return Result<RenderGraphCompileResult, std::string>::makeError(
+    return Result<CompiledRenderGraph, std::string>::makeError(
         "buildExecutorCompiledFrame: bindPreDispatchDependencyBuffer failed: " +
         bindResult.error());
   }
   bindResult = builder.bindDrawBuffer(
-      addPassResult.value(), 0u,
-      RenderGraphCompileResult::DrawBufferBindingTarget::Vertex,
+      addPassResult.value(), 0u, RenderGraphDrawBufferBindingTarget::Vertex,
       transientBufResult.value(), RenderGraphAccessMode::Read);
   if (bindResult.hasError()) {
-    return Result<RenderGraphCompileResult, std::string>::makeError(
+    return Result<CompiledRenderGraph, std::string>::makeError(
         "buildExecutorCompiledFrame: bindDrawBuffer failed: " +
         bindResult.error());
   }
@@ -155,14 +161,14 @@ buildExecutorCompiledFrame(uint64_t frameIndex) {
   return compileBuilder(builder);
 }
 
-Result<RenderGraphCompileResult, std::string>
+Result<CompiledRenderGraph, std::string>
 buildEmptyCompiledFrame(uint64_t frameIndex) {
   RenderGraphBuilder builder;
   builder.beginFrame(frameIndex);
   return compileBuilder(builder);
 }
 
-Result<RenderGraphCompileResult, std::string>
+Result<CompiledRenderGraph, std::string>
 buildComputeOnlyCompiledFrame(uint64_t frameIndex) {
   RenderGraphBuilder builder;
   builder.beginFrame(frameIndex);
@@ -173,17 +179,19 @@ buildComputeOnlyCompiledFrame(uint64_t frameIndex) {
   auto resultBufferResult = builder.createTransientBuffer(
       makeTransientBufferDesc(32u), "exec_compute_only_result");
   if (sourceTextureResult.hasError()) {
-    return Result<RenderGraphCompileResult, std::string>::makeError(
+    return Result<CompiledRenderGraph, std::string>::makeError(
         sourceTextureResult.error());
   }
   if (resultBufferResult.hasError()) {
-    return Result<RenderGraphCompileResult, std::string>::makeError(
+    return Result<CompiledRenderGraph, std::string>::makeError(
         resultBufferResult.error());
   }
 
   const std::array<BufferHandle, 1u> dispatchDependencies = {BufferHandle{}};
   ComputeDispatchItem dispatch{};
   dispatch.pipeline = ComputePipelineHandle{.index = 91u, .generation = 1u};
+  dispatch.rayQueryBinding =
+      RayQueryBindingHandle{.index = 92u, .generation = 1u};
   dispatch.dispatch = {.x = 1u, .y = 1u, .z = 1u};
   dispatch.dependencyBuffers = std::span<const BufferHandle>(
       dispatchDependencies.data(), dispatchDependencies.size());
@@ -200,27 +208,27 @@ buildComputeOnlyCompiledFrame(uint64_t frameIndex) {
 
   auto passResult = builder.addGraphicsPass(passDesc);
   if (passResult.hasError()) {
-    return Result<RenderGraphCompileResult, std::string>::makeError(
+    return Result<CompiledRenderGraph, std::string>::makeError(
         passResult.error());
   }
   auto bindResult =
       builder.addTextureRead(passResult.value(), sourceTextureResult.value());
   if (bindResult.hasError()) {
-    return Result<RenderGraphCompileResult, std::string>::makeError(
+    return Result<CompiledRenderGraph, std::string>::makeError(
         bindResult.error());
   }
   bindResult = builder.bindPreDispatchDependencyBuffer(
       passResult.value(), 0u, 0u, resultBufferResult.value(),
       RenderGraphAccessMode::Write);
   if (bindResult.hasError()) {
-    return Result<RenderGraphCompileResult, std::string>::makeError(
+    return Result<CompiledRenderGraph, std::string>::makeError(
         bindResult.error());
   }
 
   return compileBuilder(builder);
 }
 
-Result<RenderGraphCompileResult, std::string>
+Result<CompiledRenderGraph, std::string>
 buildMeshDispatchCompiledFrame(uint64_t frameIndex) {
   RenderGraphBuilder builder;
   builder.beginFrame(frameIndex);
@@ -229,7 +237,7 @@ buildMeshDispatchCompiledFrame(uint64_t frameIndex) {
       makeTransientTextureDesc(Format::RGBA8_UNORM, 32u, 32u),
       "exec_mesh_dispatch_color");
   if (colorResult.hasError()) {
-    return Result<RenderGraphCompileResult, std::string>::makeError(
+    return Result<CompiledRenderGraph, std::string>::makeError(
         colorResult.error());
   }
 
@@ -255,17 +263,18 @@ buildMeshDispatchCompiledFrame(uint64_t frameIndex) {
   passDesc.meshDispatches =
       std::span<const MeshDispatchItem>(dispatches.data(), dispatches.size());
   passDesc.debugLabel = "exec_mesh_dispatch_pass";
+  passDesc.markImplicitOutputSideEffect = true;
 
   auto passResult = builder.addGraphicsPass(passDesc);
   if (passResult.hasError()) {
-    return Result<RenderGraphCompileResult, std::string>::makeError(
+    return Result<CompiledRenderGraph, std::string>::makeError(
         passResult.error());
   }
 
   return compileBuilder(builder);
 }
 
-Result<RenderGraphCompileResult, std::string>
+Result<CompiledRenderGraph, std::string>
 buildTransientMeshDispatchIndirectCompiledFrame(uint64_t frameIndex) {
   RenderGraphBuilder builder;
   builder.beginFrame(frameIndex);
@@ -274,7 +283,7 @@ buildTransientMeshDispatchIndirectCompiledFrame(uint64_t frameIndex) {
       makeTransientTextureDesc(Format::RGBA8_UNORM, 32u, 32u),
       "exec_mesh_indirect_color");
   if (colorResult.hasError()) {
-    return Result<RenderGraphCompileResult, std::string>::makeError(
+    return Result<CompiledRenderGraph, std::string>::makeError(
         colorResult.error());
   }
 
@@ -285,11 +294,11 @@ buildTransientMeshDispatchIndirectCompiledFrame(uint64_t frameIndex) {
   auto countResult =
       builder.createTransientBuffer(indirectDesc, "exec_mesh_indirect_count");
   if (indirectResult.hasError()) {
-    return Result<RenderGraphCompileResult, std::string>::makeError(
+    return Result<CompiledRenderGraph, std::string>::makeError(
         indirectResult.error());
   }
   if (countResult.hasError()) {
-    return Result<RenderGraphCompileResult, std::string>::makeError(
+    return Result<CompiledRenderGraph, std::string>::makeError(
         countResult.error());
   }
 
@@ -322,14 +331,14 @@ buildTransientMeshDispatchIndirectCompiledFrame(uint64_t frameIndex) {
 
   auto passResult = builder.addGraphicsPass(passDesc);
   if (passResult.hasError()) {
-    return Result<RenderGraphCompileResult, std::string>::makeError(
+    return Result<CompiledRenderGraph, std::string>::makeError(
         passResult.error());
   }
 
   return compileBuilder(builder);
 }
 
-Result<RenderGraphCompileResult, std::string>
+Result<CompiledRenderGraph, std::string>
 buildTwoPassCompiledFrameWithDependency(uint64_t frameIndex) {
   RenderGraphBuilder builder;
   builder.beginFrame(frameIndex);
@@ -342,14 +351,14 @@ buildTwoPassCompiledFrameWithDependency(uint64_t frameIndex) {
   auto passAResult = addTestGraphicsPass(builder, passA, passA.debugLabel);
   auto passBResult = addTestGraphicsPass(builder, passB, passB.debugLabel);
   if (passAResult.hasError() || passBResult.hasError()) {
-    return Result<RenderGraphCompileResult, std::string>::makeError(
+    return Result<CompiledRenderGraph, std::string>::makeError(
         "buildTwoPassCompiledFrameWithDependency: addLegacyRenderPass failed");
   }
 
   auto depResult =
       builder.addDependency(passAResult.value(), passBResult.value());
   if (depResult.hasError()) {
-    return Result<RenderGraphCompileResult, std::string>::makeError(
+    return Result<CompiledRenderGraph, std::string>::makeError(
         "buildTwoPassCompiledFrameWithDependency: addDependency failed: " +
         depResult.error());
   }
@@ -357,7 +366,7 @@ buildTwoPassCompiledFrameWithDependency(uint64_t frameIndex) {
   return compileBuilder(builder);
 }
 
-Result<RenderGraphCompileResult, std::string>
+Result<CompiledRenderGraph, std::string>
 buildIndependentParallelCompiledFrame(uint64_t frameIndex, uint32_t passCount) {
   RenderGraphBuilder builder;
   builder.beginFrame(frameIndex);
@@ -369,14 +378,14 @@ buildIndependentParallelCompiledFrame(uint64_t frameIndex, uint32_t passCount) {
     pass.debugLabel = label;
     auto addResult = addTestGraphicsPass(builder, pass, pass.debugLabel);
     if (addResult.hasError()) {
-      return Result<RenderGraphCompileResult, std::string>::makeError(
+      return Result<CompiledRenderGraph, std::string>::makeError(
           "buildIndependentParallelCompiledFrame: addLegacyRenderPass "
           "failed: " +
           addResult.error());
     }
     auto sideEffectResult = builder.markPassSideEffect(addResult.value());
     if (sideEffectResult.hasError()) {
-      return Result<RenderGraphCompileResult, std::string>::makeError(
+      return Result<CompiledRenderGraph, std::string>::makeError(
           "buildIndependentParallelCompiledFrame: markPassSideEffect failed: " +
           sideEffectResult.error());
     }
@@ -385,7 +394,7 @@ buildIndependentParallelCompiledFrame(uint64_t frameIndex, uint32_t passCount) {
   return compileBuilder(builder);
 }
 
-Result<RenderGraphCompileResult, std::string>
+Result<CompiledRenderGraph, std::string>
 buildBarrierTrackedCompiledFrame(uint64_t frameIndex) {
   RenderGraphBuilder builder;
   builder.beginFrame(frameIndex);
@@ -393,7 +402,7 @@ buildBarrierTrackedCompiledFrame(uint64_t frameIndex) {
   auto bufferResult = builder.createTransientBuffer(
       makeTransientBufferDesc(64u), "barrier_buf");
   if (bufferResult.hasError()) {
-    return Result<RenderGraphCompileResult, std::string>::makeError(
+    return Result<CompiledRenderGraph, std::string>::makeError(
         "buildBarrierTrackedCompiledFrame: createTransientBuffer failed: " +
         bufferResult.error());
   }
@@ -406,27 +415,27 @@ buildBarrierTrackedCompiledFrame(uint64_t frameIndex) {
   auto passAResult = addTestGraphicsPass(builder, passA, passA.debugLabel);
   auto passBResult = addTestGraphicsPass(builder, passB, passB.debugLabel);
   if (passAResult.hasError() || passBResult.hasError()) {
-    return Result<RenderGraphCompileResult, std::string>::makeError(
+    return Result<CompiledRenderGraph, std::string>::makeError(
         "buildBarrierTrackedCompiledFrame: addLegacyRenderPass failed");
   }
 
   auto accessResult =
       builder.addBufferWrite(passAResult.value(), bufferResult.value());
   if (accessResult.hasError()) {
-    return Result<RenderGraphCompileResult, std::string>::makeError(
+    return Result<CompiledRenderGraph, std::string>::makeError(
         "buildBarrierTrackedCompiledFrame: addBufferWrite failed: " +
         accessResult.error());
   }
   accessResult =
       builder.addBufferRead(passBResult.value(), bufferResult.value());
   if (accessResult.hasError()) {
-    return Result<RenderGraphCompileResult, std::string>::makeError(
+    return Result<CompiledRenderGraph, std::string>::makeError(
         "buildBarrierTrackedCompiledFrame: addBufferRead failed: " +
         accessResult.error());
   }
   auto sideEffectResult = builder.markPassSideEffect(passBResult.value());
   if (sideEffectResult.hasError()) {
-    return Result<RenderGraphCompileResult, std::string>::makeError(
+    return Result<CompiledRenderGraph, std::string>::makeError(
         "buildBarrierTrackedCompiledFrame: markPassSideEffect failed: " +
         sideEffectResult.error());
   }
@@ -434,7 +443,7 @@ buildBarrierTrackedCompiledFrame(uint64_t frameIndex) {
   return compileBuilder(builder);
 }
 
-Result<RenderGraphCompileResult, std::string>
+Result<CompiledRenderGraph, std::string>
 buildFrameOutputCompiledFrame(uint64_t frameIndex) {
   RenderGraphBuilder builder;
   builder.beginFrame(frameIndex);
@@ -442,7 +451,7 @@ buildFrameOutputCompiledFrame(uint64_t frameIndex) {
   const TextureHandle outputTexture{.index = 701u, .generation = 1u};
   auto importResult = builder.importTexture(outputTexture, "frame_output");
   if (importResult.hasError()) {
-    return Result<RenderGraphCompileResult, std::string>::makeError(
+    return Result<CompiledRenderGraph, std::string>::makeError(
         "buildFrameOutputCompiledFrame: importTexture failed: " +
         importResult.error());
   }
@@ -452,7 +461,7 @@ buildFrameOutputCompiledFrame(uint64_t frameIndex) {
   pass.debugLabel = "frame_output_pass";
   auto passResult = addTestGraphicsPass(builder, pass, pass.debugLabel);
   if (passResult.hasError()) {
-    return Result<RenderGraphCompileResult, std::string>::makeError(
+    return Result<CompiledRenderGraph, std::string>::makeError(
         "buildFrameOutputCompiledFrame: addLegacyRenderPass failed: " +
         passResult.error());
   }
@@ -460,13 +469,13 @@ buildFrameOutputCompiledFrame(uint64_t frameIndex) {
   auto bindResult =
       builder.bindPassColorTexture(passResult.value(), importResult.value());
   if (bindResult.hasError()) {
-    return Result<RenderGraphCompileResult, std::string>::makeError(
+    return Result<CompiledRenderGraph, std::string>::makeError(
         "buildFrameOutputCompiledFrame: bindPassColorTexture failed: " +
         bindResult.error());
   }
   auto outputResult = builder.markTextureAsFrameOutput(importResult.value());
   if (outputResult.hasError()) {
-    return Result<RenderGraphCompileResult, std::string>::makeError(
+    return Result<CompiledRenderGraph, std::string>::makeError(
         "buildFrameOutputCompiledFrame: markTextureAsFrameOutput failed: " +
         outputResult.error());
   }
@@ -516,7 +525,7 @@ TEST_F(RenderGraphExecutorTest, TextureCopyPassPatchesTransientDestination) {
 
   auto compileResult = compileBuilder(builder);
   ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
-  ASSERT_EQ(compileResult.value().unresolvedTextureCopyBindings.size(), 1u);
+  ASSERT_EQ(compileResult.value().plan.commandResourcePatches.size(), 1u);
 
   RenderGraphExecutor executor;
   auto executeResult = executeCompiled(executor, gpu, compileResult.value());
@@ -587,7 +596,7 @@ TEST_F(RenderGraphExecutorTest, BufferCopyPassPatchesTransientDestination) {
 
   auto compileResult = compileBuilder(builder);
   ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
-  ASSERT_EQ(compileResult.value().unresolvedBufferCopyBindings.size(), 1u);
+  ASSERT_EQ(compileResult.value().plan.commandResourcePatches.size(), 1u);
   RenderGraphExecutor executor;
   auto executeResult = executeCompiled(executor, gpu, compileResult.value());
   ASSERT_FALSE(executeResult.hasError()) << executeResult.error();
@@ -608,15 +617,9 @@ TEST_F(RenderGraphExecutorTest,
        ExecutorMaterializesRewritesAndRetiresTransients) {
   auto compileResult = buildExecutorCompiledFrame(100u);
   ASSERT_FALSE(compileResult.hasError());
-  const RenderGraphCompileResult &compiled = compileResult.value();
-  ASSERT_EQ(compiled.unresolvedTextureBindings.size(), 2u)
-      << "expected unresolved transient color/depth bindings";
-  ASSERT_EQ(compiled.unresolvedDependencyBufferBindings.size(), 1u)
-      << "expected unresolved transient buffer dependency bindings";
-  ASSERT_EQ(compiled.unresolvedPreDispatchDependencyBufferBindings.size(), 1u)
-      << "expected unresolved transient pre-dispatch bindings";
-  ASSERT_EQ(compiled.unresolvedDrawBufferBindings.size(), 1u)
-      << "expected unresolved transient draw bindings";
+  CompiledRenderGraph &compiled = compileResult.value();
+  ASSERT_EQ(compiled.plan.commandResourcePatches.size(), 5u)
+      << "expected transient command resource patches";
 
   FakeExecutorGPUDevice gpu;
   RenderGraphExecutor executor;
@@ -641,10 +644,11 @@ TEST_F(RenderGraphExecutorTest,
               sameBuffer(gpu.lastDependencyBuffer, gpu.lastDrawVertexBuffer))
       << "all rewritten buffer slots should resolve to same transient "
          "allocation";
-  ASSERT_EQ(gpu.createdTextureCount, compiled.transientTexturePhysicalCount)
+  ASSERT_EQ(gpu.createdTextureCount,
+            compiled.plan.transientTexturePhysicalCount)
       << "materialized transient texture allocation counts should match "
          "compile metadata";
-  ASSERT_EQ(gpu.createdBufferCount, compiled.transientBufferPhysicalCount)
+  ASSERT_EQ(gpu.createdBufferCount, compiled.plan.transientBufferPhysicalCount)
       << "materialized transient buffer allocation counts should match "
          "compile metadata";
   ASSERT_EQ(gpu.destroyedTextureCount, 0u)
@@ -699,12 +703,14 @@ TEST_F(RenderGraphExecutorTest,
        ComputeOnlyPassExecutesAndPreservesDispatchDependencies) {
   auto compileResult = buildComputeOnlyCompiledFrame(304u);
   ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
-  const RenderGraphCompileResult &compiled = compileResult.value();
-  ASSERT_EQ(compiled.orderedPasses.size(), 1u);
-  EXPECT_EQ(compiled.orderedPasses[0].executionMode,
+  CompiledRenderGraph &compiled = compileResult.value();
+  ASSERT_EQ(compiled.commands.orderedPasses.size(), 1u);
+  EXPECT_EQ(compiled.commands.orderedPasses[0].executionMode,
             RenderPassExecutionMode::ComputeOnly);
-  ASSERT_EQ(compiled.orderedPasses[0].preDispatches.size(), 1u);
-  ASSERT_EQ(compiled.orderedPasses[0].preDispatches[0].dependencyBuffers.size(),
+  ASSERT_EQ(compiled.commands.orderedPasses[0].preDispatches.size(), 1u);
+  ASSERT_EQ(compiled.commands.orderedPasses[0]
+                .preDispatches[0]
+                .dependencyBuffers.size(),
             1u);
 
   FakeExecutorGPUDevice gpu;
@@ -719,14 +725,86 @@ TEST_F(RenderGraphExecutorTest,
   EXPECT_FALSE(gpu.recordedPasses[0].hasColorAttachment);
   EXPECT_TRUE(gpu.recordedPasses[0].draws.empty());
   EXPECT_TRUE(nuri::isValid(gpu.lastPreDispatchDependencyBuffer));
+  ASSERT_EQ(gpu.retainReferencesCallCount, 1u);
+  EXPECT_NE(
+      std::ranges::find(gpu.retainedComputePipelines,
+                        ComputePipelineHandle{.index = 91u, .generation = 1u}),
+      gpu.retainedComputePipelines.end());
+  EXPECT_NE(
+      std::ranges::find(gpu.retainedRayQueryBindings,
+                        RayQueryBindingHandle{.index = 92u, .generation = 1u}),
+      gpu.retainedRayQueryBindings.end());
+  EXPECT_FALSE(gpu.retainedBuffers.empty());
+  EXPECT_FALSE(gpu.retainedTextures.empty());
+}
+
+TEST_F(RenderGraphExecutorTest,
+       RecordingReferencesIncludeNonGraphCommandIdentities) {
+  auto compileResult = buildExecutorCompiledFrame(305u);
+  ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
+
+  FakeExecutorGPUDevice gpu;
+  RenderGraphExecutor executor;
+  auto executeResult = executeCompiled(executor, gpu, compileResult.value());
+  ASSERT_FALSE(executeResult.hasError()) << executeResult.error();
+  ASSERT_TRUE(executeResult.value());
+
+  ASSERT_EQ(gpu.retainReferencesCallCount, 1u);
+  EXPECT_NE(
+      std::ranges::find(gpu.retainedRenderPipelines,
+                        RenderPipelineHandle{.index = 81u, .generation = 1u}),
+      gpu.retainedRenderPipelines.end());
+  EXPECT_NE(
+      std::ranges::find(gpu.retainedComputePipelines,
+                        ComputePipelineHandle{.index = 82u, .generation = 1u}),
+      gpu.retainedComputePipelines.end());
+  EXPECT_NE(
+      std::ranges::find(gpu.retainedRayQueryBindings,
+                        RayQueryBindingHandle{.index = 83u, .generation = 1u}),
+      gpu.retainedRayQueryBindings.end());
+  EXPECT_FALSE(gpu.retainedBuffers.empty());
+  EXPECT_FALSE(gpu.retainedTextures.empty());
+}
+
+TEST_F(RenderGraphExecutorTest,
+       RecordingReferencesIncludeMeshPipelineAndDependencies) {
+  auto compileResult = buildMeshDispatchCompiledFrame(307u);
+  ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
+
+  FakeExecutorGPUDevice gpu;
+  RenderGraphExecutor executor;
+  auto executeResult = executeCompiled(executor, gpu, compileResult.value());
+  ASSERT_FALSE(executeResult.hasError()) << executeResult.error();
+  ASSERT_TRUE(executeResult.value());
+
+  ASSERT_EQ(gpu.retainReferencesCallCount, 1u);
+  EXPECT_NE(
+      std::ranges::find(gpu.retainedMeshletPipelines,
+                        MeshletPipelineHandle{.index = 17u, .generation = 1u}),
+      gpu.retainedMeshletPipelines.end());
+  EXPECT_NE(std::ranges::find(gpu.retainedBuffers,
+                              BufferHandle{.index = 70u, .generation = 1u}),
+            gpu.retainedBuffers.end());
+  EXPECT_FALSE(gpu.retainedTextures.empty());
 }
 
 TEST_F(RenderGraphExecutorTest,
        MeshDispatchIndirectTransientBuffersArePatchedBeforeRecording) {
   auto compileResult = buildTransientMeshDispatchIndirectCompiledFrame(306u);
   ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
-  const RenderGraphCompileResult &compiled = compileResult.value();
-  ASSERT_EQ(compiled.unresolvedMeshDispatchBufferBindings.size(), 2u);
+  CompiledRenderGraph &compiled = compileResult.value();
+  ASSERT_EQ(compiled.plan.commandResourcePatches.size(), 3u);
+  EXPECT_EQ(std::ranges::count_if(
+                compiled.plan.commandResourcePatches,
+                [](const RenderGraphPlan::CommandResourcePatch &patch) {
+                  return patch.target ==
+                             RenderGraphPlan::CommandResourcePatchTarget::
+                                 MeshDispatchIndirectBuffer ||
+                         patch.target ==
+                             RenderGraphPlan::CommandResourcePatchTarget::
+                                 MeshDispatchIndirectCountBuffer;
+                }),
+            2u);
 
   FakeExecutorGPUDevice gpu;
   RenderGraphExecutor executor;
@@ -755,7 +833,7 @@ TEST_F(RenderGraphExecutorTest,
     ADD_FAILURE() << "compile should succeed";
     return;
   }
-  const RenderGraphCompileResult &compiled = compileResult.value();
+  CompiledRenderGraph &compiled = compileResult.value();
 
   FakeExecutorGPUDevice gpu;
   gpu.failCreateBufferAtCall = 1u;
@@ -780,7 +858,8 @@ TEST_F(RenderGraphExecutorTest,
     ADD_FAILURE() << "submit should not be called on materialization failure";
     return;
   }
-  if (!(gpu.createdTextureCount == compiled.transientTexturePhysicalCount)) {
+  if (!(gpu.createdTextureCount ==
+        compiled.plan.transientTexturePhysicalCount)) {
     ADD_FAILURE() << "textures should be created before buffer failure";
     return;
   }
@@ -803,7 +882,7 @@ TEST_F(RenderGraphExecutorTest,
     ADD_FAILURE() << "compile should succeed";
     return;
   }
-  const RenderGraphCompileResult &compiled = compileResult.value();
+  CompiledRenderGraph &compiled = compileResult.value();
 
   FakeExecutorGPUDevice gpu;
   gpu.failSubmitFrame = true;
@@ -828,8 +907,9 @@ TEST_F(RenderGraphExecutorTest,
     ADD_FAILURE() << "submit should be attempted once";
     return;
   }
-  if (!(gpu.createdTextureCount == compiled.transientTexturePhysicalCount &&
-        gpu.createdBufferCount == compiled.transientBufferPhysicalCount)) {
+  if (!(gpu.createdTextureCount ==
+            compiled.plan.transientTexturePhysicalCount &&
+        gpu.createdBufferCount == compiled.plan.transientBufferPhysicalCount)) {
     ADD_FAILURE() << "resources should still be materialized before submit";
     return;
   }
@@ -906,9 +986,9 @@ TEST_F(RenderGraphExecutorTest,
 TEST_F(RenderGraphExecutorTest, ExecutorResolvesAndRecordsPerPassBarriers) {
   auto compileResult = buildBarrierTrackedCompiledFrame(140u);
   ASSERT_FALSE(compileResult.hasError());
-  const RenderGraphCompileResult &compiled = compileResult.value();
-  ASSERT_EQ(compiled.passBarrierPlans.size(), 2u);
-  ASSERT_EQ(compiled.passBarrierRecords.size(), 2u);
+  CompiledRenderGraph &compiled = compileResult.value();
+  ASSERT_EQ(compiled.plan.passBarrierPlans.size(), 2u);
+  ASSERT_EQ(compiled.plan.passBarrierRecords.size(), 2u);
 
   FakeExecutorGPUDevice gpu;
   RenderGraphExecutor executor;

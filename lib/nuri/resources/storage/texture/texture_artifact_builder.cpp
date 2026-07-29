@@ -2,7 +2,6 @@
 #include "nuri/core/log.h"
 #include "nuri/core/pmr_scratch.h"
 #include "nuri/core/profiling.h"
-#include "nuri/pch.h"
 #include "nuri/resources/storage/cache_utils.h"
 #include "nuri/resources/storage/texture/texture_ktx.h"
 #include <assimp/Importer.hpp>
@@ -14,6 +13,55 @@
 namespace nuri {
 
 using ArtifactResult = Result<TextureArtifactBuildResult, std::string>;
+
+namespace {
+struct MaterialArtifactPolicy {
+  bool srgb = false;
+  TextureMipSemantic mipSemantic = TextureMipSemantic::Generic;
+  TextureArtifactEncoding encoding = TextureArtifactEncoding::Etc1s;
+};
+constexpr MaterialTextureSlots<MaterialArtifactPolicy> kMaterialArtifactPolicy{{
+    {true, TextureMipSemantic::Generic, TextureArtifactEncoding::Uastc},
+    {false, TextureMipSemantic::RoughnessG, TextureArtifactEncoding::Etc1s},
+    {false, TextureMipSemantic::NormalMap, TextureArtifactEncoding::Uastc},
+    {false, TextureMipSemantic::Generic, TextureArtifactEncoding::Etc1s},
+    {true, TextureMipSemantic::Generic, TextureArtifactEncoding::Uastc},
+    {false, TextureMipSemantic::Generic, TextureArtifactEncoding::Etc1s},
+    {false, TextureMipSemantic::RoughnessG, TextureArtifactEncoding::Etc1s},
+    {false, TextureMipSemantic::NormalMap, TextureArtifactEncoding::Uastc},
+    {false, TextureMipSemantic::Generic, TextureArtifactEncoding::Etc1s},
+    {true, TextureMipSemantic::Generic, TextureArtifactEncoding::Uastc},
+    {true, TextureMipSemantic::Generic, TextureArtifactEncoding::Uastc},
+    {false, TextureMipSemantic::RoughnessA, TextureArtifactEncoding::Etc1s},
+    {false, TextureMipSemantic::Generic, TextureArtifactEncoding::Etc1s},
+    {false, TextureMipSemantic::Generic, TextureArtifactEncoding::Etc1s},
+}};
+} // namespace
+
+TextureArtifactBuildOptions
+materialTextureArtifactBuildOptions(const MaterialData &material,
+                                    MaterialTextureSlot slot) noexcept {
+  const MaterialArtifactPolicy &policy =
+      kMaterialArtifactPolicy[static_cast<size_t>(slot)];
+  TextureMipSemantic semantic = policy.mipSemantic;
+  if (slot == kMaterialTextureSlotBaseColor &&
+      material.alphaMode == MaterialAlphaMode::Mask) {
+    semantic = TextureMipSemantic::AlphaCoverage;
+  }
+  return TextureArtifactBuildOptions{
+      .loadOptions =
+          {
+              .srgb = policy.srgb,
+              .generateMipmaps = true,
+              .mipSemantic = semantic,
+              .alphaCoverageCutoff = material.alphaCutoff,
+          },
+      .encoding = policy.encoding,
+      .contentContract = semantic == TextureMipSemantic::NormalMap
+                             ? TextureContentContract::NormalRgbCleanVarianceA
+                             : TextureContentContract::Generic,
+  };
+}
 
 namespace {
 using detail::FilePtr;
@@ -45,16 +93,9 @@ elapsedNanoseconds(std::chrono::steady_clock::time_point start) noexcept {
           std::chrono::steady_clock::now() - start)
           .count());
 }
-[[nodiscard]] bool hasExtension(const std::filesystem::path &path,
-                                std::string_view extension) {
-  std::string value = path.extension().string();
-  std::ranges::transform(value, value.begin(), [](unsigned char ch) {
-    return static_cast<char>(std::tolower(ch));
-  });
-  return value == extension;
-}
 [[nodiscard]] bool isKtxPath(const std::filesystem::path &path) {
-  return hasExtension(path, ".ktx") || hasExtension(path, ".ktx2");
+  return pathHasExtensionCaseInsensitive(path, ".ktx") ||
+         pathHasExtensionCaseInsensitive(path, ".ktx2");
 }
 [[nodiscard]] uint32_t cappedEncodeThreadCount() noexcept {
   const uint32_t hardware = std::max(1u, std::thread::hardware_concurrency());
@@ -119,29 +160,21 @@ loadKtxRgba(const std::filesystem::path &path,
   }
   const size_t expectedSize = static_cast<size_t>(texture->baseWidth) *
                               static_cast<size_t>(texture->baseHeight) * 4u;
-  const ktx_size_t imageSize = ktxTexture_GetImageSize(texture, 0u);
-  if (static_cast<size_t>(imageSize) != expectedSize) {
+  auto image =
+      detail::viewKtxImage(*texture, 0u, 0u, 0u, "Texture artifact builder");
+  if (image.hasError()) {
+    return Result<ImageRgba8, std::string>::makeError(image.error());
+  }
+  if (image.value().size() != expectedSize) {
     return Result<ImageRgba8, std::string>::makeError(
         "Texture artifact builder: native KTX source is not RGBA8 and cannot "
         "be converted to the selected target");
-  }
-  ktx_size_t offset = 0u;
-  if (ktxTexture_GetImageOffset(texture, 0u, 0u, 0u, &offset) != KTX_SUCCESS) {
-    return Result<ImageRgba8, std::string>::makeError(
-        "Texture artifact builder: failed to resolve KTX base mip");
-  }
-  const uint8_t *data = ktxTexture_GetData(texture);
-  if (data == nullptr) {
-    return Result<ImageRgba8, std::string>::makeError(
-        "Texture artifact builder: KTX source payload is empty");
   }
   ImageRgba8 out(memory);
   out.width = static_cast<int32_t>(texture->baseWidth);
   out.height = static_cast<int32_t>(texture->baseHeight);
   out.sourceComponentCount = componentCount;
-  out.bytes.assign(reinterpret_cast<const std::byte *>(data + offset),
-                   reinterpret_cast<const std::byte *>(data + offset) +
-                       expectedSize);
+  out.bytes.assign(image.value().begin(), image.value().end());
   return Result<ImageRgba8, std::string>::makeResult(std::move(out));
 }
 [[nodiscard]] Result<ImageRgba8, std::string>
@@ -667,7 +700,7 @@ ArtifactResult SceneTextureArtifactBuilder::ensure(
       source.sourceKind == MaterialTextureSourceKind::ExternalFile
           ? std::filesystem::path(source.path)
           : impl_->sceneSourcePath;
-  if (hasExtension(freshnessPath, ".dds")) {
+  if (pathHasExtensionCaseInsensitive(freshnessPath, ".dds")) {
     return ArtifactResult::makeError(
         "Texture artifact builder: DDS textures are source-native and are not "
         "converted into KTX artifacts");

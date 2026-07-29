@@ -1,9 +1,7 @@
 #include "nuri/gfx/renderers/scene_draw_database.h"
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/gfx/pipeline/render_pipeline.h"
-#include "nuri/pch.h"
 #include "nuri/resources/gpu/resource_manager.h"
-#include "nuri/resources/gpu/scene_material_resolution.h"
 #include "nuri/scene/render_scene.h"
 namespace nuri {
 namespace {
@@ -21,7 +19,17 @@ SceneDrawDatabase::SceneDrawDatabase(GPUDevice &gpu,
     : gpu_(gpu), instances_(memory ? memory : std::pmr::get_default_resource()),
       draws_(memory ? memory : std::pmr::get_default_resource()),
       rayTracingMaterialTextures_(memory ? memory
-                                         : std::pmr::get_default_resource()) {}
+                                         : std::pmr::get_default_resource()),
+      categories_{std::pmr::vector<uint32_t>(
+                      memory ? memory : std::pmr::get_default_resource()),
+                  std::pmr::vector<uint32_t>(
+                      memory ? memory : std::pmr::get_default_resource()),
+                  std::pmr::vector<uint32_t>(
+                      memory ? memory : std::pmr::get_default_resource()),
+                  std::pmr::vector<uint32_t>(
+                      memory ? memory : std::pmr::get_default_resource()),
+                  std::pmr::vector<uint32_t>(
+                      memory ? memory : std::pmr::get_default_resource())} {}
 
 Result<bool, std::string> SceneDrawDatabase::prepare(FrameBuildContext &ctx) {
   if (!ctx.frame.scene) {
@@ -51,16 +59,22 @@ SceneDrawDatabase::update(const RenderScene &scene,
                           const ResourceManager &resources) {
   const MaterialTableSnapshot materials = resources.materialSnapshot();
   const uint64_t geometryVersion = gpu_.geometryMutationVersion();
-  if (geometryVersion != 0 && scene_ == &scene &&
-      topologyVersion_ == scene.topologyVersion() &&
-      materialVersion_ == materials.version &&
-      materialBindingVersion_ == resources.modelMaterialBindingVersion() &&
-      geometryVersion_ == geometryVersion) {
+  const SceneDrawSourceVersion sourceVersion{
+      .scene = &scene,
+      .topology = scene.topologyVersion(),
+      .material = materials.version,
+      .materialBinding = resources.modelMaterialBindingVersion(),
+      .geometry = geometryVersion,
+  };
+  if (geometryVersion != 0 && sourceVersion_ == sourceVersion) {
     return Result<bool, std::string>::makeResult(false);
   }
   instances_.clear();
   draws_.clear();
   rayTracingMaterialTextures_.clear();
+  for (auto &category : categories_) {
+    category.clear();
+  }
   const std::span<const Renderable> renderables = scene.renderables();
   for (uint32_t instanceIndex = 0;
        instanceIndex < static_cast<uint32_t>(renderables.size());
@@ -100,8 +114,8 @@ SceneDrawDatabase::update(const RenderScene &scene,
     for (uint32_t submeshIndex = 0;
          submeshIndex < static_cast<uint32_t>(submeshes.size());
          ++submeshIndex) {
-      const MaterialRef material = resolveSceneSubmeshMaterial(
-          *modelRecord, submeshIndex, renderable.material,
+      const MaterialRef material = resources.resolveRenderableMaterial(
+          renderable.model, submeshIndex, renderable.material,
           renderable.materialOverride);
       const MaterialRecord *materialRecord = resources.tryGet(material);
       const bool alphaMasked =
@@ -179,15 +193,32 @@ SceneDrawDatabase::update(const RenderScene &scene,
                 isValid(materialRecord->desc
                             .textures[kMaterialTextureSlotNormal]))),
       });
+      const uint32_t drawIndex = static_cast<uint32_t>(draws_.size() - 1u);
+      if (alphaMasked) {
+        categories_[static_cast<size_t>(SceneDrawCategory::AlphaMasked)]
+            .push_back(drawIndex);
+      } else if (!alphaBlended && !transmission) {
+        categories_[static_cast<size_t>(SceneDrawCategory::Opaque)].push_back(
+            drawIndex);
+      }
+      if (alphaBlended) {
+        categories_[static_cast<size_t>(SceneDrawCategory::AlphaBlended)]
+            .push_back(drawIndex);
+      }
+      if (transmission) {
+        categories_[static_cast<size_t>(SceneDrawCategory::Transmission)]
+            .push_back(drawIndex);
+      }
+      if (!alphaBlended && !transmission) {
+        categories_[static_cast<size_t>(SceneDrawCategory::RayTracing)]
+            .push_back(drawIndex);
+      }
     }
     instances_.back().drawCount =
         static_cast<uint32_t>(draws_.size()) - instances_.back().firstDraw;
   }
-  scene_ = &scene;
-  topologyVersion_ = scene.topologyVersion();
-  materialVersion_ = materials.version;
-  materialBindingVersion_ = resources.modelMaterialBindingVersion();
-  geometryVersion_ = geometryVersion;
+  sourceVersion_ = sourceVersion;
+  ++generation_;
   return Result<bool, std::string>::makeResult(true);
 }
 

@@ -1,7 +1,8 @@
 #include "nuri/utils/env_utils.h"
 #include "nuri/core/log.h"
-#include "nuri/pch.h"
+#include <array>
 #include <cctype>
+#include <ranges>
 namespace nuri {
 namespace {
 [[nodiscard]] bool envValueEqualsIgnoreCase(std::string_view value,
@@ -19,6 +20,21 @@ namespace {
     }
   }
   return true;
+}
+[[nodiscard]] std::optional<bool> parseEnvBool(std::string_view value) {
+  constexpr std::array trueValues{"1", "true", "on", "yes"};
+  constexpr std::array falseValues{"0", "false", "off", "no"};
+  if (std::ranges::any_of(trueValues, [&](std::string_view candidate) {
+        return envValueEqualsIgnoreCase(value, candidate);
+      })) {
+    return true;
+  }
+  if (std::ranges::any_of(falseValues, [&](std::string_view candidate) {
+        return envValueEqualsIgnoreCase(value, candidate);
+      })) {
+    return false;
+  }
+  return std::nullopt;
 }
 } // namespace
 
@@ -50,18 +66,8 @@ std::optional<std::string> readEnvVar(std::string_view variableName) {
 }
 
 bool readEnvFlag(std::string_view variableName) {
-  const std::optional<std::string> value = readEnvVar(variableName);
-  if (!value.has_value()) {
-    return false;
-  }
-  const std::string_view view = *value;
-  if (envValueEqualsIgnoreCase(view, "1") ||
-      envValueEqualsIgnoreCase(view, "true") ||
-      envValueEqualsIgnoreCase(view, "on") ||
-      envValueEqualsIgnoreCase(view, "yes")) {
-    return true;
-  }
-  return false;
+  const auto value = readEnvVar(variableName);
+  return value.has_value() && parseEnvBool(*value).value_or(false);
 }
 
 [[nodiscard]] const char *boolToString(bool value) {
@@ -74,18 +80,8 @@ readEnvBoolOverride(std::string_view variableName) {
   if (!value.has_value()) {
     return std::nullopt;
   }
-  const std::string_view view = *value;
-  if (envValueEqualsIgnoreCase(view, "1") ||
-      envValueEqualsIgnoreCase(view, "true") ||
-      envValueEqualsIgnoreCase(view, "on") ||
-      envValueEqualsIgnoreCase(view, "yes")) {
-    return true;
-  }
-  if (envValueEqualsIgnoreCase(view, "0") ||
-      envValueEqualsIgnoreCase(view, "false") ||
-      envValueEqualsIgnoreCase(view, "off") ||
-      envValueEqualsIgnoreCase(view, "no")) {
-    return false;
+  if (const auto parsed = parseEnvBool(*value); parsed.has_value()) {
+    return parsed;
   }
   NURI_LOG_WARNING(
       "Environment override: ignoring unrecognized boolean value '%.*s=%s'",

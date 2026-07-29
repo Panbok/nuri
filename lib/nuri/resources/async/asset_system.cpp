@@ -1,6 +1,5 @@
 #include "nuri/resources/async/asset_system.h"
 #include "nuri/core/profiling.h"
-#include "nuri/pch.h"
 #include "nuri/resources/detail/scene_asset_build_backend.h"
 #include "nuri/resources/storage/texture/dds_texture_pack.h"
 #include "nuri/resources/storage/texture/texture_cache_utils.h"
@@ -22,7 +21,7 @@ namespace {
                             1ull * 1024ull * 1024ull * 1024ull);
 }
 [[nodiscard]] uint64_t
-estimateAdaptedMeshBytes(const AdaptedSceneMesh &source) noexcept {
+estimateAdaptedMeshBytes(const ScenePrefabAdaptedMesh &source) noexcept {
   uint64_t bytes =
       static_cast<uint64_t>(source.mesh.vertices.size()) * sizeof(Vertex) +
       static_cast<uint64_t>(source.mesh.indices.size()) * sizeof(uint32_t) +
@@ -62,15 +61,15 @@ prepareTextureRequest(const TextureRequest &request) {
   return Result<PreparedTextureData, std::string>::makeError(
       "AssetSystem: unknown texture request kind");
 }
-[[nodiscard]] Result<PreparedModelData, std::string>
-prepareModelRequest(const ModelRequest &request, AdaptedSceneMesh *adapted) {
+[[nodiscard]] Result<ModelUploadPlan, std::string>
+prepareModelRequest(const ModelRequest &request,
+                    ScenePrefabAdaptedMesh *adapted) {
   if (adapted != nullptr) {
     auto cooked =
         detail::cookAdaptedSceneMesh(std::move(*adapted), request.importOptions,
                                      std::pmr::get_default_resource());
     return cooked.hasError()
-               ? Result<PreparedModelData, std::string>::makeError(
-                     cooked.error())
+               ? Result<ModelUploadPlan, std::string>::makeError(cooked.error())
                : Model::prepare(std::move(cooked.value()));
   }
   if (request.sceneMeshIndex == std::numeric_limits<uint32_t>::max()) {
@@ -101,7 +100,7 @@ void hashCombine(size_t &seed, uint64_t value) noexcept {
   return gpu.supportsBackgroundTexturePreparation();
 }
 [[nodiscard]] bool supportsBackgroundPreparation(GPUDevice &gpu,
-                                                 const PreparedModelData &) {
+                                                 const ModelUploadPlan &) {
   return gpu.supportsBackgroundBufferPreparation() &&
          gpu.supportsBackgroundBufferBatchPreparation() &&
          gpu.supportsBackgroundGeometryPreparation();
@@ -113,7 +112,7 @@ materializationNames(const TextureRequest &request,
   return {gpuName, gpuName.empty() ? request.debugName : gpuName};
 }
 [[nodiscard]] std::pair<std::string, std::string>
-materializationNames(const ModelRequest &request, const PreparedModelData &) {
+materializationNames(const ModelRequest &request, const ModelUploadPlan &) {
   return {request.debugName,
           request.debugName.empty() ? request.path : request.debugName};
 }
@@ -121,7 +120,7 @@ auto prepareGpuAsset(GPUDevice &gpu, PreparedTextureData &prepared,
                      std::string_view debugName) {
   return gpu.prepareTexture(prepared.descriptor(), debugName);
 }
-auto prepareGpuAsset(GPUDevice &gpu, PreparedModelData &prepared,
+auto prepareGpuAsset(GPUDevice &gpu, ModelUploadPlan &prepared,
                      std::string_view debugName) {
   return Model::prepareGpu(gpu, std::move(prepared), debugName);
 }
@@ -129,17 +128,20 @@ auto createGpuAsset(GPUDevice &gpu, PreparedTextureData prepared,
                     std::string_view) {
   return Texture::createPrepared(gpu, std::move(prepared));
 }
-auto createGpuAsset(GPUDevice &gpu, PreparedModelData prepared,
+auto createGpuAsset(GPUDevice &gpu, ModelUploadPlan prepared,
                     std::string_view debugName) {
   return Model::createPrepared(gpu, std::move(prepared), debugName);
 }
 auto adoptGpuAsset(ResourceManager &resources, const TextureRequest &request,
-                   std::unique_ptr<Texture> pending) {
-  return resources.adoptPreparedTexture(request, std::move(pending));
+                   const TextureKey &key, std::unique_ptr<Texture> pending) {
+  return resources.adoptPreparedTexture(
+      ResolvedTextureRequest{.request = request, .key = key},
+      std::move(pending));
 }
 auto adoptGpuAsset(ResourceManager &resources, const ModelRequest &request,
-                   std::unique_ptr<Model> pending) {
-  return resources.adoptPreparedModel(request, std::move(pending));
+                   const ModelKey &key, std::unique_ptr<Model> pending) {
+  return resources.adoptPreparedModel(
+      ResolvedModelRequest{.request = request, .key = key}, std::move(pending));
 }
 constexpr std::array<TextureRef EnvironmentHandles::*,
                      EnvironmentAssetRequest::kTextureCount>
@@ -364,19 +366,12 @@ AssetSystem::requestTexture(const TextureRequest &request,
     return Result<TextureAssetHandle, std::string>::makeError(
         "AssetSystem::requestTexture: path is empty");
   }
-  TextureRequest resolved = request;
-  resolved.path = canonicalizeResourcePath(request.path);
-  const TextureKey key{
-      .canonicalPath = resolved.path,
-      .optionsHash = hashTextureLoadOptions(resolved.loadOptions),
-      .kind = resolved.kind,
-      .contentContract = resolved.contentContract,
-  };
+  ResolvedTextureRequest resolved = resources_.resolveTextureRequest(request);
   const auto ready = resources_.tryAcquireTexture(resolved);
   return requestGpuAsset<TextureNode, TextureAssetHandle, TextureCpuCompletion>(
-      textures_, textureInFlight_, std::move(resolved), key, ready, priority,
-      AssetWorkClass::Decode, estimateSourceBytes(request.path),
-      prepareTextureRequest);
+      textures_, textureInFlight_, std::move(resolved.request),
+      std::move(resolved.key), ready, priority, AssetWorkClass::Decode,
+      estimateSourceBytes(request.path), prepareTextureRequest);
 }
 
 Result<ModelAssetHandle, std::string>
@@ -386,7 +381,7 @@ AssetSystem::requestModel(const ModelRequest &request, AssetPriority priority) {
 
 Result<ModelAssetHandle, std::string>
 AssetSystem::requestModelAsset(const ModelRequest &request,
-                               std::shared_ptr<AdaptedSceneMesh> source,
+                               std::shared_ptr<ScenePrefabAdaptedMesh> source,
                                AssetPriority priority) {
   std::lock_guard stateLock(stateMutex_);
   reclaimReleasedNodes();
@@ -394,20 +389,15 @@ AssetSystem::requestModelAsset(const ModelRequest &request,
     return Result<ModelAssetHandle, std::string>::makeError(
         "AssetSystem::requestModel: path is empty");
   }
-  ModelRequest resolved = request;
-  resolved.path = canonicalizeResourcePath(request.path);
-  const ModelKey key{
-      .canonicalPath = resolved.path,
-      .importOptionsHash = hashModelImportOptions(resolved.importOptions),
-      .sceneMeshIndex = resolved.sceneMeshIndex,
-  };
-  const uint64_t estimatedBytes = source != nullptr
-                                      ? estimateAdaptedMeshBytes(*source)
-                                      : estimateSourceBytes(resolved.path);
+  ResolvedModelRequest resolved = resources_.resolveModelRequest(request);
+  const uint64_t estimatedBytes =
+      source != nullptr ? estimateAdaptedMeshBytes(*source)
+                        : estimateSourceBytes(resolved.key.canonicalPath);
   const auto ready = resources_.tryAcquireModel(resolved);
   return requestGpuAsset<ModelNode, ModelAssetHandle, ModelCpuCompletion>(
-      models_, modelInFlight_, std::move(resolved), key, ready, priority,
-      AssetWorkClass::Cook, estimatedBytes,
+      models_, modelInFlight_, std::move(resolved.request),
+      std::move(resolved.key), ready, priority, AssetWorkClass::Cook,
+      estimatedBytes,
       [source = std::move(source)](const ModelRequest &workerRequest) {
         return prepareModelRequest(workerRequest, source.get());
       });
@@ -422,11 +412,13 @@ AssetSystem::requestGpuAsset(Pool &pool, Map &inFlight, Request request,
                              AssetPriority priority, AssetWorkClass workClass,
                              uint64_t estimatedBytes, Prepare prepare) {
   if (ready) {
-    Node &node = pool.insert(Node{.state = AssetState::Published,
-                                  .priority = priority,
-                                  .request = std::move(request),
-                                  .key = std::move(key),
-                                  .published = *ready});
+    Node newNode{};
+    newNode.state = AssetState::Published;
+    newNode.priority = priority;
+    newNode.request = std::move(request);
+    newNode.key = std::move(key);
+    newNode.published = *ready;
+    Node &node = pool.insert(std::move(newNode));
     return Result<Handle, std::string>::makeResult(node.handle);
   }
   if (auto it = inFlight.find(key); it != inFlight.end()) {
@@ -436,10 +428,11 @@ AssetSystem::requestGpuAsset(Pool &pool, Map &inFlight, Request request,
       setPriority(node.handle, priority);
     return Result<Handle, std::string>::makeResult(node.handle);
   }
-  Node &node = pool.insert(Node{.state = AssetState::Queued,
-                                .priority = priority,
-                                .request = std::move(request),
-                                .key = std::move(key)});
+  Node newNode{};
+  newNode.priority = priority;
+  newNode.request = std::move(request);
+  newNode.key = std::move(key);
+  Node &node = pool.insert(std::move(newNode));
   inFlight.emplace(node.key, node.handle);
   const Handle handle = node.handle;
   const Request workerRequest = node.request;
@@ -477,12 +470,11 @@ AssetSystem::requestMaterial(const MaterialAssetRequest &request,
       setPriority(node.handle, priority);
     return node.handle;
   }
-  MaterialNode &node = materials_.insert(MaterialNode{
-      .state = AssetState::CpuReady,
-      .priority = priority,
-      .request = request,
-      .key = key,
-  });
+  MaterialNode newNode{};
+  newNode.priority = priority;
+  newNode.request = request;
+  newNode.key = key;
+  MaterialNode &node = materials_.insert(std::move(newNode));
   materialInFlight_.emplace(node.key, node.handle);
   for (TextureAssetHandle texture : node.request.textures)
     setPriority(texture, priority);
@@ -493,16 +485,17 @@ Result<EnvironmentAssetHandle, std::string>
 AssetSystem::requestEnvironment(const EnvironmentAssetRequest &request) {
   std::lock_guard stateLock(stateMutex_);
   reclaimReleasedNodes();
-  EnvironmentNode &node = environments_.insert(EnvironmentNode{
-      .state = AssetState::CpuReady,
-      .request = request,
-  });
+  EnvironmentNode newNode{};
+  newNode.state = AssetState::CpuReady;
+  newNode.priority = request.priority;
+  newNode.request = request;
+  EnvironmentNode &node = environments_.insert(std::move(newNode));
   std::string requestError;
   for (size_t index = 0; index < node.request.textures.size(); ++index) {
     const auto &texture = node.request.textures[index];
     if (!texture)
       continue;
-    auto requested = requestTexture(*texture, node.request.priority);
+    auto requested = requestTexture(*texture, node.priority);
     if (requested.hasError()) {
       if (node.request.optionalTextures[index])
         continue;
@@ -549,23 +542,22 @@ AssetSystem::requestScene(const SceneLoadRequest &request) {
   if (auto it = sceneInFlight_.find(key); it != sceneInFlight_.end()) {
     SceneNode &node = *find(it->second);
     ++node.subscriberCount;
-    if (resolved.priority < node.request.priority)
+    if (resolved.priority < node.priority)
       setPriority(node.handle, resolved.priority);
     return Result<SceneLoadHandle, std::string>::makeResult(node.handle);
   }
-  SceneNode &node = scenes_.insert(SceneNode{
-      .state = SceneLoadState::Requested,
-      .request = std::move(resolved),
-      .key = key,
-      .publicationTarget = key.publicationTarget,
-  });
+  SceneNode newNode{};
+  newNode.priority = resolved.priority;
+  newNode.request = std::move(resolved);
+  newNode.key = key;
+  newNode.publicationTarget = key.publicationTarget;
+  SceneNode &node = scenes_.insert(std::move(newNode));
   sceneInFlight_.emplace(node.key, node.handle);
   const SceneLoadHandle handle = node.handle;
   const std::string workerPath = node.request.path;
   const SceneImportOptions workerOptions = node.request.importOptions;
   auto task = scheduler_.enqueue(makeAssetCpuJob<SceneManifestCompletion>(
-      node.request.priority, AssetWorkClass::Metadata,
-      estimateSourceBytes(workerPath),
+      node.priority, AssetWorkClass::Metadata, estimateSourceBytes(workerPath),
       node.request.debugName.empty() ? workerPath : node.request.debugName,
       SceneManifestCompletion{.handle = handle},
       [workerPath, workerOptions] {
@@ -687,7 +679,7 @@ AssetLoadSnapshot AssetSystem::query(EnvironmentAssetHandle handle) const {
   }
   return AssetLoadSnapshot{
       .state = node->state,
-      .priority = node->request.priority,
+      .priority = node->priority,
       .progress = node->state == AssetState::Published ? 1.0f : progress,
       .error = node->error,
   };
@@ -726,7 +718,7 @@ SceneLoadSnapshot AssetSystem::query(SceneLoadHandle handle) const {
   const SceneAssetCounts textures = collectSceneTextureCounts(*node);
   return SceneLoadSnapshot{
       .state = node->state,
-      .priority = node->request.priority,
+      .priority = node->priority,
       .progress = node->progress,
       .sourceDiscoveryComplete = node->manifest.has_value(),
       .hierarchyPublished = publishProgress && node->hierarchyPublished,
@@ -851,10 +843,10 @@ void AssetSystem::setPriority(EnvironmentAssetHandle handle,
                               AssetPriority priority) {
   std::lock_guard stateLock(stateMutex_);
   EnvironmentNode *node = find(handle);
-  if (node == nullptr || priority >= node->request.priority) {
+  if (node == nullptr || priority >= node->priority) {
     return;
   }
-  node->request.priority = priority;
+  node->priority = priority;
   for (const TextureAssetHandle texture : node->textures)
     setPriority(texture, priority);
 }
@@ -862,10 +854,10 @@ void AssetSystem::setPriority(EnvironmentAssetHandle handle,
 void AssetSystem::setPriority(SceneLoadHandle handle, AssetPriority priority) {
   std::lock_guard stateLock(stateMutex_);
   SceneNode *node = find(handle);
-  if (node == nullptr || priority >= node->request.priority) {
+  if (node == nullptr || priority >= node->priority) {
     return;
   }
-  node->request.priority = priority;
+  node->priority = priority;
   for (const SceneDependency &dependency : node->dependencies)
     std::visit(
         [this, priority](auto dependencyHandle) {
@@ -1110,7 +1102,7 @@ AssetSystem::prepareFrame(AssetPublicationContext context) {
                   continue;
                 }
                 auto texture = requestTexture(*prepared.textures[slotIndex],
-                                              node->request.priority);
+                                              node->priority);
                 if (texture.hasError()) {
                   ++node->optionalFailures;
                   continue;
@@ -1119,7 +1111,7 @@ AssetSystem::prepareFrame(AssetPublicationContext context) {
                 node->dependencies.emplace_back(texture.value());
               }
               node->materials[typed.materialIndex] =
-                  requestMaterial(materialRequest, node->request.priority);
+                  requestMaterial(materialRequest, node->priority);
               node->dependencies.emplace_back(
                   node->materials[typed.materialIndex]);
             }
@@ -1392,7 +1384,7 @@ AssetSystem::prepareFrame(AssetPublicationContext context) {
       }
       node.state = AssetState::Resident;
       auto adopted =
-          adoptGpuAsset(resources_, node.request, std::move(pending));
+          adoptGpuAsset(resources_, node.request, node.key, std::move(pending));
       if (adopted.hasError()) {
         finish(AssetState::Failed, adopted.error());
         ++stats.failed;
@@ -1444,7 +1436,13 @@ AssetSystem::prepareFrame(AssetPublicationContext context) {
     if (!dependenciesReady) {
       continue;
     }
-    auto material = resources_.acquireMaterial(materialRequest);
+    auto resolved = resources_.resolveMaterialRequest(materialRequest);
+    if (resolved.hasError()) {
+      finishNode(node, AssetState::Failed, resolved.error());
+      ++stats.failed;
+      continue;
+    }
+    auto material = resources_.acquireMaterial(resolved.value());
     if (material.hasError()) {
       finishNode(node, AssetState::Failed, material.error());
       ++stats.failed;
@@ -1633,11 +1631,12 @@ void AssetSystem::finishSceneNode(SceneNode &node, SceneLoadState terminalState,
   if (terminalState == SceneLoadState::Cancelled) {
     const SceneLoadHandle handle = node.handle;
     std::string retainedError = std::move(node.error);
-    node = SceneNode{.handle = handle,
-                     .state = SceneLoadState::Cancelled,
-                     .subscriberCount = 0u,
-                     .progress = 1.0f,
-                     .error = std::move(retainedError)};
+    node = {};
+    node.handle = handle;
+    node.state = SceneLoadState::Cancelled;
+    node.subscriberCount = 0u;
+    node.progress = 1.0f;
+    node.error = std::move(retainedError);
   }
   if (node.subscriberCount == 0u && isSceneTerminalState(terminalState)) {
     releasedTerminalNodes_ = true;
@@ -1746,7 +1745,7 @@ bool AssetSystem::prepareSceneNode(
             .debugName = "async_scene_fallback_material",
             .sourceIdentity = node.request.path + "#async_fallback",
         },
-        node.request.priority);
+        node.priority);
     node.dependencies.emplace_back(node.fallbackMaterial);
   }
   while (node.modelAdmissionCursor < prefab.meshAssets.size() &&
@@ -1761,11 +1760,12 @@ bool AssetSystem::prepareSceneNode(
     };
     Result<ModelAssetHandle, std::string> model =
         modelIndex < node.manifest->meshes.size()
-            ? requestModelAsset(modelRequest,
-                                std::make_shared<AdaptedSceneMesh>(std::move(
-                                    node.manifest->meshes[modelIndex])),
-                                node.request.priority)
-            : requestModel(modelRequest, node.request.priority);
+            ? requestModelAsset(
+                  modelRequest,
+                  std::make_shared<ScenePrefabAdaptedMesh>(
+                      std::move(node.manifest->meshes[modelIndex])),
+                  node.priority)
+            : requestModel(modelRequest, node.priority);
     if (model.hasError()) {
       ++node.optionalFailures;
       continue;
@@ -1786,7 +1786,7 @@ bool AssetSystem::prepareSceneNode(
             : MaterialData{};
     const SceneLoadHandle sceneHandle = node.handle;
     const std::string scenePath = node.request.path;
-    const AssetPriority priority = node.request.priority;
+    const AssetPriority priority = node.priority;
     auto task = scheduler_.enqueue(makeAssetCpuJob<SceneMaterialCompletion>(
         priority, AssetWorkClass::Transcode,
         std::min<uint64_t>(estimateSourceBytes(scenePath),

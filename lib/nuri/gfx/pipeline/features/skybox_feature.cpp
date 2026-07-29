@@ -3,7 +3,7 @@
 #include "nuri/gfx/frame/presentation_aa_plan.h"
 #include "nuri/gfx/frame/render_frame_context.h"
 #include "nuri/gfx/pipeline/render_pipeline.h"
-#include "nuri/pch.h"
+#include "nuri/gfx/shader.h"
 #include "nuri/resources/gpu/resource_manager.h"
 #include "nuri/scene/render_scene.h"
 namespace nuri {
@@ -11,7 +11,7 @@ namespace {
 constexpr uint32_t kSkyboxVertexCount = 36;
 [[nodiscard]] CoverageMode
 selectedCoverage(const RenderFrameContext &frame) noexcept {
-  return presentationAAPlanForFrame(frame).coverage;
+  return frame.presentationAA.coverage;
 }
 } // namespace
 
@@ -20,7 +20,6 @@ SkyboxPass::SkyboxPass(GPUDevice &gpu, const SkyboxFeatureConfig &config)
 
 SkyboxPass::~SkyboxPass() {
   destroyFrameBuffers();
-  skyboxShader_.reset();
   for (OwnedRenderPipelineHandle &pipeline : skyboxDepthPipelines_) {
     pipeline.reset();
   }
@@ -32,8 +31,7 @@ SkyboxPass::~SkyboxPass() {
 }
 
 bool SkyboxPass::isEnabled(const FrameBuildContext &ctx) const {
-  return ctx.frame.settings == nullptr ||
-         renderSettingsOrDefault(ctx.frame).skybox.enabled;
+  return ctx.frame.settings.skybox.enabled;
 }
 
 Result<bool, std::string> SkyboxPass::prepare(FrameBuildContext &ctx) {
@@ -49,20 +47,21 @@ Result<bool, std::string> SkyboxPass::build(FrameBuildContext &ctx) {
   RenderGraphGraphicsPassDesc passDesc{};
   const CoverageMode coverage = selectedCoverage(ctx.frame);
   const bool msaaSelected = coverage != CoverageMode::Sample1;
-  const bool usedMsaa = msaaSelected &&
-                        nuri::isValid(ctx.shared.msaaSceneColorTexture) &&
-                        nuri::isValid(ctx.shared.msaaSceneColorGraphTexture) &&
-                        nuri::isValid(ctx.shared.msaaSceneDepthTexture) &&
-                        nuri::isValid(ctx.shared.msaaSceneDepthGraphTexture);
-  const TextureHandle sceneColorTexture = usedMsaa
-                                              ? ctx.shared.msaaSceneColorTexture
-                                              : ctx.shared.sceneColorTexture;
+  const bool usedMsaa =
+      msaaSelected &&
+      nuri::isValid(ctx.shared[FrameTextureSlot::MsaaSceneColor].texture) &&
+      nuri::isValid(ctx.shared[FrameTextureSlot::MsaaSceneColor].graph) &&
+      nuri::isValid(ctx.shared[FrameTextureSlot::MsaaSceneDepth].texture) &&
+      nuri::isValid(ctx.shared[FrameTextureSlot::MsaaSceneDepth].graph);
+  const TextureHandle sceneColorTexture =
+      usedMsaa ? ctx.shared[FrameTextureSlot::MsaaSceneColor].texture
+               : ctx.shared[FrameTextureSlot::SceneColor].texture;
   RenderGraphTextureId sceneColorGraphTexture =
-      usedMsaa ? ctx.shared.msaaSceneColorGraphTexture
-               : ctx.shared.sceneColorGraphTexture;
+      usedMsaa ? ctx.shared[FrameTextureSlot::MsaaSceneColor].graph
+               : ctx.shared[FrameTextureSlot::SceneColor].graph;
   const RenderGraphTextureId sceneDepthGraphTexture =
-      usedMsaa ? ctx.shared.msaaSceneDepthGraphTexture
-               : ctx.shared.sceneDepthGraphTexture;
+      usedMsaa ? ctx.shared[FrameTextureSlot::MsaaSceneDepth].graph
+               : ctx.shared[FrameTextureSlot::SceneDepth].graph;
   const bool useDepthTest = nuri::isValid(sceneDepthGraphTexture);
   passDesc.color = {.loadOp = useDepthTest ? LoadOp::Load : LoadOp::DontCare,
                     .storeOp = StoreOp::Store,
@@ -112,10 +111,10 @@ Result<bool, std::string> SkyboxPass::build(FrameBuildContext &ctx) {
   }
   const RenderGraphPassId passId = addResult.value();
   if (usedMsaa) {
-    ctx.shared.msaaSceneColorGraphTexture = sceneColorGraphTexture;
+    ctx.shared[FrameTextureSlot::MsaaSceneColor].graph = sceneColorGraphTexture;
     ctx.frame.metrics.antiAliasing.msaaColorGraphPublished = true;
   } else {
-    ctx.shared.sceneColorGraphTexture = sceneColorGraphTexture;
+    ctx.shared[FrameTextureSlot::SceneColor].graph = sceneColorGraphTexture;
   }
   if (nuri::isValid(preparedFrameBuffer_)) {
     auto frameBufferResult = ctx.graph.importBuffer(preparedFrameBuffer_,
@@ -200,27 +199,24 @@ SkyboxPass::ensureFrameBufferCapacity(FrameBufferSlot &slot,
 }
 
 Result<bool, std::string> SkyboxPass::createShaders() {
-  skyboxShader_ = Shader::create("skybox", gpu_);
   struct ShaderSpec {
-    Shader *shader = nullptr;
     const std::filesystem::path *path = nullptr;
     ShaderStage stage = ShaderStage::Vertex;
     ShaderHandle *outHandle = nullptr;
   };
   const std::array<ShaderSpec, 2> shaderSpecs = {
-      ShaderSpec{skyboxShader_.get(), &config_.vertex, ShaderStage::Vertex,
-                 &skyboxVertexShader_},
-      ShaderSpec{skyboxShader_.get(), &config_.fragment, ShaderStage::Fragment,
+      ShaderSpec{&config_.vertex, ShaderStage::Vertex, &skyboxVertexShader_},
+      ShaderSpec{&config_.fragment, ShaderStage::Fragment,
                  &skyboxFragmentShader_},
   };
   for (const ShaderSpec &spec : shaderSpecs) {
-    if (!spec.shader || !spec.outHandle || !spec.path ||
-        spec.path->string().empty()) {
+    if (!spec.outHandle || !spec.path || spec.path->string().empty()) {
       return Result<bool, std::string>::makeError(
           "SkyboxPass::createShaders: empty shader path");
     }
     const std::string shaderPath = spec.path->string();
-    auto compileResult = spec.shader->compileFromFile(shaderPath, spec.stage);
+    auto compileResult =
+        compileShaderFile(gpu_, "skybox", shaderPath, spec.stage);
     if (compileResult.hasError()) {
       return Result<bool, std::string>::makeError(compileResult.error());
     }
@@ -311,9 +307,9 @@ SkyboxPass::prepareSkyboxDraw(FrameBuildContext &ctx) {
   uint32_t frameFlags = 0u;
   uint32_t sceneColorTexId = 0u;
   uint32_t sceneColorSamplerId = 0u;
-  if (nuri::isValid(ctx.shared.sceneColorTexture)) {
-    sceneColorTexId =
-        gpu_.getTextureBindlessIndex(ctx.shared.sceneColorTexture);
+  if (nuri::isValid(ctx.shared[FrameTextureSlot::SceneColor].texture)) {
+    sceneColorTexId = gpu_.getTextureBindlessIndex(
+        ctx.shared[FrameTextureSlot::SceneColor].texture);
     sceneColorSamplerId = gpu_.getLinearRepeatSamplerBindlessIndex(true, 1u);
     if (sceneColorTexId != kInvalidTextureBindlessIndex) {
       frameFlags |= HasSceneColor;

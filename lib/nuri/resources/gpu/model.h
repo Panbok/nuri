@@ -40,35 +40,48 @@ enum class PackedVertexFormat : uint8_t {
   AnimatedFloat32 = 2,
 };
 
-struct PreparedModelBufferData {
+enum class ModelBufferRole : uint8_t {
+  StaticDecode,
+  SkinInfluences,
+  MorphMeta,
+  MorphDeltas,
+  MeshletDescriptors,
+  MeshletVertexIndices,
+  MeshletPrimitiveIndices,
+  MeshletLodRanges,
+  Count,
+};
+
+struct ModelUploadBuffer {
   std::vector<std::byte> bytes{};
   uint32_t count = 0u;
   uint32_t stride = 0u;
 };
 
-struct NURI_API PreparedModelData {
-  explicit PreparedModelData(
+struct NURI_API ModelUploadPlan {
+  explicit ModelUploadPlan(
       std::pmr::memory_resource *memory = std::pmr::get_default_resource())
       : mesh(memory) {}
   MeshData mesh;
   std::vector<std::byte> packedVertexBytes{};
   PackedVertexFormat packedVertexFormat = PackedVertexFormat::StaticQuantized20;
-  PreparedModelBufferData staticDecode{};
-  PreparedModelBufferData skinInfluences{};
-  PreparedModelBufferData morphMeta{};
-  PreparedModelBufferData morphDeltas{};
+  std::array<ModelUploadBuffer, static_cast<size_t>(ModelBufferRole::Count)>
+      buffers{};
+  [[nodiscard]] ModelUploadBuffer &operator[](ModelBufferRole role) noexcept {
+    return buffers[static_cast<size_t>(role)];
+  }
+  [[nodiscard]] const ModelUploadBuffer &
+  operator[](ModelBufferRole role) const noexcept {
+    return buffers[static_cast<size_t>(role)];
+  }
   [[nodiscard]] uint64_t uploadBytes() const noexcept {
-    return static_cast<uint64_t>(packedVertexBytes.size()) +
-           static_cast<uint64_t>(mesh.indices.size()) * sizeof(uint32_t) +
-           static_cast<uint64_t>(staticDecode.bytes.size()) +
-           static_cast<uint64_t>(skinInfluences.bytes.size()) +
-           static_cast<uint64_t>(morphMeta.bytes.size()) +
-           static_cast<uint64_t>(morphDeltas.bytes.size()) +
-           static_cast<uint64_t>(mesh.meshlets.size()) *
-               sizeof(MeshletDescriptor) +
-           static_cast<uint64_t>(mesh.meshletVertexIndices.size()) *
-               sizeof(uint32_t) +
-           static_cast<uint64_t>(mesh.meshletPrimitiveIndices.size());
+    uint64_t bytes =
+        static_cast<uint64_t>(packedVertexBytes.size()) +
+        static_cast<uint64_t>(mesh.indices.size()) * sizeof(uint32_t);
+    for (const ModelUploadBuffer &buffer : buffers) {
+      bytes += static_cast<uint64_t>(buffer.bytes.size());
+    }
+    return bytes;
   }
 };
 
@@ -115,22 +128,22 @@ public:
   Model &operator=(Model &&) = delete;
   [[nodiscard]] static Result<std::unique_ptr<Model>, std::string>
   create(GPUDevice &gpu, const MeshData &data, std::string_view debugName = {});
-  [[nodiscard]] static Result<PreparedModelData, std::string>
+  [[nodiscard]] static Result<ModelUploadPlan, std::string>
   prepare(MeshData data);
-  [[nodiscard]] static Result<PreparedModelData, std::string> prepareFromFile(
+  [[nodiscard]] static Result<ModelUploadPlan, std::string> prepareFromFile(
       std::string_view path, const MeshImportOptions &options = {},
       std::pmr::memory_resource *memory = std::pmr::get_default_resource());
-  [[nodiscard]] static Result<PreparedModelData, std::string>
+  [[nodiscard]] static Result<ModelUploadPlan, std::string>
   prepareSceneMeshFromFile(
       std::string_view path, uint32_t sceneMeshIndex,
       const MeshImportOptions &options = {},
       std::pmr::memory_resource *memory = std::pmr::get_default_resource());
   [[nodiscard]] static Result<std::unique_ptr<Model>, std::string>
-  createPrepared(GPUDevice &gpu, PreparedModelData data,
+  createPrepared(GPUDevice &gpu, ModelUploadPlan data,
                  std::string_view debugName = {});
   [[nodiscard]] static Result<std::unique_ptr<PreparedGpuModelData>,
                               std::string>
-  prepareGpu(GPUDevice &gpu, PreparedModelData data,
+  prepareGpu(GPUDevice &gpu, ModelUploadPlan data,
              std::string_view debugName = {});
   [[nodiscard]] static Result<std::unique_ptr<Model>, std::string>
   publishPreparedGpu(GPUDevice &gpu,

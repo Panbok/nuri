@@ -64,7 +64,7 @@ private:
   bool suppressInferredSideEffects_ = false;
   uint64_t standaloneFrameIndex_ = 0;
   AssetPublicationStats lastAssetPublicationStats_{};
-  std::optional<RenderGraphCompileResult> cachedCompileResult_;
+  std::optional<RenderGraphPlan> cachedPlan_;
   RenderGraphBuilder::GraphFingerprint cachedFingerprint_{};
   SubmissionHandle lastFrameSubmission_{};
 };

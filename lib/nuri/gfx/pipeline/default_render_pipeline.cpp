@@ -1,6 +1,5 @@
 #include "nuri/gfx/pipeline/default_render_pipeline.h"
 #include "nuri/gfx/ddgi/ddgi_feature.h"
-#include "nuri/gfx/frame/render_capture.h"
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/gfx/pipeline/features/composite_feature.h"
 #include "nuri/gfx/pipeline/features/gtao_feature.h"
@@ -19,107 +18,7 @@
 #include "nuri/gfx/renderers/shadow_renderer.h"
 #include "nuri/gfx/renderers/transmission_renderer.h"
 #include "nuri/gfx/renderers/transparent_renderer.h"
-#include "nuri/pch.h"
 namespace nuri {
-namespace {
-bool needsMsaaResolve(const FrameBuildContext &ctx) {
-  const AntiAliasingFrameMetrics &metrics = ctx.frame.metrics.antiAliasing;
-  return ctx.frame.presentationAA.coverage != CoverageMode::Sample1 &&
-         !(metrics.msaaColorResolveTargetBound &&
-           metrics.msaaDepthResolveTargetBound);
-}
-Result<bool, std::string> appendMsaaResolve(FrameBuildContext &ctx,
-                                            GPUDevice &gpu) {
-  const auto import = [&ctx](RenderGraphTextureId id, TextureHandle handle,
-                             std::string_view name) {
-    return nuri::isValid(id) ? id
-                             : ctx.graph.importTexture(handle, name).value();
-  };
-  ctx.shared.msaaSceneColorGraphTexture =
-      import(ctx.shared.msaaSceneColorGraphTexture,
-             ctx.shared.msaaSceneColorTexture, "msaa_resolve_scene_color");
-  ctx.shared.msaaSceneDepthGraphTexture =
-      import(ctx.shared.msaaSceneDepthGraphTexture,
-             ctx.shared.msaaSceneDepthTexture, "msaa_resolve_scene_depth");
-  const RenderGraphTextureId colorTarget =
-      ctx.graph
-          .importTexture(ctx.shared.sceneColorTexture,
-                         "msaa_resolve_scene_color_target")
-          .value();
-  const RenderGraphTextureId depthTarget =
-      ctx.graph
-          .importTexture(ctx.shared.sceneDepthTexture,
-                         "msaa_resolve_scene_depth_target")
-          .value();
-  [[maybe_unused]] const RenderGraphPassId resolvePass =
-      ctx.graph
-          .addGraphicsPass(RenderGraphGraphicsPassDesc{
-              .color = {.loadOp = LoadOp::Load,
-                        .storeOp = StoreOp::MsaaResolve,
-                        .resolveMode = ResolveMode::Average},
-              .colorTexture = ctx.shared.msaaSceneColorGraphTexture,
-              .colorResolveTexture = colorTarget,
-              .depth = {.loadOp = LoadOp::Load,
-                        .storeOp = StoreOp::MsaaResolve,
-                        .resolveMode = ResolveMode::Min},
-              .depthTexture = ctx.shared.msaaSceneDepthGraphTexture,
-              .depthResolveTexture = depthTarget,
-              .gpuTimingScope = GpuTimingScope::MsaaResolve,
-              .debugLabel = "MSAA Resolve Pass",
-              .debugColor = 0xff44ccff,
-              .markImplicitOutputSideEffect = true,
-          })
-          .value();
-  ctx.shared.sceneColorGraphTexture = colorTarget;
-  ctx.shared.sceneDepthGraphTexture = depthTarget;
-  AntiAliasingFrameMetrics &metrics = ctx.frame.metrics.antiAliasing;
-  metrics.msaaResolvePassCount = 1u;
-  metrics.msaaColorResolveCount = 1u;
-  metrics.msaaDepthResolveCount = 1u;
-  metrics.msaaResolvedSampleCount =
-      coverageSampleCount(ctx.frame.presentationAA.coverage);
-  metrics.msaaResolvePlacement = MsaaResolvePlacement::ExplicitPass;
-  metrics.msaaColorGraphPublished = true;
-  metrics.msaaDepthGraphPublished = true;
-  metrics.msaaColorResolveTargetBound = true;
-  metrics.msaaDepthResolveTargetBound = true;
-  publishRequestedCapture(ctx.frame, gpu, "scene_color_hdr",
-                          ctx.shared.sceneColorTexture,
-                          RenderCaptureValueKind::LinearHdrColor,
-                          RenderCaptureLifetimeClass::FrameSharedRingTexture,
-                          "linear_hdr", "hdr_color", "MSAA Resolve Pass");
-  publishRequestedCapture(ctx.frame, gpu, "scene_depth",
-                          ctx.shared.sceneDepthTexture,
-                          RenderCaptureValueKind::Depth,
-                          RenderCaptureLifetimeClass::FrameSharedRingTexture,
-                          "linear_depth", "depth", "MSAA Resolve Pass");
-  metrics.msaaResolveBandwidthEstimateBytes =
-      metrics.msaaResolveReadEstimateBytes;
-  if (hasGpuTimingScope(ctx.frame.gpuTiming, GpuTimingScope::MsaaResolve)) {
-    metrics.msaaResolveGpuTimeMs = ctx.frame.gpuTiming.msaaResolveTimeMs;
-    metrics.msaaResolveGpuTimingSourceFrameIndex =
-        ctx.frame.gpuTiming.msaaResolveSourceFrameIndex;
-    metrics.msaaResolveGpuTimingAvailable = 1u;
-  }
-  return Result<bool, std::string>::makeResult(true);
-}
-void registerMsaaResolveStage(RenderPipeline &pipeline, GPUDevice &gpu) {
-  pipeline.addStage(PipelineStageDesc{
-      .componentName = "MsaaResolveFeature",
-      .name = "MsaaResolvePass",
-      .state = &gpu,
-      .enabled =
-          [](const void *, const FrameBuildContext &ctx) {
-            return needsMsaaResolve(ctx);
-          },
-      .build =
-          [](void *state, FrameBuildContext &ctx) {
-            return appendMsaaResolve(ctx, *static_cast<GPUDevice *>(state));
-          },
-  });
-}
-} // namespace
-
 Result<bool, std::string>
 registerDefaultRenderPipeline(RenderPipeline &pipeline, GPUDevice &gpu,
                               const RuntimeShaderConfig &shaderConfig,

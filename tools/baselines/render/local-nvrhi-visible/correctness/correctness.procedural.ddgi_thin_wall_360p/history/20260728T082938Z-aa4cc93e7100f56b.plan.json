@@ -1,0 +1,92 @@
+{
+    "schemaVersion": 1,
+    "kind": "nuri.snapshot.baseline_plan",
+    "caseId": "correctness.procedural.ddgi_thin_wall_360p",
+    "suite": "correctness",
+    "profileId": "local-nvrhi-visible",
+    "reason": "User-authorized stable DDGI visual baseline; Hybrid coverage excluded in favor of SceneFit",
+    "actor": "Codex",
+    "sourceCommit": "698d4e86f6923f1ca26185f3b1a5c1045273740d",
+    "sourceReportDigest": "sha256:cac45a227e49cb73a31b3b0e03e82e9ae678b7a5d60c68b33e3b46c6dc77c508",
+    "planDigest": "sha256:aa4cc93e7100f56b8d380d7e2cb7ef3d1ab64d8d48d23840e5790afbf17336e4",
+    "entries": [
+        {
+            "path": "approval.json",
+            "operation": "add",
+            "previousDigest": "",
+            "sourceDigest": "sha256:cac45a227e49cb73a31b3b0e03e82e9ae678b7a5d60c68b33e3b46c6dc77c508"
+        },
+        {
+            "path": "ddgi_debug_preview.exr",
+            "operation": "add",
+            "previousDigest": "",
+            "sourceDigest": "sha256:c14390cbbc9820d80f0beace3fab1302dd985ac806414bc808bfe9820d275e67"
+        },
+        {
+            "path": "ddgi_debug_preview.json",
+            "operation": "add",
+            "previousDigest": "",
+            "sourceDigest": "sha256:ec5b1ff858b8aaf41ec6dad2f91448a537bf5513859d99a697034fa911d6a8af"
+        },
+        {
+            "path": "ddgi_debug_preview_preview.png",
+            "operation": "add",
+            "previousDigest": "",
+            "sourceDigest": "sha256:306d4a206939902656fa80c1d16587c95e2df1e97bbe546a09ce9ea110c06c30"
+        },
+        {
+            "path": "ddgi_volume0_distance_atlas.exr",
+            "operation": "add",
+            "previousDigest": "",
+            "sourceDigest": "sha256:de7abf61d07c85ce0deab9c611dd28405634bfefb25acbdd0428b9ba5d43af39"
+        },
+        {
+            "path": "ddgi_volume0_distance_atlas.json",
+            "operation": "add",
+            "previousDigest": "",
+            "sourceDigest": "sha256:7c59770b9ccd631d1aa743e10640e052b0740ff74cc3c274e3843bb384a923bf"
+        },
+        {
+            "path": "ddgi_volume0_distance_atlas_preview.png",
+            "operation": "add",
+            "previousDigest": "",
+            "sourceDigest": "sha256:04c3639dcbc3e1ea6a2a5fa670991c8c396b7fab39c0e1777ef83509e7b1b00e"
+        },
+        {
+            "path": "ddgi_volume0_irradiance_atlas.exr",
+            "operation": "add",
+            "previousDigest": "",
+            "sourceDigest": "sha256:8141eed943cc79abc9048781eadffc8a98fbda8274d65d48f93430ba28cede15"
+        },
+        {
+            "path": "ddgi_volume0_irradiance_atlas.json",
+            "operation": "add",
+            "previousDigest": "",
+            "sourceDigest": "sha256:ae032a9c9286de8e455ab0865c9a75c8af369dbc5392ad277fb01a801c5bacdf"
+        },
+        {
+            "path": "ddgi_volume0_irradiance_atlas_preview.png",
+            "operation": "add",
+            "previousDigest": "",
+            "sourceDigest": "sha256:c0a9e59a9655b0fa53c3b0b9842e25da77299ffa72b540931337dd85bc1e6eb0"
+        },
+        {
+            "path": "final_color.json",
+            "operation": "add",
+            "previousDigest": "",
+            "sourceDigest": "sha256:5d4c24bf3ea213866af5e4817243544c96dd78f61d95e34902c3bf6d031b73b0"
+        },
+        {
+            "path": "final_color.png",
+            "operation": "add",
+            "previousDigest": "",
+            "sourceDigest": "sha256:fdad061e02290f01b2348e9ae93de7934afbade11a5a3e380de67d5ea775b36e"
+        },
+        {
+            "path": "final_color_preview.png",
+            "operation": "add",
+            "previousDigest": "",
+            "sourceDigest": "sha256:0017840b291a9d2eb5fc6930836e382ed270a9482f410bb360372560cce2ca62"
+        }
+    ]
+}

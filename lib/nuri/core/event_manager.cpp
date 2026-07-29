@@ -3,7 +3,15 @@
 namespace nuri {
 namespace {
 std::atomic<uint32_t> g_nextTypeId{0};
-}
+struct ChannelPolicy {
+  bool stopOnConsume;
+};
+constexpr std::array kChannelPolicies{
+    ChannelPolicy{false},
+    ChannelPolicy{false},
+    ChannelPolicy{true},
+};
+} // namespace
 
 EventManager::EventManager(std::pmr::memory_resource &upstream)
     : upstream_(upstream), arena_(&upstream_),
@@ -51,7 +59,8 @@ void EventManager::dispatch(EventChannel channel) {
   std::pmr::vector<QueuedEvent> localQueue(&upstream_);
   localQueue.swap(state.queue);
   std::pmr::vector<HandlerListSlot> &handlerLists = state.handlerLists;
-  const bool stopOnConsume = (channel == EventChannel::Input);
+  const bool stopOnConsume =
+      kChannelPolicies[static_cast<size_t>(channel)].stopOnConsume;
   size_t nextEventIndex = 0;
   try {
     for (; nextEventIndex < localQueue.size(); ++nextEventIndex) {
@@ -72,22 +81,16 @@ void EventManager::dispatch(EventChannel channel) {
                              static_cast<std::ptrdiff_t>(nextEventIndex),
                          localQueue.end());
     }
-    if (allQueuesEmpty()) {
-      arena_.release();
-    }
+    releaseArenaIfIdle();
     throw;
   }
-  if (allQueuesEmpty()) {
-    arena_.release();
-  }
+  releaseArenaIfIdle();
 }
 
 void EventManager::clear(EventChannel channel) {
   std::pmr::vector<QueuedEvent> &queue = stateFor(channel).queue;
   queue.clear();
-  if (allQueuesEmpty()) {
-    arena_.release();
-  }
+  releaseArenaIfIdle();
 }
 
 void EventManager::clear() {

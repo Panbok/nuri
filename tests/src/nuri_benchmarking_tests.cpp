@@ -395,8 +395,8 @@ std::string joinCheckDiagnostics(const std::vector<std::string> &messages) {
 GpuTimingReport makeOpaqueTimingReport(uint64_t frameIndex, float timeMs) {
   GpuTimingReport report{};
   report.availableScopeMask = gpuTimingScopeToBit(GpuTimingScope::Opaque);
-  report.opaqueSourceFrameIndex = frameIndex;
-  report.opaqueTimeMs = timeMs;
+  report[GpuTimingScope::Opaque].sourceFrameIndex = frameIndex;
+  report[GpuTimingScope::Opaque].timeMs = timeMs;
   return report;
 }
 
@@ -1889,8 +1889,12 @@ TEST(NuriBenchmarkingTest, ReportWritesReadsAndComputesMeasuredStats) {
   EXPECT_FALSE(
       loaded.value()
           .benchmarkCase.settings.antiAliasing.debug.spatialPostMsaaCleanup);
-  EXPECT_FALSE(
+  EXPECT_TRUE(
       loaded.value().benchmarkCase.settings.antiAliasing.postAA.enabled);
+  EXPECT_EQ(loaded.value().benchmarkCase.settings.antiAliasing.postAA.specular,
+            PostAASpecularAlgorithm::InheritCurrent);
+  EXPECT_EQ(loaded.value().benchmarkCase.settings.antiAliasing.postAA.spatial,
+            PostAASpatialAlgorithm::Smaa1x);
   const RenderSettings::DDGISettings &loadedDDGI =
       loaded.value().benchmarkCase.settings.ddgi;
   EXPECT_TRUE(loadedDDGI.enabled);
@@ -2349,11 +2353,11 @@ TEST(NuriBenchmarkingTest, FakeGpuTimingQueueDrainsAndTracksOverflow) {
 
   std::array<GpuTimingReport, 1u> one{};
   ASSERT_EQ(gpu.drainCompletedGpuTimingReports(one), 1u);
-  EXPECT_EQ(one[0].opaqueSourceFrameIndex, 1u);
-  EXPECT_FLOAT_EQ(one[0].opaqueTimeMs, 1.0f);
+  EXPECT_EQ(one[0][GpuTimingScope::Opaque].sourceFrameIndex, 1u);
+  EXPECT_FLOAT_EQ(one[0][GpuTimingScope::Opaque].timeMs, 1.0f);
 
   ASSERT_EQ(gpu.drainCompletedGpuTimingReports(one), 1u);
-  EXPECT_EQ(one[0].opaqueSourceFrameIndex, 2u);
+  EXPECT_EQ(one[0][GpuTimingScope::Opaque].sourceFrameIndex, 2u);
   EXPECT_EQ(gpu.drainCompletedGpuTimingReports(one), 0u);
 
   gpu.enqueueCompletedGpuTimingReport(makeOpaqueTimingReport(3u, 3.0f), 2u);
@@ -2363,9 +2367,11 @@ TEST(NuriBenchmarkingTest, FakeGpuTimingQueueDrainsAndTracksOverflow) {
 
   std::array<GpuTimingReport, 2u> two{};
   ASSERT_EQ(gpu.drainCompletedGpuTimingReports(two), 2u);
-  EXPECT_EQ(two[0].opaqueSourceFrameIndex, 4u);
-  EXPECT_EQ(two[1].opaqueSourceFrameIndex, 5u);
-  EXPECT_EQ(gpu.getLatestCompletedGpuTimingReport().opaqueSourceFrameIndex, 5u);
+  EXPECT_EQ(two[0][GpuTimingScope::Opaque].sourceFrameIndex, 4u);
+  EXPECT_EQ(two[1][GpuTimingScope::Opaque].sourceFrameIndex, 5u);
+  EXPECT_EQ(gpu.getLatestCompletedGpuTimingReport()[GpuTimingScope::Opaque]
+                .sourceFrameIndex,
+            5u);
 }
 
 } // namespace

@@ -1,6 +1,5 @@
 #include "tests_pch.h"
 
-#include "nuri/gfx/sim/simulation_gpu_context.h"
 #include "nuri/scene/render_scene.h"
 #include "nuri/scene_runtime/scene_runtime_host.h"
 #include "nuri/sim/simulation_scheduler.h"
@@ -305,36 +304,4 @@ TEST(SimulationRuntimeTests, BindingVersionTracksTopologyButNotTransforms) {
   (void)runtime.tick(
       {.frameDeltaSeconds = 0.0, .absoluteTimeSeconds = 0.0, .frameIndex = 2u});
   EXPECT_EQ(runtime.bindingVersion(), topologyBindingVersion);
-}
-
-TEST(SimulationRuntimeTests, GpuContextOnlyVersionsOnMeaningfulChanges) {
-  nuri::SimulationGpuContext context;
-  EXPECT_EQ(context.frameIndex(), 0u);
-  EXPECT_EQ(context.resourceVersion(), 0u);
-
-  context.beginFrame(7u);
-  EXPECT_EQ(context.frameIndex(), 7u);
-  EXPECT_EQ(context.resourceVersion(), 0u);
-
-  nuri::SimulationFrameGpuResources resources{};
-  resources.paramUpload.buffer = {.index = 1u, .generation = 1u};
-  resources.paramUpload.sizeBytes = 64u;
-  resources.writeback.buffer = {.index = 2u, .generation = 1u};
-  resources.writeback.offsetBytes = 32u;
-  resources.writeback.sizeBytes = 128u;
-
-  context.publishFrameResources(resources);
-  EXPECT_EQ(context.resourceVersion(), 1u);
-  EXPECT_EQ(context.frameResources().frameGeneration, 7u);
-  EXPECT_EQ(context.frameResources().resourceVersion, 1u);
-
-  context.publishFrameResources(resources);
-  EXPECT_EQ(context.resourceVersion(), 1u);
-
-  resources.dispatchMetadata.buffer = {.index = 3u, .generation = 1u};
-  resources.dispatchMetadata.sizeBytes = 16u;
-  context.publishFrameResources(resources);
-  EXPECT_EQ(context.resourceVersion(), 2u);
-  EXPECT_EQ(context.frameResources().frameGeneration, 7u);
-  EXPECT_EQ(context.frameResources().resourceVersion, 2u);
 }

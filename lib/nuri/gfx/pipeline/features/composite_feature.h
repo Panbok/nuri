@@ -173,21 +173,7 @@ public:
   Result<bool, std::string> build(FrameBuildContext &ctx);
 
 private:
-  Result<bool, std::string> ensureOutputTextures();
-  Result<bool, std::string> ensureBloomTextures(uint32_t requestedMipCount);
-  void destroyOutputTextures();
-  void destroyBloomTextures();
   FullscreenPassResources bloomResources_{};
-  std::vector<TextureHandle> outputTextures_{};
-  std::vector<std::vector<TextureHandle>> bloomDownsampleTextures_{};
-  std::vector<std::vector<TextureHandle>> bloomUpsampleTextures_{};
-  uint32_t outputWidth_ = 0u;
-  uint32_t outputHeight_ = 0u;
-  uint32_t outputRingCount_ = 0u;
-  uint32_t bloomWidth_ = 0u;
-  uint32_t bloomHeight_ = 0u;
-  uint32_t bloomRingCount_ = 0u;
-  uint32_t bloomMipCount_ = 0u;
 };
 
 NURI_API void

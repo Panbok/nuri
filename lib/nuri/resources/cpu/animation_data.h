@@ -1,9 +1,12 @@
 #pragma once
-#include "nuri/pch.h"
 #include <cstdint>
 #include <glm/glm.hpp>
 #include <limits>
 #include <memory_resource>
+#include <string>
+#include <type_traits>
+#include <utility>
+#include <vector>
 namespace nuri {
 
 enum class AnimationTargetPath : uint8_t {

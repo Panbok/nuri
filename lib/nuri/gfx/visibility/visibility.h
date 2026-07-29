@@ -232,18 +232,11 @@ struct VisibilityPassResult {
   void clear();
 };
 
-class NURI_API VisibilityFrameState {
-public:
-  explicit VisibilityFrameState(
-      std::pmr::memory_resource *memory = std::pmr::get_default_resource());
-  void clear();
-  [[nodiscard]] VisibilityPassResult
-  evaluateCpu(const VisibilityPassRequest &request,
-              std::span<const VisibilityCandidate> candidates);
-
-private:
-  std::pmr::memory_resource *memory_;
-};
+[[nodiscard]] NURI_API VisibilityPassResult evaluateCpuVisibility(
+    const VisibilityPassRequest &request,
+    std::span<const VisibilityCandidate> candidates,
+    std::span<const VisibilityCandidateGpu> cachedBounds = {},
+    std::pmr::memory_resource *memory = std::pmr::get_default_resource());
 
 [[nodiscard]] NURI_API VisibilityResolvedSettings
 visibilitySettingsFromRenderSettings(const RenderSettings &settings) noexcept;

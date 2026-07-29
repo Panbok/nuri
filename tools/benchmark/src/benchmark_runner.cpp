@@ -2192,10 +2192,10 @@ startRenderDocCaptureIfRequested(const BenchmarkRunOptions &options,
 [[nodiscard]] std::string_view
 resolveTelemetryPassName(const RenderGraphTelemetrySnapshot &snapshot,
                          uint32_t passIndex) {
-  if (passIndex >= snapshot.compile.passDebugNames.size()) {
+  if (passIndex >= snapshot.passDebugNames.size()) {
     return "unnamed_pass";
   }
-  const std::pmr::string &name = snapshot.compile.passDebugNames[passIndex];
+  const std::pmr::string &name = snapshot.passDebugNames[passIndex];
   return name.empty() ? std::string_view("unnamed_pass")
                       : std::string_view(name.data(), name.size());
 }
@@ -3361,7 +3361,7 @@ void addRendererFrameMetrics(BenchmarkFrameMeasurements &measurements,
   appendValue(
       measurements,
       NURI_BENCHMARK_METRIC("renderer.ddgi.surface_gather_architecture"),
-      static_cast<uint32_t>(ddgi.surfaceGatherArchitecture));
+      ddgi.opaqueGatherArchitecture);
   addIfNonzero(measurements, "renderer.ddgi.surface_gather_width",
                ddgi.surfaceGatherWidth);
   addIfNonzero(measurements, "renderer.ddgi.surface_gather_height",
@@ -3645,38 +3645,12 @@ void addRendererFrameMetrics(BenchmarkFrameMeasurements &measurements,
       appendValue(measurements,
                   registeredMetricIndex(prefix + std::string(suffix)), value);
     };
-    addVolumeMetric("active", volume.active);
-    addVolumeMetric("effective_kind", volume.effectiveKind);
-    addVolumeMetric("tier", volume.tier);
-    addVolumeMetric("cascade_index", volume.cascadeIndex);
-    addVolumeMetric("total_probes", volume.totalProbes);
-    addVolumeMetric("initialized_probes", volume.initializedProbes);
-    addVolumeMetric("shading_enabled_probes", volume.shadingEnabledProbes);
-    addVolumeMetric("invalid_probes", volume.invalidProbes);
-    addVolumeMetric("newly_exposed_probes", volume.newlyExposedProbes);
-    addVolumeMetric("updates", volume.updates);
-    addVolumeMetric("primary_queries", volume.primaryQueries);
-    addVolumeMetric("primary_queries_issued", volume.primaryQueriesIssued);
-    addVolumeMetric("secondary_queries", volume.secondaryQueries);
-    addVolumeMetric("update_age_median", volume.updateAgeMedian);
-    addVolumeMetric("update_age_p95", volume.updateAgeP95);
-    addVolumeMetric("update_age_maximum", volume.updateAgeMaximum);
-    addVolumeMetric("scheduled_quota", volume.scheduledQuota);
-    addVolumeMetric("used_quota", volume.usedQuota);
-    addVolumeMetric("deficit", static_cast<double>(volume.deficit));
-    addVolumeMetric("starvation_frames", volume.starvationFrames);
-    addVolumeMetric("estimated_full_refresh_frames",
-                    volume.estimatedFullRefreshFrames);
+    for (const auto &[suffix, value] : ddgiVolumeMetricValues(volume)) {
+      addVolumeMetric(suffix, value);
+    }
     addVolumeMetric("persistent_mb",
                     static_cast<double>(volume.persistentBytes) /
                         (1024.0 * 1024.0));
-    addVolumeMetric("unique_coverage_percentage",
-                    volume.uniqueCoveragePercentage);
-    addVolumeMetric("redundant_coverage", volume.redundantCoverage);
-    addVolumeMetric("history_ready_percentage", volume.historyReadyPercentage);
-    addVolumeMetric("coverage_ready_percentage",
-                    volume.coverageReadyPercentage);
-    addVolumeMetric("confidence", volume.confidence);
   }
   const uint64_t estimatedFrameTextureBytes =
       shadow.cascadeTextureBytes + aa.motionVectorTotalBytes +
@@ -3745,12 +3719,10 @@ void addRenderGraphTelemetryMetrics(BenchmarkFrameMeasurements &measurements,
            summary.transientTexturePhysicalAllocationCount);
   addCount("rendergraph.summary.transient_buffer_physical_allocation_count",
            summary.transientBufferPhysicalAllocationCount);
-  addCount("rendergraph.summary.unresolved_texture_binding_count",
-           summary.unresolvedTextureBindingCount);
+  addCount("rendergraph.summary.command_resource_patch_count",
+           summary.commandResourcePatchCount);
   addCount("rendergraph.summary.resolved_dependency_buffer_slot_count",
            summary.resolvedDependencyBufferSlotCount);
-  addCount("rendergraph.summary.unresolved_dependency_buffer_binding_count",
-           summary.unresolvedDependencyBufferBindingCount);
   addCount("rendergraph.summary.owned_pre_dispatch_count",
            summary.ownedPreDispatchCount);
   addCount("rendergraph.summary.owned_draw_item_count",
@@ -3761,11 +3733,11 @@ void addRenderGraphTelemetryMetrics(BenchmarkFrameMeasurements &measurements,
   for (const RenderGraphPassExecutionTiming &timing :
        snapshot->execution.passTimings) {
     const uint32_t orderedPassIndex = timing.orderedPassIndex;
-    if (orderedPassIndex >= snapshot->compile.orderedPassIndices.size()) {
+    if (orderedPassIndex >= snapshot->plan.orderedPassIndices.size()) {
       continue;
     }
     const uint32_t declaredPassIndex =
-        snapshot->compile.orderedPassIndices[orderedPassIndex];
+        snapshot->plan.orderedPassIndices[orderedPassIndex];
     const std::string_view passName =
         resolveTelemetryPassName(*snapshot, declaredPassIndex);
     measurements.appendOwned(
@@ -3949,140 +3921,163 @@ void applyGpuTimingReport(BenchmarkReport &report,
         index, static_cast<double>(ms));
   };
   add(NURI_BENCHMARK_METRIC("gpu.frame_ms"), GpuTimingScope::WholeFrame,
-      timingReport.wholeFrameSourceFrameIndex, timingReport.wholeFrameTimeMs);
+      timingReport[GpuTimingScope::WholeFrame].sourceFrameIndex,
+      timingReport[GpuTimingScope::WholeFrame].timeMs);
   const bool shadowAdded =
       add(NURI_BENCHMARK_METRIC("gpu.scopes.shadow_ms"), GpuTimingScope::Shadow,
-          timingReport.shadowSourceFrameIndex, timingReport.shadowTimeMs);
+          timingReport[GpuTimingScope::Shadow].sourceFrameIndex,
+          timingReport[GpuTimingScope::Shadow].timeMs);
   add(NURI_BENCHMARK_METRIC("gpu.scopes.shadow_depth_ms"),
-      GpuTimingScope::ShadowDepth, timingReport.shadowDepthSourceFrameIndex,
-      timingReport.shadowDepthTimeMs);
+      GpuTimingScope::ShadowDepth,
+      timingReport[GpuTimingScope::ShadowDepth].sourceFrameIndex,
+      timingReport[GpuTimingScope::ShadowDepth].timeMs);
   add(NURI_BENCHMARK_METRIC("gpu.scopes.shadow_sdsm_ms"),
-      GpuTimingScope::ShadowSdsm, timingReport.shadowSdsmSourceFrameIndex,
-      timingReport.shadowSdsmTimeMs);
+      GpuTimingScope::ShadowSdsm,
+      timingReport[GpuTimingScope::ShadowSdsm].sourceFrameIndex,
+      timingReport[GpuTimingScope::ShadowSdsm].timeMs);
   const bool opaqueAdded =
       add(NURI_BENCHMARK_METRIC("gpu.scopes.opaque_ms"), GpuTimingScope::Opaque,
-          timingReport.opaqueSourceFrameIndex, timingReport.opaqueTimeMs);
+          timingReport[GpuTimingScope::Opaque].sourceFrameIndex,
+          timingReport[GpuTimingScope::Opaque].timeMs);
   const bool opaqueDepthAdded =
       add(NURI_BENCHMARK_METRIC("gpu.scopes.opaque_depth_ms"),
-          GpuTimingScope::OpaqueDepth, timingReport.opaqueDepthSourceFrameIndex,
-          timingReport.opaqueDepthTimeMs);
-  const bool opaqueNormalAdded = add(
-      NURI_BENCHMARK_METRIC("gpu.scopes.opaque_normal_ms"),
-      GpuTimingScope::OpaqueNormal, timingReport.opaqueNormalSourceFrameIndex,
-      timingReport.opaqueNormalTimeMs);
+          GpuTimingScope::OpaqueDepth,
+          timingReport[GpuTimingScope::OpaqueDepth].sourceFrameIndex,
+          timingReport[GpuTimingScope::OpaqueDepth].timeMs);
+  const bool opaqueNormalAdded =
+      add(NURI_BENCHMARK_METRIC("gpu.scopes.opaque_normal_ms"),
+          GpuTimingScope::OpaqueNormal,
+          timingReport[GpuTimingScope::OpaqueNormal].sourceFrameIndex,
+          timingReport[GpuTimingScope::OpaqueNormal].timeMs);
   addAlias(NURI_BENCHMARK_METRIC("renderer.ao.input_ms"),
            GpuTimingScope::OpaqueNormal,
-           timingReport.opaqueNormalSourceFrameIndex,
-           timingReport.opaqueNormalTimeMs);
+           timingReport[GpuTimingScope::OpaqueNormal].sourceFrameIndex,
+           timingReport[GpuTimingScope::OpaqueNormal].timeMs);
   const bool opaqueMainAdded =
       add(NURI_BENCHMARK_METRIC("gpu.scopes.opaque_main_ms"),
-          GpuTimingScope::OpaqueMain, timingReport.opaqueMainSourceFrameIndex,
-          timingReport.opaqueMainTimeMs);
+          GpuTimingScope::OpaqueMain,
+          timingReport[GpuTimingScope::OpaqueMain].sourceFrameIndex,
+          timingReport[GpuTimingScope::OpaqueMain].timeMs);
   const bool gtaoAdded =
       add(NURI_BENCHMARK_METRIC("gpu.scopes.gtao_ms"), GpuTimingScope::GTAO,
-          timingReport.gtaoSourceFrameIndex, timingReport.gtaoTimeMs);
+          timingReport[GpuTimingScope::GTAO].sourceFrameIndex,
+          timingReport[GpuTimingScope::GTAO].timeMs);
   add(NURI_BENCHMARK_METRIC("renderer.ao.prefilter_edges_ms"),
       GpuTimingScope::GTAOPrefilterEdges,
-      timingReport.gtaoPrefilterEdgesSourceFrameIndex,
-      timingReport.gtaoPrefilterEdgesTimeMs);
+      timingReport[GpuTimingScope::GTAOPrefilterEdges].sourceFrameIndex,
+      timingReport[GpuTimingScope::GTAOPrefilterEdges].timeMs);
   add(NURI_BENCHMARK_METRIC("renderer.ao.main_ms"), GpuTimingScope::GTAOMain,
-      timingReport.gtaoMainSourceFrameIndex, timingReport.gtaoMainTimeMs);
+      timingReport[GpuTimingScope::GTAOMain].sourceFrameIndex,
+      timingReport[GpuTimingScope::GTAOMain].timeMs);
   add(NURI_BENCHMARK_METRIC("renderer.ao.denoise_ms"),
-      GpuTimingScope::GTAODenoise, timingReport.gtaoDenoiseSourceFrameIndex,
-      timingReport.gtaoDenoiseTimeMs);
+      GpuTimingScope::GTAODenoise,
+      timingReport[GpuTimingScope::GTAODenoise].sourceFrameIndex,
+      timingReport[GpuTimingScope::GTAODenoise].timeMs);
   add(NURI_BENCHMARK_METRIC("renderer.ao.upscale_ms"),
-      GpuTimingScope::GTAOUpscale, timingReport.gtaoUpscaleSourceFrameIndex,
-      timingReport.gtaoUpscaleTimeMs);
+      GpuTimingScope::GTAOUpscale,
+      timingReport[GpuTimingScope::GTAOUpscale].sourceFrameIndex,
+      timingReport[GpuTimingScope::GTAOUpscale].timeMs);
   const bool msaaResolveAdded =
       add(NURI_BENCHMARK_METRIC("gpu.scopes.msaa_resolve_ms"),
-          GpuTimingScope::MsaaResolve, timingReport.msaaResolveSourceFrameIndex,
-          timingReport.msaaResolveTimeMs);
+          GpuTimingScope::MsaaResolve,
+          timingReport[GpuTimingScope::MsaaResolve].sourceFrameIndex,
+          timingReport[GpuTimingScope::MsaaResolve].timeMs);
   add(NURI_BENCHMARK_METRIC("gpu.scopes.scene_color_downsample_ms"),
       GpuTimingScope::SceneColorDownsample,
-      timingReport.sceneColorDownsampleSourceFrameIndex,
-      timingReport.sceneColorDownsampleTimeMs);
+      timingReport[GpuTimingScope::SceneColorDownsample].sourceFrameIndex,
+      timingReport[GpuTimingScope::SceneColorDownsample].timeMs);
   add(NURI_BENCHMARK_METRIC("gpu.scopes.taa_resolve_ms"),
       GpuTimingScope::TemporalAAResolve,
-      timingReport.temporalAAResolveSourceFrameIndex,
-      timingReport.temporalAAResolveTimeMs);
+      timingReport[GpuTimingScope::TemporalAAResolve].sourceFrameIndex,
+      timingReport[GpuTimingScope::TemporalAAResolve].timeMs);
   add(NURI_BENCHMARK_METRIC("gpu.scopes.taa_debug_ms"),
       GpuTimingScope::TemporalAADebug,
-      timingReport.temporalAADebugSourceFrameIndex,
-      timingReport.temporalAADebugTimeMs);
+      timingReport[GpuTimingScope::TemporalAADebug].sourceFrameIndex,
+      timingReport[GpuTimingScope::TemporalAADebug].timeMs);
   add(NURI_BENCHMARK_METRIC("gpu.scopes.spatial_aa_ms"),
-      GpuTimingScope::SpatialAA, timingReport.spatialAASourceFrameIndex,
-      timingReport.spatialAATimeMs);
-  const bool transmissionAdded = add(
-      NURI_BENCHMARK_METRIC("gpu.scopes.transmission_ms"),
-      GpuTimingScope::Transmission, timingReport.transmissionSourceFrameIndex,
-      timingReport.transmissionTimeMs);
+      GpuTimingScope::SpatialAA,
+      timingReport[GpuTimingScope::SpatialAA].sourceFrameIndex,
+      timingReport[GpuTimingScope::SpatialAA].timeMs);
+  const bool transmissionAdded =
+      add(NURI_BENCHMARK_METRIC("gpu.scopes.transmission_ms"),
+          GpuTimingScope::Transmission,
+          timingReport[GpuTimingScope::Transmission].sourceFrameIndex,
+          timingReport[GpuTimingScope::Transmission].timeMs);
   add(NURI_BENCHMARK_METRIC("gpu.scopes.hdr_postprocess_ms"),
       GpuTimingScope::HDRPostProcess,
-      timingReport.hdrPostProcessSourceFrameIndex,
-      timingReport.hdrPostProcessTimeMs);
+      timingReport[GpuTimingScope::HDRPostProcess].sourceFrameIndex,
+      timingReport[GpuTimingScope::HDRPostProcess].timeMs);
   add(NURI_BENCHMARK_METRIC("gpu.scopes.skybox_ms"), GpuTimingScope::Skybox,
-      timingReport.skyboxSourceFrameIndex, timingReport.skyboxTimeMs);
+      timingReport[GpuTimingScope::Skybox].sourceFrameIndex,
+      timingReport[GpuTimingScope::Skybox].timeMs);
   add(NURI_BENCHMARK_METRIC("gpu.scopes.velocity_ms"), GpuTimingScope::Velocity,
-      timingReport.velocitySourceFrameIndex, timingReport.velocityTimeMs);
+      timingReport[GpuTimingScope::Velocity].sourceFrameIndex,
+      timingReport[GpuTimingScope::Velocity].timeMs);
   add(NURI_BENCHMARK_METRIC("gpu.scopes.reactive_mask_ms"),
-      GpuTimingScope::ReactiveMask, timingReport.reactiveMaskSourceFrameIndex,
-      timingReport.reactiveMaskTimeMs);
+      GpuTimingScope::ReactiveMask,
+      timingReport[GpuTimingScope::ReactiveMask].sourceFrameIndex,
+      timingReport[GpuTimingScope::ReactiveMask].timeMs);
   add(NURI_BENCHMARK_METRIC("gpu.scopes.taa_copy_back_ms"),
       GpuTimingScope::TemporalAACopyBack,
-      timingReport.temporalAACopyBackSourceFrameIndex,
-      timingReport.temporalAACopyBackTimeMs);
+      timingReport[GpuTimingScope::TemporalAACopyBack].sourceFrameIndex,
+      timingReport[GpuTimingScope::TemporalAACopyBack].timeMs);
   add(NURI_BENCHMARK_METRIC("gpu.scopes.gtao_temporal_ms"),
-      GpuTimingScope::GTAOTemporal, timingReport.gtaoTemporalSourceFrameIndex,
-      timingReport.gtaoTemporalTimeMs);
+      GpuTimingScope::GTAOTemporal,
+      timingReport[GpuTimingScope::GTAOTemporal].sourceFrameIndex,
+      timingReport[GpuTimingScope::GTAOTemporal].timeMs);
   addAlias(NURI_BENCHMARK_METRIC("renderer.ao.temporal_ms"),
            GpuTimingScope::GTAOTemporal,
-           timingReport.gtaoTemporalSourceFrameIndex,
-           timingReport.gtaoTemporalTimeMs);
+           timingReport[GpuTimingScope::GTAOTemporal].sourceFrameIndex,
+           timingReport[GpuTimingScope::GTAOTemporal].timeMs);
   addAlias(NURI_BENCHMARK_METRIC("renderer.ao.upscale_ms"),
            GpuTimingScope::GTAOTemporal,
-           timingReport.gtaoTemporalSourceFrameIndex,
-           timingReport.gtaoTemporalTimeMs);
+           timingReport[GpuTimingScope::GTAOTemporal].sourceFrameIndex,
+           timingReport[GpuTimingScope::GTAOTemporal].timeMs);
   add(NURI_BENCHMARK_METRIC("gpu.scopes.ray_tracing_scene_ms"),
       GpuTimingScope::RayTracingScene,
-      timingReport.rayTracingSceneSourceFrameIndex,
-      timingReport.rayTracingSceneTimeMs);
+      timingReport[GpuTimingScope::RayTracingScene].sourceFrameIndex,
+      timingReport[GpuTimingScope::RayTracingScene].timeMs);
   add(NURI_BENCHMARK_METRIC("gpu.scopes.ray_tracing_blas_ms"),
       GpuTimingScope::RayTracingBLAS,
-      timingReport.rayTracingBlasSourceFrameIndex,
-      timingReport.rayTracingBlasTimeMs);
+      timingReport[GpuTimingScope::RayTracingBLAS].sourceFrameIndex,
+      timingReport[GpuTimingScope::RayTracingBLAS].timeMs);
   add(NURI_BENCHMARK_METRIC("gpu.scopes.ray_tracing_tlas_ms"),
       GpuTimingScope::RayTracingTLAS,
-      timingReport.rayTracingTlasSourceFrameIndex,
-      timingReport.rayTracingTlasTimeMs);
+      timingReport[GpuTimingScope::RayTracingTLAS].sourceFrameIndex,
+      timingReport[GpuTimingScope::RayTracingTLAS].timeMs);
   add(NURI_BENCHMARK_METRIC("gpu.scopes.ddgi_ms"), GpuTimingScope::DDGI,
-      timingReport.ddgiSourceFrameIndex, timingReport.ddgiTimeMs);
+      timingReport[GpuTimingScope::DDGI].sourceFrameIndex,
+      timingReport[GpuTimingScope::DDGI].timeMs);
   add(NURI_BENCHMARK_METRIC("gpu.scopes.ddgi_trace_ms"),
-      GpuTimingScope::DDGITrace, timingReport.ddgiTraceSourceFrameIndex,
-      timingReport.ddgiTraceTimeMs);
+      GpuTimingScope::DDGITrace,
+      timingReport[GpuTimingScope::DDGITrace].sourceFrameIndex,
+      timingReport[GpuTimingScope::DDGITrace].timeMs);
   add(NURI_BENCHMARK_METRIC("gpu.scopes.ddgi_update_ms"),
-      GpuTimingScope::DDGIUpdate, timingReport.ddgiUpdateSourceFrameIndex,
-      timingReport.ddgiUpdateTimeMs);
+      GpuTimingScope::DDGIUpdate,
+      timingReport[GpuTimingScope::DDGIUpdate].sourceFrameIndex,
+      timingReport[GpuTimingScope::DDGIUpdate].timeMs);
   add(NURI_BENCHMARK_METRIC("gpu.scopes.ddgi_irradiance_update_ms"),
       GpuTimingScope::DDGIIrradianceUpdate,
-      timingReport.ddgiIrradianceUpdateSourceFrameIndex,
-      timingReport.ddgiIrradianceUpdateTimeMs);
+      timingReport[GpuTimingScope::DDGIIrradianceUpdate].sourceFrameIndex,
+      timingReport[GpuTimingScope::DDGIIrradianceUpdate].timeMs);
   add(NURI_BENCHMARK_METRIC("gpu.scopes.ddgi_distance_update_ms"),
       GpuTimingScope::DDGIDistanceUpdate,
-      timingReport.ddgiDistanceUpdateSourceFrameIndex,
-      timingReport.ddgiDistanceUpdateTimeMs);
+      timingReport[GpuTimingScope::DDGIDistanceUpdate].sourceFrameIndex,
+      timingReport[GpuTimingScope::DDGIDistanceUpdate].timeMs);
   add(NURI_BENCHMARK_METRIC("gpu.scopes.ddgi_relocate_classify_ms"),
       GpuTimingScope::DDGIRelocateClassify,
-      timingReport.ddgiRelocateClassifySourceFrameIndex,
-      timingReport.ddgiRelocateClassifyTimeMs);
+      timingReport[GpuTimingScope::DDGIRelocateClassify].sourceFrameIndex,
+      timingReport[GpuTimingScope::DDGIRelocateClassify].timeMs);
   add(NURI_BENCHMARK_METRIC("gpu.scopes.ddgi_readback_ms"),
-      GpuTimingScope::DDGIReadback, timingReport.ddgiReadbackSourceFrameIndex,
-      timingReport.ddgiReadbackTimeMs);
+      GpuTimingScope::DDGIReadback,
+      timingReport[GpuTimingScope::DDGIReadback].sourceFrameIndex,
+      timingReport[GpuTimingScope::DDGIReadback].timeMs);
   add(NURI_BENCHMARK_METRIC("gpu.scopes.ddgi_surface_cache_ms"),
       GpuTimingScope::DDGIOpaqueSurfaceCache,
-      timingReport.ddgiOpaqueSurfaceCacheSourceFrameIndex,
-      timingReport.ddgiOpaqueSurfaceCacheTimeMs);
-  if (const auto frameIt =
-          frameByIndex.find(timingReport.wholeFrameSourceFrameIndex);
+      timingReport[GpuTimingScope::DDGIOpaqueSurfaceCache].sourceFrameIndex,
+      timingReport[GpuTimingScope::DDGIOpaqueSurfaceCache].timeMs);
+  if (const auto frameIt = frameByIndex.find(
+          timingReport[GpuTimingScope::WholeFrame].sourceFrameIndex);
       frameIt != frameByIndex.end()) {
     auto &measurements = report.frames[frameIt->second].measurements;
     const auto addAbsentPhase = [&](BenchmarkMetricIndex index, bool added) {
@@ -4664,14 +4659,15 @@ void buildFrameContext(RenderFrameContext &frameContext, RenderScene &scene,
       .materialTableVersion = materialSnapshot.version,
       .environmentVersion = scene.environmentVersion(),
   };
+  ResolvedRenderSettings resolvedSettings = resolveRenderSettings(settings);
   auto planResult = buildPresentationAAPlan(
-      settings, {}, renderer.resources().gpuMultisampleCapabilities());
+      resolvedSettings, {}, renderer.resources().gpuMultisampleCapabilities());
   NURI_ASSERT(!planResult.hasError(), "Invalid presentation AA plan: %s",
               planResult.error().c_str());
   frameContext.presentationAA = planResult.value();
   auto cameraResult = temporalFrameService.prepareFrame(
       camera, static_cast<float>(width) / static_cast<float>(height),
-      settings.antiAliasing, frameContext.presentationAA,
+      resolvedSettings.antiAliasing, frameContext.presentationAA,
       TemporalCameraFrameDesc{
           .renderExtent = glm::uvec2(width, height),
           .sceneContent = sceneContent,
@@ -4682,7 +4678,8 @@ void buildFrameContext(RenderFrameContext &frameContext, RenderScene &scene,
   frameContext.camera = cameraResult.value();
   frameContext.temporalFrameService = &temporalFrameService;
   settings.antiAliasing.debug.resetHistoryRequested = false;
-  frameContext.settings = &settings;
+  resolvedSettings.antiAliasing.debug.resetHistoryRequested = false;
+  frameContext.settings = std::move(resolvedSettings);
   frameContext.metrics = {};
   frameContext.metrics.frameIndex = frameContext.frameIndex;
   frameContext.metrics.antiAliasing =

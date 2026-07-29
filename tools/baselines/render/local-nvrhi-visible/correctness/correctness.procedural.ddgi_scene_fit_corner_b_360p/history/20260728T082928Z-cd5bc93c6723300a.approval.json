@@ -1,0 +1,29 @@
+{
+    "schemaVersion": 1,
+    "kind": "nuri.baseline.approval",
+    "caseId": "correctness.procedural.ddgi_scene_fit_corner_b_360p",
+    "suite": "correctness",
+    "profileId": "local-nvrhi-visible",
+    "backend": "default",
+    "resolvedBackend": "nvrhi",
+    "reason": "User-authorized stable DDGI visual baseline; Hybrid coverage excluded in favor of SceneFit",
+    "actor": "Codex",
+    "approvedAtUtc": "2026-07-28T08:29:28Z",
+    "sourceCommit": "698d4e86f6923f1ca26185f3b1a5c1045273740d",
+    "sourceDigest": "sha256:f13228a18e812d7a20902e56817c8f7a2fecb34b5998c0054c13100e9a328797",
+    "planDigest": "sha256:cd5bc93c6723300a55c5c44608b6dc85cfb605d81528a9ee65b5ba544d5d4b9d",
+    "captures": [
+        {
+            "target": "final_color",
+            "newHash": "sha256:0f8ee3c0fa130ecf16e3149914855eb3648ee993b7fdc0182152393dfda4ccf6"
+        },
+        {
+            "target": "ddgi_coverage_debug_preview",
+            "newHash": "sha256:e3307336421d9e2b687f7b8295092f85753baebde09d6b150d88d6ebbc87b17a"
+        },
+        {
+            "target": "ddgi_volume0_distance_atlas",
+            "newHash": "sha256:169024b897174f78a82d3b90092dc62f53ce2c5718973f8616ab13c4f4c13068"
+        }
+    ]
+}

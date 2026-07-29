@@ -1,15 +1,10 @@
 #include "nuri/resources/storage/mesh/mesh_binary_serializer.h"
 #include "nuri/core/pmr_scratch.h"
-#include "nuri/pch.h"
 #include "nuri/resources/storage/binary_io.h"
 #include "nuri/resources/storage/mesh/mesh_binary_format.h"
 namespace nuri {
 namespace {
 constexpr uint64_t kMeshBinarySectionAlignment = 16u;
-[[nodiscard]] constexpr uint64_t alignSection(uint64_t value) {
-  return (value + kMeshBinarySectionAlignment - 1u) &
-         ~(kMeshBinarySectionAlignment - 1u);
-}
 template <typename T, typename... Args>
   requires(!std::is_same_v<T, MeshBinaryDecodedMesh>)
 [[nodiscard]] Result<T, std::string> makeSerializerError(Args &&...args) {
@@ -350,13 +345,9 @@ sectionSizeMatchesCountStride(const MeshBinarySectionTocEntry &entry) {
   return static_cast<uint64_t>(entry.count) * entry.stride == entry.sizeBytes;
 }
 [[nodiscard]] Result<SectionTable, MeshBinaryDeserializeError>
-indexSections(std::span<const MeshBinarySectionTocEntry> toc, size_t fileSize) {
+indexSections(std::span<const MeshBinarySectionTocEntry> toc) {
   SectionTable sections{};
   for (const MeshBinarySectionTocEntry &entry : toc) {
-    if (!binaryRangeValid(fileSize, entry.offset, entry.sizeBytes)) {
-      return makeDeserializeError<SectionTable>(
-          "meshBinaryDeserialize: invalid section range");
-    }
     const auto found = std::ranges::find(kSectionFourcc, entry.fourcc);
     if (found == kSectionFourcc.end()) {
       continue;
@@ -595,31 +586,6 @@ meshBinarySerialize(const MeshBinarySerializeInput &input) {
       return makeSerializerError<std::vector<std::byte>>(sectionError);
     }
   }
-  const uint64_t tocCount = static_cast<uint64_t>(sections.size());
-  const uint64_t tocBytes = tocCount * sizeof(MeshBinarySectionTocEntry);
-  const uint64_t sectionStart =
-      alignSection(sizeof(MeshBinaryHeader) + tocBytes);
-  std::pmr::vector<MeshBinarySectionTocEntry> tocEntries(
-      scopedScratch.resource());
-  tocEntries.resize(sections.size());
-  uint64_t cursor = sectionStart;
-  for (size_t i = 0; i < sections.size(); ++i) {
-    cursor = alignSection(cursor);
-    const SerializedSection &section = sections[i];
-    MeshBinarySectionTocEntry &entry = tocEntries[i];
-    entry.fourcc = section.fourcc;
-    entry.flags = section.flags;
-    entry.offset = cursor;
-    entry.sizeBytes = static_cast<uint64_t>(section.payload.size());
-    entry.count = section.count;
-    entry.stride = section.stride;
-    cursor += entry.sizeBytes;
-  }
-  const uint64_t fileSize = alignSection(cursor);
-  if (fileSize > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
-    return makeSerializerError<std::vector<std::byte>>(
-        "meshBinarySerialize: file size exceeds platform limits");
-  }
   MeshBinaryHeader header{};
   header.magic = kMeshBinaryMagic;
   header.majorVersion = kMeshBinaryFormatMajorVersion;
@@ -629,9 +595,6 @@ meshBinarySerialize(const MeshBinarySerializeInput &input) {
       static_cast<uint16_t>(sizeof(MeshBinarySectionTocEntry));
   header.flags =
       kBinaryHeaderFlagLittleEndian | kMeshBinaryHeaderFlagCompressed;
-  header.fileSize = fileSize;
-  header.tocOffset = sizeof(MeshBinaryHeader);
-  header.tocCount = static_cast<uint32_t>(tocEntries.size());
   header.sourcePathHash = input.sourcePathHash;
   header.importOptionsHash = input.importOptionsHash;
   header.sourceSizeBytes = input.sourceSizeBytes;
@@ -642,21 +605,17 @@ meshBinarySerialize(const MeshBinarySerializeInput &input) {
   header.modelBoundsMax[0] = input.bounds.max_.x;
   header.modelBoundsMax[1] = input.bounds.max_.y;
   header.modelBoundsMax[2] = input.bounds.max_.z;
-  std::vector<std::byte> fileBytes;
-  fileBytes.resize(static_cast<size_t>(fileSize), std::byte{0});
-  std::memcpy(fileBytes.data(), &header, sizeof(header));
-  std::memcpy(fileBytes.data() + static_cast<size_t>(header.tocOffset),
-              tocEntries.data(), static_cast<size_t>(tocBytes));
-  for (size_t i = 0; i < sections.size(); ++i) {
-    const MeshBinarySectionTocEntry &entry = tocEntries[i];
-    const SerializedSection &section = sections[i];
-    if (!section.payload.empty()) {
-      std::memcpy(fileBytes.data() + static_cast<size_t>(entry.offset),
-                  section.payload.data(), section.payload.size());
-    }
+  std::pmr::vector<BinarySection> sectionViews(scopedScratch.resource());
+  sectionViews.reserve(sections.size());
+  for (const SerializedSection &section : sections) {
+    sectionViews.push_back({.fourcc = section.fourcc,
+                            .flags = section.flags,
+                            .count = section.count,
+                            .stride = section.stride,
+                            .payload = section.payload});
   }
-  return Result<std::vector<std::byte>, std::string>::makeResult(
-      std::move(fileBytes));
+  return writeSectionedBinary<MeshBinaryHeader, MeshBinarySectionTocEntry>(
+      header, sectionViews, kMeshBinarySectionAlignment, "meshBinarySerialize");
 }
 
 Result<MeshBinaryDecodedMesh, MeshBinaryDeserializeError>
@@ -689,15 +648,13 @@ meshBinaryDeserialize(std::span<const std::byte> fileBytes,
         MeshBinaryDeserializeErrorCode::StaleCache,
         "meshBinaryDeserialize: cache is stale for current source file");
   }
-  const uint64_t tocBytes = static_cast<uint64_t>(header.tocCount) *
-                            sizeof(MeshBinarySectionTocEntry);
-  if (!binaryRangeValid(fileBytes.size(), header.tocOffset, tocBytes)) {
-    return makeDeserializeError<MeshBinaryDecodedMesh>(
-        "meshBinaryDeserialize: invalid TOC bounds");
-  }
   std::pmr::vector<MeshBinarySectionTocEntry> toc(scopedScratch.resource());
-  readPodArrayAt(fileBytes, header.tocOffset, header.tocCount, toc);
-  auto sectionResult = indexSections(toc, fileBytes.size());
+  auto tocResult = readSectionToc(fileBytes, header.tocOffset, header.tocCount,
+                                  toc, "meshBinaryDeserialize");
+  if (tocResult.hasError()) {
+    return makeDeserializeError<MeshBinaryDecodedMesh>(tocResult.error());
+  }
+  auto sectionResult = indexSections(toc);
   if (sectionResult.hasError()) {
     return Result<MeshBinaryDecodedMesh, MeshBinaryDeserializeError>::makeError(
         sectionResult.error());

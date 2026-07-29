@@ -4,7 +4,7 @@
 #include "nuri/gfx/dynamic_buffer.h"
 #include "nuri/gfx/gpu_render_types.h"
 #include "nuri/gfx/gpu_types.h"
-#include "nuri/gfx/render_graph/render_graph.h"
+#include "nuri/gfx/owned_gpu_resource.h"
 #include "nuri/math/types.h"
 #include <cstdint>
 #include <glm/glm.hpp>
@@ -18,11 +18,6 @@ public:
                        std::pmr::memory_resource *memoryResource =
                            std::pmr::get_default_resource());
   ~DebugDraw3D();
-  struct PreparedGraphPass {
-    RenderGraphGraphicsPassDesc desc{};
-    TextureHandle colorTextureHandle{};
-    TextureHandle depthTextureHandle{};
-  };
   DebugDraw3D(const DebugDraw3D &) = delete;
   DebugDraw3D &operator=(const DebugDraw3D &) = delete;
   DebugDraw3D(DebugDraw3D &&) = delete;
@@ -37,10 +32,14 @@ public:
   void frustum(const glm::mat4 &camView, const glm::mat4 &camProj,
                const glm::vec4 &color);
   void setMatrix(const glm::mat4 &mvp) { mvp_ = mvp; }
-  [[nodiscard]] Result<PreparedGraphPass, std::string>
-  buildGraphPass(uint64_t frameIndex, TextureHandle depthTexture,
-                 Format colorFormat = Format::Count,
-                 bool enableDepthTest = true);
+  [[nodiscard]] Result<bool, std::string>
+  prepareDraw(uint64_t frameIndex, TextureHandle depthTexture,
+              Format colorFormat, bool enableDepthTest, DrawItem &outDraw,
+              BufferHandle &outDependency);
+  void onFrameSubmitted(SubmissionHandle submission) noexcept {
+    lineBuffers_.submitPrepared(submission);
+  }
+  void onFrameAbandoned() noexcept { lineBuffers_.abandonPrepared(); }
 
 private:
   struct LineData {
@@ -57,14 +56,12 @@ private:
   GPUDevice &gpu_;
   glm::mat4 mvp_ = glm::mat4(1.0f);
   std::pmr::vector<LineData> lines_;
-  std::pmr::vector<DynamicBufferSlot> frameBuffers_;
-  std::array<ShaderHandle, 2u> shaders_{};
-  RenderPipelineHandle pipeline_{};
+  DynamicBufferRing lineBuffers_;
+  std::array<OwnedShaderHandle, 2u> shaders_{};
+  OwnedRenderPipelineHandle pipeline_{};
   Format pipelineColorFormat_ = Format::Count;
   Format pipelineDepthFormat_ = Format::Count;
   PushConstants pushConstants_{};
-  DrawItem drawItem_{};
-  BufferHandle dependencyBuffer_{};
 };
 
 } // namespace nuri

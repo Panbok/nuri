@@ -1268,14 +1268,15 @@ void buildFrameContext(RenderFrameContext &frameContext, RenderScene &scene,
       .materialTableVersion = materialSnapshot.version,
       .environmentVersion = scene.environmentVersion(),
   };
+  ResolvedRenderSettings resolvedSettings = resolveRenderSettings(settings);
   auto planResult = buildPresentationAAPlan(
-      settings, {}, renderer.resources().gpuMultisampleCapabilities());
+      resolvedSettings, {}, renderer.resources().gpuMultisampleCapabilities());
   NURI_ASSERT(!planResult.hasError(), "Invalid presentation AA plan: %s",
               planResult.error().c_str());
   frameContext.presentationAA = planResult.value();
   auto cameraResult = temporalFrameService.prepareFrame(
       camera, static_cast<float>(width) / static_cast<float>(height),
-      settings.antiAliasing, frameContext.presentationAA,
+      resolvedSettings.antiAliasing, frameContext.presentationAA,
       TemporalCameraFrameDesc{.renderExtent = glm::uvec2(width, height),
                               .sceneContent = sceneContent},
       frameIndex, timeSeconds, deltaSeconds);
@@ -1284,7 +1285,8 @@ void buildFrameContext(RenderFrameContext &frameContext, RenderScene &scene,
   frameContext.camera = cameraResult.value();
   frameContext.temporalFrameService = &temporalFrameService;
   settings.antiAliasing.debug.resetHistoryRequested = false;
-  frameContext.settings = &settings;
+  resolvedSettings.antiAliasing.debug.resetHistoryRequested = false;
+  frameContext.settings = std::move(resolvedSettings);
   frameContext.metrics = {};
   frameContext.metrics.frameIndex = frameContext.frameIndex;
   frameContext.metrics.antiAliasing =
@@ -1811,6 +1813,24 @@ SnapshotRunResult captureSnapshotCase(SnapshotCase snapshotCase,
       result.report = std::move(report);
       return result;
     }
+    std::unique_ptr<nuri::tools::runtime::ToolTextCoverage> textCoverage;
+    const bool text2D =
+        snapshotCase.scene.generator == "nuri.procedural.text_2d.v1";
+    const bool text3D =
+        snapshotCase.scene.generator == "nuri.procedural.text_3d.v1";
+    if (text2D || text3D) {
+      auto created = nuri::tools::runtime::ToolTextCoverage::create(
+          *gpu, pipeline, config, pipelineMemory, text2D, text3D);
+      if (created.hasError()) {
+        result.exitCode = SnapshotExitCode::EnvironmentUnavailable;
+        result.message = created.error();
+        report.warnings.push_back(result.message);
+        writeReports(result, report, reportPath, htmlPath);
+        result.report = std::move(report);
+        return result;
+      }
+      textCoverage = std::move(created.value());
+    }
 
     RenderScene scene(&sceneMemory);
     SceneLoadHandle sceneLoad{};
@@ -1931,6 +1951,12 @@ SnapshotRunResult captureSnapshotCase(SnapshotCase snapshotCase,
                         temporalFrameService, camera, frameIndex, timeSeconds,
                         snapshotCase.fixedDeltaSeconds,
                         snapshotCase.resolution[0], snapshotCase.resolution[1]);
+      if (textCoverage != nullptr) {
+        auto enqueued = textCoverage->enqueue(frameIndex);
+        if (enqueued.hasError()) {
+          return Result<bool, std::string>::makeError(enqueued.error());
+        }
+      }
       frameContext.captureRequests.clear();
       if (captureFrame) {
         for (const SnapshotCaptureTarget &capture : snapshotCase.captures) {
@@ -2108,7 +2134,7 @@ SnapshotRunResult captureSnapshotCase(SnapshotCase snapshotCase,
           {"renderer.ddgi.diagnostic_counters_enabled",
            ddgi.diagnosticCountersEnabled},
           {"renderer.ddgi.surface_gather_architecture",
-           static_cast<double>(ddgi.surfaceGatherArchitecture)},
+           static_cast<double>(ddgi.opaqueGatherArchitecture)},
           {"renderer.ddgi.surface_gather_width", ddgi.surfaceGatherWidth},
           {"renderer.ddgi.surface_gather_height", ddgi.surfaceGatherHeight},
           {"renderer.ddgi.surface_gather_max_candidate_volumes",
@@ -2230,40 +2256,13 @@ SnapshotRunResult captureSnapshotCase(SnapshotCase snapshotCase,
         report.rendererMetricValues.emplace(prefix + std::string(suffix),
                                             value);
       };
-      addVolumeMetric("active", volume.active);
       addVolumeMetric("effective_key_hash",
                       static_cast<double>(volume.effectiveKeyHash));
-      addVolumeMetric("effective_kind", volume.effectiveKind);
-      addVolumeMetric("tier", volume.tier);
-      addVolumeMetric("cascade_index", volume.cascadeIndex);
-      addVolumeMetric("total_probes", volume.totalProbes);
-      addVolumeMetric("initialized_probes", volume.initializedProbes);
-      addVolumeMetric("shading_enabled_probes", volume.shadingEnabledProbes);
-      addVolumeMetric("invalid_probes", volume.invalidProbes);
-      addVolumeMetric("newly_exposed_probes", volume.newlyExposedProbes);
-      addVolumeMetric("updates", volume.updates);
-      addVolumeMetric("primary_queries", volume.primaryQueries);
-      addVolumeMetric("primary_queries_issued", volume.primaryQueriesIssued);
-      addVolumeMetric("secondary_queries", volume.secondaryQueries);
-      addVolumeMetric("update_age_median", volume.updateAgeMedian);
-      addVolumeMetric("update_age_p95", volume.updateAgeP95);
-      addVolumeMetric("update_age_maximum", volume.updateAgeMaximum);
-      addVolumeMetric("scheduled_quota", volume.scheduledQuota);
-      addVolumeMetric("used_quota", volume.usedQuota);
-      addVolumeMetric("deficit", static_cast<double>(volume.deficit));
-      addVolumeMetric("starvation_frames", volume.starvationFrames);
-      addVolumeMetric("estimated_full_refresh_frames",
-                      volume.estimatedFullRefreshFrames);
+      for (const auto &[suffix, value] : ddgiVolumeMetricValues(volume)) {
+        addVolumeMetric(suffix, value);
+      }
       addVolumeMetric("persistent_bytes",
                       static_cast<double>(volume.persistentBytes));
-      addVolumeMetric("unique_coverage_percentage",
-                      volume.uniqueCoveragePercentage);
-      addVolumeMetric("redundant_coverage", volume.redundantCoverage);
-      addVolumeMetric("history_ready_percentage",
-                      volume.historyReadyPercentage);
-      addVolumeMetric("coverage_ready_percentage",
-                      volume.coverageReadyPercentage);
-      addVolumeMetric("confidence", volume.confidence);
     }
     auto captures = writeSnapshotCaptureArtifacts(
         *gpu, frameContext, snapshotCase.captures, caseDir, caseDir / "actual");

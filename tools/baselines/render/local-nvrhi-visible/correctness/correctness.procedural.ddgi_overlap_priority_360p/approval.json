@@ -1,0 +1,33 @@
+{
+    "schemaVersion": 1,
+    "kind": "nuri.baseline.approval",
+    "caseId": "correctness.procedural.ddgi_overlap_priority_360p",
+    "suite": "correctness",
+    "profileId": "local-nvrhi-visible",
+    "backend": "default",
+    "resolvedBackend": "nvrhi",
+    "reason": "User-authorized stable DDGI visual baseline; Hybrid coverage excluded in favor of SceneFit",
+    "actor": "Codex",
+    "approvedAtUtc": "2026-07-28T08:28:49Z",
+    "sourceCommit": "698d4e86f6923f1ca26185f3b1a5c1045273740d",
+    "sourceDigest": "sha256:820e8887bcc4ba992203e8fa34aa3ff08fef5a2fe57454fcb4d9c071d51def79",
+    "planDigest": "sha256:1bdcd52e114d33abbc08cd5a9edc5aa518e7c1d14a866cfbbd1752d5885a3305",
+    "captures": [
+        {
+            "target": "final_color",
+            "newHash": "sha256:7d5ab98bba0d8569efc4394ffa545f73e75e9b7a9c0562313bcf5af10c6b1166"
+        },
+        {
+            "target": "ddgi_debug_preview",
+            "newHash": "sha256:edcd630fba18137b1db45615a68874c538c7a4f9fbe1cef5884dfe8e31a2e6ca"
+        },
+        {
+            "target": "ddgi_volume0_irradiance_atlas",
+            "newHash": "sha256:0a45e908abb657490edb734ff0126bb68dc45d26ea639c40b9b39e040ab63038"
+        },
+        {
+            "target": "ddgi_volume1_irradiance_atlas",
+            "newHash": "sha256:37be404c1d8bca270879eaad6cdfd1563469d6ae5f343345cf966c750aca3302"
+        }
+    ]
+}

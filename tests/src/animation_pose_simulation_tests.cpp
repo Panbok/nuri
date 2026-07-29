@@ -498,8 +498,7 @@ TEST(AnimationPoseSimulationTests,
   const std::filesystem::path path = foxPath();
   ASSERT_TRUE(std::filesystem::exists(path)) << path.string();
 
-  auto prefabResult =
-      nuri::SceneImporter::loadScenePrefabFromFile(path.string());
+  auto prefabResult = nuri::SceneImporter::loadSceneFromFile(path.string());
   ASSERT_FALSE(prefabResult.hasError()) << prefabResult.error();
   const nuri::ScenePrefab &prefab = prefabResult.value();
 
@@ -689,8 +688,7 @@ TEST(AnimationPoseSimulationTests,
   const std::filesystem::path path = animatedMorphCubePath();
   ASSERT_TRUE(std::filesystem::exists(path)) << path.string();
 
-  auto prefabResult =
-      nuri::SceneImporter::loadScenePrefabFromFile(path.string());
+  auto prefabResult = nuri::SceneImporter::loadSceneFromFile(path.string());
   ASSERT_FALSE(prefabResult.hasError()) << prefabResult.error();
   const nuri::ScenePrefab &prefab = prefabResult.value();
 

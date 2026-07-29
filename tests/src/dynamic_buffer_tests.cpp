@@ -55,63 +55,133 @@ BufferDesc storageBufferDesc(size_t size) {
 
 TEST(DynamicBufferTest, GrowthIsAlignedGeometricAndNeverWaitsForIdle) {
   FailingBufferGPUDevice gpu;
-  DynamicBufferSlot slot;
+  std::unique_ptr<Buffer> buffer;
+  size_t capacityBytes = 0u;
 
-  auto initial =
-      ensureDynamicBufferCapacity(gpu, slot, storageBufferDesc(300u), "test");
+  auto initial = ensureDynamicBufferCapacity(gpu, buffer, capacityBytes,
+                                             storageBufferDesc(300u), "test");
   ASSERT_TRUE(initial.hasValue());
   EXPECT_TRUE(initial.value());
-  ASSERT_NE(slot.buffer, nullptr);
-  EXPECT_EQ(slot.capacityBytes, 512u);
-  const BufferHandle initialHandle = slot.buffer->handle();
+  ASSERT_NE(buffer, nullptr);
+  EXPECT_EQ(capacityBytes, 512u);
+  const BufferHandle initialHandle = buffer->handle();
 
-  auto adequate =
-      ensureDynamicBufferCapacity(gpu, slot, storageBufferDesc(400u), "test");
+  auto adequate = ensureDynamicBufferCapacity(gpu, buffer, capacityBytes,
+                                              storageBufferDesc(400u), "test");
   ASSERT_TRUE(adequate.hasValue());
   EXPECT_FALSE(adequate.value());
   EXPECT_EQ(gpu.createdBufferCount, 1u);
   EXPECT_EQ(gpu.destroyedBufferCount, 0u);
 
-  auto grown =
-      ensureDynamicBufferCapacity(gpu, slot, storageBufferDesc(513u), "test");
+  auto grown = ensureDynamicBufferCapacity(gpu, buffer, capacityBytes,
+                                           storageBufferDesc(513u), "test");
   ASSERT_TRUE(grown.hasValue());
   EXPECT_TRUE(grown.value());
-  EXPECT_EQ(slot.capacityBytes, 768u);
-  EXPECT_NE(slot.buffer->handle().index, initialHandle.index);
+  EXPECT_EQ(capacityBytes, 768u);
+  EXPECT_NE(buffer->handle().index, initialHandle.index);
   EXPECT_FALSE(gpu.isValid(initialHandle));
   EXPECT_EQ(gpu.destroyedBufferCount, 1u);
   EXPECT_EQ(gpu.waitIdleCallCount, 0u);
 
-  retireDynamicBuffer(slot);
-  EXPECT_EQ(slot.buffer, nullptr);
-  EXPECT_EQ(slot.capacityBytes, 0u);
+  retireDynamicBuffer(buffer, capacityBytes);
+  EXPECT_EQ(buffer, nullptr);
+  EXPECT_EQ(capacityBytes, 0u);
   EXPECT_EQ(gpu.destroyedBufferCount, 2u);
   EXPECT_EQ(gpu.waitIdleCallCount, 0u);
 }
 
 TEST(DynamicBufferTest, FailedGrowthPreservesPublishedBuffer) {
   FailingBufferGPUDevice gpu;
-  DynamicBufferSlot slot;
+  std::unique_ptr<Buffer> buffer;
+  size_t capacityBytes = 0u;
 
-  auto initial =
-      ensureDynamicBufferCapacity(gpu, slot, storageBufferDesc(256u), "test");
+  auto initial = ensureDynamicBufferCapacity(gpu, buffer, capacityBytes,
+                                             storageBufferDesc(256u), "test");
   ASSERT_TRUE(initial.hasValue());
-  const BufferHandle initialHandle = slot.buffer->handle();
-  const size_t initialCapacity = slot.capacityBytes;
+  const BufferHandle initialHandle = buffer->handle();
+  const size_t initialCapacity = capacityBytes;
 
   gpu.failCreateBufferAtCall = gpu.createBufferCallCount + 1u;
   auto failed = ensureDynamicBufferCapacity(
-      gpu, slot, storageBufferDesc(initialCapacity + 1u), "test");
+      gpu, buffer, capacityBytes, storageBufferDesc(initialCapacity + 1u),
+      "test");
   ASSERT_TRUE(failed.hasError());
-  ASSERT_NE(slot.buffer, nullptr);
-  EXPECT_EQ(slot.buffer->handle().index, initialHandle.index);
-  EXPECT_EQ(slot.buffer->handle().generation, initialHandle.generation);
-  EXPECT_EQ(slot.capacityBytes, initialCapacity);
+  ASSERT_NE(buffer, nullptr);
+  EXPECT_EQ(buffer->handle().index, initialHandle.index);
+  EXPECT_EQ(buffer->handle().generation, initialHandle.generation);
+  EXPECT_EQ(capacityBytes, initialCapacity);
   EXPECT_TRUE(gpu.isValid(initialHandle));
   EXPECT_EQ(gpu.destroyedBufferCount, 0u);
   EXPECT_EQ(gpu.waitIdleCallCount, 0u);
 
-  retireDynamicBuffer(slot);
+  retireDynamicBuffer(buffer, capacityBytes);
+}
+
+TEST(DynamicBufferRingTest, BusyPreferredLaneGrowsUntilSubmissionCompletes) {
+  FailingBufferGPUDevice gpu;
+  DynamicBufferRing ring(gpu, storageBufferDesc(0u), "ring");
+
+  ASSERT_TRUE(gpu.beginFrame(0u).hasValue());
+  auto first = ring.acquire(0u, 256u, 1u);
+  ASSERT_TRUE(first.hasValue());
+  auto firstCompletion = gpu.captureWorkCompletion();
+  ASSERT_TRUE(firstCompletion.hasValue());
+  ring.submitPrepared(firstCompletion.value());
+
+  auto second = ring.acquire(1u, 256u, 1u);
+  ASSERT_TRUE(second.hasValue());
+  EXPECT_EQ(second.value().lane, 1u);
+  EXPECT_NE(second.value().buffer.index, first.value().buffer.index);
+  auto secondCompletion = gpu.captureWorkCompletion();
+  ASSERT_TRUE(secondCompletion.hasValue());
+  ring.submitPrepared(secondCompletion.value());
+
+  ASSERT_TRUE(gpu.beginFrame(100u).hasValue());
+  auto reused = ring.acquire(2u, 128u, 1u);
+  ASSERT_TRUE(reused.hasValue());
+  EXPECT_EQ(reused.value().lane, 0u);
+  EXPECT_EQ(reused.value().buffer.index, first.value().buffer.index);
+  EXPECT_FALSE(reused.value().replaced);
+  ring.abandonPrepared();
+}
+
+TEST(DynamicBufferRoleRingTest,
+     KeepsRolesAlignedAndReusesOnlyCompletedSubmissionLanes) {
+  FailingBufferGPUDevice gpu;
+  DynamicBufferRoleRing ring(gpu, 2u);
+  ASSERT_TRUE(ring.ensureLaneCount(1u).hasValue());
+  ASSERT_TRUE(
+      ring.ensureRole(0u, storageBufferDesc(256u), "role_zero").hasValue());
+  ASSERT_TRUE(
+      ring.ensureRole(1u, storageBufferDesc(512u), "role_one").hasValue());
+
+  ASSERT_TRUE(gpu.beginFrame(0u).hasValue());
+  auto first = ring.acquire(0u, 1u);
+  ASSERT_TRUE(first.hasValue());
+  EXPECT_EQ(first.value().lane, 0u);
+  const BufferHandle firstRoleZero = ring.handle(0u, first.value().lane);
+  const BufferHandle firstRoleOne = ring.handle(1u, first.value().lane);
+  ASSERT_TRUE(nuri::isValid(firstRoleZero));
+  ASSERT_TRUE(nuri::isValid(firstRoleOne));
+  auto firstCompletion = gpu.captureWorkCompletion();
+  ASSERT_TRUE(firstCompletion.hasValue());
+  ring.submitPrepared(firstCompletion.value());
+
+  auto second = ring.acquire(1u, 1u);
+  ASSERT_TRUE(second.hasValue());
+  EXPECT_EQ(second.value().lane, 1u);
+  EXPECT_NE(ring.handle(0u, second.value().lane).index, firstRoleZero.index);
+  EXPECT_NE(ring.handle(1u, second.value().lane).index, firstRoleOne.index);
+  ring.abandonPrepared();
+
+  ASSERT_TRUE(gpu.beginFrame(100u).hasValue());
+  EXPECT_TRUE(ring.completed(0u));
+  auto reused = ring.acquire(2u, 1u);
+  ASSERT_TRUE(reused.hasValue());
+  EXPECT_EQ(reused.value().lane, 0u);
+  EXPECT_EQ(ring.handle(0u, reused.value().lane).index, firstRoleZero.index);
+  EXPECT_EQ(ring.handle(1u, reused.value().lane).index, firstRoleOne.index);
+  ring.abandonPrepared();
 }
 
 TEST(OwnedBufferTest, ScopeExitDestroysExactlyOnce) {

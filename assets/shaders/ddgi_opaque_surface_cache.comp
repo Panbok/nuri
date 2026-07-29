@@ -82,10 +82,9 @@ void main() {
   const vec3 worldNormal = normalize(mat3(pc.inverseView) * viewNormal);
   const vec3 toCamera = pc.sceneFrame.cameraPos.xyz - worldPoint;
   const float toCameraLengthSquared = dot(toCamera, toCamera);
-  const vec3 viewDirection =
-      toCameraLengthSquared > 1.0e-8
-          ? toCamera * inversesqrt(toCameraLengthSquared)
-          : worldNormal;
+  const vec3 viewDirection = toCameraLengthSquared > 1.0e-8
+                                 ? toCamera * inversesqrt(toCameraLengthSquared)
+                                 : worldNormal;
   const DDGIQueryResult ddgi =
       queryDDGI(pc.ddgiFrame, worldPoint, worldNormal, viewDirection,
                 kDDGIGatherVariantProduct);

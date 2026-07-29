@@ -11,7 +11,6 @@
 #include "nuri/gfx/renderers/detail/instance_data.h"
 #include "nuri/gfx/renderers/detail/shadow_math.h"
 #include "nuri/gfx/renderers/scene_draw_database.h"
-#include "nuri/gfx/shader.h"
 #include "nuri/gfx/visibility/visibility.h"
 #include "nuri/resources/cpu/mesh_data.h"
 #include "nuri/resources/gpu/buffer.h"
@@ -33,16 +32,6 @@ using ShadowRendererConfig = RuntimeOpaqueShaderConfig;
 class ResourceManager;
 class RenderPipeline;
 
-struct BufferDependency {
-  BufferHandle handle{};
-  RenderGraphAccessMode mode = RenderGraphAccessMode::Read;
-};
-
-struct TextureDependency {
-  TextureHandle handle{};
-  RenderGraphAccessMode mode = RenderGraphAccessMode::Read;
-};
-
 class NURI_API ShadowRenderer {
 public:
   explicit ShadowRenderer(GPUDevice &gpu, std::pmr::memory_resource *memory =
@@ -57,6 +46,8 @@ public:
   ShadowRenderer &operator=(ShadowRenderer &&) = delete;
   Result<bool, std::string> publishFrameData(RenderFrameContext &frame);
   Result<bool, std::string> prepareShadowGraphPasses(RenderFrameContext &frame);
+  void onFrameSubmitted(const RenderFrameContext &frame) noexcept;
+  void onFrameAbandoned(const RenderFrameContext &frame) noexcept;
   Result<bool, std::string>
   prepareSceneCache(SceneDrawDatabase &database, const RenderScene &scene,
                     const ResourceManager &resources,
@@ -294,6 +285,22 @@ private:
     uint64_t frameUploadSignature = std::numeric_limits<uint64_t>::max();
     uint64_t sdsmPublishedFrame = std::numeric_limits<uint64_t>::max();
   };
+  struct PendingFrameState {
+    uint64_t frameIndex = std::numeric_limits<uint64_t>::max();
+    std::array<CascadeState, kMaxShadowCascades> cascadeStates{};
+    CascadeStabilizationHistory cascadeStabilizationHistory{};
+    SdsmState sdsmState{};
+    DiagnosticLogState diagnosticLogState{};
+    std::array<shadow_detail::DirectionalShadowFit, kMaxShadowCascades>
+        frozenShadowFits{};
+    LightId frozenShadowLightId = kInvalidLightId;
+    uint32_t frozenShadowMapSize = 0u;
+    uint32_t frozenCascadeCount = 0u;
+    uint32_t sdsmPublishedSlot = std::numeric_limits<uint32_t>::max();
+    uint64_t previousSdsmPublishedFrame = std::numeric_limits<uint64_t>::max();
+    bool hasFrozenShadowFit = false;
+    bool active = false;
+  };
   Result<bool, std::string> ensureInitialized();
   Result<bool, std::string> createShaders();
   Result<bool, std::string> createPreviewShaders();
@@ -304,7 +311,7 @@ private:
   Result<bool, std::string> createSdsmReducePipeline();
   Result<bool, std::string>
   ensureShadowResources(const RenderSettings::ShadowSettings &settings);
-  void ensureRingBufferCount(uint32_t requiredCount);
+  Result<bool, std::string> ensureRingBufferCount(uint32_t requiredCount);
   Result<bool, std::string>
   ensureInstanceMatricesRingCapacity(size_t requiredBytes);
   Result<bool, std::string>
@@ -342,10 +349,23 @@ private:
   void resetFrozenShadowFit();
   void resetCascadeStabilizationHistory();
   void resetSdsmState();
+  void beginFrameTransaction(uint64_t frameIndex) noexcept;
+  void restorePendingFrameState() noexcept;
+  struct CascadeWork {
+    explicit CascadeWork(std::pmr::memory_resource *memory)
+        : pushConstants(memory), draws(memory), indirectPushConstants(memory),
+          indirectDraws(memory) {}
+
+    std::pmr::vector<PushConstants> pushConstants;
+    std::pmr::vector<DrawItem> draws;
+    std::pmr::vector<PushConstants> indirectPushConstants;
+    std::pmr::vector<DrawItem> indirectDraws;
+  };
+
   GPUDevice &gpu_;
   ShadowRendererConfig config_{};
   std::pmr::memory_resource *memory_ = std::pmr::get_default_resource();
-  std::pmr::vector<std::pmr::vector<DynamicBufferSlot>> bufferRings_;
+  DynamicBufferRoleRing bufferRings_;
   std::pmr::vector<FrameSlotState> frameSlotStates_;
   std::pmr::vector<MeshDrawTemplate> meshDrawTemplates_;
   ScratchArena batchBuildScratchArena_;
@@ -368,24 +388,15 @@ private:
   std::pmr::vector<uint32_t> staticShadowCasterLightGridQueryEntries_;
   std::pmr::vector<InstanceData> instanceMatrices_;
   std::pmr::vector<uint32_t> instanceRemap_;
-  std::array<std::pmr::vector<PushConstants>, kMaxShadowCascades>
-      cascadePushConstants_{};
-  std::array<std::pmr::vector<DrawItem>, kMaxShadowCascades>
-      cascadeDrawItems_{};
-  std::array<std::pmr::vector<PushConstants>, kMaxShadowCascades>
-      cascadeIndirectPushConstants_{};
-  std::array<std::pmr::vector<DrawItem>, kMaxShadowCascades>
-      cascadeIndirectDrawItems_{};
+  std::array<CascadeWork, kMaxShadowCascades> cascadeWork_;
   std::pmr::vector<std::byte> shadowDrawPacketUploadBytes_;
   std::array<CascadeState, kMaxShadowCascades> cascadeStates_{};
-  std::pmr::vector<BufferDependency> passBufferDependencies_;
-  std::pmr::vector<BufferHandle> passDependencyBuffers_;
-  std::pmr::vector<RenderGraphAccessMode> passDependencyBufferAccessModes_;
-  std::pmr::vector<TextureHandle> passDependencyTextures_;
-  std::pmr::vector<RenderGraphAccessMode> passDependencyTextureAccessModes_;
+  std::pmr::vector<RenderGraphImportedBufferUse> passBufferDependencies_;
+  std::pmr::vector<RenderGraphBufferUse> passBufferUses_;
+  std::pmr::vector<RenderGraphTextureUse> passTextureUses_;
   std::pmr::vector<BufferHandle> preResolvedDrawBuffers_;
-  std::pmr::vector<TextureDependency> passTextureDependencies_;
-  std::pmr::vector<TextureDependency> previewTextureDependencies_;
+  std::pmr::vector<RenderGraphImportedTextureUse> passTextureDependencies_;
+  std::pmr::vector<RenderGraphImportedTextureUse> previewTextureDependencies_;
   std::array<ShaderHandle, ShaderSlotCount> shaders_{};
   std::array<RenderPipelineHandle, 4> shadowPipelines_{};
   Format shadowDepthPipelineFormat_ = Format::Count;
@@ -448,6 +459,7 @@ private:
       currentRawShadowFits_{};
   ShadowFrameGpuData shadowFrameCpuData_{};
   ShadowDebugFrameData shadowDebugFrameData_{};
+  PendingFrameState pendingFrameState_{};
 };
 
 NURI_API ShadowRenderer *registerShadowStage(

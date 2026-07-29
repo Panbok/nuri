@@ -4,7 +4,6 @@
 #include "nuri/gfx/gpu_descriptors.h"
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/math/utils.h"
-#include "nuri/pch.h"
 #include <algorithm>
 #include <array>
 #include <chrono>

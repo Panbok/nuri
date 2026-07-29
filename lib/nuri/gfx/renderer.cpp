@@ -4,7 +4,6 @@
 #include "nuri/gfx/frame/temporal_frame_service.h"
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/gfx/render_graph/render_graph_telemetry.h"
-#include "nuri/pch.h"
 #include "nuri/utils/env_utils.h"
 namespace nuri {
 
@@ -51,7 +50,6 @@ Result<bool, std::string> Renderer::render() {
 Result<bool, std::string> Renderer::render(RenderPipeline &pipeline,
                                            RenderFrameContext &frameContext) {
   NURI_PROFILER_FUNCTION();
-  resolveRenderSettingsForFrame(frameContext);
   resetFrameSharedResources(frameContext);
   Result<bool, std::string> frameResult =
       beginFrameSequence(frameContext.frameIndex, frameContext.scene);
@@ -124,8 +122,8 @@ Result<bool, std::string> Renderer::render(RenderPipeline &pipeline,
       frameContext.temporalFrameService->abandonFrame(frameContext.frameIndex);
     } else {
       pipeline.onFrameSubmitted(frameContext);
-      const bool committed = frameContext.temporalFrameService->commitFrame(
-          frameContext.frameIndex);
+      static_cast<void>(frameContext.temporalFrameService->commitFrame(
+          frameContext.frameIndex));
     }
   } else if (submitResult.hasError()) {
     pipeline.onFrameAbandoned(frameContext);
@@ -192,11 +190,11 @@ Renderer::compileAndExecuteRenderGraph(uint64_t frameIndex) {
   lastFrameSubmission_ = {};
   const RenderGraphBuilder::GraphFingerprint fingerprint =
       renderGraphBuilder_.computeGraphFingerprint();
-  if (cachedCompileResult_.has_value() && fingerprint == cachedFingerprint_) {
+  FrameCommandArena commands(&renderGraphMemory_);
+  if (cachedPlan_.has_value() && fingerprint == cachedFingerprint_) {
     NURI_PROFILER_ZONE("Renderer.render_graph_compile_cache_hit",
                        NURI_PROFILER_COLOR_BARRIER);
-    renderGraphBuilder_.refreshHandlesInCompileResult(*cachedCompileResult_);
-    cachedCompileResult_->frameIndex = frameIndex;
+    commands = renderGraphBuilder_.buildFrameCommands(*cachedPlan_);
     NURI_PROFILER_ZONE_END();
   } else {
     std::string compileError;
@@ -207,16 +205,20 @@ Renderer::compileAndExecuteRenderGraph(uint64_t frameIndex) {
       if (compileResult.hasError()) {
         compileError = compileResult.error();
       } else {
-        cachedCompileResult_ = std::move(compileResult.value());
+        CompiledRenderGraph compiled = std::move(compileResult.value());
+        cachedPlan_ = std::move(compiled.plan);
+        commands = std::move(compiled.commands);
         cachedFingerprint_ = fingerprint;
       }
       NURI_PROFILER_ZONE_END();
     }
     if (!compileError.empty()) {
-      cachedCompileResult_.reset();
+      cachedPlan_.reset();
       return Result<bool, std::string>::makeError(std::move(compileError));
     }
   }
+  commands.frameIndex = frameIndex;
+  const CompiledRenderGraphView compiled{*cachedPlan_, commands};
   const RenderGraphTelemetryLevel telemetryLevel =
       renderGraphTelemetry_.requestedCaptureLevel();
   const auto executeResult =
@@ -225,26 +227,26 @@ Renderer::compileAndExecuteRenderGraph(uint64_t frameIndex) {
     NURI_PROFILER_ZONE("Renderer.render_graph_execute",
                        NURI_PROFILER_COLOR_SUBMIT);
     result.emplace(renderGraphExecutor_.execute(
-        renderGraphRuntime_, gpu_, *cachedCompileResult_,
+        renderGraphRuntime_, gpu_, compiled,
         RenderGraphExecutionOptions{.telemetry = telemetryLevel}));
     NURI_PROFILER_ZONE_END();
     return std::move(*result);
   }();
   if (executeResult.hasError()) {
-    cachedCompileResult_.reset();
+    cachedPlan_.reset();
     return Result<bool, std::string>::makeError(executeResult.error());
   }
   lastFrameSubmission_ = executeResult.value().submission;
   if (telemetryLevel != RenderGraphTelemetryLevel::None) {
     NURI_PROFILER_ZONE("Renderer.render_graph_telemetry",
                        NURI_PROFILER_COLOR_CMD_COPY);
-    renderGraphTelemetry_.capture(*cachedCompileResult_, executeResult.value());
+    renderGraphTelemetry_.capture(compiled, executeResult.value());
     NURI_PROFILER_ZONE_END();
   }
   return Result<bool, std::string>::makeResult(true);
 }
 
-void Renderer::invalidateCompileCache() { cachedCompileResult_.reset(); }
+void Renderer::invalidateCompileCache() { cachedPlan_.reset(); }
 
 void Renderer::onResize(uint32_t width, uint32_t height) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);

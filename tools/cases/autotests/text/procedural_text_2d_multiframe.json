@@ -1,0 +1,124 @@
+{
+  "schemaVersion": 1,
+  "id": "text.procedural.text_2d_multiframe",
+  "suite": "text",
+  "description": "Deterministic multi-frame 2D text queue, upload, submit, and reuse coverage",
+  "scene": {
+    "kind": "procedural",
+    "generator": "nuri.procedural.text_2d.v1",
+    "seed": 1,
+    "contentHash": "nuri.procedural.text_2d.v1:1"
+  },
+  "backend": "default",
+  "resolution": [
+    640,
+    360
+  ],
+  "fixedDeltaSeconds": 0.016666667,
+  "authoritative": false,
+  "presentMode": "immediate",
+  "windowMode": "visible",
+  "renderGraph": {
+    "workerCount": 1,
+    "parallelCompile": false,
+    "parallelRecording": false
+  },
+  "camera": {
+    "position": [
+      0,
+      1,
+      4
+    ],
+    "target": [
+      0,
+      1,
+      0
+    ],
+    "verticalFovDegrees": 60,
+    "nearPlane": 0.05,
+    "farPlane": 100
+  },
+  "settings": {
+    "opaque": {
+      "enabled": true,
+      "enableDepthPrepass": false,
+      "enableInstanceCompute": false,
+      "enableMeshLod": false,
+      "enableTessellation": false,
+      "forcedMeshLod": 0
+    },
+    "antiAliasing": {
+      "mode": "None",
+      "qualityPreset": "Balanced"
+    },
+    "ambientOcclusion": {
+      "mode": "Disabled",
+      "preset": "Balanced"
+    },
+    "shadow": {
+      "enabled": false,
+      "qualityPreset": "Low"
+    },
+    "hdrPostProcess": {
+      "bloomEnabled": false,
+      "adaptationEnabled": false
+    },
+    "transmission": {
+      "enabled": false
+    },
+    "transparent": {
+      "enabled": true
+    },
+    "textureFiltering": {
+      "mode": "Bilinear",
+      "anisotropy": 1
+    }
+  },
+  "warmupFrames": 2,
+  "endFrame": 5,
+  "checkpoints": [
+    {
+      "id": "first",
+      "frame": 2,
+      "captures": [
+        {
+          "target": "final_color",
+          "profile": "ldr_color",
+          "required": true,
+          "compare": false
+        },
+        {
+          "target": "frame_color_hdr",
+          "profile": "hdr_color",
+          "required": true,
+          "compare": false
+        }
+      ]
+    },
+    {
+      "id": "reused",
+      "frame": 5,
+      "captures": [
+        {
+          "target": "final_color",
+          "profile": "ldr_color",
+          "required": true,
+          "compare": false
+        },
+        {
+          "target": "frame_color_hdr",
+          "profile": "hdr_color",
+          "required": true,
+          "compare": false
+        }
+      ]
+    }
+  ],
+  "requirements": {
+    "assets": [
+      "fontsRoot:default_ui.nfont"
+    ],
+    "backends": [],
+    "allowVisibleWindow": true
+  }
+}

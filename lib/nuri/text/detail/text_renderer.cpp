@@ -1,4 +1,4 @@
-#include "nuri/text/text_renderer.h"
+#include "nuri/text/detail/text_renderer.h"
 #include "nuri/core/log.h"
 #include "nuri/core/profiling.h"
 #include "nuri/gfx/frame/render_frame_context.h"
@@ -7,7 +7,6 @@
 #include "nuri/gfx/render_graph/render_graph.h"
 #include "nuri/gfx/shader.h"
 #include "nuri/math/utils.h"
-#include "nuri/pch.h"
 namespace nuri {
 namespace {
 template <typename T, typename... Args>
@@ -192,12 +191,21 @@ void TextRenderer::hashWorldTransform(uint64_t &hash,
   hashValue(hash, transform);
 }
 
-void TextRenderer::hashUiQuad(uint64_t &hash, const UiQuad &quad) {
-  hashValue(hash, quad);
-}
-
-void TextRenderer::hashWorldQuad(uint64_t &hash, const WorldQuad &quad) {
-  hashValue(hash, quad);
+void TextRenderer::hashGlyphPacket(uint64_t &hash, const GlyphPacket &packet) {
+  hashValue(hash, packet.minX);
+  hashValue(hash, packet.minY);
+  hashValue(hash, packet.maxX);
+  hashValue(hash, packet.maxY);
+  hashValue(hash, packet.uvMinX);
+  hashValue(hash, packet.uvMinY);
+  hashValue(hash, packet.uvMaxX);
+  hashValue(hash, packet.uvMaxY);
+  hashValue(hash, packet.pxRange);
+  hashValue(hash, packet.color);
+  hashValue(hash, packet.atlas);
+  hashValue(hash, packet.domain);
+  hashValue(hash, packet.transformId);
+  hashValue(hash, packet.atlasTexture);
 }
 
 uint64_t TextRenderer::hashCameraFrameState(const CameraFrameState &camera) {
@@ -207,14 +215,10 @@ uint64_t TextRenderer::hashCameraFrameState(const CameraFrameState &camera) {
   return hash;
 }
 
-bool TextRenderer::uiBatchLess(const UiQuad &a, const UiQuad &b) {
-  if (a.atlas != b.atlas) {
-    return a.atlas < b.atlas;
+bool TextRenderer::glyphBatchLess(const GlyphPacket &a, const GlyphPacket &b) {
+  if (a.domain != b.domain) {
+    return a.domain < b.domain;
   }
-  return a.pxRange < b.pxRange;
-}
-
-bool TextRenderer::worldBatchLess(const WorldQuad &a, const WorldQuad &b) {
   if (a.atlas != b.atlas) {
     return a.atlas < b.atlas;
   }
@@ -274,13 +278,17 @@ TextRenderer::resolveWorldFromBillboard(const WorldTransform &transform,
 
 TextRenderer::TextRenderer(const CreateDesc &desc)
     : gpu_(desc.gpu), fonts_(desc.fonts), layouter_(desc.layouter),
-      memory_(desc.memory), shaderPaths_(desc.shaderPaths), uiQueue_(&memory_),
-      worldQueue_(&memory_), worldTransforms_(&memory_),
-      resolvedWorldTransforms_(&memory_), worldInstances_(&memory_),
-      uiVerts_(&memory_), uiBatches_(&memory_), worldBatches_(&memory_),
-      uiDraws_(&memory_), worldDraws_(&memory_),
-      worldTransparentDraws_(&memory_), uiPcs_(&memory_), worldPcs_(&memory_),
-      uiFrames_(&memory_), worldFrames_(&memory_),
+      memory_(desc.memory), shaderPaths_(desc.shaderPaths),
+      glyphQueue_(&memory_), worldTransforms_(&memory_),
+      resolvedWorldTransforms_(&memory_), glyphInstances_(&memory_),
+      glyphBatches_(&memory_), uiDraws_(&memory_), worldDraws_(&memory_),
+      worldSortDepths_(&memory_), worldTransparentDraws_(&memory_),
+      uiPcs_(&memory_), worldPcs_(&memory_),
+      glyphBuffers_(
+          gpu_,
+          BufferDesc{.usage = BufferUsage::Storage | BufferUsage::Vertex,
+                     .storage = Storage::HostVisible},
+          "text_glyph_packets", &memory_),
       worldTransparentTextureReadList_(&memory_) {}
 
 TextRenderer::~TextRenderer() { destroyGpu(); }
@@ -297,114 +305,111 @@ Result<TextBounds, std::string>
 TextRenderer::enqueue2D(const Text2DDesc &desc,
                         std::pmr::memory_resource &scratch) {
   NURI_PROFILER_FUNCTION();
-  auto layoutResult =
-      layouter_.layoutUtf8(desc.utf8, desc.style, desc.layout, scratch);
-  if (layoutResult.hasError()) {
-    return makeError<TextBounds>("TextRenderer::enqueue2D: ",
-                                 layoutResult.error());
-  }
-  const TextLayout &layout = *layoutResult.value();
-  const uint32_t color = packColor(desc.fillColor);
-  const size_t queueStart = uiQueue_.size();
-  TextBounds localBounds{};
-  bool hasLocalBounds = false;
-  appendGlyphQuads(
-      fonts_, layout, color, uiQueue_, uiQueueNeedsSort_, localBounds,
-      hasLocalBounds, [](UiQuad &, const auto &) {}, uiBatchLess);
-  if (uiQueue_.size() == queueStart) {
-    return Result<TextBounds, std::string>::makeResult(TextBounds{});
-  }
-  const glm::vec2 shift =
-      computeAlignedOffset2D(localBounds, desc.layout, desc.x, desc.y);
-  for (size_t i = queueStart; i < uiQueue_.size(); ++i) {
-    uiQueue_[i].minX += shift.x;
-    uiQueue_[i].maxX += shift.x;
-    uiQueue_[i].minY += shift.y;
-    uiQueue_[i].maxY += shift.y;
-    hashUiQuad(uiQueueHash_, uiQueue_[i]);
-  }
-  TextBounds finalBounds{};
-  finalBounds.minX = localBounds.minX + shift.x;
-  finalBounds.maxX = localBounds.maxX + shift.x;
-  finalBounds.minY = localBounds.minY + shift.y;
-  finalBounds.maxY = localBounds.maxY + shift.y;
-  return Result<TextBounds, std::string>::makeResult(finalBounds);
+  return enqueueCommon(TextCommonDesc{.utf8 = desc.utf8,
+                                      .style = &desc.style,
+                                      .layout = &desc.layout,
+                                      .fillColor = desc.fillColor},
+                       Text2DPayload{.anchor = {desc.x, desc.y}}, scratch);
 }
 
 Result<TextBounds, std::string>
 TextRenderer::enqueue3D(const Text3DDesc &desc,
                         std::pmr::memory_resource &scratch) {
   NURI_PROFILER_FUNCTION();
-  auto layoutResult =
-      layouter_.layoutUtf8(desc.utf8, desc.style, desc.layout, scratch);
-  if (layoutResult.hasError()) {
-    return makeError<TextBounds>("TextRenderer::enqueue3D: ",
-                                 layoutResult.error());
-  }
-  const TextLayout &layout = *layoutResult.value();
-  if (layout.glyphs.empty()) {
-    return Result<TextBounds, std::string>::makeResult(TextBounds{});
-  }
   const glm::mat4 world = decodeWorld(desc.worldFromText);
   worldTransforms_.push_back(
       WorldTransform{.worldFromText = world, .billboard = desc.billboard});
   const uint32_t transformId = static_cast<uint32_t>(worldTransforms_.size());
-  worldHasBillboards_ =
-      worldHasBillboards_ || (desc.billboard != TextBillboardMode::None);
-  const uint32_t color = packColor(desc.fillColor);
-  const size_t queueStart = worldQueue_.size();
+  const size_t glyphCount = worldGlyphCount_;
+  auto result =
+      enqueueCommon(TextCommonDesc{.utf8 = desc.utf8,
+                                   .style = &desc.style,
+                                   .layout = &desc.layout,
+                                   .fillColor = desc.fillColor},
+                    Text3DPayload{.transformId = transformId}, scratch);
+  if (result.hasError() || worldGlyphCount_ == glyphCount) {
+    worldTransforms_.pop_back();
+  }
+  if (!result.hasError() && worldGlyphCount_ != glyphCount) {
+    worldHasBillboards_ =
+        worldHasBillboards_ || (desc.billboard != TextBillboardMode::None);
+  }
+  return result;
+}
+
+Result<TextBounds, std::string>
+TextRenderer::enqueueCommon(const TextCommonDesc &desc,
+                            const TextPayload &payload,
+                            std::pmr::memory_resource &scratch) {
+  auto layoutResult =
+      layouter_.layoutUtf8(desc.utf8, *desc.style, *desc.layout, scratch);
+  if (layoutResult.hasError()) {
+    return makeError<TextBounds>("TextRenderer::enqueue: ",
+                                 layoutResult.error());
+  }
+  const TextLayout &layout = *layoutResult.value();
+  const Text2DPayload *ui = std::get_if<Text2DPayload>(&payload);
+  const Text3DPayload *world = std::get_if<Text3DPayload>(&payload);
+  const size_t queueStart = glyphQueue_.size();
   TextBounds localBounds{};
   bool hasLocalBounds = false;
   appendGlyphQuads(
-      fonts_, layout, color, worldQueue_, worldQueueNeedsSort_, localBounds,
-      hasLocalBounds,
-      [this, transformId](WorldQuad &quad, const LayoutGlyph &glyph) {
-        quad.transformId = transformId;
-        quad.atlasTexture = fonts_.atlasTexture(glyph.atlasPage);
+      fonts_, layout, packColor(desc.fillColor), glyphQueue_,
+      glyphQueueNeedsSort_, localBounds, hasLocalBounds,
+      [this, ui, world](GlyphPacket &packet, const LayoutGlyph &glyph) {
+        packet.domain = ui ? TextDomain::Ui : TextDomain::World;
+        packet.transformId = world ? world->transformId : 0u;
+        packet.atlasTexture = fonts_.atlasTexture(glyph.atlasPage);
       },
-      worldBatchLess);
-  if (worldQueue_.size() == queueStart) {
-    worldTransforms_.pop_back();
+      glyphBatchLess);
+  if (glyphQueue_.size() == queueStart) {
     return Result<TextBounds, std::string>::makeResult(TextBounds{});
   }
-  const glm::vec2 shift = computeAlignedOffsetLocal(localBounds, desc.layout);
-  hashWorldTransform(worldQueueHash_, worldTransforms_.back());
-  for (size_t i = queueStart; i < worldQueue_.size(); ++i) {
-    worldQueue_[i].minX += shift.x;
-    worldQueue_[i].minY += shift.y;
-    worldQueue_[i].maxX += shift.x;
-    worldQueue_[i].maxY += shift.y;
-    hashWorldQuad(worldQueueHash_, worldQueue_[i]);
+  const size_t appended = glyphQueue_.size() - queueStart;
+  uiGlyphCount_ += ui ? appended : 0u;
+  worldGlyphCount_ += world ? appended : 0u;
+  const glm::vec2 shift =
+      ui ? computeAlignedOffset2D(localBounds, *desc.layout, ui->anchor.x,
+                                  ui->anchor.y)
+         : computeAlignedOffsetLocal(localBounds, *desc.layout);
+  if (world) {
+    hashWorldTransform(glyphQueueHash_, worldTransforms_.back());
   }
-  TextBounds finalBounds{};
-  finalBounds.minX = localBounds.minX + shift.x;
-  finalBounds.maxX = localBounds.maxX + shift.x;
-  finalBounds.minY = localBounds.minY + shift.y;
-  finalBounds.maxY = localBounds.maxY + shift.y;
-  return Result<TextBounds, std::string>::makeResult(finalBounds);
+  for (size_t i = queueStart; i < glyphQueue_.size(); ++i) {
+    glyphQueue_[i].minX += shift.x;
+    glyphQueue_[i].maxX += shift.x;
+    glyphQueue_[i].minY += shift.y;
+    glyphQueue_[i].maxY += shift.y;
+    hashGlyphPacket(glyphQueueHash_, glyphQueue_[i]);
+  }
+  return Result<TextBounds, std::string>::makeResult(
+      TextBounds{.minX = localBounds.minX + shift.x,
+                 .minY = localBounds.minY + shift.y,
+                 .maxX = localBounds.maxX + shift.x,
+                 .maxY = localBounds.maxY + shift.y});
 }
 
 void TextRenderer::clear() {
-  uiQueue_.clear();
-  worldQueue_.clear();
+  glyphQueue_.clear();
+  uiGlyphCount_ = 0u;
+  worldGlyphCount_ = 0u;
   worldTransforms_.clear();
   uiDraws_.clear();
   worldDraws_.clear();
+  worldSortDepths_.clear();
   worldTransparentDraws_.clear();
   uiPcs_.clear();
   worldPcs_.clear();
   uiAppended_ = false;
   worldAppended_ = false;
-  uiQueueNeedsSort_ = false;
-  worldQueueNeedsSort_ = false;
-  uiQueueHash_ = kHashSeed;
-  worldQueueHash_ = kHashSeed;
+  glyphQueueNeedsSort_ = false;
+  glyphQueueHash_ = kHashSeed;
+  glyphPrepared_ = false;
   worldHasBillboards_ = false;
-  worldGlyphBufferAddress_ = 0;
+  glyphBufferAddress_ = 0;
   worldTransformBufferAddress_ = 0;
-  worldDependencyBuffer_ = {};
+  glyphDependencyBuffer_ = {};
   worldTransparentTextureReadList_.clear();
-  worldPreparedSlot_ = 0;
 }
 
 Result<bool, std::string>
@@ -418,13 +423,13 @@ TextRenderer::compileShaders(std::string_view name,
   if (vertexPath.empty() || fragmentPath.empty()) {
     return makeError<bool>("TextRenderer: shader paths are empty");
   }
-  auto helper = Shader::create(name, gpu_);
-  auto vs = helper->compileFromFile(vertexPath.string(), ShaderStage::Vertex);
+  auto vs =
+      compileShaderFile(gpu_, name, vertexPath.string(), ShaderStage::Vertex);
   if (vs.hasError()) {
     return Result<bool, std::string>::makeError(vs.error());
   }
-  auto fs =
-      helper->compileFromFile(fragmentPath.string(), ShaderStage::Fragment);
+  auto fs = compileShaderFile(gpu_, name, fragmentPath.string(),
+                              ShaderStage::Fragment);
   if (fs.hasError()) {
     gpu_.destroyShaderModule(vs.value());
     return Result<bool, std::string>::makeError(fs.error());
@@ -447,28 +452,8 @@ Result<bool, std::string> TextRenderer::ensureUiPipeline(Format colorFormat) {
     gpu_.destroyRenderPipeline(uiPipeline_);
     uiPipeline_ = {};
   }
-  static const VertexBinding bindings[] = {
-      {.stride = static_cast<uint32_t>(sizeof(UiVertex))},
-  };
-  static const VertexAttribute attributes[] = {
-      {.location = 0,
-       .binding = 0,
-       .offset = static_cast<uint32_t>(offsetof(UiVertex, pos)),
-       .format = VertexFormat::Float2},
-      {.location = 1,
-       .binding = 0,
-       .offset = static_cast<uint32_t>(offsetof(UiVertex, uv)),
-       .format = VertexFormat::Float2},
-      {.location = 2,
-       .binding = 0,
-       .offset = static_cast<uint32_t>(offsetof(UiVertex, color)),
-       .format = VertexFormat::UByte4_Norm},
-  };
   RenderPipelineDesc desc{};
-  desc.vertexInput = VertexInput{
-      .attributes = attributes,
-      .bindings = bindings,
-  };
+  desc.vertexInput = {};
   desc.vertexShader = uiVs_;
   desc.fragmentShader = uiFs_;
   desc.colorFormats = {colorFormat};
@@ -526,201 +511,61 @@ TextRenderer::ensureWorldPipeline(Format colorFormat, Format depthFormat) {
   return Result<bool, std::string>::makeResult(true);
 }
 
-void TextRenderer::syncFrames(std::pmr::vector<FrameBuffers> &frames) {
-  const uint32_t swapchainCount = std::max(1u, gpu_.getSwapchainImageCount());
-  if (frames.size() == swapchainCount) {
-    return;
-  }
-  frames.clear();
-  frames.resize(swapchainCount);
-}
-
-uint32_t TextRenderer::frameSlot(std::pmr::vector<FrameBuffers> &frames) {
-  syncFrames(frames);
-  const uint32_t count = static_cast<uint32_t>(frames.size());
-  return static_cast<uint32_t>(frameIndex_ % count);
-}
-
-Result<bool, std::string>
-TextRenderer::ensureUiFrameBuffers(FrameBuffers &frame, size_t vertexBytes,
-                                   size_t quadCount) {
-  constexpr size_t kIndicesPerQuad = 6u;
-  constexpr size_t kVerticesPerQuad = 4u;
-  auto vertex =
-      ensureDynamicBufferCapacity(gpu_, frame.vertex,
-                                  BufferDesc{.usage = BufferUsage::Vertex,
-                                             .storage = Storage::HostVisible,
-                                             .size = vertexBytes},
-                                  "text_ui_vertices");
-  if (vertex.hasError()) {
-    return vertex;
-  }
-  if (vertex.value()) {
-    frame.lastUploadHash = 0u;
-  }
-  auto index = ensureDynamicBufferCapacity(
-      gpu_, frame.index,
-      BufferDesc{.usage = BufferUsage::Index,
-                 .storage = Storage::HostVisible,
-                 .size = quadCount * kIndicesPerQuad * sizeof(uint32_t)},
-      "text_ui_indices");
-  if (index.hasError()) {
-    return index;
-  }
-  if (index.value()) {
-    const size_t indexCount = frame.index.capacityBytes / sizeof(uint32_t);
-    std::pmr::vector<uint32_t> indexPattern(&memory_);
-    indexPattern.resize(indexCount);
-    for (size_t i = 0; i < indexCount / kIndicesPerQuad; ++i) {
-      const uint32_t baseVertex = static_cast<uint32_t>(i * kVerticesPerQuad);
-      const size_t idx = i * kIndicesPerQuad;
-      indexPattern[idx + 0u] = baseVertex;
-      indexPattern[idx + 1u] = baseVertex + 1u;
-      indexPattern[idx + 2u] = baseVertex + 2u;
-      indexPattern[idx + 3u] = baseVertex + 2u;
-      indexPattern[idx + 4u] = baseVertex + 3u;
-      indexPattern[idx + 5u] = baseVertex;
-    }
-    auto up = gpu_.updateBuffer(
-        frame.index.buffer->handle(),
-        std::span<const std::byte>(
-            reinterpret_cast<const std::byte *>(indexPattern.data()),
-            frame.index.capacityBytes),
-        0);
-    if (up.hasError()) {
-      retireDynamicBuffer(frame.index);
-      return Result<bool, std::string>::makeError(up.error());
-    }
-  }
-  return Result<bool, std::string>::makeResult(true);
-}
-
-Result<bool, std::string> TextRenderer::uploadUi(uint32_t slot) {
+Result<bool, std::string> TextRenderer::uploadGlyphPackets() {
   NURI_PROFILER_FUNCTION();
-  constexpr size_t kVerticesPerQuad = 4u;
-  FrameBuffers &frame = uiFrames_[slot];
-  const size_t vbBytes = uiVerts_.size() * sizeof(UiVertex);
-  const size_t quadCount = uiVerts_.size() / kVerticesPerQuad;
-  auto ensure = ensureUiFrameBuffers(frame, vbBytes, quadCount);
-  if (ensure.hasError()) {
-    return ensure;
-  }
-  if (frame.lastUploadHash == uiQueueHash_) {
-    return Result<bool, std::string>::makeResult(true);
-  }
-  auto up = gpu_.updateBuffer(
-      frame.vertex.buffer->handle(),
-      std::span<const std::byte>(
-          reinterpret_cast<const std::byte *>(uiVerts_.data()), vbBytes),
-      0);
-  if (up.hasError()) {
-    return Result<bool, std::string>::makeError(up.error());
-  }
-  frame.lastUploadHash = uiQueueHash_;
-  return Result<bool, std::string>::makeResult(true);
-}
-
-Result<bool, std::string> TextRenderer::uploadWorld(uint32_t slot) {
-  NURI_PROFILER_FUNCTION();
-  FrameBuffers &frame = worldFrames_[slot];
   const size_t transformBytes =
       resolvedWorldTransforms_.size() * sizeof(ResolvedWorldTransform);
   const size_t instancesOffset = alignUp(transformBytes, 16u);
-  const size_t instanceBytes =
-      worldInstances_.size() * sizeof(WorldGlyphInstance);
+  const size_t instanceBytes = glyphInstances_.size() * sizeof(GlyphInstance);
   const size_t totalBytes = instancesOffset + instanceBytes;
-  auto ensure = ensureDynamicBufferCapacity(
-      gpu_, frame.vertex,
-      BufferDesc{.usage = BufferUsage::Storage | BufferUsage::Vertex,
-                 .storage = Storage::HostVisible,
-                 .size = totalBytes},
-      "text_world_instances");
+  auto ensure = glyphBuffers_.acquire(
+      frameIndex_, totalBytes, std::max(1u, gpu_.getSwapchainImageCount()));
   if (ensure.hasError()) {
-    return ensure;
+    return Result<bool, std::string>::makeError(ensure.error());
+  }
+  glyphDependencyBuffer_ = ensure.value().buffer;
+  if (transformBytes != 0u) {
+    auto up = gpu_.updateBuffer(
+        glyphDependencyBuffer_,
+        std::span<const std::byte>(reinterpret_cast<const std::byte *>(
+                                       resolvedWorldTransforms_.data()),
+                                   transformBytes),
+        0u);
+    if (up.hasError()) {
+      glyphBuffers_.abandonPrepared();
+      return Result<bool, std::string>::makeError(up.error());
+    }
   }
   auto up = gpu_.updateBuffer(
-      frame.vertex.buffer->handle(),
+      glyphDependencyBuffer_,
       std::span<const std::byte>(
-          reinterpret_cast<const std::byte *>(resolvedWorldTransforms_.data()),
-          transformBytes),
-      0);
-  if (up.hasError()) {
-    return Result<bool, std::string>::makeError(up.error());
-  }
-  up = gpu_.updateBuffer(
-      frame.vertex.buffer->handle(),
-      std::span<const std::byte>(
-          reinterpret_cast<const std::byte *>(worldInstances_.data()),
+          reinterpret_cast<const std::byte *>(glyphInstances_.data()),
           instanceBytes),
       instancesOffset);
   if (up.hasError()) {
+    glyphBuffers_.abandonPrepared();
     return Result<bool, std::string>::makeError(up.error());
   }
   worldTransformBufferAddress_ =
-      gpu_.getBufferDeviceAddress(frame.vertex.buffer->handle(), 0u);
-  worldGlyphBufferAddress_ = gpu_.getBufferDeviceAddress(
-      frame.vertex.buffer->handle(), instancesOffset);
+      transformBytes == 0u
+          ? 0u
+          : gpu_.getBufferDeviceAddress(glyphDependencyBuffer_, 0u);
+  glyphBufferAddress_ =
+      gpu_.getBufferDeviceAddress(glyphDependencyBuffer_, instancesOffset);
   return Result<bool, std::string>::makeResult(true);
 }
 
-void TextRenderer::buildUiGeometry() {
-  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CMD_DRAW);
-  const bool canReuseUiGeometry =
-      uiGeometryValid_ && uiQueueHash_ == lastBuiltUiQueueHash_;
-  if (canReuseUiGeometry) {
-    return;
-  }
-  if (uiQueueNeedsSort_) {
-    std::sort(uiQueue_.begin(), uiQueue_.end(), uiBatchLess);
-    uiQueueNeedsSort_ = false;
-  }
-  uiVerts_.clear();
-  uiBatches_.clear();
-  const size_t quadCount = uiQueue_.size();
-  uiVerts_.reserve(quadCount * 4u);
-  uiBatches_.reserve(16u);
-  uint32_t currentAtlas = std::numeric_limits<uint32_t>::max();
-  float currentPxRange = -1.0f;
-  size_t indexWrite = 0;
-  for (const UiQuad &q : uiQueue_) {
-    if (currentAtlas != q.atlas ||
-        std::abs(currentPxRange - q.pxRange) > kBatchPxRangeEpsilon) {
-      currentAtlas = q.atlas;
-      currentPxRange = q.pxRange;
-      uiBatches_.push_back(UiBatch{
-          .atlas = q.atlas,
-          .pxRange = q.pxRange,
-          .firstIndex = static_cast<uint32_t>(indexWrite),
-          .indexCount = 0,
-      });
-    }
-    uiVerts_.push_back(
-        UiVertex{{q.minX, q.minY}, {q.uvMinX, q.uvMinY}, q.color});
-    uiVerts_.push_back(
-        UiVertex{{q.maxX, q.minY}, {q.uvMaxX, q.uvMinY}, q.color});
-    uiVerts_.push_back(
-        UiVertex{{q.maxX, q.maxY}, {q.uvMaxX, q.uvMaxY}, q.color});
-    uiVerts_.push_back(
-        UiVertex{{q.minX, q.maxY}, {q.uvMinX, q.uvMaxY}, q.color});
-    indexWrite += 6u;
-    uiBatches_.back().indexCount += 6u;
-  }
-  uiGeometryValid_ = true;
-  lastBuiltUiQueueHash_ = uiQueueHash_;
-}
-
-void TextRenderer::buildWorldGeometry(const CameraFrameState &camera) {
-  NURI_PROFILER_ZONE("TextRenderer::buildWorldGeometry",
+void TextRenderer::buildGlyphPackets(const CameraFrameState &camera) {
+  NURI_PROFILER_ZONE("TextRenderer::buildGlyphPackets",
                      NURI_PROFILER_COLOR_CMD_DRAW);
-  if (worldQueueNeedsSort_) {
-    std::sort(worldQueue_.begin(), worldQueue_.end(), worldBatchLess);
-    worldQueueNeedsSort_ = false;
+  if (glyphQueueNeedsSort_) {
+    std::sort(glyphQueue_.begin(), glyphQueue_.end(), glyphBatchLess);
+    glyphQueueNeedsSort_ = false;
   }
-  worldInstances_.clear();
-  worldBatches_.clear();
-  const size_t quadCount = worldQueue_.size();
-  worldInstances_.reserve(quadCount);
-  worldBatches_.reserve(16u);
+  glyphInstances_.clear();
+  glyphBatches_.clear();
+  glyphInstances_.reserve(glyphQueue_.size());
+  glyphBatches_.reserve(16u);
   const BillboardFrameBasis basis = buildBillboardFrameBasis(camera);
   resolvedWorldTransforms_.resize(worldTransforms_.size());
   for (size_t i = 0; i < worldTransforms_.size(); ++i) {
@@ -735,58 +580,85 @@ void TextRenderer::buildWorldGeometry(const CameraFrameState &camera) {
   uint32_t currentTransformId = std::numeric_limits<uint32_t>::max();
   float currentPxRange = -1.0f;
   const glm::mat4 view = camera.view;
-  for (const WorldQuad &q : worldQueue_) {
-    if (currentAtlas != q.atlas || currentTransformId != q.transformId ||
+  TextDomain currentDomain = static_cast<TextDomain>(0xffu);
+  for (const GlyphPacket &q : glyphQueue_) {
+    if (currentDomain != q.domain || currentAtlas != q.atlas ||
+        currentTransformId != q.transformId ||
         std::abs(currentPxRange - q.pxRange) > kBatchPxRangeEpsilon) {
+      currentDomain = q.domain;
       currentAtlas = q.atlas;
       currentTransformId = q.transformId;
       currentPxRange = q.pxRange;
-      const size_t transformIdx = static_cast<size_t>(q.transformId - 1u);
-      const glm::vec3 translation =
-          glm::vec3(resolvedWorldTransforms_[transformIdx].translation);
-      worldBatches_.push_back(WorldBatch{
+      float sortDepth = 0.0f;
+      if (q.domain == TextDomain::World) {
+        const size_t transformIdx = static_cast<size_t>(q.transformId - 1u);
+        const glm::vec3 translation =
+            glm::vec3(resolvedWorldTransforms_[transformIdx].translation);
+        sortDepth = -(view * glm::vec4(translation, 1.0f)).z;
+      }
+      glyphBatches_.push_back(GlyphBatch{
+          .domain = q.domain,
           .atlas = q.atlas,
           .pxRange = q.pxRange,
-          .firstInstance = static_cast<uint32_t>(worldInstances_.size()),
+          .firstInstance = static_cast<uint32_t>(glyphInstances_.size()),
           .instanceCount = 0,
           .atlasTexture = q.atlasTexture,
-          .sortDepth = -(view * glm::vec4(translation, 1.0f)).z,
+          .sortDepth = sortDepth,
       });
     }
-    const size_t transformIdx = static_cast<size_t>(q.transformId) - 1u;
-    worldInstances_.push_back(WorldGlyphInstance{
+    const uint32_t transformIndex =
+        q.domain == TextDomain::World ? q.transformId - 1u : 0u;
+    glyphInstances_.push_back(GlyphInstance{
         .rectMinMax = glm::vec4(q.minX, q.minY, q.maxX, q.maxY),
         .uvMinMax = glm::vec4(q.uvMinX, q.uvMinY, q.uvMaxX, q.uvMaxY),
         .color = q.color,
-        .transformIndex = static_cast<uint32_t>(transformIdx),
+        .transformIndex = transformIndex,
     });
-    worldBatches_.back().instanceCount += 1u;
+    glyphBatches_.back().instanceCount += 1u;
   }
   NURI_PROFILER_ZONE_END();
+}
+
+Result<bool, std::string>
+TextRenderer::prepareGlyphPackets(const CameraFrameState &camera) {
+  if (glyphPrepared_) {
+    return Result<bool, std::string>::makeResult(true);
+  }
+  const uint64_t cameraHash =
+      worldHasBillboards_ ? hashCameraFrameState(camera) : 0ull;
+  const bool canReuse = glyphGeometryValid_ &&
+                        glyphQueueHash_ == lastBuiltGlyphQueueHash_ &&
+                        cameraHash == lastBuiltWorldCameraHash_;
+  if (!canReuse) {
+    buildGlyphPackets(camera);
+    glyphGeometryValid_ = true;
+    lastBuiltGlyphQueueHash_ = glyphQueueHash_;
+    lastBuiltWorldCameraHash_ = cameraHash;
+  }
+  auto upload = uploadGlyphPackets();
+  if (upload.hasError()) {
+    return upload;
+  }
+  glyphPrepared_ = true;
+  return Result<bool, std::string>::makeResult(true);
 }
 
 Result<bool, std::string>
 TextRenderer::prepareWorldRenderState(RenderFrameContext &frame,
                                       TextureHandle &outDepth,
                                       Format &outDepthFormat) {
-  if (worldQueue_.empty() || worldAppended_) {
+  if (worldGlyphCount_ == 0u || worldAppended_) {
     return Result<bool, std::string>::makeResult(false);
   }
-  const uint64_t cameraHash =
-      worldHasBillboards_ ? hashCameraFrameState(frame.camera) : 0ull;
-  const bool canReuseWorldGeometry =
-      worldGeometryValid_ && worldQueueHash_ == lastBuiltWorldQueueHash_ &&
-      cameraHash == lastBuiltWorldCameraHash_;
-  if (!canReuseWorldGeometry) {
-    buildWorldGeometry(frame.camera);
-    worldGeometryValid_ = true;
-    lastBuiltWorldQueueHash_ = worldQueueHash_;
-    lastBuiltWorldCameraHash_ = cameraHash;
+  auto packets = prepareGlyphPackets(frame.camera);
+  if (packets.hasError()) {
+    return packets;
   }
   outDepth = resolveFrameDepthTexture(frame);
   outDepthFormat = ::nuri::isValid(outDepth) ? gpu_.getTextureFormat(outDepth)
                                              : Format::Count;
-  const TextureHandle colorTexture = frame.sharedResources.frameColorTexture;
+  const TextureHandle colorTexture =
+      frame.sharedResources[FrameTextureSlot::FrameColor].texture;
   const Format colorFormat = ::nuri::isValid(colorTexture)
                                  ? gpu_.getTextureFormat(colorTexture)
                                  : gpu_.getSwapchainFormat();
@@ -794,30 +666,28 @@ TextRenderer::prepareWorldRenderState(RenderFrameContext &frame,
   if (pipeline.hasError()) {
     return pipeline;
   }
-  worldPreparedSlot_ = frameSlot(worldFrames_);
-  auto upload = uploadWorld(worldPreparedSlot_);
-  if (upload.hasError()) {
-    return upload;
-  }
-  worldDependencyBuffer_ =
-      worldFrames_[worldPreparedSlot_].vertex.buffer->handle();
   worldDraws_.clear();
+  worldSortDepths_.clear();
   worldPcs_.clear();
   worldTransparentTextureReadList_.clear();
-  worldDraws_.reserve(worldBatches_.size());
-  worldPcs_.reserve(worldBatches_.size());
+  worldDraws_.reserve(glyphBatches_.size());
+  worldPcs_.reserve(glyphBatches_.size());
   const glm::mat4 viewProj =
       cameraCurrentUnjitteredViewProjection(frame.camera);
-  for (const WorldBatch &batch : worldBatches_) {
+  for (const GlyphBatch &batch : glyphBatches_) {
+    if (batch.domain != TextDomain::World) {
+      continue;
+    }
     worldPcs_.push_back(WorldPC{
         .viewProj = viewProj,
-        .glyphBufferAddress = worldGlyphBufferAddress_,
+        .glyphBufferAddress = glyphBufferAddress_,
         .transformBufferAddress = worldTransformBufferAddress_,
         .atlas = batch.atlas,
         .pxRange = batch.pxRange,
         .alphaDiscardThreshold = 1.0e-3f,
     });
     DrawItem &draw = worldDraws_.emplace_back();
+    worldSortDepths_.push_back(batch.sortDepth);
     draw.pipeline = worldPipeline_;
     draw.vertexCount = 6;
     draw.instanceCount = batch.instanceCount;
@@ -859,7 +729,7 @@ Result<bool, std::string> TextRenderer::append3DGraphPass(
     return Result<bool, std::string>::makeResult(true);
   }
   const bool hasDepth = ::nuri::isValid(depthTexture);
-  colorTexture = frame.sharedResources.frameColorTexture;
+  colorTexture = frame.sharedResources[FrameTextureSlot::FrameColor].texture;
   int32_t w = 0;
   int32_t h = 0;
   gpu_.getFramebufferSize(w, h);
@@ -871,8 +741,9 @@ Result<bool, std::string> TextRenderer::append3DGraphPass(
                 .clearColor = {0.0f, 0.0f, 0.0f, 1.0f}};
   if (::nuri::isValid(colorTexture)) {
     desc.colorTexture =
-        ::nuri::isValid(frame.sharedResources.frameColorGraphTexture)
-            ? frame.sharedResources.frameColorGraphTexture
+        ::nuri::isValid(
+            frame.sharedResources[FrameTextureSlot::FrameColor].graph)
+            ? frame.sharedResources[FrameTextureSlot::FrameColor].graph
             : graph.importTexture(colorTexture, "text3d_pass_color_texture")
                   .value();
   }
@@ -899,7 +770,7 @@ Result<bool, std::string> TextRenderer::append3DGraphPass(
   desc.draws =
       std::span<const DrawItem>(worldDraws_.data(), worldDraws_.size());
   desc.dependencyBuffers =
-      std::span<const BufferHandle>(&worldDependencyBuffer_, 1u);
+      std::span<const BufferHandle>(&glyphDependencyBuffer_, 1u);
   desc.debugLabel = "Text3D Pass";
   desc.debugColor = 0xff44cc88u;
   const RenderGraphPassId pass = graph.addGraphicsPass(desc).value();
@@ -929,11 +800,11 @@ Result<bool, std::string> TextRenderer::buildTransparentStageContribution(
     return Result<bool, std::string>::makeResult(true);
   }
   worldTransparentDraws_.clear();
-  worldTransparentDraws_.reserve(worldBatches_.size());
-  for (size_t i = 0; i < worldBatches_.size(); ++i) {
+  worldTransparentDraws_.reserve(worldDraws_.size());
+  for (size_t i = 0; i < worldDraws_.size(); ++i) {
     worldTransparentDraws_.push_back(TransparentStageSortableDraw{
         .draw = worldDraws_[i],
-        .sortDepth = worldBatches_[i].sortDepth,
+        .sortDepth = worldSortDepths_[i],
         .stableOrder = static_cast<uint32_t>(i),
     });
   }
@@ -941,7 +812,7 @@ Result<bool, std::string> TextRenderer::buildTransparentStageContribution(
       worldTransparentDraws_.data(), worldTransparentDraws_.size());
   out.fixedDraws = {};
   out.dependencyBuffers =
-      std::span<const BufferHandle>(&worldDependencyBuffer_, 1u);
+      std::span<const BufferHandle>(&glyphDependencyBuffer_, 1u);
   out.textureReads =
       std::span<const TextureHandle>(worldTransparentTextureReadList_.data(),
                                      worldTransparentTextureReadList_.size());
@@ -954,15 +825,15 @@ TextRenderer::append2DGraphPass(RenderFrameContext &frame,
                                 RenderGraphBuilder &graph,
                                 bool hasPriorColorPass) {
   NURI_PROFILER_FUNCTION();
-  if (uiQueue_.empty() || uiAppended_) {
+  if (uiGlyphCount_ == 0u || uiAppended_) {
     return Result<bool, std::string>::makeResult(true);
   }
-  buildUiGeometry();
-  if (uiBatches_.empty()) {
-    uiAppended_ = true;
-    return Result<bool, std::string>::makeResult(true);
+  auto packets = prepareGlyphPackets(frame.camera);
+  if (packets.hasError()) {
+    return packets;
   }
-  const TextureHandle colorTexture = frame.sharedResources.frameColorTexture;
+  const TextureHandle colorTexture =
+      frame.sharedResources[FrameTextureSlot::FrameColor].texture;
   const Format colorFormat = ::nuri::isValid(colorTexture)
                                  ? gpu_.getTextureFormat(colorTexture)
                                  : gpu_.getSwapchainFormat();
@@ -970,15 +841,10 @@ TextRenderer::append2DGraphPass(RenderFrameContext &frame,
   if (pipeline.hasError()) {
     return pipeline;
   }
-  const uint32_t slot = frameSlot(uiFrames_);
-  auto upload = uploadUi(slot);
-  if (upload.hasError()) {
-    return upload;
-  }
   uiDraws_.clear();
   uiPcs_.clear();
-  uiDraws_.reserve(uiBatches_.size());
-  uiPcs_.reserve(uiBatches_.size());
+  uiDraws_.reserve(glyphBatches_.size());
+  uiPcs_.reserve(glyphBatches_.size());
   int32_t fbW = 0;
   int32_t fbH = 0;
   gpu_.getFramebufferSize(fbW, fbH);
@@ -992,19 +858,20 @@ TextRenderer::append2DGraphPass(RenderFrameContext &frame,
   const glm::mat4 proj = glm::ortho(
       0.0f, std::max(1.0f, static_cast<float>(logicalW)),
       std::max(1.0f, static_cast<float>(logicalH)), 0.0f, -1.0f, 1.0f);
-  const FrameBuffers &buffers = uiFrames_[slot];
-  for (const UiBatch &b : uiBatches_) {
-    uiPcs_.push_back(
-        UiPC{.proj = proj, .atlas = b.atlas, .pxRange = b.pxRange});
+  for (const GlyphBatch &b : glyphBatches_) {
+    if (b.domain != TextDomain::Ui) {
+      continue;
+    }
+    uiPcs_.push_back(UiPC{.proj = proj,
+                          .glyphBufferAddress = glyphBufferAddress_,
+                          .atlas = b.atlas,
+                          .pxRange = b.pxRange});
     const UiPC &pc = uiPcs_.back();
     DrawItem d{};
     d.pipeline = uiPipeline_;
-    d.vertexBuffer = buffers.vertex.buffer->handle();
-    d.indexBuffer = buffers.index.buffer->handle();
-    d.indexFormat = IndexFormat::U32;
-    d.indexCount = b.indexCount;
-    d.instanceCount = 1;
-    d.firstIndex = b.firstIndex;
+    d.vertexCount = 6u;
+    d.instanceCount = b.instanceCount;
+    d.firstInstance = b.firstInstance;
     d.pushConstants = std::span<const std::byte>(
         reinterpret_cast<const std::byte *>(&pc), sizeof(pc));
     d.debugLabel = "Text2D Batch";
@@ -1019,8 +886,9 @@ TextRenderer::append2DGraphPass(RenderFrameContext &frame,
                 .clearColor = {0.0f, 0.0f, 0.0f, 1.0f}};
   if (::nuri::isValid(colorTexture)) {
     desc.colorTexture =
-        ::nuri::isValid(frame.sharedResources.frameColorGraphTexture)
-            ? frame.sharedResources.frameColorGraphTexture
+        ::nuri::isValid(
+            frame.sharedResources[FrameTextureSlot::FrameColor].graph)
+            ? frame.sharedResources[FrameTextureSlot::FrameColor].graph
             : graph.importTexture(colorTexture, "text2d_pass_color_texture")
                   .value();
   }
@@ -1032,17 +900,34 @@ TextRenderer::append2DGraphPass(RenderFrameContext &frame,
                    .minDepth = 0.0f,
                    .maxDepth = 1.0f};
   desc.draws = std::span<const DrawItem>(uiDraws_.data(), uiDraws_.size());
+  desc.dependencyBuffers =
+      std::span<const BufferHandle>(&glyphDependencyBuffer_, 1u);
   desc.debugLabel = "Text2D Pass";
   desc.debugColor = 0xffcc8844u;
-  [[maybe_unused]] const RenderGraphPassId pass =
-      graph.addGraphicsPass(desc).value();
+  const RenderGraphPassId pass = graph.addGraphicsPass(desc).value();
+  for (const GlyphBatch &batch : glyphBatches_) {
+    if (batch.domain == TextDomain::Ui) {
+      (void)graph
+          .addTextureRead(
+              pass,
+              graph.importTexture(batch.atlasTexture, "text2d_atlas_texture")
+                  .value())
+          .value();
+    }
+  }
   uiAppended_ = true;
   return Result<bool, std::string>::makeResult(true);
 }
 
+void TextRenderer::onFrameSubmitted(SubmissionHandle submission) noexcept {
+  glyphBuffers_.submitPrepared(submission);
+}
+
+void TextRenderer::onFrameAbandoned() noexcept {
+  glyphBuffers_.abandonPrepared();
+}
+
 void TextRenderer::destroyGpu() {
-  uiFrames_.clear();
-  worldFrames_.clear();
   if (::nuri::isValid(uiPipeline_)) {
     gpu_.destroyRenderPipeline(uiPipeline_);
     uiPipeline_ = {};

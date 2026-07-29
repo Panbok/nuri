@@ -1,5 +1,4 @@
 #include "nuri/core/thread_priority.h"
-#include "nuri/pch.h"
 #if defined(_WIN32)
 #ifndef NOMINMAX
 #define NOMINMAX

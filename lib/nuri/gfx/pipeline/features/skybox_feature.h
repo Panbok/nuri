@@ -6,7 +6,6 @@
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/gfx/owned_gpu_resource.h"
 #include "nuri/gfx/pipeline/render_pipeline.h"
-#include "nuri/gfx/shader.h"
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -81,7 +80,6 @@ private:
   void destroyFrameBuffers();
   GPUDevice &gpu_;
   SkyboxFeatureConfig config_{};
-  std::unique_ptr<Shader> skyboxShader_;
   std::array<OwnedRenderPipelineHandle, kCoverageModeCount> skyboxPipelines_;
   std::array<OwnedRenderPipelineHandle, kCoverageModeCount>
       skyboxDepthPipelines_;

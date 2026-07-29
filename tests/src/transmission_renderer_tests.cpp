@@ -253,23 +253,21 @@ MaterialTableGpuData
 createMaterialTableGpuData(GPUDevice &gpu,
                            const MaterialTableSnapshot &snapshot) {
   MaterialTableGpuData data{};
-  data.headerBuffer =
-      createStorageTableBuffer(gpu, snapshot.headers, "material_headers");
-  data.clearcoatBuffer =
-      createStorageTableBuffer(gpu, snapshot.clearcoat, "material_clearcoat");
-  data.sheenBuffer =
-      createStorageTableBuffer(gpu, snapshot.sheen, "material_sheen");
-  data.transmissionBuffer = createStorageTableBuffer(gpu, snapshot.transmission,
-                                                     "material_transmission");
-  data.specularBuffer =
-      createStorageTableBuffer(gpu, snapshot.specular, "material_specular");
-  data.headerBufferAddress = gpu.getBufferDeviceAddress(data.headerBuffer);
-  data.clearcoatBufferAddress =
-      gpu.getBufferDeviceAddress(data.clearcoatBuffer);
-  data.sheenBufferAddress = gpu.getBufferDeviceAddress(data.sheenBuffer);
-  data.transmissionBufferAddress =
-      gpu.getBufferDeviceAddress(data.transmissionBuffer);
-  data.specularBufferAddress = gpu.getBufferDeviceAddress(data.specularBuffer);
+  const auto populate = [&gpu, &data](MaterialTableRegion region,
+                                      const auto &rows,
+                                      std::string_view debugName) {
+    auto &gpuRegion = data[region];
+    gpuRegion.buffer = createStorageTableBuffer(gpu, rows, debugName);
+    gpuRegion.address = gpu.getBufferDeviceAddress(gpuRegion.buffer);
+  };
+  populate(MaterialTableRegion::Header, snapshot.headers, "material_headers");
+  populate(MaterialTableRegion::Clearcoat, snapshot.clearcoat,
+           "material_clearcoat");
+  populate(MaterialTableRegion::Sheen, snapshot.sheen, "material_sheen");
+  populate(MaterialTableRegion::Transmission, snapshot.transmission,
+           "material_transmission");
+  populate(MaterialTableRegion::Specular, snapshot.specular,
+           "material_specular");
   data.version = snapshot.version;
   return data;
 }
@@ -284,12 +282,16 @@ createForwardSceneGpuData(GPUDevice &gpu,
   frameData.sceneColorSamplerId = gpu.getLinearRepeatSamplerBindlessIndex(true);
   frameData.materialSamplerId = gpu.getDefaultSamplerBindlessIndex();
   frameData.materialDataSamplerId = gpu.getDefaultSamplerBindlessIndex();
-  frameData.materialHeaderBufferAddress = materialGpu.headerBufferAddress;
-  frameData.materialClearcoatBufferAddress = materialGpu.clearcoatBufferAddress;
-  frameData.materialSheenBufferAddress = materialGpu.sheenBufferAddress;
+  frameData.materialHeaderBufferAddress =
+      materialGpu[MaterialTableRegion::Header].address;
+  frameData.materialClearcoatBufferAddress =
+      materialGpu[MaterialTableRegion::Clearcoat].address;
+  frameData.materialSheenBufferAddress =
+      materialGpu[MaterialTableRegion::Sheen].address;
   frameData.materialTransmissionBufferAddress =
-      materialGpu.transmissionBufferAddress;
-  frameData.materialSpecularBufferAddress = materialGpu.specularBufferAddress;
+      materialGpu[MaterialTableRegion::Transmission].address;
+  frameData.materialSpecularBufferAddress =
+      materialGpu[MaterialTableRegion::Specular].address;
   const std::span<const std::byte> frameDataBytes{
       reinterpret_cast<const std::byte *>(&frameData), sizeof(frameData)};
   const BufferHandle buffer =
@@ -358,9 +360,11 @@ TEST(TransmissionRendererTest,
   RenderFrameContext frame{};
   frame.scene = &scene;
   frame.resources = &resources;
-  frame.settings = &settings;
-  frame.sharedResources.sceneColorTexture = sceneColorTexture->handle();
-  frame.sharedResources.frameColorTexture = frameColorTexture->handle();
+  frame.settings = settings;
+  frame.sharedResources[FrameTextureSlot::SceneColor].texture =
+      sceneColorTexture->handle();
+  frame.sharedResources[FrameTextureSlot::FrameColor].texture =
+      frameColorTexture->handle();
   frame.sharedResources.materialTableGpuData = materialGpu;
   frame.sharedResources.forwardSceneGpuData = sceneGpu;
   SceneDrawDatabase drawDatabase(gpu, &memory);
@@ -422,7 +426,7 @@ TEST(TransmissionRendererTest,
   ASSERT_FALSE(materialPrepare.hasError()) << materialPrepare.error();
   ASSERT_TRUE(materialPrepare.value());
   EXPECT_LE(gpu.bufferDeviceAddressCallCount, 2u);
-  EXPECT_EQ(renderer.cachedMaterialVersion_,
+  EXPECT_EQ(renderer.sceneCache_.materialVersion,
             resources.materialSnapshot().version);
 
   gpu.bumpGeometryMutationVersion();
@@ -434,7 +438,7 @@ TEST(TransmissionRendererTest,
   ASSERT_FALSE(geometryPrepare.hasError()) << geometryPrepare.error();
   ASSERT_TRUE(geometryPrepare.value());
   EXPECT_GT(gpu.bufferDeviceAddressCallCount, 2u);
-  EXPECT_EQ(renderer.cachedGeometryMutationVersion_,
+  EXPECT_EQ(renderer.sceneCache_.geometryMutationVersion,
             gpu.geometryMutationVersion());
 }
 
@@ -493,9 +497,11 @@ TEST(TransmissionRendererTest,
   RenderFrameContext frame{};
   frame.scene = &scene;
   frame.resources = &resources;
-  frame.settings = &settings;
-  frame.sharedResources.sceneColorTexture = sceneColorTexture->handle();
-  frame.sharedResources.frameColorTexture = frameColorTexture->handle();
+  frame.settings = settings;
+  frame.sharedResources[FrameTextureSlot::SceneColor].texture =
+      sceneColorTexture->handle();
+  frame.sharedResources[FrameTextureSlot::FrameColor].texture =
+      frameColorTexture->handle();
   frame.sharedResources.materialTableGpuData = materialGpu;
   frame.sharedResources.forwardSceneGpuData = sceneGpu;
   SceneDrawDatabase drawDatabase(gpu, &memory);
@@ -508,7 +514,7 @@ TEST(TransmissionRendererTest,
   ASSERT_FALSE(fallbackPrepare.hasError()) << fallbackPrepare.error();
   ASSERT_TRUE(fallbackPrepare.value());
   EXPECT_TRUE(renderer.meshDrawTemplates_.empty());
-  EXPECT_TRUE(renderer.instanceRemap_.empty());
+  EXPECT_TRUE(renderer.sceneCache_.instanceRemap.empty());
 
   const uint64_t topologyVersion = scene.topologyVersion();
   const uint64_t transformVersion = scene.transformVersion();
@@ -524,8 +530,8 @@ TEST(TransmissionRendererTest,
   ASSERT_FALSE(transmissionPrepare.hasError()) << transmissionPrepare.error();
   ASSERT_TRUE(transmissionPrepare.value());
   EXPECT_EQ(renderer.meshDrawTemplates_.size(), kRenderableCount);
-  EXPECT_EQ(renderer.instanceMatrices_.size(), kRenderableCount);
-  EXPECT_EQ(renderer.instanceRemap_.size(), kRenderableCount);
+  EXPECT_EQ(renderer.sceneCache_.instanceMatrices.size(), kRenderableCount);
+  EXPECT_EQ(renderer.sceneCache_.instanceRemap.size(), kRenderableCount);
 }
 
 TEST(TransmissionRendererTest, StableSortedTransmissionRecomputesSortDepths) {
@@ -581,11 +587,13 @@ TEST(TransmissionRendererTest, StableSortedTransmissionRecomputesSortDepths) {
   RenderFrameContext frame{};
   frame.scene = &scene;
   frame.resources = &resources;
-  frame.settings = &settings;
   frame.camera.view = glm::mat4(1.0f);
   settings.opaque.enableCpuFrustumCulling = false;
-  frame.sharedResources.sceneColorTexture = sceneColorTexture->handle();
-  frame.sharedResources.frameColorTexture = frameColorTexture->handle();
+  frame.settings = settings;
+  frame.sharedResources[FrameTextureSlot::SceneColor].texture =
+      sceneColorTexture->handle();
+  frame.sharedResources[FrameTextureSlot::FrameColor].texture =
+      frameColorTexture->handle();
   frame.sharedResources.materialTableGpuData = materialGpu;
   frame.sharedResources.forwardSceneGpuData = sceneGpu;
   SceneDrawDatabase drawDatabase(gpu, &memory);

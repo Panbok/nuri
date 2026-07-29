@@ -1,5 +1,6 @@
 #pragma once
 #include "nuri/defines.h"
+#include "nuri/resources/gpu/resource_handles.h"
 #include <array>
 #include <cassert>
 #include <cstdint>
@@ -8,57 +9,13 @@
 #include <vector>
 namespace nuri {
 
-inline constexpr uint32_t kTextHandleIndexBits = 20;
-inline constexpr uint32_t kTextHandleGenerationBits = 12;
-inline constexpr uint32_t kTextHandleIndexMask =
-    (1u << kTextHandleIndexBits) - 1u;
-inline constexpr uint32_t kTextHandleGenerationMask =
-    (1u << kTextHandleGenerationBits) - 1u;
-
-struct FontHandle {
-  uint32_t value = 0;
-  auto operator<=>(const FontHandle &) const = default;
-};
-struct AtlasPageHandle {
-  uint32_t value = 0;
-  auto operator<=>(const AtlasPageHandle &) const = default;
-};
-struct ShaperFaceHandle {
-  uint32_t value = 0;
-  auto operator<=>(const ShaperFaceHandle &) const = default;
-};
+using FontHandle = PackedHandle<struct FontHandleTag>;
+using AtlasPageHandle = PackedHandle<struct AtlasPageHandleTag>;
+using ShaperFaceHandle = PackedHandle<struct ShaperFaceHandleTag>;
 
 inline constexpr FontHandle kInvalidFontHandle{};
 inline constexpr AtlasPageHandle kInvalidAtlasPageHandle{};
 inline constexpr ShaperFaceHandle kInvalidShaperFaceHandle{};
-
-[[nodiscard]] constexpr bool isValid(FontHandle h) noexcept {
-  return h.value != 0;
-}
-[[nodiscard]] constexpr bool isValid(AtlasPageHandle h) noexcept {
-  return h.value != 0;
-}
-[[nodiscard]] constexpr bool isValid(ShaperFaceHandle h) noexcept {
-  return h.value != 0;
-}
-
-[[nodiscard]] constexpr uint32_t
-packTextHandleValue(uint32_t index, uint32_t generation) noexcept {
-  if (generation == 0) {
-    return 0;
-  }
-  return ((generation & kTextHandleGenerationMask) << kTextHandleIndexBits) |
-         (index & kTextHandleIndexMask);
-}
-
-[[nodiscard]] constexpr uint32_t textHandleIndex(uint32_t packed) noexcept {
-  return packed & kTextHandleIndexMask;
-}
-
-[[nodiscard]] constexpr uint32_t
-textHandleGeneration(uint32_t packed) noexcept {
-  return (packed >> kTextHandleIndexBits) & kTextHandleGenerationMask;
-}
 
 using GlyphId = uint32_t;
 

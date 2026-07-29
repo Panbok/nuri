@@ -8,7 +8,6 @@
 #include "nuri/gfx/render_graph/render_graph.h"
 #include "nuri/gfx/renderers/detail/instance_data.h"
 #include "nuri/gfx/renderers/scene_draw_database.h"
-#include "nuri/gfx/shader.h"
 #include "nuri/gfx/visibility/visibility.h"
 #include "nuri/resources/cpu/mesh_data.h"
 #include "nuri/resources/gpu/buffer.h"
@@ -50,8 +49,8 @@ public:
   Result<bool, std::string> prepareSceneCache(SceneDrawDatabase &database,
                                               const RenderScene &scene,
                                               const ResourceManager &resources);
-  void commitSubmittedFrame(uint64_t frameIndex) noexcept;
-  void abandonPreparedFrame(uint64_t frameIndex) noexcept;
+  void commitSubmittedFrame(const RenderFrameContext &frame) noexcept;
+  void abandonPreparedFrame(const RenderFrameContext &frame) noexcept;
   [[nodiscard]] bool hasPreparedOpaquePrepassPasses() const noexcept;
   [[nodiscard]] bool hasPreparedOpaqueMainLightingPasses() const noexcept;
   [[nodiscard]] bool hasPreparedOpaquePickPasses() const noexcept;
@@ -310,6 +309,15 @@ private:
       return std::span<const BufferHandle>(buffers.data(), buffers.size());
     }
   };
+  struct MeshletPreparedStream {
+    std::pmr::vector<MeshDispatchItem> dispatches;
+    std::pmr::vector<MeshletPushConstants> constants;
+    std::pmr::vector<MeshletDispatchDependencyBuffers> dependencies;
+
+    explicit MeshletPreparedStream(
+        std::pmr::memory_resource *memory = std::pmr::get_default_resource())
+        : dispatches(memory), constants(memory), dependencies(memory) {}
+  };
   struct alignas(16) VelocityFrameGpuData {
     glm::mat4 currentViewProjNoJitter{1.0f};
     glm::mat4 previousViewProjNoJitter{1.0f};
@@ -392,7 +400,10 @@ private:
     bool publishesDepth = false;
     uint32_t depthPyramidLevel = UINT32_MAX;
     explicit PreparedGraphPass(
-        std::pmr::memory_resource * = std::pmr::get_default_resource()) {}
+        std::pmr::memory_resource *memory = std::pmr::get_default_resource())
+        : bufferUses(memory), textureUses(memory) {}
+    std::pmr::vector<RenderGraphImportedBufferUse> bufferUses;
+    std::pmr::vector<RenderGraphImportedTextureUse> textureUses;
   };
   struct IndirectPackCache {
     bool valid = false;
@@ -437,6 +448,32 @@ private:
           meshletDispatchDependencyBuffers(memory), meshletBatchGpuData(memory),
           remap(memory) {}
   };
+  struct SurfacePipelineLibrary {
+    std::array<RenderPipelineHandle, 8 * kCoverageModeCount> meshScene{};
+    std::array<RenderPipelineHandle, 4> meshPick{};
+    std::array<RenderPipelineHandle, 4> meshShadowInspect{};
+    std::array<RenderPipelineHandle, 4> meshVelocity{};
+    std::array<RenderPipelineHandle, 2> meshReactiveMask{};
+    std::array<RenderPipelineHandle, 4> meshNormal{};
+    std::array<RenderPipelineHandle, 8 * kCoverageModeCount> meshDepth{};
+    std::array<RenderPipelineHandle,
+               static_cast<size_t>(OverlayPipelineKind::Count) *
+                   kCoverageModeCount>
+        overlay{};
+    RenderPipelineHandle currentFrameDepthVerification{};
+    RenderPipelineHandle depthPyramid{};
+    RenderPipelineHandle depthMotionVector{};
+    std::array<MeshletPipelineHandle, 8 * kCoverageModeCount> meshletScene{};
+    std::array<MeshletPipelineHandle, 4 * kCoverageModeCount> meshletDepth{};
+    std::array<MeshletPipelineHandle, 4> meshletNormal{};
+    std::array<MeshletPipelineHandle, 2> meshletVelocity{};
+    std::array<MeshletPipelineHandle, 2> meshletReactiveMask{};
+    std::array<bool, static_cast<size_t>(OverlayPipelineKind::Count) *
+                         kCoverageModeCount>
+        overlayUnsupported{};
+    bool tessellationUnsupported = false;
+    bool meshletInitialized = false;
+  };
   Result<bool, std::string> ensureInitialized();
   [[nodiscard]] bool meshletPipelinesConfigured() const noexcept;
   Result<bool, std::string> recreatePickTexture();
@@ -469,11 +506,9 @@ private:
   void invalidateVisibilityReadbackSlot(size_t slot);
   Result<bool, std::string>
   ensureVisibilityVisibleIndexRingCapacity(size_t requiredBytes);
-  Result<bool, std::string>
-  ensureDynamicRingCapacity(std::pmr::vector<DynamicBufferSlot> &ring,
-                            size_t requiredBytes, size_t minimumBytes,
-                            std::string_view debugNamePrefix,
-                            Storage storage = Storage::Device);
+  Result<bool, std::string> ensureDynamicRingCapacity(
+      BufferRingSlot role, size_t requiredBytes, size_t minimumBytes,
+      std::string_view debugNamePrefix, Storage storage = Storage::Device);
   Result<bool, std::string>
   ensureInstanceRemapRingCapacity(size_t requiredBytes);
   Result<bool, std::string>
@@ -604,7 +639,7 @@ private:
   std::unique_ptr<Buffer> instanceCentersPhaseBuffer_;
   std::unique_ptr<Buffer> instanceLodBoundsBuffer_;
   std::unique_ptr<Buffer> instanceBaseMatricesBuffer_;
-  std::pmr::vector<std::pmr::vector<DynamicBufferSlot>> bufferRings_;
+  DynamicBufferRoleRing bufferRings_;
   bool cachedMeshletCounterValid_ = false;
   uint32_t cachedMeshletCounterSourceFrame_ = 0u;
   uint32_t cachedMeshletEmitted_ = 0u;
@@ -622,38 +657,11 @@ private:
   std::optional<glm::mat4> sceneDepthPyramidSourceViewProj_{};
   SamplerHandle sceneDepthSampler_{};
   std::array<ShaderHandle, ShaderSlotCount> shaders_{};
-  std::array<RenderPipelineHandle, 8 * kCoverageModeCount>
-      meshScenePipelines_{};
-  std::array<RenderPipelineHandle, 4> meshPickPipelines_{};
-  std::array<RenderPipelineHandle, 4> meshShadowInspectPipelines_{};
-  std::array<RenderPipelineHandle, 4> meshVelocityPipelines_{};
-  std::array<RenderPipelineHandle, 2> meshReactiveMaskPipelines_{};
-  std::array<RenderPipelineHandle, 4> meshNormalPipelines_{};
-  std::array<RenderPipelineHandle, 8 * kCoverageModeCount>
-      meshDepthPipelines_{};
-  std::array<RenderPipelineHandle,
-             static_cast<size_t>(OverlayPipelineKind::Count) *
-                 kCoverageModeCount>
-      overlayPipelines_{};
-  RenderPipelineHandle currentFrameDepthVerificationPipelineHandle_{};
-  RenderPipelineHandle depthPyramidPipelineHandle_{};
-  RenderPipelineHandle depthMotionVectorPipelineHandle_{};
-  std::array<MeshletPipelineHandle, 8 * kCoverageModeCount>
-      meshletScenePipelines_{};
-  std::array<MeshletPipelineHandle, 4 * kCoverageModeCount>
-      meshletDepthPipelines_{};
-  std::array<MeshletPipelineHandle, 4> meshletNormalPipelines_{};
-  std::array<MeshletPipelineHandle, 2> meshletVelocityPipelines_{};
-  std::array<MeshletPipelineHandle, 2> meshletReactiveMaskPipelines_{};
+  SurfacePipelineLibrary pipelines_{};
   size_t instanceCentersPhaseBufferCapacityBytes_ = 0;
   size_t instanceLodBoundsBufferCapacityBytes_ = 0;
   size_t instanceBaseMatricesBufferCapacityBytes_ = 0;
   bool initialized_ = false;
-  bool tessellationUnsupported_ = false;
-  std::array<bool, static_cast<size_t>(OverlayPipelineKind::Count) *
-                       kCoverageModeCount>
-      overlayPipelineUnsupported_{};
-  bool meshletPipelineInitialized_ = false;
   const RenderScene *cachedScene_ = nullptr;
   uint64_t cachedTopologyVersion_ = std::numeric_limits<uint64_t>::max();
   uint64_t cachedTransformVersion_ = std::numeric_limits<uint64_t>::max();
@@ -742,33 +750,18 @@ private:
   DepthMotionVectorPushConstants depthMotionVectorPushConstants_{};
   DrawItem depthMotionVectorDrawItem_{};
   std::array<TextureHandle, 1> depthMotionVectorDependencyTextures_{};
-  std::pmr::vector<MeshDispatchItem> meshletDepthPrepassDispatchItems_;
-  std::pmr::vector<MeshletPushConstants> meshletDepthPrepassPushConstants_;
-  std::pmr::vector<MeshletDispatchDependencyBuffers>
-      meshletDepthPrepassDispatchDependencyBuffers_;
+  MeshletPreparedStream meshletDepthPrepassStream_;
   std::pmr::vector<BufferHandle> meshletDepthPrepassDependencyBuffers_;
   std::pmr::vector<RenderGraphAccessMode>
       meshletDepthPrepassDependencyBufferAccessModes_;
-  std::pmr::vector<MeshDispatchItem> meshletNormalPrepassDispatchItems_;
-  std::pmr::vector<MeshletPushConstants> meshletNormalPrepassPushConstants_;
-  std::pmr::vector<MeshletDispatchDependencyBuffers>
-      meshletNormalPrepassDispatchDependencyBuffers_;
+  MeshletPreparedStream meshletNormalPrepassStream_;
   std::pmr::vector<BufferHandle> meshletNormalPrepassDependencyBuffers_;
   std::pmr::vector<RenderGraphAccessMode>
       meshletNormalPrepassDependencyBufferAccessModes_;
-  std::pmr::vector<MeshDispatchItem> meshletDispatchItems_;
-  std::pmr::vector<MeshletPushConstants> meshletPushConstants_;
+  MeshletPreparedStream meshletMainStream_;
   std::pmr::vector<MeshletBatchGpuData> meshletBatchGpuData_;
-  std::pmr::vector<MeshletDispatchDependencyBuffers>
-      meshletDispatchDependencyBuffers_;
-  std::pmr::vector<MeshDispatchItem> meshletVelocityDispatchItems_;
-  std::pmr::vector<MeshletPushConstants> meshletVelocityPushConstants_;
-  std::pmr::vector<MeshletDispatchDependencyBuffers>
-      meshletVelocityDispatchDependencyBuffers_;
-  std::pmr::vector<MeshDispatchItem> meshletReactiveMaskDispatchItems_;
-  std::pmr::vector<MeshletPushConstants> meshletReactiveMaskPushConstants_;
-  std::pmr::vector<MeshletDispatchDependencyBuffers>
-      meshletReactiveMaskDispatchDependencyBuffers_;
+  MeshletPreparedStream meshletVelocityStream_;
+  MeshletPreparedStream meshletReactiveMaskStream_;
   std::pmr::vector<TextureHandle> depthPyramidDependencyTextures_;
   std::pmr::vector<ShadowSdsmReducePushConstants>
       shadowSdsmReducePushConstants_;

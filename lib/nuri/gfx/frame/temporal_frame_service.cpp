@@ -1,9 +1,30 @@
 #include "nuri/gfx/frame/temporal_frame_service.h"
 #include "nuri/gfx/frame/presentation_aa_plan.h"
-#include "nuri/pch.h"
 #include <cmath>
 namespace nuri {
 namespace {
+constexpr TemporalResetReasonFlags kViewResetReasons =
+    TemporalResetReasonFlags::FirstUse |
+    TemporalResetReasonFlags::ExplicitReset |
+    TemporalResetReasonFlags::CameraCut |
+    TemporalResetReasonFlags::ProjectionChange |
+    TemporalResetReasonFlags::BackendRecreation;
+constexpr TemporalResetReasonFlags kGridResetReasons =
+    TemporalResetReasonFlags::Resize |
+    TemporalResetReasonFlags::RenderScaleChange;
+struct EpochRule {
+  TemporalResetReasonFlags reasons;
+  uint64_t TemporalEpochs::*epoch;
+};
+constexpr std::array kEpochRules{
+    EpochRule{kViewResetReasons, &TemporalEpochs::viewContinuity},
+    EpochRule{kGridResetReasons, &TemporalEpochs::renderGrid},
+    EpochRule{TemporalResetReasonFlags::ProviderChange,
+              &TemporalEpochs::providerConfiguration},
+    EpochRule{TemporalResetReasonFlags::ResourceRecreation |
+                  TemporalResetReasonFlags::BackendRecreation,
+              &TemporalEpochs::resourceGeneration},
+};
 [[nodiscard]] TemporalResetReasonFlags
 resetFlags(TemporalHistoryResetReason reason) noexcept {
   switch (reason) {
@@ -31,21 +52,12 @@ resetFlags(TemporalHistoryResetReason reason) noexcept {
   return TemporalResetReasonFlags::SceneDiscontinuity;
 }
 [[nodiscard]] bool invalidatesView(TemporalResetReasonFlags flags) noexcept {
-  constexpr TemporalResetReasonFlags kViewReasons =
-      TemporalResetReasonFlags::FirstUse |
-      TemporalResetReasonFlags::ExplicitReset |
-      TemporalResetReasonFlags::CameraCut |
-      TemporalResetReasonFlags::ProjectionChange |
-      TemporalResetReasonFlags::BackendRecreation;
-  return (static_cast<uint32_t>(flags) & static_cast<uint32_t>(kViewReasons)) !=
-         0u;
+  return (static_cast<uint32_t>(flags) &
+          static_cast<uint32_t>(kViewResetReasons)) != 0u;
 }
 [[nodiscard]] bool invalidatesGrid(TemporalResetReasonFlags flags) noexcept {
-  constexpr TemporalResetReasonFlags kGridReasons =
-      TemporalResetReasonFlags::Resize |
-      TemporalResetReasonFlags::RenderScaleChange;
-  return (static_cast<uint32_t>(flags) & static_cast<uint32_t>(kGridReasons)) !=
-         0u;
+  return (static_cast<uint32_t>(flags) &
+          static_cast<uint32_t>(kGridResetReasons)) != 0u;
 }
 } // namespace
 
@@ -86,21 +98,11 @@ Result<CameraFrameState, std::string> TemporalFrameService::prepareFrame(
                                         !invalidatesView(reasons) &&
                                         !invalidatesGrid(reasons);
   pending.facts.pendingCommit = true;
-  if (invalidatesView(reasons)) {
-    ++pending.facts.epochs.viewContinuity;
-  }
-  if (invalidatesGrid(reasons)) {
-    ++pending.facts.epochs.renderGrid;
-  }
-  if (hasTemporalResetReason(reasons,
-                             TemporalResetReasonFlags::ProviderChange)) {
-    ++pending.facts.epochs.providerConfiguration;
-  }
-  if (hasTemporalResetReason(reasons,
-                             TemporalResetReasonFlags::ResourceRecreation) ||
-      hasTemporalResetReason(reasons,
-                             TemporalResetReasonFlags::BackendRecreation)) {
-    ++pending.facts.epochs.resourceGeneration;
+  for (const EpochRule &rule : kEpochRules) {
+    if ((static_cast<uint32_t>(reasons) &
+         static_cast<uint32_t>(rule.reasons)) != 0u) {
+      ++(pending.facts.epochs.*rule.epoch);
+    }
   }
   cameraState.jitterEnabled = plan.jitterScene && cameraState.jitterEnabled;
   cameraState.historyValid =

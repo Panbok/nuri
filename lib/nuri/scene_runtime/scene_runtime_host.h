@@ -1,7 +1,6 @@
 #pragma once
 #include "nuri/defines.h"
 #include "nuri/gfx/sim/animation_scene_frame_data.h"
-#include "nuri/gfx/sim/simulation_gpu_context.h"
 #include "nuri/scene/render_scene.h"
 #include "nuri/scene_runtime/scene_runtime_bindings.h"
 #include "nuri/sim/animation_pose_simulation.h"
@@ -9,11 +8,13 @@
 #include "nuri/sim/simulation_scheduler.h"
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <memory_resource>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 namespace nuri {
 
 class AnimationGpuServices;
@@ -100,18 +101,19 @@ private:
   [[nodiscard]] const SceneRuntimeBindings &bindings() const noexcept {
     return bindings_;
   }
-  [[nodiscard]] SimulationGpuContext &gpuContext() noexcept {
-    return gpuContext_;
-  }
   std::pmr::memory_resource *memory_ = std::pmr::get_default_resource();
   RenderScene *scene_ = nullptr;
   SimulationRegistry registry_;
   SceneRuntimeBindings bindings_;
-  SimulationGpuContext gpuContext_;
   SimulationScheduler scheduler_{};
   std::unique_ptr<AnimationPoseSimulationBackend> animationPoseBackend_;
   std::optional<AnimationPoseSimulationCreatePayload>
       pendingAnimationPoseCreatePayload_;
+  std::unordered_map<const ScenePrefab *, std::weak_ptr<const ScenePrefab>>
+      animationPrefabOwners_;
+  std::unordered_map<const SceneInstantiationMap *,
+                     std::weak_ptr<const SceneInstantiationMap>>
+      animationInstantiationOwners_;
   uint64_t bindingVersion_ = 0u;
   uint64_t topologyVersion_ = 0u;
   SimulationTickResult lastTickResult_{};

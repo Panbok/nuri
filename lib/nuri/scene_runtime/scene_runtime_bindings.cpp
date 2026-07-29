@@ -1,5 +1,4 @@
 #include "nuri/scene_runtime/scene_runtime_bindings.h"
-#include "nuri/pch.h"
 #include <algorithm>
 #include <limits>
 namespace nuri {

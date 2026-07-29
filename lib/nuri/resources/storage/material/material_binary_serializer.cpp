@@ -1,5 +1,4 @@
 #include "nuri/resources/storage/material/material_binary_serializer.h"
-#include "nuri/pch.h"
 #include "nuri/resources/storage/binary_io.h"
 #include "nuri/resources/storage/material/material_binary_format.h"
 namespace nuri {

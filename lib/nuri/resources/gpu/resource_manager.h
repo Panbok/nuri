@@ -38,12 +38,27 @@ struct NURI_API ModelRequest {
   uint32_t sceneMeshIndex = std::numeric_limits<uint32_t>::max();
 };
 
+struct NURI_API ResolvedTextureRequest {
+  TextureRequest request{};
+  TextureKey key{};
+};
+
+struct NURI_API ResolvedModelRequest {
+  ModelRequest request{};
+  ModelKey key{};
+};
+
 struct NURI_API MaterialRequest {
   MaterialDesc desc{};
   using TextureRefs = MaterialTextureSlots<TextureRef>;
   TextureRefs textureRefs{};
   std::string debugName{};
   std::string sourceIdentity{};
+};
+
+struct NURI_API ResolvedMaterialRequest {
+  MaterialRequest request{};
+  MaterialKey key{};
 };
 
 template <typename Fn>
@@ -155,22 +170,44 @@ public:
   ResourceManager &operator=(ResourceManager &&) = delete;
   [[nodiscard]] Result<TextureRef, std::string>
   acquireTexture(const TextureRequest &request);
+  [[nodiscard]] Result<TextureRef, std::string>
+  acquireTexture(const ResolvedTextureRequest &request);
+  [[nodiscard]] ResolvedTextureRequest
+  resolveTextureRequest(const TextureRequest &request) const;
   [[nodiscard]] std::optional<TextureRef>
   tryAcquireTexture(const TextureRequest &request);
+  [[nodiscard]] std::optional<TextureRef>
+  tryAcquireTexture(const ResolvedTextureRequest &request);
   [[nodiscard]] Result<TextureRef, std::string>
   adoptPreparedTexture(const TextureRequest &request,
                        std::unique_ptr<Texture> texture);
+  [[nodiscard]] Result<TextureRef, std::string>
+  adoptPreparedTexture(const ResolvedTextureRequest &request,
+                       std::unique_ptr<Texture> texture);
   [[nodiscard]] Result<ModelRef, std::string>
   acquireModel(const ModelRequest &request);
+  [[nodiscard]] Result<ModelRef, std::string>
+  acquireModel(const ResolvedModelRequest &request);
+  [[nodiscard]] ResolvedModelRequest
+  resolveModelRequest(const ModelRequest &request) const;
   [[nodiscard]] std::optional<ModelRef>
   tryAcquireModel(const ModelRequest &request);
+  [[nodiscard]] std::optional<ModelRef>
+  tryAcquireModel(const ResolvedModelRequest &request);
   [[nodiscard]] Result<ModelRef, std::string>
   adoptPreparedModel(const ModelRequest &request, std::unique_ptr<Model> model);
+  [[nodiscard]] Result<ModelRef, std::string>
+  adoptPreparedModel(const ResolvedModelRequest &request,
+                     std::unique_ptr<Model> model);
   [[nodiscard]] Result<ModelRef, std::string>
   acquireGeneratedModel(const MeshData &meshData,
                         std::string_view debugName = {});
   [[nodiscard]] Result<MaterialRef, std::string>
   acquireMaterial(const MaterialRequest &request);
+  [[nodiscard]] Result<MaterialRef, std::string>
+  acquireMaterial(const ResolvedMaterialRequest &request);
+  [[nodiscard]] Result<ResolvedMaterialRequest, std::string>
+  resolveMaterialRequest(const MaterialRequest &request) const;
   [[nodiscard]] Result<ScenePrefabAssets, std::string>
   acquireScenePrefabAssets(const ScenePrefab &prefab);
   void retain(TextureRef ref);
@@ -185,6 +222,10 @@ public:
   [[nodiscard]] const TextureRecord *tryGet(TextureRef ref) const;
   [[nodiscard]] const ModelRecord *tryGet(ModelRef ref) const;
   [[nodiscard]] const MaterialRecord *tryGet(MaterialRef ref) const;
+  [[nodiscard]] MaterialRef
+  resolveRenderableMaterial(ModelRef model, uint32_t submeshIndex,
+                            MaterialRef fallback,
+                            MaterialRef overrideMaterial) const noexcept;
   [[nodiscard]] MaterialTableSnapshot materialSnapshot() const noexcept {
     return MaterialTableSnapshot{
         .headers = std::span<const MaterialHeaderGpuData>(

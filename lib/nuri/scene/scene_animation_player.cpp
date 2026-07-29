@@ -1,7 +1,6 @@
 #include "nuri/scene/scene_animation_player.h"
 #include "nuri/core/pmr_scratch.h"
 #include "nuri/math/utils.h"
-#include "nuri/pch.h"
 #define GLM_ENABLE_EXPERIMENTAL
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtx/matrix_decompose.hpp>

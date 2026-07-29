@@ -1,7 +1,6 @@
-#include "nuri/text/text_layouter.h"
+#include "nuri/text/detail/text_layouter.h"
 #include "nuri/core/log.h"
 #include "nuri/core/profiling.h"
-#include "nuri/pch.h"
 namespace nuri {
 namespace {
 template <typename... Args>

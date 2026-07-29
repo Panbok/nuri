@@ -22,7 +22,8 @@ using namespace nuri;
       .alphaToCoverage = true,
       .sampleRateShading = false,
   };
-  auto result = buildPresentationAAPlan(settings, {}, kTestGpuCapabilities);
+  auto result = buildPresentationAAPlan(resolveRenderSettings(settings), {},
+                                        kTestGpuCapabilities);
   EXPECT_FALSE(result.hasError()) << (result.hasError() ? result.error() : "");
   return result.hasError() ? PresentationAAPlan{} : result.value();
 }
@@ -245,13 +246,14 @@ TEST(TemporalFrameServiceTest,
   settings.antiAliasing.temporalProvider =
       TemporalReconstructionProvider::External;
 
-  auto result = buildPresentationAAPlan(settings);
+  auto result = buildPresentationAAPlan(resolveRenderSettings(settings));
   ASSERT_TRUE(result.hasError());
 
   PresentationAAProviderCapabilities capabilities{};
   capabilities.externalTemporal = true;
   capabilities.compositionMask = true;
-  result = buildPresentationAAPlan(settings, capabilities);
+  result =
+      buildPresentationAAPlan(resolveRenderSettings(settings), capabilities);
   ASSERT_FALSE(result.hasError()) << result.error();
   EXPECT_EQ(result.value().reconstruction,
             ColorReconstruction::ExternalTemporal);

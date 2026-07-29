@@ -1,151 +1,275 @@
 #include "nuri/core/log.h"
+#include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
+#include <cstdarg>
+#include <cstdio>
+#include <ctime>
 #include <limits>
 #include <memory>
 #include <mutex>
-#include <vector>
-namespace nuri {
+#if defined(_WIN32)
+#include <io.h>
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
 
+namespace nuri {
 namespace {
-void writeFallback(std::string_view message) {
-  if (message.empty()) {
+[[nodiscard]] constexpr const char *levelName(LogLevel level) noexcept {
+  constexpr std::array names{"trace",   "debug", "info",
+                             "warning", "error", "fatal"};
+  return names[static_cast<size_t>(level)];
+}
+
+[[nodiscard]] constexpr const char *colorCode(LogLevel level) noexcept {
+  constexpr std::array colors{"\x1b[90m", "\x1b[36m", "\x1b[32m",
+                              "\x1b[33m", "\x1b[31m", "\x1b[1;91m"};
+  return colors[static_cast<size_t>(level)];
+}
+
+[[nodiscard]] constexpr bool includes(LogLevel threshold,
+                                      LogLevel level) noexcept {
+  return static_cast<uint8_t>(level) >= static_cast<uint8_t>(threshold);
+}
+
+[[nodiscard]] bool enableTerminalColor(std::FILE *stream) noexcept {
+  if (!stream) {
+    return false;
+  }
+#if defined(_WIN32)
+  const int descriptor = _fileno(stream);
+  const intptr_t osHandle = descriptor < 0 ? -1 : _get_osfhandle(descriptor);
+  if (osHandle == -1) {
+    return false;
+  }
+  const HANDLE handle = reinterpret_cast<HANDLE>(osHandle);
+  DWORD mode = 0u;
+  return GetConsoleMode(handle, &mode) != 0 &&
+         (((mode & ENABLE_VIRTUAL_TERMINAL_PROCESSING) != 0u) ||
+          SetConsoleMode(handle, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING) !=
+              0);
+#else
+  return ::isatty(::fileno(stream)) != 0;
+#endif
+}
+
+struct LocalTimestamp {
+  std::tm calendar{};
+  uint32_t milliseconds = 0u;
+};
+
+[[nodiscard]] LocalTimestamp localTimestamp() noexcept {
+  const auto now = std::chrono::system_clock::now();
+  const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+      now.time_since_epoch());
+  const std::time_t time = std::chrono::system_clock::to_time_t(now);
+  LocalTimestamp timestamp{
+      .milliseconds = static_cast<uint32_t>(elapsed.count() % 1000),
+  };
+#if defined(_WIN32)
+  (void)localtime_s(&timestamp.calendar, &time);
+#else
+  (void)localtime_r(&time, &timestamp.calendar);
+#endif
+  return timestamp;
+}
+
+void writeLine(std::FILE *stream, LogLevel level, std::string_view message,
+               bool forceFlush, bool colored) noexcept {
+  if (!stream) {
     return;
   }
-  std::fwrite(message.data(), sizeof(char), message.size(), stderr);
-  std::fputc('\n', stderr);
+  const LocalTimestamp timestamp = localTimestamp();
+  const int length = static_cast<int>(std::min(
+      message.size(), static_cast<size_t>(std::numeric_limits<int>::max())));
+  if (colored) {
+    std::fputs(colorCode(level), stream);
+  }
+  std::fprintf(stream, "%02d:%02d:%02d.%03u %-7s %.*s",
+               timestamp.calendar.tm_hour, timestamp.calendar.tm_min,
+               timestamp.calendar.tm_sec, timestamp.milliseconds,
+               levelName(level), length, message.data());
+  if (colored) {
+    std::fputs("\x1b[0m", stream);
+  }
+  std::fputc('\n', stream);
+  if (forceFlush) {
+    std::fflush(stream);
+  }
 }
+
+class StdioLog final {
+public:
+  [[nodiscard]] static std::shared_ptr<StdioLog>
+  create(const LogConfig &config) {
+    auto log = std::shared_ptr<StdioLog>(new StdioLog(config));
+    return log->initialized_ ? std::move(log) : nullptr;
+  }
+
+  ~StdioLog() {
+    std::scoped_lock lock(mutex_);
+    if (file_) {
+      std::fclose(file_);
+    }
+  }
+
+  void write(LogLevel level, std::string_view message) {
+    std::scoped_lock lock(mutex_);
+    if (includes(config_.logLevel, level)) {
+      writeLine(file_, level, message, config_.forceFlush, false);
+    }
+    if (includes(config_.consoleLevel, level)) {
+      std::FILE *console = level >= LogLevel::Error ? stderr : stdout;
+      writeLine(console, level, message, config_.forceFlush,
+                console == stderr ? stderrColor_ : stdoutColor_);
+    }
+  }
+
+private:
+  explicit StdioLog(const LogConfig &config)
+      : config_(config),
+        stdoutColor_(config.coloredConsole && enableTerminalColor(stdout)),
+        stderrColor_(config.coloredConsole && enableTerminalColor(stderr)) {
+    if (config_.filePath.empty()) {
+      initialized_ = true;
+      return;
+    }
+#if defined(_WIN32)
+    initialized_ = fopen_s(&file_, config_.filePath.c_str(), "wb") == 0;
+#else
+    file_ = std::fopen(config_.filePath.c_str(), "wb");
+    initialized_ = file_ != nullptr;
+#endif
+  }
+
+  LogConfig config_{};
+  std::FILE *file_ = nullptr;
+  std::mutex mutex_{};
+  bool stdoutColor_ = false;
+  bool stderrColor_ = false;
+  bool initialized_ = false;
+};
+
 struct LoggerState {
-  std::shared_ptr<Log> loadOrCreate() {
-    std::shared_ptr<Log> current = instance.load(std::memory_order_acquire);
+  [[nodiscard]] std::shared_ptr<StdioLog> loadOrCreate() {
+    std::shared_ptr<StdioLog> current =
+        instance.load(std::memory_order_acquire);
     if (current) {
       return current;
     }
     std::scoped_lock lock(controlMutex);
     current = instance.load(std::memory_order_acquire);
-    if (current) {
-      return current;
+    if (!current) {
+      current = StdioLog::create(hasConfig ? config : LogConfig{});
+      instance.store(current, std::memory_order_release);
     }
-    std::unique_ptr<Log> createdUnique =
-        hasConfig ? Log::create(config) : Log::create();
-    std::shared_ptr<Log> created = std::move(createdUnique);
-    instance.store(created, std::memory_order_release);
-    return created;
+    return current;
   }
-  void initializeDefault() { (void)loadOrCreate(); }
-  void initializeWithConfig(const LogConfig &newConfig) {
+
+  void initialize(const LogConfig *newConfig) {
     std::scoped_lock lock(controlMutex);
     if (instance.load(std::memory_order_acquire)) {
       return;
     }
-    config = newConfig;
-    hasConfig = true;
-    std::unique_ptr<Log> createdUnique = Log::create(config);
-    std::shared_ptr<Log> created = std::move(createdUnique);
-    instance.store(created, std::memory_order_release);
+    if (newConfig) {
+      config = *newConfig;
+      hasConfig = true;
+    }
+    instance.store(StdioLog::create(hasConfig ? config : LogConfig{}),
+                   std::memory_order_release);
   }
+
   void shutdown() {
-    std::shared_ptr<Log> oldInstance;
+    std::shared_ptr<StdioLog> oldInstance;
     {
       std::scoped_lock lock(controlMutex);
-      oldInstance =
-          instance.exchange(std::shared_ptr<Log>{}, std::memory_order_acq_rel);
+      oldInstance = instance.exchange({}, std::memory_order_acq_rel);
       config = {};
       hasConfig = false;
     }
-    oldInstance.reset();
   }
-  Log *getRawLegacy() { return loadOrCreate().get(); }
+
   std::mutex controlMutex;
-  std::atomic<std::shared_ptr<Log>> instance;
+  std::atomic<std::shared_ptr<StdioLog>> instance;
   LogConfig config;
   bool hasConfig = false;
 };
+
 struct RecentLogRing {
   static constexpr size_t kCapacity = 2000;
+
   void append(LogLevel level, std::string_view message) {
     if (message.empty()) {
       return;
     }
-    auto entry = std::make_shared<LogEntry>();
-    entry->level = level;
-    entry->message.assign(message.data(), message.size());
-    entry->sequence = nextSequence.fetch_add(1, std::memory_order_acq_rel);
-    const size_t index = static_cast<size_t>((entry->sequence - 1) % kCapacity);
-    std::shared_ptr<const LogEntry> published = std::move(entry);
-    slots[index].store(std::move(published), std::memory_order_release);
+    std::scoped_lock lock(mutex);
+    LogEntry &entry = slots[(nextSequence - 1) % kCapacity];
+    entry.level = level;
+    entry.message.assign(message);
+    entry.sequence = nextSequence++;
   }
+
   LogReadResult readSince(std::uint64_t afterSequence,
                           std::vector<LogEntry> &out) const {
+    std::scoped_lock lock(mutex);
     out.clear();
-    LogReadResult result{};
-    const std::uint64_t claimed =
-        nextSequence.load(std::memory_order_acquire) - 1;
+    const std::uint64_t claimed = nextSequence - 1;
     if (claimed == 0) {
-      return result;
+      return {};
     }
-    const std::uint64_t capacity = static_cast<std::uint64_t>(kCapacity);
-    const std::uint64_t firstSequence =
-        claimed > capacity ? (claimed - capacity + 1) : 1;
-    result.firstSequence = firstSequence;
-    if (afterSequence != 0 && afterSequence < firstSequence) {
-      result.truncated = true;
-    }
-    const std::uint64_t nextRequested =
+    const std::uint64_t first =
+        claimed > kCapacity ? claimed - kCapacity + 1 : 1;
+    LogReadResult result{
+        .firstSequence = first,
+        .lastSequence = claimed,
+        .truncated = afterSequence != 0 && afterSequence < first,
+    };
+    const std::uint64_t requested =
         afterSequence == std::numeric_limits<std::uint64_t>::max()
             ? afterSequence
-            : (afterSequence + 1);
-    const std::uint64_t start =
-        nextRequested > firstSequence ? nextRequested : firstSequence;
-    std::uint64_t contiguousLast = afterSequence;
-    for (std::uint64_t sequence = start; sequence <= claimed; ++sequence) {
-      const size_t index = static_cast<size_t>((sequence - 1) % kCapacity);
-      std::shared_ptr<const LogEntry> entry =
-          slots[index].load(std::memory_order_acquire);
-      if (!entry || entry->sequence != sequence) {
-        break;
-      }
-      out.push_back(*entry);
-      contiguousLast = sequence;
-    }
-    if (contiguousLast >= firstSequence) {
-      result.lastSequence = contiguousLast;
-    } else {
-      result.lastSequence = firstSequence - 1;
+            : afterSequence + 1;
+    for (std::uint64_t sequence = std::max(requested, first);
+         sequence <= claimed; ++sequence) {
+      out.push_back(slots[(sequence - 1) % kCapacity]);
     }
     return result;
   }
-  std::array<std::atomic<std::shared_ptr<const LogEntry>>, kCapacity> slots{};
-  std::atomic<std::uint64_t> nextSequence{1};
+
+  mutable std::mutex mutex;
+  std::array<LogEntry, kCapacity> slots{};
+  std::uint64_t nextSequence = 1;
 };
+
 LoggerState &loggerState() {
   static LoggerState state;
   return state;
 }
+
 RecentLogRing &recentLogRing() {
   static RecentLogRing ring;
   return ring;
 }
 } // namespace
 
-void Log::initialize() { loggerState().initializeDefault(); }
+void Log::initialize() { loggerState().initialize(nullptr); }
 
 void Log::initialize(const LogConfig &config) {
-  loggerState().initializeWithConfig(config);
+  loggerState().initialize(&config);
 }
 
 void Log::shutdown() { loggerState().shutdown(); }
 
-Log *Log::get() { return loggerState().getRawLegacy(); }
-
 void logMessage(LogLevel level, std::string_view message) {
   recentLogRing().append(level, message);
-  std::shared_ptr<Log> log = loggerState().loadOrCreate();
-  if (!log) {
-    writeFallback(message);
-    return;
+  if (std::shared_ptr<StdioLog> log = loggerState().loadOrCreate()) {
+    log->write(level, message);
+  } else if (!message.empty()) {
+    std::fwrite(message.data(), sizeof(char), message.size(), stderr);
+    std::fputc('\n', stderr);
   }
-  log->write(level, message);
 }
 
 void logMessagef(LogLevel level, const char *fmt, ...) {
@@ -154,19 +278,18 @@ void logMessagef(LogLevel level, const char *fmt, ...) {
   }
   va_list args;
   va_start(args, fmt);
-  va_list argsCopy;
-  va_copy(argsCopy, args);
-  const int required = std::vsnprintf(nullptr, 0, fmt, argsCopy);
-  va_end(argsCopy);
+  va_list copy;
+  va_copy(copy, args);
+  const int required = std::vsnprintf(nullptr, 0, fmt, copy);
+  va_end(copy);
   if (required < 0) {
     va_end(args);
     return;
   }
-  std::string buffer;
-  buffer.resize(static_cast<size_t>(required) + 1);
+  std::string buffer(static_cast<size_t>(required) + 1, '\0');
   std::vsnprintf(buffer.data(), buffer.size(), fmt, args);
-  buffer.resize(static_cast<size_t>(required));
   va_end(args);
+  buffer.resize(static_cast<size_t>(required));
   logMessage(level, buffer);
 }
 
@@ -174,5 +297,4 @@ LogReadResult readLogEntriesSince(std::uint64_t afterSequence,
                                   std::vector<LogEntry> &out) {
   return recentLogRing().readSince(afterSequence, out);
 }
-
 } // namespace nuri

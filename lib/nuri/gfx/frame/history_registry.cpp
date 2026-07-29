@@ -1,5 +1,4 @@
 #include "nuri/gfx/frame/history_registry.h"
-#include "nuri/pch.h"
 #include <algorithm>
 namespace nuri {
 

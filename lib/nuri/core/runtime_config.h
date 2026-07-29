@@ -67,8 +67,13 @@ struct NURI_API RuntimeCompositeConfig {
 };
 
 struct NURI_API RuntimeDDGIShaderConfig {
-  uint64_t persistentMemoryLimitBytes = 256ull * 1024ull * 1024ull;
-  uint64_t peakMemoryLimitBytes = 512ull * 1024ull * 1024ull;
+  static constexpr int32_t kDefaultPersistentMemoryLimitMiB = 256;
+  static constexpr int32_t kDefaultPeakMemoryLimitMiB = 512;
+  uint64_t persistentMemoryLimitBytes =
+      static_cast<uint64_t>(kDefaultPersistentMemoryLimitMiB) * 1024ull *
+      1024ull;
+  uint64_t peakMemoryLimitBytes =
+      static_cast<uint64_t>(kDefaultPeakMemoryLimitMiB) * 1024ull * 1024ull;
   std::filesystem::path shaderBasePath;
   std::filesystem::path decodePositions;
   std::filesystem::path prepareDynamicVertices;
@@ -102,7 +107,6 @@ struct NURI_API RuntimeConfig {
 
 [[nodiscard]] NURI_API Result<RuntimeConfig, std::string>
 loadRuntimeConfig(const std::filesystem::path &configPath);
-[[nodiscard]] NURI_API Result<RuntimeConfig, std::string> loadRuntimeConfig();
 [[nodiscard]] NURI_API Result<RuntimeConfig, std::string>
 loadRuntimeConfigFromEnvOrDefault();
 

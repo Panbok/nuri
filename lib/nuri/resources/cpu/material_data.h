@@ -5,6 +5,7 @@
 #include <glm/glm.hpp>
 #include <limits>
 #include <string>
+#include <string_view>
 #include <vector>
 namespace nuri {
 
@@ -27,6 +28,39 @@ enum MaterialTextureSlot : uint32_t {
   kMaterialTextureSlotThickness,
   kMaterialTextureSlotCount,
 };
+
+struct MaterialTextureSlotDesc {
+  MaterialTextureSlot slot = kMaterialTextureSlotBaseColor;
+  std::string_view name{};
+  std::string_view debugToken{};
+};
+
+inline constexpr std::array<MaterialTextureSlotDesc, kMaterialTextureSlotCount>
+    kMaterialTextureSlotDescs{{
+        {kMaterialTextureSlotBaseColor, "baseColor", "base_color"},
+        {kMaterialTextureSlotMetallicRoughness, "metallicRoughness",
+         "metallic_roughness"},
+        {kMaterialTextureSlotNormal, "normal", "normal"},
+        {kMaterialTextureSlotOcclusion, "occlusion", "occlusion"},
+        {kMaterialTextureSlotEmissive, "emissive", "emissive"},
+        {kMaterialTextureSlotClearcoat, "clearcoat", "clearcoat"},
+        {kMaterialTextureSlotClearcoatRoughness, "clearcoatRoughness",
+         "clearcoat_roughness"},
+        {kMaterialTextureSlotClearcoatNormal, "clearcoatNormal",
+         "clearcoat_normal"},
+        {kMaterialTextureSlotSpecular, "specular", "specular"},
+        {kMaterialTextureSlotSpecularColor, "specularColor", "specular_color"},
+        {kMaterialTextureSlotSheenColor, "sheenColor", "sheen_color"},
+        {kMaterialTextureSlotSheenRoughness, "sheenRoughness",
+         "sheen_roughness"},
+        {kMaterialTextureSlotTransmission, "transmission", "transmission"},
+        {kMaterialTextureSlotThickness, "thickness", "thickness"},
+    }};
+
+[[nodiscard]] constexpr const MaterialTextureSlotDesc &
+materialTextureSlotDesc(MaterialTextureSlot slot) noexcept {
+  return kMaterialTextureSlotDescs[static_cast<size_t>(slot)];
+}
 
 template <typename T>
 using MaterialTextureSlots = std::array<T, kMaterialTextureSlotCount>;

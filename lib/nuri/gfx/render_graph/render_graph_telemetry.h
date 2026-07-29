@@ -26,15 +26,11 @@ struct NURI_API RenderGraphTelemetrySnapshot {
     uint32_t transientBufferAllocationMapSize = 0;
     uint32_t transientTexturePhysicalAllocationCount = 0;
     uint32_t transientBufferPhysicalAllocationCount = 0;
-    uint32_t unresolvedTextureBindingCount = 0;
+    uint32_t commandResourcePatchCount = 0;
     uint32_t resolvedDependencyBufferSlotCount = 0;
-    uint32_t unresolvedDependencyBufferBindingCount = 0;
     uint32_t ownedPreDispatchCount = 0, ownedDrawItemCount = 0;
     uint32_t ownedMeshDispatchItemCount = 0;
     uint32_t resolvedPreDispatchDependencyBufferSlotCount = 0;
-    uint32_t unresolvedPreDispatchDependencyBufferBindingCount = 0;
-    uint32_t unresolvedDrawBufferBindingCount = 0;
-    uint32_t unresolvedMeshDispatchBufferBindingCount = 0;
     uint64_t compileFingerprint = 0, barrierFingerprint = 0;
     uint64_t executionFingerprint = 0;
     bool usedParallelCompile = false, usedParallelPayloadResolution = false;
@@ -42,12 +38,13 @@ struct NURI_API RenderGraphTelemetrySnapshot {
     bool usedParallelLifetimeAnalysis = false, usedParallelRecording = false;
   };
   Summary summary{};
-  RenderGraphCompileResult compile;
+  RenderGraphPlan plan;
+  std::pmr::vector<std::pmr::string> passDebugNames;
   RenderGraphExecutionMetadata execution;
   explicit RenderGraphTelemetrySnapshot(
       std::pmr::memory_resource *memory = std::pmr::get_default_resource());
-  void captureFrom(const RenderGraphCompileResult &compiled);
-  void captureFrom(const RenderGraphCompileResult &compiled,
+  void captureFrom(CompiledRenderGraphView compiled);
+  void captureFrom(CompiledRenderGraphView compiled,
                    const RenderGraphExecutionMetadata &execution);
   void reset();
 };
@@ -63,8 +60,8 @@ public:
   [[nodiscard]] bool captureRequested() const noexcept {
     return requestedCaptureLevel() != RenderGraphTelemetryLevel::None;
   }
-  void capture(const RenderGraphCompileResult &compiled);
-  void capture(const RenderGraphCompileResult &compiled,
+  void capture(CompiledRenderGraphView compiled);
+  void capture(CompiledRenderGraphView compiled,
                const RenderGraphExecutionMetadata &execution);
   [[nodiscard]] bool hasSnapshot() const noexcept { return hasSnapshot_; }
   [[nodiscard]] const RenderGraphTelemetrySnapshot *

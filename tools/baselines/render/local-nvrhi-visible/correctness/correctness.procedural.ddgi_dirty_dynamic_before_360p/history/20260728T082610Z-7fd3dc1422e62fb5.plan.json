@@ -1,0 +1,56 @@
+{
+    "schemaVersion": 1,
+    "kind": "nuri.snapshot.baseline_plan",
+    "caseId": "correctness.procedural.ddgi_dirty_dynamic_before_360p",
+    "suite": "correctness",
+    "profileId": "local-nvrhi-visible",
+    "reason": "User-authorized stable DDGI visual baseline; Hybrid coverage excluded in favor of SceneFit",
+    "actor": "Codex",
+    "sourceCommit": "698d4e86f6923f1ca26185f3b1a5c1045273740d",
+    "sourceReportDigest": "sha256:30443661acac93981af1a7f0c7776adc95a0945c3a9d34d4dbef902cb8bbbbeb",
+    "planDigest": "sha256:7fd3dc1422e62fb5ff03ec92c56fe27a2f3b565a296c8322df5ad9f4b7c7646d",
+    "entries": [
+        {
+            "path": "approval.json",
+            "operation": "add",
+            "previousDigest": "",
+            "sourceDigest": "sha256:30443661acac93981af1a7f0c7776adc95a0945c3a9d34d4dbef902cb8bbbbeb"
+        },
+        {
+            "path": "ddgi_dirty_region_debug_preview.exr",
+            "operation": "add",
+            "previousDigest": "",
+            "sourceDigest": "sha256:360851e7d5dad7ceb7042f8a33bf9c9f1fae476e4eb33e81d2213680cdbed1d9"
+        },
+        {
+            "path": "ddgi_dirty_region_debug_preview.json",
+            "operation": "add",
+            "previousDigest": "",
+            "sourceDigest": "sha256:c2b7b85ac85ce9fa7c56ccda1c8b15c5b5684981717696994b95b17c58ad317c"
+        },
+        {
+            "path": "ddgi_dirty_region_debug_preview_preview.png",
+            "operation": "add",
+            "previousDigest": "",
+            "sourceDigest": "sha256:c3c76218e3c7eb7b7a1bc5b195ef605a774b94dcf6d63a71ae3d90773f337249"
+        },
+        {
+            "path": "final_color.json",
+            "operation": "add",
+            "previousDigest": "",
+            "sourceDigest": "sha256:b2b08c86e4528d49e4e7687f1909513b66ecb9d206b7f31484a398adfdf63c75"
+        },
+        {
+            "path": "final_color.png",
+            "operation": "add",
+            "previousDigest": "",
+            "sourceDigest": "sha256:cd3ba73df6b7b0be28cfa46a16bacee5f5d85739d85d2f6e3b66d2ddb22ee634"
+        },
+        {
+            "path": "final_color_preview.png",
+            "operation": "add",
+            "previousDigest": "",
+            "sourceDigest": "sha256:84b4c1d1369701f6479b7ae8e07f24110652922fe4e1240d06c5e1fd0911b27a"
+        }
+    ]
+}

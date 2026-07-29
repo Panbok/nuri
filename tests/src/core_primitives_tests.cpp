@@ -16,6 +16,7 @@
 #include <memory_resource>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -71,6 +72,37 @@ TEST(LogTests, WritesConfiguredFileWithoutExternalLoggingDependency) {
 
 TEST(LogTests, EnablesColoredConsoleByDefault) {
   EXPECT_TRUE(nuri::LogConfig{}.coloredConsole);
+}
+
+TEST(LogTests, ConcurrentRecentEntriesRetainCompleteMessages) {
+  std::vector<nuri::LogEntry> entries;
+  const auto before = nuri::readLogEntriesSince(0u, entries);
+  constexpr uint32_t kThreadCount = 4u;
+  constexpr uint32_t kMessagesPerThread = 100u;
+  std::array<std::thread, kThreadCount> writers;
+  for (uint32_t thread = 0; thread < kThreadCount; ++thread) {
+    writers[thread] = std::thread([thread] {
+      for (uint32_t message = 0; message < kMessagesPerThread; ++message) {
+        nuri::logMessage(nuri::LogLevel::Debug,
+                         std::format("ring-{0}-{1}", thread, message));
+      }
+    });
+  }
+  for (std::thread &writer : writers) {
+    writer.join();
+  }
+
+  const auto result = nuri::readLogEntriesSince(before.lastSequence, entries);
+  ASSERT_FALSE(result.truncated);
+  ASSERT_EQ(entries.size(), kThreadCount * kMessagesPerThread);
+  std::ranges::sort(entries, {}, &nuri::LogEntry::message);
+  for (uint32_t thread = 0; thread < kThreadCount; ++thread) {
+    for (uint32_t message = 0; message < kMessagesPerThread; ++message) {
+      EXPECT_TRUE(std::ranges::binary_search(
+          entries, std::format("ring-{0}-{1}", thread, message), {},
+          &nuri::LogEntry::message));
+    }
+  }
 }
 
 TEST(FrameTimeDisplaySamplerTests, PublishesIntervalAveragesAtReadableCadence) {

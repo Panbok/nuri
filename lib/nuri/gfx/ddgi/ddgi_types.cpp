@@ -14,6 +14,36 @@ uint32_t ddgiProbeCount(const glm::uvec3 &counts) noexcept {
              : 0u;
 }
 
+std::array<DDGIVolumeMetricValue, 26>
+ddgiVolumeMetricValues(const DDGIVolumeFrameMetrics &volume) noexcept {
+  return {{{"active", volume.active},
+           {"effective_kind", volume.effectiveKind},
+           {"tier", volume.tier},
+           {"cascade_index", volume.cascadeIndex},
+           {"total_probes", volume.totalProbes},
+           {"initialized_probes", volume.initializedProbes},
+           {"shading_enabled_probes", volume.shadingEnabledProbes},
+           {"invalid_probes", volume.invalidProbes},
+           {"newly_exposed_probes", volume.newlyExposedProbes},
+           {"updates", volume.updates},
+           {"primary_queries", volume.primaryQueries},
+           {"primary_queries_issued", volume.primaryQueriesIssued},
+           {"secondary_queries", volume.secondaryQueries},
+           {"update_age_median", volume.updateAgeMedian},
+           {"update_age_p95", volume.updateAgeP95},
+           {"update_age_maximum", volume.updateAgeMaximum},
+           {"scheduled_quota", volume.scheduledQuota},
+           {"used_quota", volume.usedQuota},
+           {"deficit", static_cast<double>(volume.deficit)},
+           {"starvation_frames", volume.starvationFrames},
+           {"estimated_full_refresh_frames", volume.estimatedFullRefreshFrames},
+           {"unique_coverage_percentage", volume.uniqueCoveragePercentage},
+           {"redundant_coverage", volume.redundantCoverage},
+           {"history_ready_percentage", volume.historyReadyPercentage},
+           {"coverage_ready_percentage", volume.coverageReadyPercentage},
+           {"confidence", volume.confidence}}};
+}
+
 uint32_t ddgiProbeIndex(const glm::uvec3 &coordinate,
                         const glm::uvec3 &counts) noexcept {
   return coordinate.x + counts.x * (coordinate.y + counts.y * coordinate.z);

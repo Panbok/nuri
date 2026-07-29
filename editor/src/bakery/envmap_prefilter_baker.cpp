@@ -688,13 +688,9 @@ advanceEnvmapPrefilterSetup(GPUDevice &gpu, const EnvBakePlan &plan,
   }
 
   case EnvSetupPhase::CompileShader: {
-    auto shader = Shader::create("envmap_prefilter_baker", gpu);
-    if (!shader) {
-      return Result<EnvSetupProgress, std::string>::makeError(
-          "Env prefilter baker: failed to create shader helper");
-    }
     auto compileResult =
-        shader->compileFromFile(plan.shaderPath.string(), ShaderStage::Compute);
+        compileShaderFile(gpu, "envmap_prefilter_baker",
+                          plan.shaderPath.string(), ShaderStage::Compute);
     if (compileResult.hasError()) {
       return Result<EnvSetupProgress, std::string>::makeError(
           "Env prefilter baker: shader compile failed: " +

@@ -12,11 +12,9 @@ layout(location = 2) in vec2 inUnitRange;
 layout(location = 0) out vec4 outFragColor;
 
 layout(push_constant) uniform PushConstants {
-  // Match text_2d_mtsdf.vert push-constant offsets (projection occupies 0..63).
-  layout(offset = 64) uint atlasBindless;
-  layout(offset = 68) float pxRange;
-  layout(offset = 72) float _pad0;
-  layout(offset = 76) float _pad1;
+  // Match text_2d_mtsdf.vert: projection 0..63, glyph address 64..71.
+  layout(offset = 72) uint atlasBindless;
+  layout(offset = 76) float pxRange;
 }
 pc;
 

@@ -1,5 +1,6 @@
 #include "nuri/tools/runtime/render_tool_runtime.h"
 
+#include "nuri/core/pmr_scratch.h"
 #include "nuri/core/runtime_config.h"
 #include "nuri/core/window.h"
 #include "nuri/gfx/frame/presentation_aa_plan.h"
@@ -8,9 +9,11 @@
 #include "nuri/resources/gpu/resource_manager.h"
 #include "nuri/resources/scene_importer.h"
 #include "nuri/resources/storage/texture/texture_artifact_builder.h"
+#include "nuri/text/text_system.h"
 
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <memory>
 #include <optional>
@@ -1097,6 +1100,7 @@ struct ToolRendererRuntime::Impl {
   ToolSceneDesc sceneDesc{};
   bool sceneBaseModelApplied = false;
   std::optional<AnimationSceneFrameData> externalAnimationSceneFrameData{};
+  std::unique_ptr<ToolTextCoverage> textCoverage{};
   RenderPipeline pipeline;
   RenderScene scene;
   SceneLoadHandle sceneLoad{};
@@ -1104,6 +1108,117 @@ struct ToolRendererRuntime::Impl {
   TemporalFrameService temporalFrameService{};
   RenderFrameContext frameContext{};
 };
+
+struct ToolTextCoverage::Impl {
+  Impl(std::pmr::memory_resource &memory, bool enable2D, bool enable3D)
+      : scratch(&memory), enable2D(enable2D), enable3D(enable3D) {}
+  std::unique_ptr<TextSystem> text;
+  ScratchArena scratch;
+  bool enable2D = false;
+  bool enable3D = false;
+};
+
+ToolTextCoverage::ToolTextCoverage(std::unique_ptr<Impl> impl)
+    : impl_(std::move(impl)) {}
+
+ToolTextCoverage::~ToolTextCoverage() = default;
+
+Result<std::unique_ptr<ToolTextCoverage>, std::string> ToolTextCoverage::create(
+    GPUDevice &gpu, RenderPipeline &pipeline, const RuntimeConfig &config,
+    std::pmr::memory_resource &memory, bool enable2D, bool enable3D) {
+  if (!enable2D && !enable3D) {
+    return Result<std::unique_ptr<ToolTextCoverage>, std::string>::makeError(
+        "text coverage requires a 2D or 3D domain");
+  }
+  const std::filesystem::path font =
+      (config.roots.fonts / "default_ui.nfont").lexically_normal();
+  if (!std::filesystem::is_regular_file(font)) {
+    return Result<std::unique_ptr<ToolTextCoverage>, std::string>::makeError(
+        "text coverage font is unavailable: " + font.string());
+  }
+  auto impl = std::make_unique<Impl>(memory, enable2D, enable3D);
+  auto text = TextSystem::create({
+      .gpu = gpu,
+      .memory = memory,
+      .defaultFontPath = font,
+      .requireDefaultFont = true,
+      .shaderPaths =
+          {
+              .uiVertex = config.shaders.textMtsdf.uiVertex,
+              .uiFragment = config.shaders.textMtsdf.uiFragment,
+              .worldVertex = config.shaders.textMtsdf.worldVertex,
+              .worldFragment = config.shaders.textMtsdf.worldFragment,
+          },
+  });
+  if (text.hasError()) {
+    return Result<std::unique_ptr<ToolTextCoverage>, std::string>::makeError(
+        text.error());
+  }
+  impl->text = std::move(text.value());
+  if (enable3D) {
+    registerText3DStage(pipeline, *impl->text);
+  }
+  if (enable2D) {
+    registerText2DStage(pipeline, *impl->text);
+  }
+  return Result<std::unique_ptr<ToolTextCoverage>, std::string>::makeResult(
+      std::unique_ptr<ToolTextCoverage>(new ToolTextCoverage(std::move(impl))));
+}
+
+Result<bool, std::string> ToolTextCoverage::enqueue(uint64_t frameIndex) {
+  impl_->text->beginFrame(frameIndex);
+  ScopedScratch scratch(impl_->scratch);
+  const FontHandle font = impl_->text->defaultFont();
+  if (!nuri::isValid(font)) {
+    return Result<bool, std::string>::makeError(
+        "text coverage default font is invalid");
+  }
+
+  Text2DDesc ui{};
+  ui.utf8 = "NURI TEXT 2D  AV 0123456789";
+  ui.style.font = font;
+  ui.style.pxSize = 30.0f;
+  ui.layout.alignV = TextAlignV::Top;
+  ui.fillColor = {.r = 0.03f, .g = 0.08f, .b = 0.01f, .a = 1.0f};
+  ui.outlineColor = {.r = 0.03f, .g = 0.05f, .b = 0.02f, .a = 1.0f};
+  ui.mtsdf.outlineWidth = 0.08f;
+  ui.x = 24.0f;
+  ui.y = 24.0f;
+  if (impl_->enable2D) {
+    auto uiResult = impl_->text->enqueue2D(ui, *scratch.resource());
+    if (uiResult.hasError()) {
+      return Result<bool, std::string>::makeError(uiResult.error());
+    }
+    const TextBounds &bounds = uiResult.value();
+    if (!(bounds.minX >= 0.0f && bounds.minY >= 0.0f &&
+          bounds.maxX > bounds.minX && bounds.maxY > bounds.minY &&
+          bounds.maxX < 640.0f && bounds.maxY < 360.0f)) {
+      return Result<bool, std::string>::makeError(
+          "text coverage 2D bounds are outside the capture viewport");
+    }
+  }
+
+  Text3DDesc world{};
+  world.utf8 = "NURI TEXT 3D";
+  world.style.font = font;
+  world.style.pxSize = 34.0f;
+  world.layout.alignH = TextAlignH::Center;
+  world.layout.alignV = TextAlignV::Middle;
+  world.fillColor = {.r = 0.8f, .g = 0.92f, .b = 1.0f, .a = 1.0f};
+  world.billboard = TextBillboardMode::Spherical;
+  const glm::mat4 worldFromText =
+      glm::scale(glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 1.0f, 0.0f)),
+                 glm::vec3(0.018f));
+  std::memcpy(world.worldFromText.data(), &worldFromText[0][0],
+              sizeof(world.worldFromText));
+  if (impl_->enable3D) {
+    auto worldResult = impl_->text->enqueue3D(world, *scratch.resource());
+    if (worldResult.hasError()) {
+      return Result<bool, std::string>::makeError(worldResult.error());
+    }
+  }
+  return Result<bool, std::string>::makeResult(true);
+}
 
 ToolRendererRuntime::ToolRendererRuntime(std::unique_ptr<Impl> impl)
     : impl_(std::move(impl)) {}
@@ -1207,6 +1322,12 @@ Result<bool, std::string> ToolRendererRuntime::applySceneBaseModel() {
 Result<bool, std::string> ToolRendererRuntime::commitScene() {
   return impl_->scene.commit();
 }
+Result<bool, std::string>
+ToolRendererRuntime::enqueueTextCoverage(uint64_t frameIndex) {
+  return impl_->textCoverage != nullptr
+             ? impl_->textCoverage->enqueue(frameIndex)
+             : Result<bool, std::string>::makeResult(false);
+}
 Result<std::array<uint32_t, 2>, std::string>
 ToolRendererRuntime::resize(uint32_t width, uint32_t height) {
   if (width == 0u || height == 0u || width > static_cast<uint32_t>(INT32_MAX) ||
@@ -1284,6 +1405,18 @@ createToolRendererRuntime(const ToolRuntimeDesc &desc) {
     return Result<std::unique_ptr<ToolRendererRuntime>, std::string>::makeError(
         pipelineResult.error());
   }
+  const bool text2D = desc.scene.generator == "nuri.procedural.text_2d.v1";
+  const bool text3D = desc.scene.generator == "nuri.procedural.text_3d.v1";
+  if (text2D || text3D) {
+    auto textCoverage =
+        ToolTextCoverage::create(*impl->gpu, impl->pipeline, config,
+                                 impl->pipelineMemory, text2D, text3D);
+    if (textCoverage.hasError()) {
+      return Result<std::unique_ptr<ToolRendererRuntime>,
+                    std::string>::makeError(textCoverage.error());
+    }
+    impl->textCoverage = std::move(textCoverage.value());
+  }
   auto sceneResult =
       populateToolScene(desc, *impl->renderer, impl->scene, &impl->sceneMemory,
                         impl->sceneLoad, impl->environmentLoad);
@@ -1343,14 +1476,15 @@ void buildToolFrameContext(RenderFrameContext &frameContext, RenderScene &scene,
       .materialTableVersion = materialSnapshot.version,
       .environmentVersion = scene.environmentVersion(),
   };
+  ResolvedRenderSettings resolvedSettings = resolveRenderSettings(settings);
   auto planResult = buildPresentationAAPlan(
-      settings, {}, renderer.resources().gpuMultisampleCapabilities());
+      resolvedSettings, {}, renderer.resources().gpuMultisampleCapabilities());
   NURI_ASSERT(!planResult.hasError(), "Invalid presentation AA plan: %s",
               planResult.error().c_str());
   frameContext.presentationAA = planResult.value();
   auto cameraResult = temporalFrameService.prepareFrame(
       camera, static_cast<float>(desc.width) / static_cast<float>(desc.height),
-      settings.antiAliasing, frameContext.presentationAA,
+      resolvedSettings.antiAliasing, frameContext.presentationAA,
       TemporalCameraFrameDesc{.renderExtent =
                                   glm::uvec2(desc.width, desc.height),
                               .sceneContent = sceneContent,
@@ -1361,7 +1495,8 @@ void buildToolFrameContext(RenderFrameContext &frameContext, RenderScene &scene,
   frameContext.camera = cameraResult.value();
   frameContext.temporalFrameService = &temporalFrameService;
   settings.antiAliasing.debug.resetHistoryRequested = false;
-  frameContext.settings = &settings;
+  resolvedSettings.antiAliasing.debug.resetHistoryRequested = false;
+  frameContext.settings = std::move(resolvedSettings);
   frameContext.metrics = {};
   frameContext.metrics.frameIndex = frameContext.frameIndex;
   frameContext.metrics.antiAliasing =

@@ -1,7 +1,6 @@
 #include "nuri/resources/async/asset_cpu_scheduler.h"
 #include "nuri/core/log.h"
 #include "nuri/core/profiling.h"
-#include "nuri/pch.h"
 #include <algorithm>
 #include <exception>
 #include <limits>
@@ -300,6 +299,29 @@ void AssetCpuScheduler::workerMain(std::stop_token stopToken,
       workCv_.notify_all();
     }
   }
+}
+
+AssetCpuScheduler &backgroundAssetCpuScheduler() {
+  struct BackgroundScheduler {
+    BackgroundScheduler()
+        : scheduler(AssetCpuSchedulerConfig{
+              .workerCount = 1u,
+              .reservedLogicalThreads = 0u,
+              .interactiveWorkerCount = 1u,
+              .maxInFlightJobs = 32u,
+              .maxInFlightBytes = 512ull * 1024ull * 1024ull,
+              .ioConcurrency = 1u,
+              .decodeConcurrency = 1u,
+              .cookConcurrency = 1u,
+              .transcodeConcurrency = 1u,
+              .metadataConcurrency = 1u,
+              .gpuMaterializationConcurrency = 1u,
+          }) {}
+    ~BackgroundScheduler() { scheduler.waitIdle(); }
+    AssetCpuScheduler scheduler;
+  };
+  static BackgroundScheduler owner;
+  return owner.scheduler;
 }
 
 } // namespace nuri

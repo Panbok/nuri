@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <ktx.h>
 #include <memory>
+#include <span>
 namespace nuri::detail {
 
 struct KtxTextureDeleter {
@@ -57,6 +58,27 @@ using FilePtr = std::unique_ptr<std::FILE, FileCloser>;
         "' (error " + std::to_string(static_cast<int>(error)) + ")");
   }
   return Result<KtxTexturePtr, std::string>::makeResult(KtxTexturePtr(texture));
+}
+
+[[nodiscard]] inline Result<std::span<const std::byte>, std::string>
+viewKtxImage(ktxTexture &texture, uint32_t level, uint32_t layer, uint32_t face,
+             std::string_view context) {
+  ktx_size_t offset = 0u;
+  if (ktxTexture_GetImageOffset(&texture, level, layer, face, &offset) !=
+      KTX_SUCCESS) {
+    return Result<std::span<const std::byte>, std::string>::makeError(
+        std::string(context) + ": failed to resolve KTX image offset");
+  }
+  const auto size = ktxTexture_GetImageSize(&texture, level);
+  const auto dataSize = ktxTexture_GetDataSize(&texture);
+  const auto *data = ktxTexture_GetData(&texture);
+  if (data == nullptr || offset > dataSize || size > dataSize - offset) {
+    return Result<std::span<const std::byte>, std::string>::makeError(
+        std::string(context) + ": KTX image payload is out of bounds");
+  }
+  return Result<std::span<const std::byte>, std::string>::makeResult(
+      {reinterpret_cast<const std::byte *>(data) + offset,
+       static_cast<size_t>(size)});
 }
 
 inline constexpr ktx_uint32_t kVkRgba8Unorm = 37u;

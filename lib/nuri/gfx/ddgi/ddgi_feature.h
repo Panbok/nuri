@@ -8,7 +8,6 @@
 #include "nuri/gfx/ddgi/ddgi_scheduler.h"
 #include "nuri/gfx/owned_gpu_resource.h"
 #include "nuri/gfx/pipeline/render_pipeline.h"
-#include "nuri/gfx/shader.h"
 #include <array>
 #include <memory>
 #include <memory_resource>
@@ -258,11 +257,66 @@ private:
   void clearPendingVolumes() noexcept;
   void clearFrameSlots() noexcept;
 
+  struct PendingSourceFacts {
+    uint64_t sceneId = 0u;
+    uint64_t geometryTopology = UINT64_MAX;
+    uint64_t geometryTransform = UINT64_MAX;
+    uint64_t geometryDeformation = UINT64_MAX;
+    uint64_t lightTopology = UINT64_MAX;
+    uint64_t lightTransform = UINT64_MAX;
+    uint64_t material = UINT64_MAX;
+    uint64_t environment = UINT64_MAX;
+    bool geometry = false;
+    bool radiometric = false;
+  };
+
+  struct PendingDDGIFrame {
+    explicit PendingDDGIFrame(std::pmr::memory_resource *memory)
+        : volumes(memory), scrollLayouts(memory), localLights(memory),
+          directionalLights(memory) {}
+
+    PendingSourceFacts sources{};
+    std::pmr::vector<VolumeResource> volumes;
+    std::pmr::vector<DDGIVolumeLayout> scrollLayouts;
+    std::pmr::vector<LocalLightSnapshot> localLights;
+    std::pmr::vector<DirectionalLightGpuData> directionalLights;
+    DDGITieredScheduleResult tierSchedule{};
+    DDGICoverageSettings coverageSettings{};
+    std::array<DDGIEffectiveVolume, kMaxDDGIEffectiveVolumes>
+        effectiveVolumes{};
+    std::array<uint32_t, kMaxDDGIEffectiveVolumes> retainedSourceIndices{};
+    std::array<glm::vec3, kMaxDDGIEffectiveVolumes>
+        requestedCoverageHalfExtents{};
+    std::array<glm::vec3, kMaxDDGIEffectiveVolumes>
+        achievedCoverageHalfExtents{};
+    uint64_t volumeTopologyVersion = UINT64_MAX;
+    uint64_t volumeTransformVersion = UINT64_MAX;
+    uint64_t volumeSettingsVersion = UINT64_MAX;
+    uint64_t coverageGeneration = 0u;
+    uint64_t sceneBoundsGeneration = 0u;
+    uint64_t resetEpoch = 0u;
+    uint64_t forceEpoch = 0u;
+    uint64_t scheduledFrameIndex = UINT64_MAX;
+    uint32_t effectiveVolumeCount = 0u;
+    uint32_t failedVolumeCount = 0u;
+    DDGIVolumeFailureReason volumeFailureReason = DDGIVolumeFailureReason::None;
+    bool relocationEnabled = true;
+    bool classificationEnabled = true;
+    bool replacement = false;
+    bool compatiblePlan = false;
+    bool initializationScheduled = false;
+    bool scrollScheduled = false;
+    bool updatesScheduled = false;
+    bool radiometricResponseScheduled = false;
+    bool geometryResponseScheduled = false;
+    bool inspectionScheduled = false;
+    bool dirtyConsumptionScheduled = false;
+  };
+
   GPUDevice &gpu_;
   RuntimeDDGIShaderConfig config_{};
   std::pmr::memory_resource *memory_ = std::pmr::get_default_resource();
   ScratchArena scratch_;
-  std::array<std::unique_ptr<Shader>, PipelineCount> shaders_{};
   std::array<OwnedComputePipelineHandle, PipelineCount> pipelines_{};
   OwnedRayQueryBinding traceBinding_{};
   OwnedRayQueryBinding inspectBinding_{};
@@ -271,33 +325,24 @@ private:
   OwnedSamplerHandle sampler_{};
   std::string initializationError_{};
   std::pmr::vector<VolumeResource> volumes_;
-  std::pmr::vector<VolumeResource> pendingVolumes_;
   std::pmr::vector<FrameSlot> frameSlots_;
   std::pmr::vector<DDGIProbeUpdateEntry> scheduledEntries_;
   std::pmr::vector<DDGIProbeUpdateEntry> dispatchEntries_;
   std::pmr::vector<DDGIProbeUpdateEntry> scrollInvalidations_;
-  std::pmr::vector<DDGIVolumeLayout> pendingScrollLayouts_;
   std::pmr::vector<ComputeDispatchItem> dispatches_;
   std::pmr::vector<ComputeDispatchItem> irradianceDispatches_;
   std::pmr::vector<ComputeDispatchItem> distanceDispatches_;
   std::pmr::vector<BlendPushConstants> blendPushConstants_;
-  std::pmr::vector<BufferHandle> dependencyBuffers_;
-  std::pmr::vector<RenderGraphAccessMode> dependencyBufferModes_;
-  std::pmr::vector<TextureHandle> dependencyTextures_;
-  std::pmr::vector<RenderGraphAccessMode> dependencyTextureModes_;
-  std::pmr::vector<TextureHandle> irradianceDependencyTextures_;
-  std::pmr::vector<RenderGraphAccessMode> irradianceDependencyTextureModes_;
-  std::pmr::vector<TextureHandle> distanceDependencyTextures_;
-  std::pmr::vector<RenderGraphAccessMode> distanceDependencyTextureModes_;
+  std::pmr::vector<RenderGraphImportedBufferUse> bufferUses_;
+  std::pmr::vector<RenderGraphImportedTextureUse> textureUses_;
+  std::pmr::vector<RenderGraphImportedTextureUse> irradianceTextureUses_;
+  std::pmr::vector<RenderGraphImportedTextureUse> distanceTextureUses_;
   std::pmr::vector<BufferHandle> forwardDependencyBuffers_;
   std::pmr::vector<TextureHandle> forwardDependencyTextures_;
   std::pmr::vector<LocalLightGpuData> selectedLocalLights_;
   std::pmr::vector<LocalLightSnapshot> submittedLocalLights_;
   std::pmr::vector<DirectionalLightGpuData> submittedDirectionalLights_;
-  std::pmr::vector<LocalLightSnapshot> pendingLocalLights_;
-  std::pmr::vector<DirectionalLightGpuData> pendingDirectionalLights_;
   DDGIFrameGpuData frameData_{};
-  DDGITieredScheduleResult pendingTierSchedule_{};
   DDGIDirtyRegionRing dirtyRegions_{};
   DDGIEffectiveVolumePlan coveragePlan_;
   std::array<TracePushConstants, 2> tracePushConstants_{};
@@ -319,43 +364,21 @@ private:
   uint64_t lightTransformVersion_ = UINT64_MAX;
   uint64_t materialVersion_ = UINT64_MAX;
   uint64_t environmentVersion_ = UINT64_MAX;
-  uint64_t pendingGeometryTopologyVersion_ = UINT64_MAX;
-  uint64_t pendingGeometryTransformVersion_ = UINT64_MAX;
-  uint64_t pendingGeometryDeformationVersion_ = UINT64_MAX;
-  uint64_t pendingLightTopologyVersion_ = UINT64_MAX;
-  uint64_t pendingLightTransformVersion_ = UINT64_MAX;
-  uint64_t pendingMaterialVersion_ = UINT64_MAX;
-  uint64_t pendingEnvironmentVersion_ = UINT64_MAX;
-  uint64_t pendingSceneId_ = 0u;
+  PendingDDGIFrame pending_;
   uint32_t selectedLocalLightCount_ = 0u;
   uint32_t totalLocalLightCount_ = 0u;
   uint32_t secondaryQueriesPer1024Primary_ = 1024u;
   bool secondaryLightingPossible_ = false;
-  uint64_t pendingVolumeTopologyVersion_ = UINT64_MAX;
-  uint64_t pendingVolumeTransformVersion_ = UINT64_MAX;
-  uint64_t pendingVolumeSettingsVersion_ = UINT64_MAX;
   DDGICoverageSettings coverageSettings_{};
   DDGICoverageSettings coveragePlanSettings_{};
   DDGICoverageSolveLimits coveragePlanLimits_{};
-  DDGICoverageSettings pendingCoverageSettings_{};
   uint64_t coverageGeneration_ = 0u;
   uint64_t coveragePlanSceneId_ = 0u;
   uint64_t coveragePlanBoundsGeneration_ = 0u;
   uint64_t coveragePlanVolumeTopologyVersion_ = UINT64_MAX;
   uint64_t coveragePlanVolumeTransformVersion_ = UINT64_MAX;
   uint64_t coveragePlanVolumeSettingsVersion_ = UINT64_MAX;
-  uint64_t pendingCoverageGeneration_ = 0u;
   uint64_t sceneBoundsGeneration_ = 0u;
-  uint64_t pendingSceneBoundsGeneration_ = 0u;
-  std::array<DDGIEffectiveVolume, kMaxDDGIEffectiveVolumes>
-      pendingEffectiveVolumes_{};
-  std::array<uint32_t, kMaxDDGIEffectiveVolumes>
-      pendingRetainedSourceIndices_{};
-  std::array<glm::vec3, kMaxDDGIEffectiveVolumes>
-      pendingRequestedCoverageHalfExtents_{};
-  std::array<glm::vec3, kMaxDDGIEffectiveVolumes>
-      pendingAchievedCoverageHalfExtents_{};
-  uint32_t pendingEffectiveVolumeCount_ = 0u;
   uint64_t submittedSequence_ = 0u;
   uint64_t nextResourceGeneration_ = 0u;
   uint64_t deviceEpoch_ = 0u;
@@ -363,9 +386,6 @@ private:
   uint64_t probeStateMirrorSourceFrame_ = 0u;
   uint64_t consumedResetEpoch_ = 0u;
   uint64_t consumedForceEpoch_ = 0u;
-  uint64_t pendingResetEpoch_ = 0u;
-  uint64_t pendingForceEpoch_ = 0u;
-  uint64_t scheduledFrameIndex_ = UINT64_MAX;
   uint64_t latestTraceCounterSceneId_ = 0u;
   uint64_t latestTraceCounterDeviceEpoch_ = 0u;
   uint64_t latestTraceCounterFeatureGeneration_ = 0u;
@@ -375,26 +395,10 @@ private:
   uint64_t scheduledReadbackBytes_ = 0u;
   size_t activeFrameSlotIndex_ = std::numeric_limits<size_t>::max();
   uint32_t failedVolumeCount_ = 0u;
-  uint32_t pendingFailedVolumeCount_ = 0u;
   DDGIVolumeFailureReason volumeFailureReason_ = DDGIVolumeFailureReason::None;
-  DDGIVolumeFailureReason pendingVolumeFailureReason_ =
-      DDGIVolumeFailureReason::None;
   bool relocationEnabled_ = true;
   bool classificationEnabled_ = true;
-  bool pendingRelocationEnabled_ = true;
-  bool pendingClassificationEnabled_ = true;
   bool initialized_ = false;
-  bool replacementPending_ = false;
-  bool compatiblePlanPending_ = false;
-  bool initializationScheduled_ = false;
-  bool scrollScheduled_ = false;
-  bool updatesScheduled_ = false;
-  bool radiometricResponseScheduled_ = false;
-  bool geometryResponseScheduled_ = false;
-  bool pendingGeometrySourceFacts_ = false;
-  bool pendingRadiometricSourceFacts_ = false;
-  bool inspectionScheduled_ = false;
-  bool dirtyConsumptionScheduled_ = false;
   bool probeStateMirrorAvailable_ = false;
   bool latestTraceCountersAvailable_ = false;
   bool coveragePlanValid_ = false;

@@ -4,6 +4,7 @@
 #include "nuri/gfx/gpu_types.h"
 #include "nuri/resources/gpu/model.h"
 #include "nuri/resources/gpu/resource_handles.h"
+#include <array>
 #include <cstdint>
 #include <memory_resource>
 #include <span>
@@ -62,6 +63,24 @@ struct SceneDrawRecord {
   bool materialNormalRequired = false;
 };
 
+enum class SceneDrawCategory : uint8_t {
+  Opaque,
+  AlphaMasked,
+  AlphaBlended,
+  Transmission,
+  RayTracing,
+  Count,
+};
+
+struct SceneDrawSourceVersion {
+  const RenderScene *scene = nullptr;
+  uint64_t topology = UINT64_MAX;
+  uint64_t material = UINT64_MAX;
+  uint64_t materialBinding = UINT64_MAX;
+  uint64_t geometry = UINT64_MAX;
+  bool operator==(const SceneDrawSourceVersion &) const noexcept = default;
+};
+
 class NURI_API SceneDrawDatabase {
 public:
   explicit SceneDrawDatabase(
@@ -83,17 +102,25 @@ public:
   rayTracingMaterialTextures() const noexcept {
     return rayTracingMaterialTextures_;
   }
+  [[nodiscard]] std::span<const uint32_t>
+  category(SceneDrawCategory category) const noexcept {
+    return categories_[static_cast<size_t>(category)];
+  }
+  [[nodiscard]] uint64_t generation() const noexcept { return generation_; }
+  [[nodiscard]] const SceneDrawSourceVersion &sourceVersion() const noexcept {
+    return sourceVersion_;
+  }
 
 private:
   GPUDevice &gpu_;
   std::pmr::vector<SceneInstanceRecord> instances_;
   std::pmr::vector<SceneDrawRecord> draws_;
   std::pmr::vector<TextureHandle> rayTracingMaterialTextures_;
-  const RenderScene *scene_ = nullptr;
-  uint64_t topologyVersion_ = UINT64_MAX;
-  uint64_t materialVersion_ = UINT64_MAX;
-  uint64_t materialBindingVersion_ = UINT64_MAX;
-  uint64_t geometryVersion_ = UINT64_MAX;
+  std::array<std::pmr::vector<uint32_t>,
+             static_cast<size_t>(SceneDrawCategory::Count)>
+      categories_;
+  SceneDrawSourceVersion sourceVersion_{};
+  uint64_t generation_ = 0u;
 };
 
 } // namespace nuri

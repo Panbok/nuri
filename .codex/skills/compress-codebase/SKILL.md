@@ -12,6 +12,13 @@ public contracts, ownership, concurrency, lifetime, and measured hot-path
 performance. A smaller file is not success when total maintained code or concept
 count grows elsewhere.
 
+Keep the result conventionally formatted and easy to review. Preserve meaningful
+line breaks, indentation, and blank lines between distinct phases. Keep one
+logical statement per line; do not fold control flow, declarations, or multiple
+operations together to manufacture a lower physical LOC count. Group related
+work into coherent blocks whose purpose a human can identify at a glance. Run the
+repository formatter on touched code when one is available.
+
 Map every file in scope before broad edits. Coverage means every original file has
 an explicit disposition, including files deliberately kept unchanged.
 
@@ -73,6 +80,9 @@ needs two semantically identical concrete uses and must reduce total relationshi
    both deleted and added lines. Moving code is not compression.
 5. Stop and repair any behavior, lifetime, visual, or measured performance
    regression before starting the next slice.
+6. Review the formatted diff as code, not only as metrics. Reject any slice whose
+   LOC reduction depends on packed lines, collapsed blocks, or harder-to-scan
+   control flow.
 
 For `lib/nuri` or renderer-facing work, also use `nuri-renderer-design` and the
 applicable Nuri autotest, snapshot, and benchmark skills. Preserve

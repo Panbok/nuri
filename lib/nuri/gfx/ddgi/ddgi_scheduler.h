@@ -117,13 +117,7 @@ struct DDGITierScheduleInput {
 
 struct DDGITieredProbeScheduleCandidate {
   uint64_t tierStableKey = 0u;
-  uint32_t volumeStableId = 0u;
-  uint32_t probeId = 0u;
-  DDGIProbeState state = DDGIProbeState::Uninitialized;
-  uint64_t lastSubmittedUpdate = 0u;
-  bool invalidated = false;
-  uint32_t classificationIteration = 0u;
-  uint32_t radianceRayCount = 0u;
+  DDGIProbeScheduleCandidate probe{};
 };
 
 struct DDGITierScheduleResult {

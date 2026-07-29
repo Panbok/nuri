@@ -15,7 +15,7 @@ namespace nuri {
 
 struct PreparedSceneManifest {
   ScenePrefab prefab{};
-  std::vector<AdaptedSceneMesh> meshes{};
+  std::vector<ScenePrefabAdaptedMesh> meshes{};
   std::vector<MaterialData> materials{};
   std::shared_ptr<const std::vector<EmbeddedSceneTextureData>>
       embeddedTextures{};

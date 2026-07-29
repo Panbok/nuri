@@ -1,10 +1,10 @@
 #include "mesh_importer.h"
 #include "nuri/core/pmr_scratch.h"
 #include "nuri/core/profiling.h"
-#include "nuri/pch.h"
 #include "nuri/resources/detail/gltf_json_utils.h"
 #include "nuri/resources/detail/scene_asset_build_backend.h"
 #include "nuri/resources/scene_importer.h"
+#include "nuri/resources/storage/cache_utils.h"
 #include <assimp/Importer.hpp>
 #include <assimp/material.h>
 #include <assimp/postprocess.h>
@@ -25,9 +25,7 @@ constexpr std::array<float, 5> kLodAttributeWeights{0.5f, 0.5f, 0.5f, 1.0f,
                                                     1.0f};
 constexpr size_t kTriangleIndexCount = 3;
 constexpr float kDefaultTextureScale = 1.0f;
-constexpr float kDefaultAttenuationDistance = 0.0f;
 constexpr float kDefaultIor = 1.5f;
-constexpr glm::vec3 kDefaultAttenuationColor(1.0f);
 constexpr float kDirectionEpsilon = 1.0e-10f;
 using detail::isGltfJsonAssetPath;
 using detail::readJsonStringView;
@@ -61,7 +59,7 @@ resolveExternalTexturePath(const std::filesystem::path &modelPath,
       return {.path = companion.string(),
               .usedDdsCompanion =
                   extension == ".dds" &&
-                  !detail::hasExtensionCaseInsensitive(texturePath, ".dds")};
+                  !pathHasExtensionCaseInsensitive(texturePath, ".dds")};
     }
   }
   return ResolvedExternalTexturePath{
@@ -865,7 +863,7 @@ aiMatrix4x4 glmMat4ToAiMatrix4x4(const glm::mat4 &matrix) {
   return out;
 }
 glm::mat4 computeImportedSceneWorldMatrix(uint32_t nodeIndex,
-                                          const ImportedScene &scene,
+                                          const ScenePrefab &scene,
                                           std::span<glm::mat4> cache,
                                           std::span<uint8_t> state) {
   if (nodeIndex >= scene.nodes.size()) {
@@ -887,17 +885,6 @@ glm::mat4 computeImportedSceneWorldMatrix(uint32_t nodeIndex,
   cache[nodeIndex] = world;
   state[nodeIndex] = 2u;
   return world;
-}
-[[nodiscard]] uint32_t
-findMeshAssetIndexBySourceSceneMeshIndex(const ImportedScene &scene,
-                                         uint32_t sourceSceneMeshIndex) {
-  for (uint32_t assetIndex = 0u; assetIndex < scene.meshAssets.size();
-       ++assetIndex) {
-    if (scene.meshAssets[assetIndex].sourceIndex == sourceSceneMeshIndex) {
-      return assetIndex;
-    }
-  }
-  return kInvalidScenePrefabIndex;
 }
 void extractMeshGeometry(const aiMesh &mesh, const aiMatrix4x4 &transform,
                          std::pmr::vector<Vertex> &outVertices,
@@ -1459,7 +1446,7 @@ buildSceneMeshData(const aiMesh &mesh, uint32_t sceneMeshIndex,
 }
 [[nodiscard]] nuri::Result<MeshData, std::string>
 buildFlattenedSceneDataFromImportedScene(std::string_view path,
-                                         const ImportedScene &importedScene,
+                                         const ScenePrefab &importedScene,
                                          const MeshImportOptions &options,
                                          std::pmr::memory_resource *mem,
                                          bool includeAnimationData = true) {
@@ -1501,8 +1488,7 @@ buildFlattenedSceneDataFromImportedScene(std::string_view path,
     }
   };
   if (!importedScene.renderables.empty()) {
-    for (const ImportedSceneRenderable &renderable :
-         importedScene.renderables) {
+    for (const ScenePrefabRenderable &renderable : importedScene.renderables) {
       if (renderable.meshAssetIndex >= importedScene.meshAssets.size()) {
         continue;
       }
@@ -1511,7 +1497,7 @@ buildFlattenedSceneDataFromImportedScene(std::string_view path,
     }
     data.submeshes.reserve(importedScene.renderables.size());
   } else {
-    for (const ImportedSceneAsset &meshAsset : importedScene.meshAssets) {
+    for (const ScenePrefabAssetRef &meshAsset : importedScene.meshAssets) {
       reserveForMesh(meshAsset.sourceIndex);
     }
     data.submeshes.reserve(importedScene.meshAssets.size());
@@ -1542,16 +1528,15 @@ buildFlattenedSceneDataFromImportedScene(std::string_view path,
                             options, buffers.lodIndices, buffers.lodErrors);
   };
   if (!importedScene.renderables.empty()) {
-    for (const ImportedSceneRenderable &renderable :
-         importedScene.renderables) {
+    for (const ScenePrefabRenderable &renderable : importedScene.renderables) {
       if (renderable.meshAssetIndex >= importedScene.meshAssets.size() ||
           renderable.materialAssetIndex >=
               importedScene.materialAssets.size()) {
         continue;
       }
-      const ImportedSceneAsset &meshAsset =
+      const ScenePrefabAssetRef &meshAsset =
           importedScene.meshAssets[renderable.meshAssetIndex];
-      const ImportedSceneAsset &materialAsset =
+      const ScenePrefabAssetRef &materialAsset =
           importedScene.materialAssets[renderable.materialAssetIndex];
       const glm::mat4 worldTransform = computeImportedSceneWorldMatrix(
           renderable.nodeIndex, importedScene, worldCache, worldState);
@@ -1561,7 +1546,7 @@ buildFlattenedSceneDataFromImportedScene(std::string_view path,
                        materialAsset.sourceIndex);
     }
   } else {
-    for (const ImportedSceneAsset &meshAsset : importedScene.meshAssets) {
+    for (const ScenePrefabAssetRef &meshAsset : importedScene.meshAssets) {
       auto meshResult = resolveSceneMesh(*scene, meshAsset.sourceIndex,
                                          "MeshImporter::loadFromFile");
       if (meshResult.hasError()) {
@@ -1616,7 +1601,7 @@ unsigned int detail::sceneMeshImportFlags(const MeshImportOptions &options) {
   return buildAssimpFlags(options, false, true);
 }
 
-Result<std::pmr::vector<AdaptedSceneMesh>, std::string>
+Result<std::pmr::vector<ScenePrefabAdaptedMesh>, std::string>
 detail::adaptSceneMeshes(const aiScene &scene,
                          std::span<const uint32_t> sceneMeshIndices,
                          std::string_view sourcePath,
@@ -1626,7 +1611,7 @@ detail::adaptSceneMeshes(const aiScene &scene,
   if (mem == nullptr) {
     mem = std::pmr::get_default_resource();
   }
-  std::pmr::vector<AdaptedSceneMesh> adapted(mem);
+  std::pmr::vector<ScenePrefabAdaptedMesh> adapted(mem);
   adapted.reserve(sceneMeshIndices.size());
   const std::string sceneName = importedSceneName(scene, sourcePath);
   const auto primitiveMapping = loadGltfPrimitiveMaterialMapping(sourcePath);
@@ -1634,12 +1619,12 @@ detail::adaptSceneMeshes(const aiScene &scene,
     auto meshResult =
         resolveSceneMesh(scene, sceneMeshIndex, "detail::adaptSceneMeshes");
     if (meshResult.hasError()) {
-      return Result<std::pmr::vector<AdaptedSceneMesh>, std::string>::makeError(
-          meshResult.error());
+      return Result<std::pmr::vector<ScenePrefabAdaptedMesh>,
+                    std::string>::makeError(meshResult.error());
     }
     const aiMesh &mesh = *meshResult.value();
     adapted.emplace_back(mem);
-    AdaptedSceneMesh &source = adapted.back();
+    ScenePrefabAdaptedMesh &source = adapted.back();
     source.sourceSceneMeshIndex = sceneMeshIndex;
     source.sourceMaterialIndex = mesh.mMaterialIndex;
     if (primitiveMapping.has_value() &&
@@ -1659,17 +1644,18 @@ detail::adaptSceneMeshes(const aiScene &scene,
                         source.mesh.morphTargets);
     if (source.mesh.vertices.empty() ||
         source.mesh.indices.size() < kTriangleIndexCount) {
-      return Result<std::pmr::vector<AdaptedSceneMesh>, std::string>::makeError(
-          "detail::adaptSceneMeshes: mesh index " +
-          std::to_string(sceneMeshIndex) + " has insufficient geometry");
+      return Result<std::pmr::vector<ScenePrefabAdaptedMesh>, std::string>::
+          makeError("detail::adaptSceneMeshes: mesh index " +
+                    std::to_string(sceneMeshIndex) +
+                    " has insufficient geometry");
     }
   }
-  return Result<std::pmr::vector<AdaptedSceneMesh>, std::string>::makeResult(
-      std::move(adapted));
+  return Result<std::pmr::vector<ScenePrefabAdaptedMesh>,
+                std::string>::makeResult(std::move(adapted));
 }
 
 Result<MeshData, std::string>
-detail::cookAdaptedSceneMesh(AdaptedSceneMesh source,
+detail::cookAdaptedSceneMesh(ScenePrefabAdaptedMesh source,
                              const MeshImportOptions &options,
                              std::pmr::memory_resource *mem) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);

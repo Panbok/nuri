@@ -1,9 +1,8 @@
-#include "nuri/text/font_manager.h"
+#include "nuri/text/detail/font_manager.h"
 #include "nuri/core/containers/hash_map.h"
 #include "nuri/core/containers/slot_pool.h"
 #include "nuri/core/log.h"
 #include "nuri/gfx/gpu_device.h"
-#include "nuri/pch.h"
 #include "nuri/resources/storage/cache_utils.h"
 #include "nuri/resources/storage/font/nfont_binary_codec.h"
 #include "nuri/resources/storage/texture/texture_processing.h"
@@ -83,9 +82,7 @@ public:
       record.cmap.emplace(entry.codepoint, entry.glyphId);
     }
     record.fallback.clear();
-    const FontHandle handle{
-        .value = packTextHandleValue(index, slot.generation),
-    };
+    const FontHandle handle = FontHandle::fromParts(index, slot.generation);
     NURI_LOG_INFO(
         "FontManager: loaded font '%s' from '%s' (glyphs=%zu pages=%zu)",
         record.debugName.c_str(), record.sourcePath.c_str(),
@@ -97,7 +94,7 @@ public:
     if (record == nullptr) {
       return makeError<bool>("FontManager::unloadFont: invalid font handle");
     }
-    const uint32_t index = textHandleIndex(font.value);
+    const uint32_t index = indexOf(font);
     releaseFontRecord(index);
     return Result<bool, std::string>::makeResult(true);
   }
@@ -263,9 +260,8 @@ private:
     record.width = page.width;
     record.height = page.height;
     record.debugName = debugName;
-    return Result<AtlasPageHandle, std::string>::makeResult(AtlasPageHandle{
-        .value = packTextHandleValue(index, slot.generation),
-    });
+    return Result<AtlasPageHandle, std::string>::makeResult(
+        AtlasPageHandle::fromParts(index, slot.generation));
   }
   void destroyAtlasPages(std::span<const AtlasPageHandle> pages) {
     for (const AtlasPageHandle pageHandle : pages) {
@@ -287,7 +283,7 @@ private:
     fontSlots_.release(index);
   }
   void releaseAtlasPageRecord(AtlasPageHandle page) {
-    const uint32_t index = textHandleIndex(page.value);
+    const uint32_t index = indexOf(page);
     AtlasPageRecord &record = atlasPageRecords_[index];
     gpu_.destroyTexture(record.texture);
     record.texture = TextureHandle{};
@@ -305,16 +301,16 @@ private:
     }
   }
   [[nodiscard]] FontRecord *resolveFont(FontHandle font) {
-    const uint32_t index = textHandleIndex(font.value);
-    const uint32_t generation = textHandleGeneration(font.value);
+    const uint32_t index = indexOf(font);
+    const uint32_t generation = generationOf(font);
     if (!fontSlots_.isValid(index, generation)) {
       return nullptr;
     }
     return &fontRecords_[index];
   }
   [[nodiscard]] const FontRecord *resolveFont(FontHandle font) const {
-    const uint32_t index = textHandleIndex(font.value);
-    const uint32_t generation = textHandleGeneration(font.value);
+    const uint32_t index = indexOf(font);
+    const uint32_t generation = generationOf(font);
     if (!fontSlots_.isValid(index, generation)) {
       return nullptr;
     }
@@ -322,8 +318,8 @@ private:
   }
   [[nodiscard]] const AtlasPageRecord *
   resolveAtlasPageRecord(AtlasPageHandle page) const {
-    const uint32_t index = textHandleIndex(page.value);
-    const uint32_t generation = textHandleGeneration(page.value);
+    const uint32_t index = indexOf(page);
+    const uint32_t generation = generationOf(page);
     if (!atlasPageSlots_.isValid(index, generation)) {
       return nullptr;
     }
@@ -350,8 +346,9 @@ private:
   std::pmr::memory_resource &memory_;
   std::pmr::vector<FontRecord> fontRecords_;
   std::pmr::vector<AtlasPageRecord> atlasPageRecords_;
-  SlotPool<MaskedNonZeroGenerationPolicy<kTextHandleGenerationMask>> fontSlots_;
-  SlotPool<MaskedNonZeroGenerationPolicy<kTextHandleGenerationMask>>
+  SlotPool<MaskedNonZeroGenerationPolicy<kResourceHandleGenerationMask>>
+      fontSlots_;
+  SlotPool<MaskedNonZeroGenerationPolicy<kResourceHandleGenerationMask>>
       atlasPageSlots_;
 };
 

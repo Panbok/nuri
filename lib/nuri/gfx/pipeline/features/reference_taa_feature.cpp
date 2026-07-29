@@ -2,7 +2,7 @@
 #include "nuri/gfx/frame/presentation_aa_plan.h"
 #include "nuri/gfx/fullscreen.h"
 #include "nuri/gfx/pipeline/render_pipeline.h"
-#include "nuri/pch.h"
+#include "nuri/gfx/shader.h"
 #include <bit>
 namespace nuri {
 namespace {
@@ -55,7 +55,7 @@ makeFullscreenDraw(RenderPipelineHandle pipeline,
   return draw;
 }
 [[nodiscard]] float referenceCurrentWeight(TemporalAAQualityPreset preset) {
-  switch (sanitizeTemporalAAQualityPreset(preset)) {
+  switch (preset) {
   case TemporalAAQualityPreset::Performance:
     return 0.16f;
   case TemporalAAQualityPreset::Balanced:
@@ -96,27 +96,22 @@ ReferenceTAAResolvePass::~ReferenceTAAResolvePass() {
 }
 
 bool ReferenceTAAResolvePass::isEnabled(const FrameBuildContext &ctx) const {
-  return presentationAAPlanForFrame(ctx.frame).reconstruction ==
+  return ctx.frame.presentationAA.reconstruction ==
          ColorReconstruction::ReferenceTAA;
 }
 
 Result<bool, std::string>
-ReferenceTAAResolvePass::prepare(FrameBuildContext &ctx) {
+ReferenceTAAResolvePass::prepare(FrameBuildContext &) {
   if (initialized_) {
     return Result<bool, std::string>::makeResult(true);
   }
-  shader_ = Shader::create("taa_reference", gpu_);
-  if (!shader_) {
-    return Result<bool, std::string>::makeError(
-        "ReferenceTAAResolvePass::prepare: failed to create shader");
-  }
-  auto vertexResult =
-      shader_->compileFromFile(vertexPath_.string(), ShaderStage::Vertex);
+  auto vertexResult = compileShaderFile(
+      gpu_, "taa_reference", vertexPath_.string(), ShaderStage::Vertex);
   if (vertexResult.hasError()) {
     return Result<bool, std::string>::makeError(vertexResult.error());
   }
-  auto fragmentResult =
-      shader_->compileFromFile(fragmentPath_.string(), ShaderStage::Fragment);
+  auto fragmentResult = compileShaderFile(
+      gpu_, "taa_reference", fragmentPath_.string(), ShaderStage::Fragment);
   if (fragmentResult.hasError()) {
     gpu_.destroyShaderModule(vertexResult.value());
     return Result<bool, std::string>::makeError(fragmentResult.error());
@@ -155,39 +150,42 @@ ReferenceTAAResolvePass::prepare(FrameBuildContext &ctx) {
 Result<bool, std::string>
 ReferenceTAAResolvePass::build(FrameBuildContext &ctx) {
   if (!isEnabled(ctx) || !nuri::isValid(pipeline_) ||
-      !nuri::isValid(ctx.shared.frameColorTexture) ||
-      !nuri::isValid(ctx.shared.sceneColorTexture) ||
-      !nuri::isValid(ctx.shared.historyColorReadTexture) ||
-      !nuri::isValid(ctx.shared.historyColorWriteTexture) ||
-      !nuri::isValid(ctx.shared.sceneDepthTexture) ||
-      !nuri::isValid(ctx.shared.motionVectorTexture) ||
-      !nuri::isValid(ctx.shared.motionClassTexture) ||
-      !nuri::isValid(ctx.shared.reactiveMaskTexture)) {
+      !nuri::isValid(ctx.shared[FrameTextureSlot::FrameColor].texture) ||
+      !nuri::isValid(ctx.shared[FrameTextureSlot::SceneColor].texture) ||
+      !nuri::isValid(ctx.shared[FrameHistoryTextureSlot::ColorRead].texture) ||
+      !nuri::isValid(ctx.shared[FrameHistoryTextureSlot::ColorWrite].texture) ||
+      !nuri::isValid(ctx.shared[FrameTextureSlot::SceneDepth].texture) ||
+      !nuri::isValid(ctx.shared[FrameTextureSlot::MotionVector].texture) ||
+      !nuri::isValid(ctx.shared[FrameTextureSlot::MotionClass].texture) ||
+      !nuri::isValid(ctx.shared[FrameTextureSlot::ReactiveMask].texture)) {
     return Result<bool, std::string>::makeResult(false);
   }
   const bool historyValid =
       ctx.frame.camera.historyValid && ctx.shared.historyColorReadValid;
   const bool previousDepthValid =
-      historyValid && nuri::isValid(ctx.shared.previousSceneDepthTexture);
-  const TextureHandle previousDepth = previousDepthValid
-                                          ? ctx.shared.previousSceneDepthTexture
-                                          : ctx.shared.sceneDepthTexture;
-  const uint32_t currentTexId =
-      gpu_.getTextureBindlessIndex(ctx.shared.frameColorTexture);
-  const uint32_t opaqueSceneTexId =
-      gpu_.getTextureBindlessIndex(ctx.shared.sceneColorTexture);
-  const uint32_t historyTexId =
-      gpu_.getTextureBindlessIndex(ctx.shared.historyColorReadTexture);
-  const uint32_t depthTexId =
-      gpu_.getTextureBindlessIndex(ctx.shared.sceneDepthTexture);
+      historyValid &&
+      nuri::isValid(
+          ctx.shared[FrameHistoryTextureSlot::PreviousSceneDepth].texture);
+  const TextureHandle previousDepth =
+      previousDepthValid
+          ? ctx.shared[FrameHistoryTextureSlot::PreviousSceneDepth].texture
+          : ctx.shared[FrameTextureSlot::SceneDepth].texture;
+  const uint32_t currentTexId = gpu_.getTextureBindlessIndex(
+      ctx.shared[FrameTextureSlot::FrameColor].texture);
+  const uint32_t opaqueSceneTexId = gpu_.getTextureBindlessIndex(
+      ctx.shared[FrameTextureSlot::SceneColor].texture);
+  const uint32_t historyTexId = gpu_.getTextureBindlessIndex(
+      ctx.shared[FrameHistoryTextureSlot::ColorRead].texture);
+  const uint32_t depthTexId = gpu_.getTextureBindlessIndex(
+      ctx.shared[FrameTextureSlot::SceneDepth].texture);
   const uint32_t previousDepthTexId =
       gpu_.getTextureBindlessIndex(previousDepth);
-  const uint32_t motionTexId =
-      gpu_.getTextureBindlessIndex(ctx.shared.motionVectorTexture);
-  const uint32_t motionClassTexId =
-      gpu_.getTextureBindlessIndex(ctx.shared.motionClassTexture);
-  const uint32_t reactiveTexId =
-      gpu_.getTextureBindlessIndex(ctx.shared.reactiveMaskTexture);
+  const uint32_t motionTexId = gpu_.getTextureBindlessIndex(
+      ctx.shared[FrameTextureSlot::MotionVector].texture);
+  const uint32_t motionClassTexId = gpu_.getTextureBindlessIndex(
+      ctx.shared[FrameTextureSlot::MotionClass].texture);
+  const uint32_t reactiveTexId = gpu_.getTextureBindlessIndex(
+      ctx.shared[FrameTextureSlot::ReactiveMask].texture);
   const uint32_t linearSamplerId =
       gpu_.getSamplerBindlessIndex(linearClampSampler_);
   const uint32_t pointSamplerId = gpu_.getDefaultSamplerBindlessIndex();
@@ -205,26 +203,27 @@ ReferenceTAAResolvePass::build(FrameBuildContext &ctx) {
         "ReferenceTAAResolvePass::build: invalid bindless resource");
   }
   auto historyOutput = ctx.graph.importTexture(
-      ctx.shared.historyColorWriteTexture, "reference_taa_history_write");
+      ctx.shared[FrameHistoryTextureSlot::ColorWrite].texture,
+      "reference_taa_history_write");
   if (historyOutput.hasError()) {
     return Result<bool, std::string>::makeError(historyOutput.error());
   }
-  auto frameOutput = ctx.graph.importTexture(ctx.shared.frameColorTexture,
-                                             "reference_taa_frame_output");
+  auto frameOutput =
+      ctx.graph.importTexture(ctx.shared[FrameTextureSlot::FrameColor].texture,
+                              "reference_taa_frame_output");
   if (frameOutput.hasError()) {
     return Result<bool, std::string>::makeError(frameOutput.error());
   }
-  const TextureDimensions dimensions =
-      gpu_.getTextureDimensions(ctx.shared.frameColorTexture);
+  const TextureDimensions dimensions = gpu_.getTextureDimensions(
+      ctx.shared[FrameTextureSlot::FrameColor].texture);
   const float inverseWidth =
       1.0f / static_cast<float>(std::max(dimensions.width, 1u));
   const float inverseHeight =
       1.0f / static_cast<float>(std::max(dimensions.height, 1u));
-  const RenderSettings &settings = renderSettingsOrDefault(ctx.frame);
-  const RenderSettings::AntiAliasingDebugSettings aaDebug =
-      effectiveTemporalAADebugSettings(settings.antiAliasing);
+  const RenderSettings &settings = ctx.frame.settings;
+  const TemporalAATuning &tuning = settings.antiAliasing.temporalTuning;
   const float sharpenStrength =
-      aaDebug.taaSharpenEnabled ? aaDebug.taaSharpenStrength : 0.0f;
+      tuning.sharpenEnabled ? tuning.sharpenStrength : 0.0f;
   ReferenceTAAPushConstants constants{
       .currentTexId = currentTexId,
       .opaqueSceneTexId = opaqueSceneTexId,
@@ -253,14 +252,14 @@ ReferenceTAAResolvePass::build(FrameBuildContext &ctx) {
   const DrawItem resolveDraw =
       makeFullscreenDraw(pipeline_, constants, "ReferenceTaaResolve");
   const std::array<TextureHandle, 8> resolveReads{
-      ctx.shared.frameColorTexture,
-      ctx.shared.sceneColorTexture,
-      ctx.shared.historyColorReadTexture,
-      ctx.shared.sceneDepthTexture,
+      ctx.shared[FrameTextureSlot::FrameColor].texture,
+      ctx.shared[FrameTextureSlot::SceneColor].texture,
+      ctx.shared[FrameHistoryTextureSlot::ColorRead].texture,
+      ctx.shared[FrameTextureSlot::SceneDepth].texture,
       previousDepth,
-      ctx.shared.motionVectorTexture,
-      ctx.shared.motionClassTexture,
-      ctx.shared.reactiveMaskTexture,
+      ctx.shared[FrameTextureSlot::MotionVector].texture,
+      ctx.shared[FrameTextureSlot::MotionClass].texture,
+      ctx.shared[FrameTextureSlot::ReactiveMask].texture,
   };
   RenderGraphGraphicsPassDesc resolvePass{};
   resolvePass.color = {.loadOp = LoadOp::Clear,
@@ -276,13 +275,13 @@ ReferenceTAAResolvePass::build(FrameBuildContext &ctx) {
   if (addResolve.hasError()) {
     return Result<bool, std::string>::makeError(addResolve.error());
   }
-  constants.currentTexId =
-      gpu_.getTextureBindlessIndex(ctx.shared.historyColorWriteTexture);
+  constants.currentTexId = gpu_.getTextureBindlessIndex(
+      ctx.shared[FrameHistoryTextureSlot::ColorWrite].texture);
   constants.mode = kReferenceModeCopy;
   const DrawItem copyDraw =
       makeFullscreenDraw(pipeline_, constants, "ReferenceTaaCopy");
   const std::array<TextureHandle, 1> copyReads{
-      ctx.shared.historyColorWriteTexture};
+      ctx.shared[FrameHistoryTextureSlot::ColorWrite].texture};
   RenderGraphGraphicsPassDesc copyPass{};
   copyPass.color = {.loadOp = LoadOp::Clear,
                     .storeOp = StoreOp::Store,
@@ -297,8 +296,9 @@ ReferenceTAAResolvePass::build(FrameBuildContext &ctx) {
   if (addCopy.hasError()) {
     return Result<bool, std::string>::makeError(addCopy.error());
   }
-  ctx.shared.frameColorGraphTexture = frameOutput.value();
-  ctx.frame.sharedResources.frameColorGraphTexture = frameOutput.value();
+  ctx.shared[FrameTextureSlot::FrameColor].graph = frameOutput.value();
+  ctx.frame.sharedResources[FrameTextureSlot::FrameColor].graph =
+      frameOutput.value();
   ctx.shared.historyWriteRequirements |=
       FrameTextureRequirementFlags::HistoryColor;
   AntiAliasingFrameMetrics &metrics = ctx.frame.metrics.antiAliasing;
@@ -313,10 +313,10 @@ ReferenceTAAResolvePass::build(FrameBuildContext &ctx) {
   metrics.taaDepthRejectionEnabled = previousDepthValid;
   metrics.taaNeighborhoodClampEnabled = historyValid;
   metrics.taaAdaptiveBlendEnabled = historyValid;
-  metrics.taaSharpenEnabled = aaDebug.taaSharpenEnabled;
+  metrics.taaSharpenEnabled = tuning.sharpenEnabled;
   metrics.taaSharpenActive = historyValid && sharpenStrength > 0.0f;
   metrics.taaSharpenStrength = sharpenStrength;
-  metrics.taaSharpenConfidenceThreshold = aaDebug.taaSharpenConfidenceThreshold;
+  metrics.taaSharpenConfidenceThreshold = tuning.sharpenConfidenceThreshold;
   metrics.taaResolvedSceneColorPublished = true;
   if (!historyValid) {
     ++metrics.taaCurrentFallbackFrameCount;
@@ -326,7 +326,7 @@ ReferenceTAAResolvePass::build(FrameBuildContext &ctx) {
 
 Result<bool, std::string>
 ReferenceTAAResolvePass::publishFrameData(FrameBuildContext &ctx) {
-  if (presentationAAPlanForFrame(ctx.frame).reconstruction ==
+  if (ctx.frame.presentationAA.reconstruction ==
       ColorReconstruction::ReferenceTAA) {
     ctx.shared.textureRequirements |=
         FrameTextureRequirementFlags::HistoryColor |

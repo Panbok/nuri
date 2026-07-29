@@ -825,8 +825,9 @@ TEST(RenderGraphRendererTest, RendererPublishesOneGpuTimingSnapshotPerFrame) {
   EnvVarGuard dumpEnv("NURI_RENDER_GRAPH_DUMP", "0");
   std::pmr::unsynchronized_pool_resource memory;
   FakeRendererGPUDevice gpu;
-  gpu.latestCompletedGpuTimingReport.opaqueSourceFrameIndex = 41u;
-  gpu.latestCompletedGpuTimingReport.opaqueTimeMs = 3.25f;
+  gpu.latestCompletedGpuTimingReport[GpuTimingScope::Opaque].sourceFrameIndex =
+      41u;
+  gpu.latestCompletedGpuTimingReport[GpuTimingScope::Opaque].timeMs = 3.25f;
   gpu.latestCompletedGpuTimingReport.availableScopeMask =
       gpuTimingScopeToBit(GpuTimingScope::Opaque);
   Renderer renderer(gpu, memory);
@@ -840,8 +841,9 @@ TEST(RenderGraphRendererTest, RendererPublishesOneGpuTimingSnapshotPerFrame) {
 
   ASSERT_FALSE(renderResult.hasError());
   EXPECT_EQ(gpu.latestGpuTimingReportFetchCount, 1u);
-  EXPECT_FLOAT_EQ(frameContext.gpuTiming.opaqueTimeMs, 3.25f);
-  EXPECT_EQ(frameContext.gpuTiming.opaqueSourceFrameIndex, 41u);
+  EXPECT_FLOAT_EQ(frameContext.gpuTiming[GpuTimingScope::Opaque].timeMs, 3.25f);
+  EXPECT_EQ(frameContext.gpuTiming[GpuTimingScope::Opaque].sourceFrameIndex,
+            41u);
   EXPECT_TRUE(
       hasGpuTimingScope(frameContext.gpuTiming, GpuTimingScope::Opaque));
 }
@@ -863,13 +865,12 @@ TEST(RenderGraphRendererTest,
       static_cast<TemporalReconstructionProvider>(0xffu);
 
   RenderFrameContext frameContext{};
-  frameContext.settings = &authored;
+  frameContext.settings = authored;
   frameContext.resources = &renderer.resources();
   auto renderResult = renderer.render(pipeline, frameContext);
 
   ASSERT_FALSE(renderResult.hasError());
-  ASSERT_TRUE(frameContext.settingsResolved);
-  const RenderSettings &resolved = renderSettingsOrDefault(frameContext);
+  const RenderSettings &resolved = frameContext.settings;
   EXPECT_FLOAT_EQ(resolved.hdrPostProcess.bloomStrength,
                   kDefaultHDRBloomStrength);
   EXPECT_FLOAT_EQ(resolved.transmission.taaJitterPrefilterMaxLod, 2.0f);
@@ -927,33 +928,30 @@ TEST(RenderGraphRendererTest, TemporalAAQualityPresetDrivesEffectiveSettings) {
   aa.mode = AntiAliasingMode::TAA;
   aa.qualityPreset = TemporalAAQualityPreset::Quality;
   aa.debug.jitterEnabled = true;
-  aa.debug.taaCurrentFrameWeight = 0.77f;
-  aa.debug.taaMotionCurrentWeight = 0.88f;
-  aa.debug.taaVarianceGamma = 0.25f;
-  aa.debug.spatialPostTaaCleanup = false;
-  aa.debug.transparentPostTaaSpatialCleanup = false;
+  aa.temporalTuning.currentFrameWeight = 0.77f;
+  aa.temporalTuning.motionCurrentWeight = 0.88f;
+  aa.temporalTuning.varianceGamma = 0.25f;
+  aa.temporalTuning.spatialPostTaaCleanup = false;
+  aa.temporalTuning.transparentPostTaaSpatialCleanup = false;
 
-  const RenderSettings::AntiAliasingDebugSettings effective =
-      effectiveTemporalAADebugSettings(aa);
+  const TemporalAATuning effective = effectiveTemporalAATuning(aa);
 
-  EXPECT_TRUE(effective.jitterEnabled);
-  EXPECT_FLOAT_EQ(effective.taaJitterScale, 0.75f);
-  EXPECT_FLOAT_EQ(effective.taaCurrentFrameWeight, 0.045f);
-  EXPECT_FLOAT_EQ(effective.taaMotionCurrentWeight, 0.22f);
-  EXPECT_FLOAT_EQ(effective.taaDisocclusionCurrentWeight, 0.62f);
-  EXPECT_FLOAT_EQ(effective.taaClampCurrentWeight, 0.38f);
-  EXPECT_FLOAT_EQ(effective.taaVelocityBlendScale, 0.22f);
-  EXPECT_FLOAT_EQ(effective.taaVarianceGamma, 1.85f);
-  EXPECT_TRUE(effective.taaSharpenEnabled);
-  EXPECT_FLOAT_EQ(effective.taaSharpenStrength, 0.14f);
-  EXPECT_FLOAT_EQ(effective.taaSharpenConfidenceThreshold, 0.82f);
+  EXPECT_FLOAT_EQ(effective.jitterScale, 0.75f);
+  EXPECT_FLOAT_EQ(effective.currentFrameWeight, 0.045f);
+  EXPECT_FLOAT_EQ(effective.motionCurrentWeight, 0.22f);
+  EXPECT_FLOAT_EQ(effective.disocclusionCurrentWeight, 0.62f);
+  EXPECT_FLOAT_EQ(effective.clampCurrentWeight, 0.38f);
+  EXPECT_FLOAT_EQ(effective.velocityBlendScale, 0.22f);
+  EXPECT_FLOAT_EQ(effective.varianceGamma, 1.85f);
+  EXPECT_TRUE(effective.sharpenEnabled);
+  EXPECT_FLOAT_EQ(effective.sharpenStrength, 0.14f);
+  EXPECT_FLOAT_EQ(effective.sharpenConfidenceThreshold, 0.82f);
   EXPECT_TRUE(effective.spatialPostTaaCleanup);
   EXPECT_TRUE(effective.transparentPostTaaSpatialCleanup);
-  EXPECT_EQ(effective.taaHistoryFilterMode,
+  EXPECT_EQ(effective.historyFilterMode,
             TemporalAAHistoryFilterMode::CatmullRom);
-  EXPECT_EQ(effective.taaClampMode, TemporalAAClampMode::VarianceYCoCg);
-  EXPECT_EQ(effective.taaHdrWeightingMode,
-            TemporalAAHdrWeightingMode::Luminance);
+  EXPECT_EQ(effective.clampMode, TemporalAAClampMode::VarianceYCoCg);
+  EXPECT_EQ(effective.hdrWeightingMode, TemporalAAHdrWeightingMode::Luminance);
 }
 
 TEST(RenderGraphRendererTest, MsaaAntiAliasingModesSanitizeTemporalState) {
@@ -992,7 +990,8 @@ TEST(RenderGraphRendererTest,
       .sampleRateShading = true,
   };
 
-  auto planResult = buildPresentationAAPlan(settings, {}, supported);
+  auto planResult =
+      buildPresentationAAPlan(resolveRenderSettings(settings), {}, supported);
   ASSERT_FALSE(planResult.hasError()) << planResult.error();
   EXPECT_EQ(planResult.value().coverage, CoverageMode::Sample4);
   EXPECT_EQ(planResult.value().alphaCoverage,
@@ -1003,7 +1002,8 @@ TEST(RenderGraphRendererTest,
   EXPECT_FALSE(planResult.value().sampleShadingEnabled);
 
   settings.antiAliasing.mode = AntiAliasingMode::MSAA8x;
-  planResult = buildPresentationAAPlan(settings, {}, supported);
+  planResult =
+      buildPresentationAAPlan(resolveRenderSettings(settings), {}, supported);
   ASSERT_FALSE(planResult.hasError()) << planResult.error();
   EXPECT_EQ(planResult.value().coverage, CoverageMode::Sample8);
 
@@ -1012,7 +1012,8 @@ TEST(RenderGraphRendererTest,
   const auto expectUnsupported = [&settings, &supported](
                                      PresentationAAGpuCapabilities caps,
                                      PresentationAAUnsupportedReason reason) {
-    auto result = buildPresentationAAPlan(settings, {}, caps);
+    auto result =
+        buildPresentationAAPlan(resolveRenderSettings(settings), {}, caps);
     ASSERT_TRUE(result.hasError());
     EXPECT_EQ(msaaUnsupportedReason(settings.antiAliasing.mode, caps), reason);
     EXPECT_NE(result.error().find(presentationAAUnsupportedReasonName(reason)),
@@ -1034,13 +1035,14 @@ TEST(RenderGraphRendererTest,
   settings.antiAliasing.mode = AntiAliasingMode::MSAA8x;
   caps = supported;
   caps.sample8Color = false;
-  auto result = buildPresentationAAPlan(settings, {}, caps);
+  auto result =
+      buildPresentationAAPlan(resolveRenderSettings(settings), {}, caps);
   ASSERT_TRUE(result.hasError());
   EXPECT_EQ(msaaUnsupportedReason(settings.antiAliasing.mode, caps),
             PresentationAAUnsupportedReason::Sample8Color);
   caps = supported;
   caps.sample8Depth = false;
-  result = buildPresentationAAPlan(settings, {}, caps);
+  result = buildPresentationAAPlan(resolveRenderSettings(settings), {}, caps);
   ASSERT_TRUE(result.hasError());
   EXPECT_EQ(msaaUnsupportedReason(settings.antiAliasing.mode, caps),
             PresentationAAUnsupportedReason::Sample8Depth);
@@ -1049,18 +1051,18 @@ TEST(RenderGraphRendererTest,
 TEST(RenderGraphRendererTest,
      AntiAliasingVelocityRejectionThresholdSanitizesPixels) {
   RenderSettings::AntiAliasingSettings aa{};
-  aa.debug.taaVelocityRejectionThreshold =
+  aa.temporalTuning.velocityRejectionThreshold =
       std::numeric_limits<float>::quiet_NaN();
   sanitizeAntiAliasingSettings(aa);
-  EXPECT_FLOAT_EQ(aa.debug.taaVelocityRejectionThreshold, 1.5f);
+  EXPECT_FLOAT_EQ(aa.temporalTuning.velocityRejectionThreshold, 1.5f);
 
-  aa.debug.taaVelocityRejectionThreshold = -1.0f;
+  aa.temporalTuning.velocityRejectionThreshold = -1.0f;
   sanitizeAntiAliasingSettings(aa);
-  EXPECT_FLOAT_EQ(aa.debug.taaVelocityRejectionThreshold, 0.0f);
+  EXPECT_FLOAT_EQ(aa.temporalTuning.velocityRejectionThreshold, 0.0f);
 
-  aa.debug.taaVelocityRejectionThreshold = 128.0f;
+  aa.temporalTuning.velocityRejectionThreshold = 128.0f;
   sanitizeAntiAliasingSettings(aa);
-  EXPECT_FLOAT_EQ(aa.debug.taaVelocityRejectionThreshold, 64.0f);
+  EXPECT_FLOAT_EQ(aa.temporalTuning.velocityRejectionThreshold, 64.0f);
 }
 
 TEST(RenderGraphRendererTest, ShadowSettingsSanitizeClampsCoreValues) {
@@ -1660,21 +1662,26 @@ TEST(
   frameContext.camera.historyValid = false;
   auto prepareResult = provider.prepare(ctx);
   ASSERT_FALSE(prepareResult.hasError());
-  ASSERT_TRUE(isValid(frameContext.sharedResources.motionVectorTexture));
-  EXPECT_FALSE(
-      isValid(frameContext.sharedResources.previousMotionVectorTexture));
+  ASSERT_TRUE(isValid(
+      frameContext.sharedResources[FrameTextureSlot::MotionVector].texture));
+  EXPECT_FALSE(isValid(
+      frameContext
+          .sharedResources[FrameHistoryTextureSlot::PreviousMotionVector]
+          .texture));
   const TextureHandle firstMotionVector =
-      frameContext.sharedResources.motionVectorTexture;
+      frameContext.sharedResources[FrameTextureSlot::MotionVector].texture;
   const TextureHandle firstSceneDepth =
-      frameContext.sharedResources.sceneDepthTexture;
+      frameContext.sharedResources[FrameTextureSlot::SceneDepth].texture;
   const TextureHandle firstHistoryWrite =
-      frameContext.sharedResources.historyColorWriteTexture;
+      frameContext.sharedResources[FrameHistoryTextureSlot::ColorWrite].texture;
   EXPECT_EQ(frameContext.metrics.antiAliasing.historyColorTextureCount, 3u);
   EXPECT_EQ(frameContext.metrics.antiAliasing.historyColorTextureBytes,
             1280ull * 720ull * 8ull);
   EXPECT_EQ(frameContext.metrics.antiAliasing.historyColorTotalBytes,
             3ull * 1280ull * 720ull * 8ull);
-  EXPECT_FALSE(isValid(frameContext.sharedResources.previousSceneDepthTexture));
+  EXPECT_FALSE(isValid(
+      frameContext.sharedResources[FrameHistoryTextureSlot::PreviousSceneDepth]
+          .texture));
   EXPECT_FALSE(frameContext.metrics.antiAliasing.previousSceneDepthValid);
 
   frameContext.sharedResources.historyWriteRequirements |=
@@ -1686,26 +1693,38 @@ TEST(
   frameContext.camera.historyValid = true;
   prepareResult = provider.prepare(ctx);
   ASSERT_FALSE(prepareResult.hasError());
-  ASSERT_TRUE(isValid(frameContext.sharedResources.motionVectorTexture));
-  ASSERT_TRUE(
-      isValid(frameContext.sharedResources.previousMotionVectorTexture));
-  EXPECT_TRUE(
-      sameTexture(frameContext.sharedResources.previousMotionVectorTexture,
-                  firstMotionVector));
-  ASSERT_TRUE(isValid(frameContext.sharedResources.previousSceneDepthTexture));
+  ASSERT_TRUE(isValid(
+      frameContext.sharedResources[FrameTextureSlot::MotionVector].texture));
+  ASSERT_TRUE(isValid(
+      frameContext
+          .sharedResources[FrameHistoryTextureSlot::PreviousMotionVector]
+          .texture));
   EXPECT_TRUE(sameTexture(
-      frameContext.sharedResources.previousSceneDepthTexture, firstSceneDepth));
-  EXPECT_FALSE(sameTexture(frameContext.sharedResources.sceneDepthTexture,
-                           firstSceneDepth));
+      frameContext
+          .sharedResources[FrameHistoryTextureSlot::PreviousMotionVector]
+          .texture,
+      firstMotionVector));
+  ASSERT_TRUE(isValid(
+      frameContext.sharedResources[FrameHistoryTextureSlot::PreviousSceneDepth]
+          .texture));
+  EXPECT_TRUE(sameTexture(
+      frameContext.sharedResources[FrameHistoryTextureSlot::PreviousSceneDepth]
+          .texture,
+      firstSceneDepth));
+  EXPECT_FALSE(sameTexture(
+      frameContext.sharedResources[FrameTextureSlot::SceneDepth].texture,
+      firstSceneDepth));
   EXPECT_TRUE(frameContext.metrics.antiAliasing.previousSceneDepthValid);
   EXPECT_EQ(frameContext.metrics.antiAliasing.previousSceneDepthTextureBytes,
             1280ull * 720ull * 4ull);
-  EXPECT_FALSE(sameTexture(frameContext.sharedResources.motionVectorTexture,
-                           firstMotionVector));
-  EXPECT_TRUE(sameTexture(frameContext.sharedResources.historyColorReadTexture,
-                          firstHistoryWrite));
+  EXPECT_FALSE(sameTexture(
+      frameContext.sharedResources[FrameTextureSlot::MotionVector].texture,
+      firstMotionVector));
+  EXPECT_TRUE(sameTexture(
+      frameContext.sharedResources[FrameHistoryTextureSlot::ColorRead].texture,
+      firstHistoryWrite));
   const TextureHandle secondHistoryWrite =
-      frameContext.sharedResources.historyColorWriteTexture;
+      frameContext.sharedResources[FrameHistoryTextureSlot::ColorWrite].texture;
   EXPECT_FALSE(sameTexture(secondHistoryWrite, firstHistoryWrite));
 
   frameContext.sharedResources.historyWriteRequirements |=
@@ -1716,17 +1735,22 @@ TEST(
   frameContext.frameIndex = 2u;
   prepareResult = provider.prepare(ctx);
   ASSERT_FALSE(prepareResult.hasError());
-  EXPECT_TRUE(isValid(frameContext.sharedResources.previousSceneDepthTexture));
+  EXPECT_TRUE(isValid(
+      frameContext.sharedResources[FrameHistoryTextureSlot::PreviousSceneDepth]
+          .texture));
   EXPECT_FALSE(sameTexture(
-      frameContext.sharedResources.previousSceneDepthTexture, firstSceneDepth));
-  EXPECT_TRUE(sameTexture(frameContext.sharedResources.historyColorReadTexture,
-                          secondHistoryWrite));
-  EXPECT_FALSE(
-      sameTexture(frameContext.sharedResources.historyColorWriteTexture,
-                  firstHistoryWrite));
-  EXPECT_FALSE(
-      sameTexture(frameContext.sharedResources.historyColorWriteTexture,
-                  secondHistoryWrite));
+      frameContext.sharedResources[FrameHistoryTextureSlot::PreviousSceneDepth]
+          .texture,
+      firstSceneDepth));
+  EXPECT_TRUE(sameTexture(
+      frameContext.sharedResources[FrameHistoryTextureSlot::ColorRead].texture,
+      secondHistoryWrite));
+  EXPECT_FALSE(sameTexture(
+      frameContext.sharedResources[FrameHistoryTextureSlot::ColorWrite].texture,
+      firstHistoryWrite));
+  EXPECT_FALSE(sameTexture(
+      frameContext.sharedResources[FrameHistoryTextureSlot::ColorWrite].texture,
+      secondHistoryWrite));
 
   uint32_t motionVectorTextureCount = 0u;
   for (const TextureDesc &desc : gpu.createdTextureDescs) {
@@ -1758,18 +1782,20 @@ TEST(RenderGraphRendererTest,
   auto prepareResult = provider.prepare(ctx);
   ASSERT_FALSE(prepareResult.hasError());
   const TextureHandle originalSceneColor =
-      frameContext.sharedResources.sceneColorTexture;
+      frameContext.sharedResources[FrameTextureSlot::SceneColor].texture;
   const TextureHandle originalFrameColor =
-      frameContext.sharedResources.frameColorTexture;
+      frameContext.sharedResources[FrameTextureSlot::FrameColor].texture;
 
   gpu.resizeSwapchain(1920, 1080);
   frameContext.frameIndex = 1u;
   prepareResult = provider.prepare(ctx);
   ASSERT_FALSE(prepareResult.hasError());
-  EXPECT_FALSE(sameTexture(originalSceneColor,
-                           frameContext.sharedResources.sceneColorTexture));
-  EXPECT_FALSE(sameTexture(originalFrameColor,
-                           frameContext.sharedResources.frameColorTexture));
+  EXPECT_FALSE(sameTexture(
+      originalSceneColor,
+      frameContext.sharedResources[FrameTextureSlot::SceneColor].texture));
+  EXPECT_FALSE(sameTexture(
+      originalFrameColor,
+      frameContext.sharedResources[FrameTextureSlot::FrameColor].texture));
 }
 
 TEST(RenderGraphRendererTest, SkyboxFrameDataUsesOneBufferPerLogicalFrameSlot) {
@@ -1898,7 +1924,7 @@ TEST(RenderGraphRendererTest, ShadowFeatureBuildsNoGraphPassesWhenDisabled) {
   RenderFrameContext frameContext{};
   frameContext.frameIndex = 1u;
   frameContext.resources = &renderer.resources();
-  frameContext.settings = &settings;
+  frameContext.settings = settings;
   RenderGraphBuilder graph(&memory);
   graph.beginFrame(frameContext.frameIndex);
 
@@ -1948,7 +1974,7 @@ TEST(RenderGraphRendererTest,
   frame.frameIndex = 1u;
   frame.scene = &scene;
   frame.resources = &resources;
-  frame.settings = &settings;
+  frame.settings = settings;
   frame.camera.view = glm::lookAt(glm::vec3(0.0f, 1.0f, 4.0f), glm::vec3(0.0f),
                                   glm::vec3(0.0f, 1.0f, 0.0f));
   frame.camera.proj = glm::perspective(glm::radians(60.0f), 1.0f, 0.1f, 20.0f);
@@ -1971,6 +1997,7 @@ TEST(RenderGraphRendererTest,
   auto prepareResult = shadow.prepareShadowGraphPasses(frame);
   ASSERT_FALSE(prepareResult.hasError()) << prepareResult.error();
   ASSERT_EQ(shadow.meshDrawTemplates_.size(), 1u);
+  shadow.onFrameAbandoned(frame);
 
   const BufferHandle previousVertexBuffer =
       shadow.meshDrawTemplates_.front().baseVertexBuffer;
@@ -1997,6 +2024,7 @@ TEST(RenderGraphRendererTest,
                          relocationResult.value().indexBuffer));
   EXPECT_EQ(shadow.cachedGeometryMutationVersion_,
             gpu.geometryMutationVersion());
+  shadow.onFrameAbandoned(frame);
 }
 
 TEST(RenderGraphRendererTest,
@@ -2025,7 +2053,7 @@ TEST(RenderGraphRendererTest,
   frameContext.frameIndex = 1u;
   frameContext.scene = &scene;
   frameContext.resources = &renderer.resources();
-  frameContext.settings = &settings;
+  frameContext.settings = settings;
   frameContext.camera = CameraFrameState{
       .projectionType = ProjectionType::Perspective,
       .nearPlane = 0.1f,
@@ -2050,6 +2078,66 @@ TEST(RenderGraphRendererTest,
             ShadowSdsmReductionBackend::Cpu);
   EXPECT_FALSE(frameContext.sharedResources.shadowDebugFrameData->sdsm
                    .reductionFallbackActive);
+}
+
+TEST(RenderGraphRendererTest,
+     ShadowFrameTransactionCommitsOnlySubmittedAttemptedState) {
+  std::array<std::byte, 64 * 1024> scratchBytes{};
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeFullscreenGpuDevice gpu;
+  ShadowRenderer shadow(gpu, &memory);
+
+  RenderSettings settings{};
+  settings.shadow.enabled = false;
+  RenderFrameContext setupFrame{};
+  setupFrame.frameIndex = 40u;
+  setupFrame.settings = settings;
+  auto publishResult = shadow.publishFrameData(setupFrame);
+  ASSERT_FALSE(publishResult.hasError()) << publishResult.error();
+  shadow.onFrameSubmitted(setupFrame);
+
+  shadow.cascadeStates_[0].reusableValid = true;
+  shadow.cascadeStates_[0].reusableContentSignature = 17u;
+  shadow.cascadeStabilizationHistory_.valid = true;
+  shadow.cascadeStabilizationHistory_.shadowMapSize = 256u;
+  shadow.sdsmState_.hasValidSdsmRange_ = true;
+  shadow.sdsmState_.sdsmSmoothedMaxDepth_ = 12.0f;
+  shadow.hasFrozenShadowFit_ = true;
+  shadow.frozenShadowMapSize_ = 256u;
+
+  RenderFrameContext abandonedFrame{};
+  abandonedFrame.frameIndex = 41u;
+  abandonedFrame.settings = settings;
+  publishResult = shadow.publishFrameData(abandonedFrame);
+  ASSERT_FALSE(publishResult.hasError()) << publishResult.error();
+  EXPECT_FALSE(shadow.cascadeStates_[0].reusableValid);
+  EXPECT_FALSE(shadow.cascadeStabilizationHistory_.valid);
+  EXPECT_FALSE(shadow.sdsmState_.hasValidSdsmRange_);
+  EXPECT_FALSE(shadow.hasFrozenShadowFit_);
+  shadow.onFrameAbandoned(abandonedFrame);
+
+  EXPECT_TRUE(shadow.cascadeStates_[0].reusableValid);
+  EXPECT_EQ(shadow.cascadeStates_[0].reusableContentSignature, 17u);
+  EXPECT_TRUE(shadow.cascadeStabilizationHistory_.valid);
+  EXPECT_EQ(shadow.cascadeStabilizationHistory_.shadowMapSize, 256u);
+  EXPECT_TRUE(shadow.sdsmState_.hasValidSdsmRange_);
+  EXPECT_FLOAT_EQ(shadow.sdsmState_.sdsmSmoothedMaxDepth_, 12.0f);
+  EXPECT_TRUE(shadow.hasFrozenShadowFit_);
+  EXPECT_EQ(shadow.frozenShadowMapSize_, 256u);
+
+  RenderFrameContext submittedFrame{};
+  submittedFrame.frameIndex = 42u;
+  submittedFrame.settings = settings;
+  publishResult = shadow.publishFrameData(submittedFrame);
+  ASSERT_FALSE(publishResult.hasError()) << publishResult.error();
+  shadow.onFrameSubmitted(submittedFrame);
+
+  EXPECT_FALSE(shadow.cascadeStates_[0].reusableValid);
+  EXPECT_EQ(shadow.cascadeStates_[0].reusableContentSignature, 0u);
+  EXPECT_FALSE(shadow.cascadeStabilizationHistory_.valid);
+  EXPECT_FALSE(shadow.sdsmState_.hasValidSdsmRange_);
+  EXPECT_FALSE(shadow.hasFrozenShadowFit_);
 }
 
 TEST(RenderGraphRendererTest,
@@ -2088,7 +2176,7 @@ TEST(RenderGraphRendererTest,
     publishFrame.frameIndex = publishFrameIndex;
     publishFrame.scene = &scene;
     publishFrame.resources = &renderer.resources();
-    publishFrame.settings = &publishSettings;
+    publishFrame.settings = publishSettings;
     publishFrame.camera = camera;
 
     RenderGraphBuilder publishGraph(&memory);
@@ -2113,6 +2201,7 @@ TEST(RenderGraphRendererTest,
           0u);
       ASSERT_FALSE(writeResult.hasError()) << writeResult.error();
     }
+    pipeline.onFrameSubmitted(publishFrame);
   }
 
   RenderSettings settings{};
@@ -2123,7 +2212,7 @@ TEST(RenderGraphRendererTest,
   frameContext.frameIndex = 2u;
   frameContext.scene = &scene;
   frameContext.resources = &renderer.resources();
-  frameContext.settings = &settings;
+  frameContext.settings = settings;
   frameContext.camera = camera;
   frameContext.sharedResources.sceneDepthPyramidTextures[0] =
       pyramidTextureResult.value();
@@ -2192,7 +2281,7 @@ TEST(RenderGraphRendererTest,
     publishFrame.frameIndex = publishFrameIndex;
     publishFrame.scene = &scene;
     publishFrame.resources = &renderer.resources();
-    publishFrame.settings = &publishSettings;
+    publishFrame.settings = publishSettings;
     publishFrame.camera = camera;
 
     RenderGraphBuilder publishGraph(&memory);
@@ -2216,6 +2305,7 @@ TEST(RenderGraphRendererTest,
             std::span<const GpuSdsmMinMaxResultProbe>(&gpuResult, 1u)),
         0u);
     ASSERT_FALSE(writeResult.hasError()) << writeResult.error();
+    pipeline.onFrameSubmitted(publishFrame);
   }
 
   RenderSettings settings{};
@@ -2226,7 +2316,7 @@ TEST(RenderGraphRendererTest,
   frameContext.frameIndex = 2u;
   frameContext.scene = &scene;
   frameContext.resources = &renderer.resources();
-  frameContext.settings = &settings;
+  frameContext.settings = settings;
   frameContext.camera = camera;
   frameContext.sharedResources.sceneDepthPyramidTextures[0] =
       pyramidTextureResult.value();
@@ -2336,7 +2426,7 @@ TEST(RenderGraphRendererTest,
     frameContext.frameIndex = frameIndex;
     frameContext.scene = &scene;
     frameContext.resources = &renderer.resources();
-    frameContext.settings = &settings;
+    frameContext.settings = settings;
     frameContext.camera.view =
         glm::lookAt(glm::vec3(0.0f, 1.5f, 4.0f), glm::vec3(0.0f, 0.5f, 0.0f),
                     glm::vec3(0.0f, 1.0f, 0.0f));
@@ -2355,6 +2445,7 @@ TEST(RenderGraphRendererTest,
         pipeline.buildRenderGraph(frameContext, renderer.resources(), graph);
     EXPECT_FALSE(buildResult.hasError()) << buildResult.error();
     EXPECT_TRUE(buildResult.value());
+    pipeline.onFrameSubmitted(frameContext);
     return frameContext;
   };
 
@@ -2437,13 +2528,13 @@ TEST(RenderGraphRendererTest,
   settings.shadow.debug.enableCascadeCasterCulling = true;
 
   const auto buildFrame = [&](uint64_t frameIndex)
-      -> std::pair<RenderFrameContext, RenderGraphCompileResult> {
+      -> std::pair<RenderFrameContext, CompiledRenderGraph> {
     RenderFrameContext frameContext{};
-    RenderGraphCompileResult compiled(&memory);
+    CompiledRenderGraph compiled(&memory);
     frameContext.frameIndex = frameIndex;
     frameContext.scene = &scene;
     frameContext.resources = &renderer.resources();
-    frameContext.settings = &settings;
+    frameContext.settings = settings;
     frameContext.camera.view =
         glm::lookAt(glm::vec3(0.0f, 1.5f, 4.0f), glm::vec3(0.0f, 0.5f, 0.0f),
                     glm::vec3(0.0f, 1.0f, 0.0f));
@@ -2474,22 +2565,24 @@ TEST(RenderGraphRendererTest,
     RenderGraphRuntime runtime;
     auto compileResult = graph.compile(runtime);
     if (compileResult.hasError()) {
+      pipeline.onFrameAbandoned(frameContext);
       ADD_FAILURE() << compileResult.error();
       return {frameContext, std::move(compiled)};
     }
-    return std::pair<RenderFrameContext, RenderGraphCompileResult>(
+    pipeline.onFrameSubmitted(frameContext);
+    return std::pair<RenderFrameContext, CompiledRenderGraph>(
         std::move(frameContext), std::move(compileResult.value()));
   };
 
   const auto [firstFrame, firstCompiled] = buildFrame(80u);
   EXPECT_EQ(firstFrame.metrics.shadow.reusedStaticOnlyCascadeCount, 0u);
-  EXPECT_FALSE(firstCompiled.orderedPasses.empty());
+  EXPECT_FALSE(firstCompiled.commands.orderedPasses.empty());
 
   settings.shadow.enabled = false;
   const auto [disabledFrame, disabledCompiled] = buildFrame(81u);
   EXPECT_EQ(disabledFrame.metrics.shadow.cascadeCount, 0u);
   uint32_t disabledShadowPassCount = 0u;
-  for (const RenderPass &pass : disabledCompiled.orderedPasses) {
+  for (const RenderPass &pass : disabledCompiled.commands.orderedPasses) {
     if (std::string_view(pass.debugLabel)
             .starts_with("ShadowDepthPass.Cascade")) {
       ++disabledShadowPassCount;
@@ -2502,7 +2595,7 @@ TEST(RenderGraphRendererTest,
   EXPECT_EQ(reenabledFrame.metrics.shadow.reusedStaticOnlyCascadeCount, 0u);
   EXPECT_GT(reenabledFrame.metrics.shadow.totalDraws, 0u);
   uint32_t reenabledShadowPassCount = 0u;
-  for (const RenderPass &pass : reenabledCompiled.orderedPasses) {
+  for (const RenderPass &pass : reenabledCompiled.commands.orderedPasses) {
     if (!std::string_view(pass.debugLabel)
              .starts_with("ShadowDepthPass.Cascade")) {
       continue;
@@ -2539,12 +2632,14 @@ TEST(RenderGraphRendererTest,
   ASSERT_EQ(gpu.updateBufferBatchSizes.size(), 1u);
   EXPECT_EQ(gpu.updateBufferBatchSizes.front(), 5u);
   EXPECT_EQ(gpu.updateBufferCallCount, 5u);
+  provider.onFrameAbandoned(frame);
 
   prepareResult = provider.prepare(ctx);
   ASSERT_TRUE(prepareResult.hasValue());
   EXPECT_TRUE(prepareResult.value());
   EXPECT_EQ(gpu.updateBufferBatchCallCount, 1u);
   EXPECT_EQ(gpu.updateBufferCallCount, 5u);
+  provider.onFrameAbandoned(frame);
 }
 
 TEST(RenderGraphRendererTest,
@@ -2586,19 +2681,12 @@ TEST(RenderGraphRendererTest,
   frameContext.camera.view = glm::mat4(1.0f);
   frameContext.camera.proj = glm::mat4(1.0f);
   frameContext.camera.cameraPos = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
-  frameContext.sharedResources.materialTableGpuData = MaterialTableGpuData{
-      .headerBuffer = materialBuffer,
-      .clearcoatBuffer = materialBuffer,
-      .sheenBuffer = materialBuffer,
-      .transmissionBuffer = materialBuffer,
-      .specularBuffer = materialBuffer,
-      .headerBufferAddress = materialBufferAddress,
-      .clearcoatBufferAddress = materialBufferAddress,
-      .sheenBufferAddress = materialBufferAddress,
-      .transmissionBufferAddress = materialBufferAddress,
-      .specularBufferAddress = materialBufferAddress,
-      .version = 1u,
-  };
+  MaterialTableGpuData materialTable{};
+  for (auto &region : materialTable.regions) {
+    region = {.buffer = materialBuffer, .address = materialBufferAddress};
+  }
+  materialTable.version = 1u;
+  frameContext.sharedResources.materialTableGpuData = materialTable;
 
   FrameBuildContext ctx{
       .frame = frameContext,
@@ -2612,11 +2700,13 @@ TEST(RenderGraphRendererTest,
   ASSERT_TRUE(prepareResult.value());
   const uint32_t firstUploadCount = gpu.updateBufferCallCount;
   EXPECT_GE(firstUploadCount, 3u);
+  provider.onFrameAbandoned(frameContext);
 
   prepareResult = provider.prepare(ctx);
   ASSERT_FALSE(prepareResult.hasError());
   ASSERT_TRUE(prepareResult.value());
   EXPECT_EQ(gpu.updateBufferCallCount, firstUploadCount);
+  provider.onFrameAbandoned(frameContext);
 
   const auto sunNodeResult =
       scene.graph().createNode(scene.graph().rootNode(), "Sun Node");
@@ -2633,6 +2723,7 @@ TEST(RenderGraphRendererTest,
   ASSERT_FALSE(prepareResult.hasError());
   ASSERT_TRUE(prepareResult.value());
   EXPECT_EQ(gpu.updateBufferCallCount, firstUploadCount + 1u);
+  provider.onFrameAbandoned(frameContext);
 }
 
 } // namespace

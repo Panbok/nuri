@@ -1,0 +1,29 @@
+{
+    "schemaVersion": 1,
+    "kind": "nuri.baseline.approval",
+    "caseId": "correctness.procedural.ddgi_authored_camera_a_360p",
+    "suite": "correctness",
+    "profileId": "local-nvrhi-visible",
+    "backend": "default",
+    "resolvedBackend": "nvrhi",
+    "reason": "User-authorized stable DDGI visual baseline; Hybrid coverage excluded in favor of SceneFit",
+    "actor": "Codex",
+    "approvedAtUtc": "2026-07-28T08:24:35Z",
+    "sourceCommit": "698d4e86f6923f1ca26185f3b1a5c1045273740d",
+    "sourceDigest": "sha256:3bab11bd8509afe7f6ee77e7cc6b8b97809ee7594b7c10a467d173fced513ad1",
+    "planDigest": "sha256:e3a0ce2c0e4e3bb1e223b4fb1bd08e7a5280f1d5bab15ca610f2ffc1f35abe04",
+    "captures": [
+        {
+            "target": "final_color",
+            "newHash": "sha256:8976998c8d0c7becde27240b578c5552cdd8175381160b7cfb136c0ff9ea2b0d"
+        },
+        {
+            "target": "ddgi_debug_preview",
+            "newHash": "sha256:87a423198b198d069cf4752c47cac4e2e1052adbeb4fbd07da2583b86e24d746"
+        },
+        {
+            "target": "ddgi_volume0_irradiance_atlas",
+            "newHash": "sha256:3f7004664cce2741e29c39ab2945c7fa98bfcb0fec7c0fa57ca3f20e574ef62c"
+        }
+    ]
+}

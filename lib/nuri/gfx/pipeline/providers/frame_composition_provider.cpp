@@ -1,7 +1,7 @@
 #include "nuri/gfx/pipeline/providers/frame_composition_provider.h"
 #include "nuri/core/profiling.h"
 #include "nuri/gfx/frame/presentation_aa_plan.h"
-#include "nuri/pch.h"
+#include "nuri/gfx/frame/render_capture.h"
 #include "nuri/resources/gpu/resource_manager.h"
 namespace nuri {
 namespace {
@@ -24,7 +24,111 @@ TextureDesc makeTextureDesc(Format format, uint32_t width, uint32_t height,
       .generateMipmaps = false,
   };
 }
+
+bool needsMsaaResolve(const FrameBuildContext &ctx) {
+  const AntiAliasingFrameMetrics &metrics = ctx.frame.metrics.antiAliasing;
+  return ctx.frame.presentationAA.coverage != CoverageMode::Sample1 &&
+         !(metrics.msaaColorResolveTargetBound &&
+           metrics.msaaDepthResolveTargetBound);
+}
+
+Result<bool, std::string> appendMsaaResolve(FrameBuildContext &ctx,
+                                            GPUDevice &gpu) {
+  const auto import = [&ctx](RenderGraphTextureId id, TextureHandle handle,
+                             std::string_view name) {
+    return nuri::isValid(id) ? id
+                             : ctx.graph.importTexture(handle, name).value();
+  };
+  ctx.shared[FrameTextureSlot::MsaaSceneColor].graph =
+      import(ctx.shared[FrameTextureSlot::MsaaSceneColor].graph,
+             ctx.shared[FrameTextureSlot::MsaaSceneColor].texture,
+             "msaa_resolve_scene_color");
+  ctx.shared[FrameTextureSlot::MsaaSceneDepth].graph =
+      import(ctx.shared[FrameTextureSlot::MsaaSceneDepth].graph,
+             ctx.shared[FrameTextureSlot::MsaaSceneDepth].texture,
+             "msaa_resolve_scene_depth");
+  const RenderGraphTextureId colorTarget =
+      ctx.graph
+          .importTexture(ctx.shared[FrameTextureSlot::SceneColor].texture,
+                         "msaa_resolve_scene_color_target")
+          .value();
+  const RenderGraphTextureId depthTarget =
+      ctx.graph
+          .importTexture(ctx.shared[FrameTextureSlot::SceneDepth].texture,
+                         "msaa_resolve_scene_depth_target")
+          .value();
+  [[maybe_unused]] const RenderGraphPassId resolvePass =
+      ctx.graph
+          .addGraphicsPass(RenderGraphGraphicsPassDesc{
+              .color = {.loadOp = LoadOp::Load,
+                        .storeOp = StoreOp::MsaaResolve,
+                        .resolveMode = ResolveMode::Average},
+              .colorTexture =
+                  ctx.shared[FrameTextureSlot::MsaaSceneColor].graph,
+              .colorResolveTexture = colorTarget,
+              .depth = {.loadOp = LoadOp::Load,
+                        .storeOp = StoreOp::MsaaResolve,
+                        .resolveMode = ResolveMode::Min},
+              .depthTexture =
+                  ctx.shared[FrameTextureSlot::MsaaSceneDepth].graph,
+              .depthResolveTexture = depthTarget,
+              .gpuTimingScope = GpuTimingScope::MsaaResolve,
+              .debugLabel = "MSAA Resolve Pass",
+              .debugColor = 0xff44ccff,
+              .markImplicitOutputSideEffect = true,
+          })
+          .value();
+  ctx.shared[FrameTextureSlot::SceneColor].graph = colorTarget;
+  ctx.shared[FrameTextureSlot::SceneDepth].graph = depthTarget;
+  AntiAliasingFrameMetrics &metrics = ctx.frame.metrics.antiAliasing;
+  metrics.msaaResolvePassCount = 1u;
+  metrics.msaaColorResolveCount = 1u;
+  metrics.msaaDepthResolveCount = 1u;
+  metrics.msaaResolvedSampleCount =
+      coverageSampleCount(ctx.frame.presentationAA.coverage);
+  metrics.msaaResolvePlacement = MsaaResolvePlacement::ExplicitPass;
+  metrics.msaaColorGraphPublished = true;
+  metrics.msaaDepthGraphPublished = true;
+  metrics.msaaColorResolveTargetBound = true;
+  metrics.msaaDepthResolveTargetBound = true;
+  publishRequestedCapture(ctx.frame, gpu, "scene_color_hdr",
+                          ctx.shared[FrameTextureSlot::SceneColor].texture,
+                          RenderCaptureValueKind::LinearHdrColor,
+                          RenderCaptureLifetimeClass::FrameSharedRingTexture,
+                          "linear_hdr", "hdr_color", "MSAA Resolve Pass");
+  publishRequestedCapture(ctx.frame, gpu, "scene_depth",
+                          ctx.shared[FrameTextureSlot::SceneDepth].texture,
+                          RenderCaptureValueKind::Depth,
+                          RenderCaptureLifetimeClass::FrameSharedRingTexture,
+                          "linear_depth", "depth", "MSAA Resolve Pass");
+  metrics.msaaResolveBandwidthEstimateBytes =
+      metrics.msaaResolveReadEstimateBytes;
+  if (hasGpuTimingScope(ctx.frame.gpuTiming, GpuTimingScope::MsaaResolve)) {
+    metrics.msaaResolveGpuTimeMs =
+        ctx.frame.gpuTiming[GpuTimingScope::MsaaResolve].timeMs;
+    metrics.msaaResolveGpuTimingSourceFrameIndex =
+        ctx.frame.gpuTiming[GpuTimingScope::MsaaResolve].sourceFrameIndex;
+    metrics.msaaResolveGpuTimingAvailable = 1u;
+  }
+  return Result<bool, std::string>::makeResult(true);
+}
 } // namespace
+
+void registerMsaaResolveStage(RenderPipeline &pipeline, GPUDevice &gpu) {
+  pipeline.addStage(PipelineStageDesc{
+      .componentName = "MsaaResolveFeature",
+      .name = "MsaaResolvePass",
+      .state = &gpu,
+      .enabled =
+          [](const void *, const FrameBuildContext &ctx) {
+            return needsMsaaResolve(ctx);
+          },
+      .build =
+          [](void *state, FrameBuildContext &ctx) {
+            return appendMsaaResolve(ctx, *static_cast<GPUDevice *>(state));
+          },
+  });
+}
 
 FrameCompositionProvider::FrameCompositionProvider(
     GPUDevice &gpu, std::pmr::memory_resource *memory)
@@ -48,29 +152,29 @@ FrameCompositionProvider::prepare(FrameBuildContext &ctx) {
   NURI_PROFILER_FUNCTION();
   ctx.shared.textureRequirements |= kBaselineFrameTextureRequirements;
   ctx.shared.historyWriteRequirements = FrameTextureRequirementFlags::None;
-  ctx.shared.sceneColorGraphTexture = {};
-  ctx.shared.frameColorGraphTexture = {};
-  ctx.shared.presentCaptureGraphTexture = {};
-  ctx.shared.sceneDepthGraphTexture = {};
-  ctx.shared.previousSceneDepthGraphTexture = {};
-  ctx.shared.transmissionVisibilityDepthTexture = {};
-  ctx.shared.transmissionVisibilityDepthGraphTexture = {};
-  ctx.shared.msaaSceneColorGraphTexture = {};
-  ctx.shared.msaaSceneDepthGraphTexture = {};
-  ctx.shared.normalGraphTexture = {};
-  ctx.shared.ambientOcclusionGraphTexture = {};
-  ctx.shared.ddgiOpaqueSurfaceCacheGraphTexture = {};
-  ctx.shared.previousAmbientOcclusionTexture = {};
+  ctx.shared[FrameTextureSlot::SceneColor].graph = {};
+  ctx.shared[FrameTextureSlot::FrameColor].graph = {};
+  ctx.shared[FrameTextureSlot::PresentCapture].graph = {};
+  ctx.shared[FrameTextureSlot::SceneDepth].graph = {};
+  ctx.shared[FrameHistoryTextureSlot::PreviousSceneDepth].graph = {};
+  ctx.shared[FrameTextureSlot::TransmissionVisibilityDepth].texture = {};
+  ctx.shared[FrameTextureSlot::TransmissionVisibilityDepth].graph = {};
+  ctx.shared[FrameTextureSlot::MsaaSceneColor].graph = {};
+  ctx.shared[FrameTextureSlot::MsaaSceneDepth].graph = {};
+  ctx.shared[FrameTextureSlot::Normal].graph = {};
+  ctx.shared[FrameTextureSlot::AmbientOcclusion].graph = {};
+  ctx.shared[FrameTextureSlot::DdgiOpaqueSurfaceCache].graph = {};
+  ctx.shared[FrameHistoryTextureSlot::PreviousAmbientOcclusion].texture = {};
   ctx.shared.sceneDepthPyramidGraphTextures = {};
-  ctx.shared.motionVectorGraphTexture = {};
-  ctx.shared.previousMotionVectorGraphTexture = {};
-  ctx.shared.reactiveMaskGraphTexture = {};
-  ctx.shared.motionClassGraphTexture = {};
+  ctx.shared[FrameTextureSlot::MotionVector].graph = {};
+  ctx.shared[FrameHistoryTextureSlot::PreviousMotionVector].graph = {};
+  ctx.shared[FrameTextureSlot::ReactiveMask].graph = {};
+  ctx.shared[FrameTextureSlot::MotionClass].graph = {};
   ctx.shared.historyColorReadValid = false;
-  ctx.shared.exposureReadGraphTexture = {};
-  ctx.shared.exposureWriteGraphTexture = {};
+  ctx.shared[FrameHistoryTextureSlot::ExposureRead].graph = {};
+  ctx.shared[FrameHistoryTextureSlot::ExposureWrite].graph = {};
   ctx.shared.exposureHistoryValid = false;
-  const RenderSettings &settings = renderSettingsOrDefault(ctx.frame);
+  const RenderSettings &settings = ctx.frame.settings;
   if (isRenderCaptureRequested(ctx.frame, "final_color")) {
     ctx.shared.textureRequirements |=
         FrameTextureRequirementFlags::PresentCapture;
@@ -111,69 +215,69 @@ FrameCompositionProvider::prepare(FrameBuildContext &ctx) {
                                    : pendingHistoryRequirements_,
             requirement);
       };
-  ctx.shared.sceneColorTexture =
+  ctx.shared[FrameTextureSlot::SceneColor].texture =
       currentTexture(Ring::SceneColor, ctx.frame.frameIndex);
   ctx.shared.sceneColorHalfResTexture =
       currentTexture(Ring::SceneColorHalf, ctx.frame.frameIndex);
   ctx.shared.sceneColorQuarterResTexture =
       currentTexture(Ring::SceneColorQuarter, ctx.frame.frameIndex);
-  ctx.shared.frameColorTexture =
+  ctx.shared[FrameTextureSlot::FrameColor].texture =
       currentTexture(Ring::FrameColor, ctx.frame.frameIndex);
-  ctx.shared.presentCaptureTexture =
+  ctx.shared[FrameTextureSlot::PresentCapture].texture =
       currentTexture(Ring::PresentCapture, ctx.frame.frameIndex);
-  ctx.shared.sceneDepthTexture =
+  ctx.shared[FrameTextureSlot::SceneDepth].texture =
       currentTexture(Ring::SceneDepth, historyLease.writeSlot);
-  ctx.shared.previousSceneDepthTexture =
+  ctx.shared[FrameHistoryTextureSlot::PreviousSceneDepth].texture =
       hasTemporalCameraContinuity(ctx.frame.camera) && declaredHistoryValid &&
               historyRequirementWasWritten(
                   FrameTextureRequirementFlags::SceneDepth)
           ? currentTexture(Ring::SceneDepth, historyReadSlot)
           : TextureHandle{};
-  ctx.shared.msaaSceneColorTexture =
+  ctx.shared[FrameTextureSlot::MsaaSceneColor].texture =
       currentTexture(Ring::MsaaSceneColor, ctx.frame.frameIndex);
-  ctx.shared.msaaSceneDepthTexture =
+  ctx.shared[FrameTextureSlot::MsaaSceneDepth].texture =
       currentTexture(Ring::MsaaSceneDepth, ctx.frame.frameIndex);
-  ctx.shared.historyColorReadTexture =
+  ctx.shared[FrameHistoryTextureSlot::ColorRead].texture =
       currentTexture(Ring::HistoryColor, historyReadSlot);
-  ctx.shared.historyColorWriteTexture =
+  ctx.shared[FrameHistoryTextureSlot::ColorWrite].texture =
       currentTexture(Ring::HistoryColor, historyLease.writeSlot);
   ctx.shared.historyColorReadValid =
       declaredHistoryValid &&
       historyRequirementWasWritten(
           FrameTextureRequirementFlags::HistoryColor) &&
-      nuri::isValid(ctx.shared.historyColorReadTexture);
-  ctx.shared.motionVectorTexture =
+      nuri::isValid(ctx.shared[FrameHistoryTextureSlot::ColorRead].texture);
+  ctx.shared[FrameTextureSlot::MotionVector].texture =
       currentTexture(Ring::MotionVectors, historyLease.writeSlot);
-  ctx.shared.previousMotionVectorTexture =
+  ctx.shared[FrameHistoryTextureSlot::PreviousMotionVector].texture =
       hasTemporalCameraContinuity(ctx.frame.camera) && declaredHistoryValid &&
               historyRequirementWasWritten(
                   FrameTextureRequirementFlags::MotionVectors)
           ? currentTexture(Ring::MotionVectors, historyReadSlot)
           : TextureHandle{};
-  ctx.shared.reactiveMaskTexture =
+  ctx.shared[FrameTextureSlot::ReactiveMask].texture =
       currentTexture(Ring::ReactiveMask, ctx.frame.frameIndex);
-  ctx.shared.motionClassTexture =
+  ctx.shared[FrameTextureSlot::MotionClass].texture =
       currentTexture(Ring::MotionClass, ctx.frame.frameIndex);
-  ctx.shared.normalTexture =
+  ctx.shared[FrameTextureSlot::Normal].texture =
       currentTexture(Ring::Normals, ctx.frame.frameIndex);
-  ctx.shared.ambientOcclusionTexture =
+  ctx.shared[FrameTextureSlot::AmbientOcclusion].texture =
       currentTexture(Ring::AmbientOcclusion, historyLease.writeSlot);
-  ctx.shared.ddgiOpaqueSurfaceCacheTexture =
+  ctx.shared[FrameTextureSlot::DdgiOpaqueSurfaceCache].texture =
       currentTexture(Ring::DDGIOpaqueSurfaceCache, ctx.frame.frameIndex);
-  ctx.shared.previousAmbientOcclusionTexture =
+  ctx.shared[FrameHistoryTextureSlot::PreviousAmbientOcclusion].texture =
       hasTemporalCameraContinuity(ctx.frame.camera) && declaredHistoryValid &&
               historyRequirementWasWritten(
                   FrameTextureRequirementFlags::AmbientOcclusion)
           ? currentTexture(Ring::AmbientOcclusion, historyReadSlot)
           : TextureHandle{};
-  ctx.shared.exposureReadTexture =
+  ctx.shared[FrameHistoryTextureSlot::ExposureRead].texture =
       currentTexture(Ring::Exposure, historyReadSlot);
-  ctx.shared.exposureWriteTexture =
+  ctx.shared[FrameHistoryTextureSlot::ExposureWrite].texture =
       currentTexture(Ring::Exposure, historyLease.writeSlot);
   ctx.shared.exposureHistoryValid =
       declaredHistoryValid &&
       historyRequirementWasWritten(FrameTextureRequirementFlags::Exposure) &&
-      nuri::isValid(ctx.shared.exposureReadTexture);
+      nuri::isValid(ctx.shared[FrameHistoryTextureSlot::ExposureRead].texture);
   const auto ringSize = [this](Ring ring) {
     return textureRings_[static_cast<size_t>(ring)].size();
   };
@@ -192,17 +296,19 @@ FrameCompositionProvider::prepare(FrameBuildContext &ctx) {
   AmbientOcclusionFrameMetrics &aoMetrics = ctx.frame.metrics.ambientOcclusion;
   aoMetrics.inputMode = ctx.frame.ambientOcclusion.inputMode;
   aoMetrics.workingResolution = ctx.frame.ambientOcclusion.workingResolution;
-  aoMetrics.normalFormat = nuri::isValid(ctx.shared.normalTexture)
-                               ? kFrameCompositionNormalFormat
-                               : Format::Count;
+  aoMetrics.normalFormat =
+      nuri::isValid(ctx.shared[FrameTextureSlot::Normal].texture)
+          ? kFrameCompositionNormalFormat
+          : Format::Count;
   aoMetrics.ambientOcclusionFormat = kFrameCompositionAmbientOcclusionFormat;
   aoMetrics.width = framebufferWidth_;
   aoMetrics.height = framebufferHeight_;
-  aoMetrics.normalsAllocated = nuri::isValid(ctx.shared.normalTexture);
+  aoMetrics.normalsAllocated =
+      nuri::isValid(ctx.shared[FrameTextureSlot::Normal].texture);
   aoMetrics.ambientOcclusionAllocated =
-      nuri::isValid(ctx.shared.ambientOcclusionTexture);
-  aoMetrics.temporalHistoryValid =
-      nuri::isValid(ctx.shared.previousAmbientOcclusionTexture);
+      nuri::isValid(ctx.shared[FrameTextureSlot::AmbientOcclusion].texture);
+  aoMetrics.temporalHistoryValid = nuri::isValid(
+      ctx.shared[FrameHistoryTextureSlot::PreviousAmbientOcclusion].texture);
   aoMetrics.normalTextureAllocationCount = allocations(Ring::Normals);
   aoMetrics.normalTextureReallocationCount = reallocations(Ring::Normals);
   aoMetrics.ambientOcclusionTextureAllocationCount =
@@ -264,9 +370,9 @@ FrameCompositionProvider::prepare(FrameBuildContext &ctx) {
   aaMetrics.msaaWidth = framebufferWidth_;
   aaMetrics.msaaHeight = framebufferHeight_;
   aaMetrics.msaaColorAllocated =
-      nuri::isValid(ctx.shared.msaaSceneColorTexture);
+      nuri::isValid(ctx.shared[FrameTextureSlot::MsaaSceneColor].texture);
   aaMetrics.msaaDepthAllocated =
-      nuri::isValid(ctx.shared.msaaSceneDepthTexture);
+      nuri::isValid(ctx.shared[FrameTextureSlot::MsaaSceneDepth].texture);
   aaMetrics.msaaColorTextureCount =
       static_cast<uint32_t>(ringSize(Ring::MsaaSceneColor));
   aaMetrics.msaaDepthTextureCount =
@@ -326,11 +432,11 @@ FrameCompositionProvider::prepare(FrameBuildContext &ctx) {
   aaMetrics.motionVectorReallocationCount = reallocations(Ring::MotionVectors);
   aaMetrics.motionVectorRg32FallbackCount = 0u;
   aaMetrics.motionVectorAllocated =
-      nuri::isValid(ctx.shared.motionVectorTexture);
-  aaMetrics.previousMotionVectorValid =
-      nuri::isValid(ctx.shared.previousMotionVectorTexture);
-  aaMetrics.previousSceneDepthValid =
-      nuri::isValid(ctx.shared.previousSceneDepthTexture);
+      nuri::isValid(ctx.shared[FrameTextureSlot::MotionVector].texture);
+  aaMetrics.previousMotionVectorValid = nuri::isValid(
+      ctx.shared[FrameHistoryTextureSlot::PreviousMotionVector].texture);
+  aaMetrics.previousSceneDepthValid = nuri::isValid(
+      ctx.shared[FrameHistoryTextureSlot::PreviousSceneDepth].texture);
   aaMetrics.motionVectorFormatSupported =
       kFrameCompositionMotionVectorFormat == Format::RG16_FLOAT;
   const uint64_t bytesPerTexture = static_cast<uint64_t>(framebufferWidth_) *
@@ -358,7 +464,7 @@ FrameCompositionProvider::prepare(FrameBuildContext &ctx) {
   aaMetrics.reactiveMaskAllocationCount = allocations(Ring::ReactiveMask);
   aaMetrics.reactiveMaskReallocationCount = reallocations(Ring::ReactiveMask);
   aaMetrics.reactiveMaskAllocated =
-      nuri::isValid(ctx.shared.reactiveMaskTexture);
+      nuri::isValid(ctx.shared[FrameTextureSlot::ReactiveMask].texture);
   aaMetrics.reactiveMaskFormatSupported =
       formatTexelBytes(kFrameCompositionReactiveMaskFormat) != 0u;
   const uint64_t reactiveBytesPerTexture =
@@ -396,7 +502,8 @@ FrameCompositionProvider::prepare(FrameBuildContext &ctx) {
   if (ctx.shared.sceneDepthSamplerId == 0u) {
     ctx.shared.sceneDepthSamplerId = gpu_.getDefaultSamplerBindlessIndex();
   }
-  ctx.frame.sharedDepthTexture = ctx.shared.sceneDepthTexture;
+  ctx.frame.sharedDepthTexture =
+      ctx.shared[FrameTextureSlot::SceneDepth].texture;
   allocationCounts_.fill(0u);
   reallocationCounts_.fill(0u);
   return Result<bool, std::string>::makeResult(true);

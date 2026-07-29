@@ -1,0 +1,33 @@
+{
+  "target": "ddgi_volume0_irradiance_atlas",
+  "capturePointVersion": 4,
+  "kind": "linear_hdr_color",
+  "format": 4,
+  "width": 320,
+  "height": 320,
+  "mip": 0,
+  "layer": 0,
+  "rowStride": 2560,
+  "origin": "top_left",
+  "colorSpace": "ddgi_perception_gamma5",
+  "profile": "hdr_color",
+  "payload": "ddgi_volume0_irradiance_atlas.exr",
+  "hash": "sha256:94e9a293565cf83c0d54c8f3e0b8257a6763d3e0c96ee8298d8ed25392a1e7cd",
+  "ddgi": {
+    "valid": 1,
+    "effectiveKind": 1,
+    "effectiveKeyHash": 7646036748682935010,
+    "cascadeIndex": 4294967295,
+    "coverageGeneration": 1,
+    "layoutGeneration": 1,
+    "resourceGeneration": 1,
+    "sceneBoundsGeneration": 0,
+    "ringOrigin": [0, 0, 0],
+    "cameraCell": [0, 0, 0],
+    "requestedHalfExtents": [5, 1.75, 4],
+    "achievedHalfExtents": [5, 2, 4],
+    "fadeStartHalfExtents": [5, 2, 4],
+    "fadeEndHalfExtents": [5, 2, 4],
+    "transitionCells": 0
+  }
+}

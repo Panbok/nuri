@@ -5,6 +5,7 @@
 #include "nuri/gfx/frame/render_frame_context.h"
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/gfx/render_graph/render_graph.h"
+#include "nuri/gfx/renderers/detail/forward_rendering.h"
 #include "nuri/gfx/renderers/detail/instance_data.h"
 #include "nuri/gfx/renderers/scene_draw_database.h"
 #include "nuri/resources/cpu/mesh_data.h"
@@ -18,6 +19,7 @@
 #include <filesystem>
 #include <glm/glm.hpp>
 #include <limits>
+#include <memory>
 #include <memory_resource>
 #include <utility>
 #include <vector>
@@ -27,6 +29,7 @@ using TransmissionRendererConfig = RuntimeOpaqueShaderConfig;
 
 class ResourceManager;
 class RenderPipeline;
+class ForwardInstanceBuffers;
 
 class NURI_API TransmissionRenderer {
 public:
@@ -41,6 +44,8 @@ public:
   void onAttach();
   void onDetach();
   void publishFrameData(RenderFrameContext &frame);
+  void onFrameSubmitted(const RenderFrameContext &frame) noexcept;
+  void onFrameAbandoned(const RenderFrameContext &frame) noexcept;
   Result<bool, std::string>
   buildTransparentStageContribution(RenderFrameContext &frame,
                                     TransparentStageContribution &out);
@@ -72,19 +77,12 @@ private:
                                             Format depthFormat,
                                             RasterPipelineState rasterState);
   Result<bool, std::string> ensureFeedbackCopyPipeline(Format colorFormat);
-  Result<bool, std::string>
-  ensureInstanceMatricesRingCapacity(size_t requiredBytes);
-  Result<bool, std::string>
-  ensureInstanceRemapRingCapacity(size_t requiredBytes);
-  Result<bool, std::string>
-  ensureBlendedFrameDataRingCapacity(size_t requiredBytes);
-  Result<bool, std::string>
-  ensureTransparentFeedbackTextures(RenderFrameContext &frame);
   [[nodiscard]] TransparentStageFeedbackRefreshMode
   selectTransparentFeedbackRefreshMode(uint32_t visibleDrawCount);
   Result<bool, std::string>
   appendTransparentFeedbackRefresh(RenderFrameContext &frame,
                                    RenderGraphBuilder &graph);
+  Result<bool, std::string> applyTransparentFeedbackBindings(DrawItem &draw);
   void rebuildSceneCache(const SceneDrawDatabase &database,
                          const RenderScene &scene);
   void refreshDrawTemplateTransforms();
@@ -95,13 +93,11 @@ private:
   void destroyBuffers();
   [[nodiscard]] RenderPipelineHandle
   selectMeshPipeline(bool doubleSided, bool useBlendPipeline) const;
-  void destroyFeedbackTextures();
   GPUDevice &gpu_;
   TransmissionRendererConfig config_{};
   std::pmr::memory_resource *memory_ = std::pmr::get_default_resource();
-  std::pmr::vector<DynamicBufferSlot> instanceMatricesRing_;
-  std::pmr::vector<DynamicBufferSlot> instanceRemapRing_;
-  std::pmr::vector<DynamicBufferSlot> blendedFrameDataRing_;
+  std::unique_ptr<ForwardInstanceBuffers> instanceBuffers_;
+  std::unique_ptr<DynamicBufferRing> blendedFrameDataRing_;
   std::array<ShaderHandle, 4> shaders_{};
   std::array<RenderPipelineHandle, 4> meshPipelines_{};
   RenderPipelineHandle feedbackCopyPipelineHandle_{};
@@ -111,23 +107,11 @@ private:
   Format feedbackCopyPipelineColorFormat_ = Format::Count;
   bool initialized_ = false;
   bool loggedTransparentFeedbackFallbackWarning_ = false;
-  const RenderScene *cachedScene_ = nullptr;
-  uint64_t cachedTopologyVersion_ = std::numeric_limits<uint64_t>::max();
-  uint64_t cachedMaterialVersion_ = std::numeric_limits<uint64_t>::max();
-  uint64_t cachedModelMaterialBindingVersion_ =
-      std::numeric_limits<uint64_t>::max();
-  uint64_t cachedTransformVersion_ = std::numeric_limits<uint64_t>::max();
-  uint64_t cachedGeometryMutationVersion_ =
-      std::numeric_limits<uint64_t>::max();
+  ForwardSceneDrawCache sceneCache_;
   EnvironmentHandles cachedEnvironmentHandles_{};
   bool environmentTextureAccessCacheValid_ = false;
   bool materialTextureAccessCacheValid_ = false;
   std::pmr::vector<MeshDrawTemplate> meshDrawTemplates_;
-  std::pmr::vector<InstanceData> instanceMatrices_;
-  std::pmr::vector<uint32_t> instanceRemap_;
-  std::pmr::vector<uint64_t> instanceDataRingUploadVersions_;
-  std::pmr::vector<TextureHandle> materialTextureAccessHandles_;
-  std::pmr::vector<TextureHandle> environmentTextureAccessHandles_;
   std::pmr::vector<TextureHandle> staticPassTextureReads_;
   std::pmr::vector<MeshPushConstants> meshPushConstants_;
   std::pmr::vector<MeshPushConstants> blendedPushConstants_;
@@ -157,14 +141,12 @@ private:
   TextureHandle preparedFrameColorTexture_{};
   TextureHandle preparedDepthTexture_{};
   RenderGraphTextureId preparedSceneDepthGraphTexture_{};
-  std::array<TextureHandle, kFrameCompositionSceneColorMipCount>
+  std::array<RenderGraphTextureId, kFrameCompositionSceneColorMipCount>
       preparedTransparentFeedbackTextures_{};
-  std::array<std::pmr::vector<TextureHandle>,
-             kFrameCompositionSceneColorMipCount>
-      transparentFeedbackTextures_;
-  uint32_t transparentFeedbackWidth_ = 0u;
-  uint32_t transparentFeedbackHeight_ = 0u;
-  uint32_t transparentFeedbackRingCount_ = 0u;
+  std::array<PushConstantTextureBinding, kFrameCompositionSceneColorMipCount>
+      preparedTransparentFeedbackBindings_{};
+  std::array<TextureHandle, kFrameCompositionSceneColorMipCount>
+      transparentFeedbackCaptureTextures_{};
   uint32_t preparedTransparentFeedbackCandidateCount_ = 0u;
 };
 

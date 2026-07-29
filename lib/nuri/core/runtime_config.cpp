@@ -1,6 +1,6 @@
 #include "nuri/core/runtime_config.h"
 #include "nuri/core/profiling.h"
-#include "nuri/pch.h"
+#include "nuri/utils/env_utils.h"
 namespace nuri {
 namespace {
 constexpr std::string_view kDefaultConfigPath = "app.config.json";
@@ -158,6 +158,8 @@ constexpr std::array kDDGIFields = {
 };
 constexpr auto kDDGIConfigFields = std::to_array<std::string_view>(
     {"persistent_memory_limit_mb", "peak_memory_limit_mb"});
+constexpr auto kShaderSections = std::to_array<std::string_view>(
+    {"debug_grid", "skybox", "opaque", "composite", "text_mtsdf", "ddgi"});
 template <typename T>
 [[nodiscard]] Result<T, std::string> makeError(std::string message) {
   return Result<T, std::string>::makeError(std::move(message));
@@ -395,8 +397,6 @@ loadRuntimeConfig(const std::filesystem::path &configPath) {
       std::to_array<std::string_view>({"window", "roots", "shaders"});
   constexpr auto windowKeys =
       std::to_array<std::string_view>({"title", "width", "height", "mode"});
-  constexpr auto shaderKeys = std::to_array<std::string_view>(
-      {"debug_grid", "skybox", "opaque", "composite", "text_mtsdf", "ddgi"});
   const auto listed = [](const auto &keys) {
     return [&keys](std::string_view key) {
       return std::ranges::find(keys, key) != keys.end();
@@ -407,7 +407,7 @@ loadRuntimeConfig(const std::filesystem::path &configPath) {
   yyjson_val *roots = reader.object(root, "roots", "", true);
   yyjson_val *shaders = reader.object(root, "shaders", "", false);
   reader.validate(window, "window", listed(windowKeys));
-  reader.validate(shaders, "shaders", listed(shaderKeys));
+  reader.validate(shaders, "shaders", listed(kShaderSections));
   RuntimeConfig config{};
   config.sourcePath = normalizedPath;
   config.window.title = reader.text(window, "title", "window");
@@ -427,13 +427,11 @@ loadRuntimeConfig(const std::filesystem::path &configPath) {
   }
   const auto configDirectory = normalizedPath.parent_path();
   readRoots(reader, roots, configDirectory, config.roots, kRootFields);
-  yyjson_val *debug = reader.object(shaders, "debug_grid", "shaders", false);
-  yyjson_val *skybox = reader.object(shaders, "skybox", "shaders", false);
-  yyjson_val *opaque = reader.object(shaders, "opaque", "shaders", false);
-  yyjson_val *composite = reader.object(shaders, "composite", "shaders", false);
-  yyjson_val *textMtsdf =
-      reader.object(shaders, "text_mtsdf", "shaders", false);
-  yyjson_val *ddgi = reader.object(shaders, "ddgi", "shaders", false);
+  std::array<yyjson_val *, kShaderSections.size()> sections{};
+  std::ranges::transform(kShaderSections, sections.begin(), [&](auto key) {
+    return reader.object(shaders, key.data(), "shaders", false);
+  });
+  auto [debug, skybox, opaque, composite, textMtsdf, ddgi] = sections;
   readPaths(reader, debug, "shaders.debug_grid", config.roots.shaders,
             config.roots.textures, config.shaders.debugGrid, kDebugFields);
   readPaths(reader, skybox, "shaders.skybox", config.roots.shaders,
@@ -453,11 +451,13 @@ loadRuntimeConfig(const std::filesystem::path &configPath) {
   constexpr uint64_t kMiB = 1024ull * 1024ull;
   config.shaders.ddgi.persistentMemoryLimitBytes =
       static_cast<uint64_t>(reader.positiveIntOr(
-          ddgi, "persistent_memory_limit_mb", "shaders.ddgi", 256)) *
+          ddgi, "persistent_memory_limit_mb", "shaders.ddgi",
+          RuntimeDDGIShaderConfig::kDefaultPersistentMemoryLimitMiB)) *
       kMiB;
   config.shaders.ddgi.peakMemoryLimitBytes =
-      static_cast<uint64_t>(reader.positiveIntOr(ddgi, "peak_memory_limit_mb",
-                                                 "shaders.ddgi", 512)) *
+      static_cast<uint64_t>(reader.positiveIntOr(
+          ddgi, "peak_memory_limit_mb", "shaders.ddgi",
+          RuntimeDDGIShaderConfig::kDefaultPeakMemoryLimitMiB)) *
       kMiB;
   if (config.shaders.ddgi.peakMemoryLimitBytes <
           config.shaders.ddgi.persistentMemoryLimitBytes &&
@@ -471,31 +471,9 @@ loadRuntimeConfig(const std::filesystem::path &configPath) {
   return Result<RuntimeConfig, std::string>::makeResult(std::move(config));
 }
 
-Result<RuntimeConfig, std::string> loadRuntimeConfig() {
-  return loadRuntimeConfig(std::filesystem::path{kDefaultConfigPath});
-}
-
 Result<RuntimeConfig, std::string> loadRuntimeConfigFromEnvOrDefault() {
-#if defined(_WIN32)
-  char *raw = nullptr;
-  size_t size = 0;
-  const int error = _dupenv_s(&raw, &size, kAppConfigEnvVar);
-  std::unique_ptr<char, decltype(&std::free)> value(raw, &std::free);
-  if (error != 0) {
-    return makeError<RuntimeConfig>("Failed to read environment variable '" +
-                                    std::string(kAppConfigEnvVar) +
-                                    "' (error " + std::to_string(error) + ")");
-  }
-  if (value && value.get()[0] != '\0') {
-    return loadRuntimeConfig(value.get());
-  }
-#else
-  const char *value = std::getenv(kAppConfigEnvVar);
-  if (value && value[0] != '\0') {
-    return loadRuntimeConfig(value);
-  }
-#endif
-  return loadRuntimeConfig();
+  const auto path = readEnvVar(kAppConfigEnvVar);
+  return loadRuntimeConfig(path.value_or(std::string{kDefaultConfigPath}));
 }
 
 } // namespace nuri

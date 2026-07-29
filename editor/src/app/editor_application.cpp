@@ -511,7 +511,6 @@ struct EditorApplication::TransitionProbe {
 ApplicationConfig
 EditorApplication::makeEditorApplicationConfig(const RuntimeConfig &config) {
   ApplicationConfig appConfig = makeApplicationConfig(config);
-  appConfig.renderComposition = RenderCompositionMode::PipelineOnly;
   return appConfig;
 }
 

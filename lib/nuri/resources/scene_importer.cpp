@@ -2,7 +2,6 @@
 #include "nuri/core/containers/hash_map.h"
 #include "nuri/core/profiling.h"
 #include "nuri/math/light.h"
-#include "nuri/pch.h"
 #include "nuri/resources/detail/gltf_buffer_utils.h"
 #include "nuri/resources/detail/gltf_json_utils.h"
 #include "nuri/resources/detail/scene_asset_build_backend.h"
@@ -54,14 +53,14 @@ parseAnimationDefinitions(yyjson_val *root,
 [[nodiscard]] bool hasRenderableTriangleGeometry(const aiMesh &mesh);
 template <typename SourceName>
 [[nodiscard]] uint32_t
-ensureImportedAsset(std::pmr::vector<ImportedSceneAsset> &assets,
+ensureImportedAsset(std::pmr::vector<ScenePrefabAssetRef> &assets,
                     HashMap<uint32_t, uint32_t> &sourceToAsset,
                     uint32_t sourceIndex, std::string_view nameOverride,
                     SourceName &&sourceName) {
   if (auto it = sourceToAsset.find(sourceIndex); it != sourceToAsset.end()) {
     return it->second;
   }
-  ImportedSceneAsset asset{};
+  ScenePrefabAssetRef asset{};
   asset.sourceIndex = sourceIndex;
   asset.sourceName =
       nameOverride.empty() ? sourceName() : std::string(nameOverride);
@@ -71,7 +70,7 @@ ensureImportedAsset(std::pmr::vector<ImportedSceneAsset> &assets,
   return assetIndex;
 }
 [[nodiscard]] uint32_t
-ensureImportedMeshAsset(ImportedScene &imported, const aiScene &scene,
+ensureImportedMeshAsset(ScenePrefab &imported, const aiScene &scene,
                         HashMap<uint32_t, uint32_t> &meshOrdinalToAsset,
                         uint32_t sourceSceneMeshIndex,
                         std::string_view sourceNameOverride = {}) {
@@ -87,7 +86,7 @@ ensureImportedMeshAsset(ImportedScene &imported, const aiScene &scene,
       });
 }
 [[nodiscard]] uint32_t
-ensureImportedMaterialAsset(ImportedScene &imported, const aiScene &scene,
+ensureImportedMaterialAsset(ScenePrefab &imported, const aiScene &scene,
                             HashMap<uint32_t, uint32_t> &materialOrdinalToAsset,
                             uint32_t sourceMaterialIndex,
                             std::string_view sourceNameOverride = {}) {
@@ -107,7 +106,7 @@ ensureImportedMaterialAsset(ImportedScene &imported, const aiScene &scene,
       });
 }
 void appendRemainingSceneAssets(
-    ImportedScene &imported, const aiScene &scene,
+    ScenePrefab &imported, const aiScene &scene,
     HashMap<uint32_t, uint32_t> &meshOrdinalToAsset,
     HashMap<uint32_t, uint32_t> &materialOrdinalToAsset,
     uint32_t materialCountLimit = std::numeric_limits<uint32_t>::max()) {
@@ -239,7 +238,7 @@ resolveGltfMeshMorphTargetCount(yyjson_val *root, uint32_t meshIndex) {
 }
 template <typename ResolveImportedNodeIndexFn>
 [[nodiscard]] Result<void, std::string> attachParsedLightsToImportedNodes(
-    ImportedScene &imported, std::span<const ParsedNode> parsedNodes,
+    ScenePrefab &imported, std::span<const ParsedNode> parsedNodes,
     std::span<const ParsedLightDef> parsedLights,
     ResolveImportedNodeIndexFn &&resolveImportedNodeIndexFn) {
   for (uint32_t parsedNodeIndex = 0u; parsedNodeIndex < parsedNodes.size();
@@ -257,17 +256,22 @@ template <typename ResolveImportedNodeIndexFn>
     if (importedNodeIndex == kInvalidScenePrefabIndex) {
       continue;
     }
-    ImportedSceneLight light{};
-    light.nodeIndex = importedNodeIndex;
-    light.light = parsedLights[*parsedNode.lightIndex].desc;
-    light.sourceName = !parsedNode.name.empty()
-                           ? parsedNode.name
-                           : parsedLights[*parsedNode.lightIndex].name;
+    ScenePrefabLight light{
+        .nodeIndex = importedNodeIndex,
+        .light = parsedLights[*parsedNode.lightIndex].desc,
+    };
+    ScenePrefabLightSource source{};
+    source.sourceName = !parsedNode.name.empty()
+                            ? parsedNode.name
+                            : parsedLights[*parsedNode.lightIndex].name;
     if (light.light.name.empty()) {
-      light.light.name = light.sourceName;
+      light.light.name = source.sourceName;
     }
-    light.sourceNodeIndex = parsedNodeIndex;
+    light.light.position = glm::vec3(0.0f);
+    light.light.rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+    source.sourceNodeIndex = parsedNodeIndex;
     imported.lights.push_back(std::move(light));
+    imported.lightSources.push_back(std::move(source));
   }
   return Result<void, std::string>::makeResult();
 }
@@ -323,7 +327,7 @@ template <typename ResolveImportedNodeIndexFn>
     std::span<const std::string> parsedPaths,
     const HashMap<std::string, uint32_t> &importedPathToNode,
     const HashMap<std::string, std::vector<uint32_t>> &importedNameToNodes,
-    std::span<const ImportedSceneNode> importedNodes);
+    std::span<const ScenePrefabNode> importedNodes);
 void remapSkinAndAnimationNodeIndices(
     std::span<SkinData> skins, std::span<AnimationClipData> animations,
     std::span<const uint32_t> parsedToImportedNodeIndex) {
@@ -767,7 +771,7 @@ parseAnimationDefinitions(yyjson_val *root,
       std::move(clips));
 }
 Result<void, std::string> rebuildImportedSceneFromParsedGltf(
-    ImportedScene &imported, const aiScene &scene,
+    ScenePrefab &imported, const aiScene &scene,
     std::span<const ParsedNode> parsedNodes,
     std::span<const uint32_t> parsedRoots,
     std::span<const std::string> parsedPaths,
@@ -832,13 +836,12 @@ Result<void, std::string> rebuildImportedSceneFromParsedGltf(
       }
     }
   }
-  std::pmr::vector<ImportedSceneNode> structuralNodes =
-      std::move(imported.nodes);
-  std::pmr::vector<ImportedSceneRenderable> structuralRenderables =
+  std::pmr::vector<ScenePrefabNode> structuralNodes = std::move(imported.nodes);
+  std::pmr::vector<ScenePrefabRenderable> structuralRenderables =
       std::move(imported.renderables);
-  std::pmr::vector<ImportedSceneAsset> structuralMeshAssets =
+  std::pmr::vector<ScenePrefabAssetRef> structuralMeshAssets =
       std::move(imported.meshAssets);
-  std::pmr::vector<ImportedSceneAsset> structuralMaterialAssets =
+  std::pmr::vector<ScenePrefabAssetRef> structuralMaterialAssets =
       std::move(imported.materialAssets);
   std::pmr::vector<uint32_t> structuralRootNodes =
       std::move(imported.rootNodes);
@@ -847,6 +850,7 @@ Result<void, std::string> rebuildImportedSceneFromParsedGltf(
   imported.meshAssets.clear();
   imported.materialAssets.clear();
   imported.lights.clear();
+  imported.lightSources.clear();
   imported.rootNodes.clear();
   imported.nodes.reserve(parsedNodes.size());
   imported.rootNodes.reserve(parsedRoots.size());
@@ -863,7 +867,7 @@ Result<void, std::string> rebuildImportedSceneFromParsedGltf(
       structuralNodes.size());
   for (uint32_t renderableIndex = 0u;
        renderableIndex < structuralRenderables.size(); ++renderableIndex) {
-    const ImportedSceneRenderable &renderable =
+    const ScenePrefabRenderable &renderable =
         structuralRenderables[renderableIndex];
     structuralRenderableIndicesByNode[renderable.nodeIndex].push_back(
         renderableIndex);
@@ -871,7 +875,7 @@ Result<void, std::string> rebuildImportedSceneFromParsedGltf(
   std::vector<uint32_t> structuralRootCandidates;
   structuralRootCandidates.reserve(structuralRootNodes.size());
   for (const uint32_t rootIndex : structuralRootNodes) {
-    const ImportedSceneNode &rootNode = structuralNodes[rootIndex];
+    const ScenePrefabNode &rootNode = structuralNodes[rootIndex];
     if (rootNode.parentIndex == kInvalidScenePrefabIndex &&
         rootNode.name.empty() && !structuralChildren[rootIndex].empty()) {
       structuralRootCandidates.insert(structuralRootCandidates.end(),
@@ -978,7 +982,7 @@ Result<void, std::string> rebuildImportedSceneFromParsedGltf(
   HashMap<uint32_t, uint32_t> meshOrdinalToAsset{};
   HashMap<uint32_t, uint32_t> materialOrdinalToAsset{};
   for (const uint32_t parsedNodeIndex : orderedParsedNodeIndices) {
-    ImportedSceneNode importedNode{};
+    ScenePrefabNode importedNode{};
     const uint32_t parsedParentIndex = parentIndices[parsedNodeIndex];
     importedNode.parentIndex = parsedParentIndex == kInvalidScenePrefabIndex
                                    ? kInvalidScenePrefabIndex
@@ -1005,11 +1009,11 @@ Result<void, std::string> rebuildImportedSceneFromParsedGltf(
     if (structuralNodeIndex != kInvalidScenePrefabIndex) {
       for (const uint32_t renderableIndex :
            structuralRenderableIndicesByNode[structuralNodeIndex]) {
-        const ImportedSceneRenderable &structuralRenderable =
+        const ScenePrefabRenderable &structuralRenderable =
             structuralRenderables[renderableIndex];
-        const ImportedSceneAsset &structuralMeshAsset =
+        const ScenePrefabAssetRef &structuralMeshAsset =
             structuralMeshAssets[structuralRenderable.meshAssetIndex];
-        const ImportedSceneAsset &structuralMaterialAsset =
+        const ScenePrefabAssetRef &structuralMaterialAsset =
             structuralMaterialAssets[structuralRenderable.materialAssetIndex];
         uint32_t sourceMaterialIndex = structuralMaterialAsset.sourceIndex;
         if (parsedNode.meshIndex.has_value()) {
@@ -1023,7 +1027,7 @@ Result<void, std::string> rebuildImportedSceneFromParsedGltf(
             sourceMaterialIndex == structuralMaterialAsset.sourceIndex
                 ? std::string_view(structuralMaterialAsset.sourceName)
                 : std::string_view{};
-        imported.renderables.push_back(ImportedSceneRenderable{
+        imported.renderables.push_back(ScenePrefabRenderable{
             .nodeIndex = remappedNodeIndices[parsedNodeIndex],
             .meshAssetIndex =
                 ensureImportedMeshAsset(imported, scene, meshOrdinalToAsset,
@@ -1054,7 +1058,7 @@ Result<void, std::string> rebuildImportedSceneFromParsedGltf(
         materialMapping, *parsedNode.meshIndex, mesh.mMaterialIndex);
     sourceMaterialIndex = resolveGltfPrimitiveMaterialIndex(
         materialMapping, sourceSceneMeshIndex, sourceMaterialIndex);
-    imported.renderables.push_back(ImportedSceneRenderable{
+    imported.renderables.push_back(ScenePrefabRenderable{
         .nodeIndex = remappedNodeIndices[parsedNodeIndex],
         .meshAssetIndex = ensureImportedMeshAsset(
             imported, scene, meshOrdinalToAsset, sourceSceneMeshIndex),
@@ -1177,7 +1181,7 @@ void buildParsedNodePathsRecursive(uint32_t nodeIndex,
     std::span<const std::string> parsedPaths,
     const HashMap<std::string, uint32_t> &importedPathToNode,
     const HashMap<std::string, std::vector<uint32_t>> &importedNameToNodes,
-    std::span<const ImportedSceneNode> importedNodes) {
+    std::span<const ScenePrefabNode> importedNodes) {
   if (parsedNodeIndex < parsedPaths.size()) {
     auto it = importedPathToNode.find(parsedPaths[parsedNodeIndex]);
     if (it != importedPathToNode.end()) {
@@ -1192,7 +1196,7 @@ void buildParsedNodePathsRecursive(uint32_t nodeIndex,
   }
   uint32_t match = kInvalidScenePrefabIndex;
   for (uint32_t nodeIndex = 0u; nodeIndex < importedNodes.size(); ++nodeIndex) {
-    const ImportedSceneNode &candidate = importedNodes[nodeIndex];
+    const ScenePrefabNode &candidate = importedNodes[nodeIndex];
     if (matrixNearlyEqual(candidate.localFromParent, parsedNode.localMatrix)) {
       if (match != kInvalidScenePrefabIndex) {
         return kInvalidScenePrefabIndex;
@@ -1224,16 +1228,22 @@ SceneImporter::loadLightsFromFile(std::string_view path) {
   if (loaded.hasError()) {
     return Result<ImportedLightSet, std::string>::makeError(loaded.error());
   }
-  const ImportedScene &scene = loaded.value();
+  const ScenePrefab &scene = loaded.value();
+  if (scene.lightSources.size() != scene.lights.size()) {
+    return Result<ImportedLightSet, std::string>::makeError(
+        "SceneImporter::loadLightsFromFile: inconsistent light metadata");
+  }
   ImportedLightSet lights;
   lights.reserve(scene.lights.size());
-  for (const ImportedSceneLight &source : scene.lights) {
+  for (size_t lightIndex = 0u; lightIndex < scene.lights.size(); ++lightIndex) {
+    const ScenePrefabLight &light = scene.lights[lightIndex];
+    const ScenePrefabLightSource &source = scene.lightSources[lightIndex];
     glm::mat4 world(1.0f);
-    for (uint32_t node = source.nodeIndex; node != kInvalidScenePrefabIndex;
+    for (uint32_t node = light.nodeIndex; node != kInvalidScenePrefabIndex;
          node = scene.nodes[node].parentIndex) {
       world = scene.nodes[node].localFromParent * world;
     }
-    LightDesc desc = source.light;
+    LightDesc desc = light.light;
     desc.position = glm::vec3(world[3]);
     desc.rotation = rotationFromMatrixOrIdentity(world);
     if (!source.sourceName.empty()) {
@@ -1245,17 +1255,17 @@ SceneImporter::loadLightsFromFile(std::string_view path) {
   return Result<ImportedLightSet, std::string>::makeResult(std::move(lights));
 }
 
-Result<ImportedScene, std::string>
+Result<ScenePrefab, std::string>
 SceneImporter::loadSceneFromFile(std::string_view path,
                                  const SceneImportOptions &options,
                                  std::pmr::memory_resource *memory) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
   if (path.empty()) {
-    return Result<ImportedScene, std::string>::makeError(
+    return Result<ScenePrefab, std::string>::makeError(
         "SceneImporter::loadSceneFromFile: path is empty");
   }
   memory = memory ? memory : std::pmr::get_default_resource();
-  ImportedScene imported(memory);
+  ScenePrefab imported(memory);
   imported.sourcePath = canonicalizeResourcePath(path);
   imported.importOptions = options.assetBuildOptions;
   Assimp::Importer importer;
@@ -1266,7 +1276,7 @@ SceneImporter::loadSceneFromFile(std::string_view path,
           : structuralSceneAssimpFlags();
   const aiScene *scene = importer.ReadFile(pathString, assimpFlags);
   if (scene == nullptr || scene->mRootNode == nullptr) {
-    return Result<ImportedScene, std::string>::makeError(
+    return Result<ScenePrefab, std::string>::makeError(
         std::string("SceneImporter::loadSceneFromFile: Assimp error: ") +
         importer.GetErrorString());
   }
@@ -1286,7 +1296,7 @@ SceneImporter::loadSceneFromFile(std::string_view path,
                          uint32_t siblingOrdinal) {
     const uint32_t importedNodeIndex =
         static_cast<uint32_t>(imported.nodes.size());
-    ImportedSceneNode importedNode{};
+    ScenePrefabNode importedNode{};
     importedNode.parentIndex = parentIndex;
     importedNode.localFromParent = aiMatrix4x4ToMat4(node->mTransformation);
     if (node->mName.length > 0u) {
@@ -1313,7 +1323,7 @@ SceneImporter::loadSceneFromFile(std::string_view path,
         continue;
       }
       const uint32_t sourceMaterialIndex = mesh->mMaterialIndex;
-      imported.renderables.push_back(ImportedSceneRenderable{
+      imported.renderables.push_back(ScenePrefabRenderable{
           .nodeIndex = importedNodeIndex,
           .meshAssetIndex = ensureImportedMeshAsset(
               imported, *scene, meshOrdinalToAsset, sourceSceneMeshIndex),
@@ -1332,14 +1342,13 @@ SceneImporter::loadSceneFromFile(std::string_view path,
   imported.rootNodes.push_back(0u);
   appendRemainingSceneAssets(imported, *scene, meshOrdinalToAsset,
                              materialOrdinalToAsset);
-  const auto finalizeImported = [&]() -> Result<ImportedScene, std::string> {
+  const auto finalizeImported = [&]() -> Result<ScenePrefab, std::string> {
     if (!options.adaptAssetSources) {
-      return Result<ImportedScene, std::string>::makeResult(
-          std::move(imported));
+      return Result<ScenePrefab, std::string>::makeResult(std::move(imported));
     }
     std::pmr::vector<uint32_t> sourceMeshIndices(memory);
     sourceMeshIndices.reserve(imported.meshAssets.size());
-    for (const ImportedSceneAsset &asset : imported.meshAssets) {
+    for (const ScenePrefabAssetRef &asset : imported.meshAssets) {
       sourceMeshIndices.push_back(asset.sourceIndex);
     }
     auto adaptedMeshes = detail::adaptSceneMeshes(
@@ -1348,14 +1357,14 @@ SceneImporter::loadSceneFromFile(std::string_view path,
                                   sourceMeshIndices.size()),
         imported.sourcePath, options.assetBuildOptions, memory);
     if (adaptedMeshes.hasError()) {
-      return Result<ImportedScene, std::string>::makeError(
+      return Result<ScenePrefab, std::string>::makeError(
           "SceneImporter::loadSceneFromFile: failed to adapt mesh sources: " +
           adaptedMeshes.error());
     }
     auto adaptedMaterials =
         detail::adaptMaterialInfo(*scene, imported.sourcePath);
     if (adaptedMaterials.hasError()) {
-      return Result<ImportedScene, std::string>::makeError(
+      return Result<ScenePrefab, std::string>::makeError(
           "SceneImporter::loadSceneFromFile: failed to adapt material "
           "sources: " +
           adaptedMaterials.error());
@@ -1395,7 +1404,7 @@ SceneImporter::loadSceneFromFile(std::string_view path,
       }
       imported.embeddedTextures.push_back(std::move(adaptedTexture));
     }
-    return Result<ImportedScene, std::string>::makeResult(std::move(imported));
+    return Result<ScenePrefab, std::string>::makeResult(std::move(imported));
   };
   if (!detail::isGltfJsonAssetPath(path)) {
     return finalizeImported();
@@ -1403,8 +1412,7 @@ SceneImporter::loadSceneFromFile(std::string_view path,
   const std::filesystem::path scenePath{std::string(path)};
   auto fileBytesResult = readBinaryFile(scenePath);
   if (fileBytesResult.hasError()) {
-    return Result<ImportedScene, std::string>::makeError(
-        fileBytesResult.error());
+    return Result<ScenePrefab, std::string>::makeError(fileBytesResult.error());
   }
   auto docResult = detail::loadGltfJsonDocument(
       scenePath,
@@ -1412,11 +1420,11 @@ SceneImporter::loadSceneFromFile(std::string_view path,
                                  fileBytesResult.value().size()),
       "glTF scene source");
   if (docResult.hasError()) {
-    return Result<ImportedScene, std::string>::makeError(docResult.error());
+    return Result<ScenePrefab, std::string>::makeError(docResult.error());
   }
   yyjson_val *root = yyjson_doc_get_root(docResult.value().get());
   if (!yyjson_is_obj(root)) {
-    return Result<ImportedScene, std::string>::makeError(
+    return Result<ScenePrefab, std::string>::makeError(
         "glTF root is not a JSON object");
   }
   auto buffersResult = detail::loadGltfBuffers(
@@ -1425,27 +1433,27 @@ SceneImporter::loadSceneFromFile(std::string_view path,
                                  fileBytesResult.value().size()),
       memory);
   if (buffersResult.hasError()) {
-    return Result<ImportedScene, std::string>::makeError(buffersResult.error());
+    return Result<ScenePrefab, std::string>::makeError(buffersResult.error());
   }
   auto lightsResult = parseLightDefinitions(root);
   if (lightsResult.hasError()) {
-    return Result<ImportedScene, std::string>::makeError(lightsResult.error());
+    return Result<ScenePrefab, std::string>::makeError(lightsResult.error());
   }
   auto parsedNodesResult = parseNodes(root);
   if (parsedNodesResult.hasError()) {
-    return Result<ImportedScene, std::string>::makeError(
+    return Result<ScenePrefab, std::string>::makeError(
         parsedNodesResult.error());
   }
   std::vector<ParsedNode> parsedNodes = std::move(parsedNodesResult.value());
   auto skinsResult = parseSkinDefinitions(root, buffersResult.value(), memory);
   if (skinsResult.hasError()) {
-    return Result<ImportedScene, std::string>::makeError(skinsResult.error());
+    return Result<ScenePrefab, std::string>::makeError(skinsResult.error());
   }
   imported.skins = std::move(skinsResult.value());
   auto animationsResult = parseAnimationDefinitions(
       root, parsedNodes, buffersResult.value(), memory);
   if (animationsResult.hasError()) {
-    return Result<ImportedScene, std::string>::makeError(
+    return Result<ScenePrefab, std::string>::makeError(
         animationsResult.error());
   }
   imported.animations = std::move(animationsResult.value());
@@ -1454,7 +1462,7 @@ SceneImporter::loadSceneFromFile(std::string_view path,
   }
   auto rootsResult = resolveSceneRootNodes(root, parsedNodes.size());
   if (rootsResult.hasError()) {
-    return Result<ImportedScene, std::string>::makeError(rootsResult.error());
+    return Result<ScenePrefab, std::string>::makeError(rootsResult.error());
   }
   const std::vector<uint32_t> parsedRoots = std::move(rootsResult.value());
   std::vector<std::string> parsedPaths(parsedNodes.size());
@@ -1469,7 +1477,7 @@ SceneImporter::loadSceneFromFile(std::string_view path,
   auto primitiveMaterialMappingResult =
       detail::readGltfPrimitiveMaterialMapping(root);
   if (primitiveMaterialMappingResult.hasError()) {
-    return Result<ImportedScene, std::string>::makeError(
+    return Result<ScenePrefab, std::string>::makeError(
         primitiveMaterialMappingResult.error());
   }
   const detail::GltfPrimitiveMaterialMapping primitiveMaterialMapping =
@@ -1479,59 +1487,22 @@ SceneImporter::loadSceneFromFile(std::string_view path,
       importedPathToNode, importedNameToNodes, lightsResult.value(),
       primitiveMaterialMapping, parsedToImportedNodeIndex);
   if (rebuildResult.hasError()) {
-    return Result<ImportedScene, std::string>::makeError(rebuildResult.error());
+    return Result<ScenePrefab, std::string>::makeError(rebuildResult.error());
   }
   remapSkinAndAnimationNodeIndices(imported.skins, imported.animations,
                                    parsedToImportedNodeIndex);
   return finalizeImported();
 }
 
-Result<ScenePrefab, std::string>
-SceneImporter::buildScenePrefab(const ImportedScene &scene,
-                                std::pmr::memory_resource *memory) {
-  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
-  memory = memory ? memory : std::pmr::get_default_resource();
-  ScenePrefab prefab(memory);
-  prefab.sourcePath = scene.sourcePath;
-  prefab.sourceSceneName = scene.sourceSceneName;
-  prefab.importOptions = scene.importOptions;
-  prefab.nodes.assign(scene.nodes.begin(), scene.nodes.end());
-  prefab.meshAssets.assign(scene.meshAssets.begin(), scene.meshAssets.end());
-  prefab.materialAssets.assign(scene.materialAssets.begin(),
-                               scene.materialAssets.end());
-  prefab.renderables.assign(scene.renderables.begin(), scene.renderables.end());
-  prefab.lights.reserve(scene.lights.size());
-  for (const ImportedSceneLight &sceneLight : scene.lights) {
-    ScenePrefabLight prefabLight{};
-    prefabLight.nodeIndex = sceneLight.nodeIndex;
-    prefabLight.light = sceneLight.light;
-    prefabLight.light.position = glm::vec3(0.0f);
-    prefabLight.light.rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
-    if (prefabLight.light.name.empty()) {
-      prefabLight.light.name = std::string(sceneLight.sourceName);
-    }
-    prefab.lights.push_back(std::move(prefabLight));
-  }
-  prefab.skins.reserve(scene.skins.size());
-  for (const SkinData &skin : scene.skins) {
-    prefab.skins.emplace_back(skin, memory);
-  }
-  prefab.animations.reserve(scene.animations.size());
-  for (const AnimationClipData &clip : scene.animations) {
-    prefab.animations.emplace_back(clip, memory);
-  }
-  return Result<ScenePrefab, std::string>::makeResult(std::move(prefab));
-}
-
 Result<ImportedSceneAssets, std::string>
-SceneImporter::buildSceneAssets(const ImportedScene &scene,
+SceneImporter::buildSceneAssets(const ScenePrefab &scene,
                                 std::pmr::memory_resource *memory) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
   memory = memory ? memory : std::pmr::get_default_resource();
   ImportedSceneAssets assets(memory);
   std::pmr::vector<uint32_t> sourceMeshIndices(memory);
   sourceMeshIndices.reserve(scene.meshAssets.size());
-  for (const ImportedSceneAsset &meshAsset : scene.meshAssets) {
+  for (const ScenePrefabAssetRef &meshAsset : scene.meshAssets) {
     sourceMeshIndices.push_back(meshAsset.sourceIndex);
   }
   if (!sourceMeshIndices.empty()) {
@@ -1556,7 +1527,7 @@ SceneImporter::buildSceneAssets(const ImportedScene &scene,
   }
   const ImportedMaterialSet &allMaterials = materialsResult.value();
   assets.materials.materials.reserve(scene.materialAssets.size());
-  for (const ImportedSceneAsset &materialAsset : scene.materialAssets) {
+  for (const ScenePrefabAssetRef &materialAsset : scene.materialAssets) {
     if (materialAsset.sourceIndex < allMaterials.materials.size()) {
       assets.materials.materials.push_back(
           allMaterials.materials[materialAsset.sourceIndex]);
@@ -1568,17 +1539,6 @@ SceneImporter::buildSceneAssets(const ImportedScene &scene,
   }
   return Result<ImportedSceneAssets, std::string>::makeResult(
       std::move(assets));
-}
-
-Result<ScenePrefab, std::string>
-SceneImporter::loadScenePrefabFromFile(std::string_view path,
-                                       const SceneImportOptions &options,
-                                       std::pmr::memory_resource *memory) {
-  auto sceneResult = loadSceneFromFile(path, options, memory);
-  if (sceneResult.hasError()) {
-    return Result<ScenePrefab, std::string>::makeError(sceneResult.error());
-  }
-  return buildScenePrefab(sceneResult.value(), memory);
 }
 
 Result<ImportedSceneAssets, std::string>

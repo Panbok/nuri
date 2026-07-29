@@ -14,35 +14,30 @@ isPostAASpecularDebugView(AntiAliasingDebugView view) noexcept {
 [[nodiscard]] inline PostAAPlan
 resolvePostAAPlan(const RenderSettings::AntiAliasingSettings &settings,
                   CoverageMode coverage) noexcept {
-  PostAASettings authored = settings.postAA;
-  if (!authored.enabled && settings.debug.spatialPostMsaaCleanup) {
-    authored.enabled = true;
-    authored.specular = PostAASpecularAlgorithm::InheritCurrent;
-    authored.spatial = PostAASpatialAlgorithm::Smaa1x;
-  }
+  const PostAASettings &resolved = settings.postAA;
   PostAAPlan plan{};
-  plan.requested = authored.enabled;
+  plan.requested = resolved.enabled;
   const bool msaaEligible =
       coverage == CoverageMode::Sample4 || coverage == CoverageMode::Sample8;
   if (!msaaEligible) {
-    if (authored.enabled) {
+    if (resolved.enabled) {
       plan.inactiveReason = PostAAInactiveReason::CoverageIsSingleSample;
     }
     return plan;
   }
   plan.specularAADebugOverride = settings.debug.specularAAOverride;
-  if (!authored.enabled) {
+  if (!resolved.enabled) {
     plan.resolvedMaterialSpecularAA =
         plan.specularAADebugOverride == SpecularAADebugOverride::ForceOff
             ? ResolvedMaterialSpecularAA::Off
             : ResolvedMaterialSpecularAA::LegacyShadingNormalDerivative;
     return plan;
   }
-  plan.specular = authored.specular;
-  plan.spatial = authored.spatial;
-  plan.materialVarianceScale = authored.materialVarianceScale;
-  plan.geometricVarianceScale = authored.geometricVarianceScale;
-  plan.maxSlopeVariance = authored.maxSlopeVariance;
+  plan.specular = resolved.specular;
+  plan.spatial = resolved.spatial;
+  plan.materialVarianceScale = resolved.materialVarianceScale;
+  plan.geometricVarianceScale = resolved.geometricVarianceScale;
+  plan.maxSlopeVariance = resolved.maxSlopeVariance;
   plan.active = plan.specular == PostAASpecularAlgorithm::BakedClean ||
                 plan.spatial == PostAASpatialAlgorithm::Smaa1x;
   if (!plan.active) {
@@ -62,8 +57,7 @@ resolvePostAAPlan(const RenderSettings::AntiAliasingSettings &settings,
           : (plan.specular == PostAASpecularAlgorithm::BakedClean
                  ? ResolvedMaterialSpecularAA::BakedClean
                  : ResolvedMaterialSpecularAA::LegacyShadingNormalDerivative);
-  const AntiAliasingDebugView debugView =
-      sanitizeAntiAliasingDebugView(settings.debug.view);
+  const AntiAliasingDebugView debugView = settings.debug.view;
   plan.debugView = plan.specular == PostAASpecularAlgorithm::BakedClean &&
                            isPostAASpecularDebugView(debugView)
                        ? debugView
@@ -91,8 +85,7 @@ temporalAAContinuityEquivalent(const PresentationAAPlan &lhs,
 [[nodiscard]] constexpr PresentationAAUnsupportedReason msaaUnsupportedReason(
     AntiAliasingMode mode,
     const PresentationAAGpuCapabilities &capabilities) noexcept {
-  const bool sample8 =
-      sanitizeAntiAliasingMode(mode) == AntiAliasingMode::MSAA8x;
+  const bool sample8 = mode == AntiAliasingMode::MSAA8x;
   if (!(sample8 ? capabilities.sample8Color : capabilities.sample4Color)) {
     return sample8 ? PresentationAAUnsupportedReason::Sample8Color
                    : PresentationAAUnsupportedReason::Sample4Color;
@@ -133,18 +126,13 @@ temporalAAContinuityEquivalent(const PresentationAAPlan &lhs,
 
 [[nodiscard]] inline Result<PresentationAAPlan, std::string>
 buildPresentationAAPlan(
-    const RenderSettings &sourceSettings,
+    const ResolvedRenderSettings &settings,
     const PresentationAAProviderCapabilities &providerCapabilities = {},
     const PresentationAAGpuCapabilities &gpuCapabilities = {}) {
-  RenderSettings settings = sourceSettings;
-  sanitizeAntiAliasingSettings(settings.antiAliasing);
-  sanitizeAmbientOcclusionSettings(settings.ambientOcclusion, settings.opaque,
-                                   settings.antiAliasing);
   PresentationAAPlan plan{};
   const AntiAliasingMode mode = settings.antiAliasing.mode;
   const TemporalReconstructionProvider temporalProvider =
-      sanitizeTemporalReconstructionProvider(
-          settings.antiAliasing.temporalProvider);
+      settings.antiAliasing.temporalProvider;
   switch (mode) {
   case AntiAliasingMode::None:
     break;
@@ -199,7 +187,7 @@ buildPresentationAAPlan(
     plan.needsReactiveMask = providerCapabilities.reactiveMask;
     plan.needsMotionClass = true;
     if (temporalProvider == TemporalReconstructionProvider::Legacy &&
-        settings.antiAliasing.debug.spatialPostTaaCleanup) {
+        settings.antiAliasing.temporalTuning.spatialPostTaaCleanup) {
       plan.spatialCleanup = SpatialCleanupPoint::PreComposition;
     }
     break;
@@ -216,15 +204,6 @@ buildPresentationAAPlan(
 [[nodiscard]] constexpr bool
 usesTemporalColorReconstruction(const PresentationAAPlan &plan) noexcept {
   return plan.reconstruction != ColorReconstruction::Off;
-}
-
-[[nodiscard]] inline PresentationAAPlan
-presentationAAPlanForFrame(const RenderFrameContext &frame) {
-  if (frame.presentationAA.valid) {
-    return frame.presentationAA;
-  }
-  const auto plan = buildPresentationAAPlan(renderSettingsOrDefault(frame));
-  return plan.hasError() ? PresentationAAPlan{} : plan.value();
 }
 
 [[nodiscard]] constexpr bool

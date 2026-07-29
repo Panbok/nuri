@@ -23,6 +23,7 @@
 #include <optional>
 #include <string_view>
 #include <type_traits>
+#include <utility>
 #include <vector>
 namespace nuri {
 
@@ -343,6 +344,37 @@ enum class TemporalAAVelocityDilationMode : uint8_t {
 enum class TemporalAAHistoryFilterMode : uint8_t {
   CatmullRom = 0,
   Bilinear = 1,
+};
+
+struct TemporalAATuning {
+  bool spatialPostTaaCleanup = true;
+  bool sharpenEnabled = true;
+  bool materialMipBiasEnabled = false;
+  bool transparentPostTaaSpatialCleanup = true;
+  float jitterScale = 0.75f;
+  float currentFrameWeight = 0.045f;
+  float sharpenStrength = 0.14f;
+  float sharpenConfidenceThreshold = 0.82f;
+  float materialMipBias = 0.0f;
+  float depthDiscontinuityThreshold = 0.01f;
+  float velocityRejectionThreshold = 1.5f;
+  float velocityBlendScale = 0.22f;
+  float motionCurrentWeight = 0.22f;
+  float disocclusionCurrentWeight = 0.62f;
+  float clampCurrentWeight = 0.38f;
+  float clampBlendAttenuation = 0.35f;
+  float varianceGamma = 1.85f;
+  float hdrWeightStrength = 0.50f;
+  float reactiveCurrentWeight = 0.85f;
+  float reactiveStrength = 1.0f;
+  float velocityDilationDepthThreshold = 0.01f;
+  TemporalAAClampMode clampMode = TemporalAAClampMode::VarianceYCoCg;
+  TemporalAAHdrWeightingMode hdrWeightingMode =
+      TemporalAAHdrWeightingMode::Luminance;
+  TemporalAAVelocityDilationMode velocityDilationMode =
+      TemporalAAVelocityDilationMode::ClosestDepth;
+  TemporalAAHistoryFilterMode historyFilterMode =
+      TemporalAAHistoryFilterMode::CatmullRom;
 };
 
 enum class TemporalAAQualityPreset : uint8_t {
@@ -858,38 +890,10 @@ struct RenderSettings {
     bool freezeJitter = false;
     bool resetHistoryRequested = false;
     bool logDiagnostics = false;
-    bool spatialPostTaaCleanup = true;
     bool spatialPostMsaaCleanup = false;
     SpecularAADebugOverride specularAAOverride = SpecularAADebugOverride::None;
-    bool taaSharpenEnabled = true;
-    bool taaMaterialMipBiasEnabled = false;
-    bool transparentPostTaaSpatialCleanup = true;
     AntiAliasingDebugView view = AntiAliasingDebugView::None;
     float diagnosticLogIntervalSeconds = 0.25f;
-    float taaJitterScale = 0.75f;
-    float taaCurrentFrameWeight = 0.045f;
-    float taaSharpenStrength = 0.14f;
-    float taaSharpenConfidenceThreshold = 0.82f;
-    float taaMaterialMipBias = 0.0f;
-    float taaDepthDiscontinuityThreshold = 0.01f;
-    float taaVelocityRejectionThreshold = 1.5f;
-    float taaVelocityBlendScale = 0.22f;
-    float taaMotionCurrentWeight = 0.22f;
-    float taaDisocclusionCurrentWeight = 0.62f;
-    float taaClampCurrentWeight = 0.38f;
-    float taaClampBlendAttenuation = 0.35f;
-    float taaVarianceGamma = 1.85f;
-    float taaHdrWeightStrength = 0.50f;
-    float taaReactiveCurrentWeight = 0.85f;
-    float taaReactiveStrength = 1.0f;
-    float taaVelocityDilationDepthThreshold = 0.01f;
-    TemporalAAClampMode taaClampMode = TemporalAAClampMode::VarianceYCoCg;
-    TemporalAAHdrWeightingMode taaHdrWeightingMode =
-        TemporalAAHdrWeightingMode::Luminance;
-    TemporalAAVelocityDilationMode taaVelocityDilationMode =
-        TemporalAAVelocityDilationMode::ClosestDepth;
-    TemporalAAHistoryFilterMode taaHistoryFilterMode =
-        TemporalAAHistoryFilterMode::CatmullRom;
   };
   struct AntiAliasingSettings {
     AntiAliasingMode mode = AntiAliasingMode::None;
@@ -897,6 +901,7 @@ struct RenderSettings {
         TemporalReconstructionProvider::Legacy;
     TemporalAAQualityPreset qualityPreset = TemporalAAQualityPreset::Quality;
     PostAASettings postAA{};
+    TemporalAATuning temporalTuning{};
     AntiAliasingDebugSettings debug{};
   };
   struct DDGISettings {
@@ -957,6 +962,27 @@ struct RenderSettings {
   ToneMapSettings toneMap{};
   HDRPostProcessSettings hdrPostProcess{};
   DDGISettings ddgi{};
+};
+
+struct ResolvedRenderSettings final : RenderSettings {
+  ResolvedRenderSettings() = default;
+  ResolvedRenderSettings(const ResolvedRenderSettings &) = default;
+  ResolvedRenderSettings(ResolvedRenderSettings &&) = default;
+
+  ResolvedRenderSettings &operator=(const RenderSettings &source) {
+    *this = fromAuthored(source);
+    return *this;
+  }
+
+  ResolvedRenderSettings &operator=(ResolvedRenderSettings &&) = default;
+  ResolvedRenderSettings &operator=(const ResolvedRenderSettings &) = default;
+
+  [[nodiscard]] static ResolvedRenderSettings
+  fromAuthored(const RenderSettings &source);
+
+private:
+  explicit ResolvedRenderSettings(RenderSettings &&settings)
+      : RenderSettings(std::move(settings)) {}
 };
 
 [[nodiscard]] inline uint64_t ddgiProductProfileFingerprint(
@@ -1402,6 +1428,12 @@ sanitizeAntiAliasingSettings(RenderSettings::AntiAliasingSettings &settings) {
   settings.mode = sanitizeAntiAliasingMode(settings.mode);
   settings.qualityPreset =
       sanitizeTemporalAAQualityPreset(settings.qualityPreset);
+  if (!settings.postAA.enabled && settings.debug.spatialPostMsaaCleanup) {
+    settings.postAA.enabled = true;
+    settings.postAA.specular = PostAASpecularAlgorithm::InheritCurrent;
+    settings.postAA.spatial = PostAASpatialAlgorithm::Smaa1x;
+  }
+  settings.debug.spatialPostMsaaCleanup = false;
   settings.postAA.specular = sanitizeContiguousEnum(
       settings.postAA.specular, PostAASpecularAlgorithm::BakedClean,
       PostAASpecularAlgorithm::BakedClean);
@@ -1430,92 +1462,65 @@ sanitizeAntiAliasingSettings(RenderSettings::AntiAliasingSettings &settings) {
     settings.debug.view = AntiAliasingDebugView::None;
   }
   settings.debug.view = sanitizeAntiAliasingDebugView(settings.debug.view);
-  settings.debug.taaClampMode =
-      sanitizeTemporalAAClampMode(settings.debug.taaClampMode);
-  settings.debug.taaHdrWeightingMode =
-      sanitizeTemporalAAHdrWeightingMode(settings.debug.taaHdrWeightingMode);
-  settings.debug.taaVelocityDilationMode =
+  settings.temporalTuning.clampMode =
+      sanitizeTemporalAAClampMode(settings.temporalTuning.clampMode);
+  settings.temporalTuning.hdrWeightingMode = sanitizeTemporalAAHdrWeightingMode(
+      settings.temporalTuning.hdrWeightingMode);
+  settings.temporalTuning.velocityDilationMode =
       sanitizeTemporalAAVelocityDilationMode(
-          settings.debug.taaVelocityDilationMode);
-  using Debug = RenderSettings::AntiAliasingDebugSettings;
+          settings.temporalTuning.velocityDilationMode);
+  using Tuning = TemporalAATuning;
   struct FloatSetting {
-    float Debug::*field;
+    float Tuning::*field;
     float minimum;
     float maximum;
     float fallback;
   };
   static constexpr std::array floatSettings{
-      FloatSetting{&Debug::taaCurrentFrameWeight, 0.0f, 1.0f, 0.045f},
-      FloatSetting{&Debug::diagnosticLogIntervalSeconds, 0.033f, 5.0f, 0.25f},
-      FloatSetting{&Debug::taaJitterScale, 0.0f, 1.0f, 0.75f},
-      FloatSetting{&Debug::taaSharpenStrength, 0.0f, 1.0f, 0.14f},
-      FloatSetting{&Debug::taaSharpenConfidenceThreshold, 0.0f, 1.0f, 0.82f},
-      FloatSetting{&Debug::taaMaterialMipBias, -1.0f, 0.0f, 0.0f},
-      FloatSetting{&Debug::taaDepthDiscontinuityThreshold, 0.0f, 1.0f, 0.01f},
-      FloatSetting{&Debug::taaVelocityRejectionThreshold, 0.0f, 64.0f, 1.5f},
-      FloatSetting{&Debug::taaVelocityBlendScale, 0.0f, 4.0f, 0.22f},
-      FloatSetting{&Debug::taaMotionCurrentWeight, 0.0f, 1.0f, 0.22f},
-      FloatSetting{&Debug::taaDisocclusionCurrentWeight, 0.0f, 1.0f, 0.62f},
-      FloatSetting{&Debug::taaClampCurrentWeight, 0.0f, 1.0f, 0.38f},
-      FloatSetting{&Debug::taaClampBlendAttenuation, 0.0f, 1.0f, 0.35f},
-      FloatSetting{&Debug::taaVarianceGamma, 0.0f, 4.0f, 1.85f},
-      FloatSetting{&Debug::taaHdrWeightStrength, 0.0f, 1.0f, 0.50f},
-      FloatSetting{&Debug::taaReactiveCurrentWeight, 0.0f, 1.0f, 0.85f},
-      FloatSetting{&Debug::taaReactiveStrength, 0.0f, 4.0f, 1.0f},
-      FloatSetting{&Debug::taaVelocityDilationDepthThreshold, 0.0f, 1.0f,
-                   0.01f},
+      FloatSetting{&Tuning::currentFrameWeight, 0.0f, 1.0f, 0.045f},
+      FloatSetting{&Tuning::jitterScale, 0.0f, 1.0f, 0.75f},
+      FloatSetting{&Tuning::sharpenStrength, 0.0f, 1.0f, 0.14f},
+      FloatSetting{&Tuning::sharpenConfidenceThreshold, 0.0f, 1.0f, 0.82f},
+      FloatSetting{&Tuning::materialMipBias, -1.0f, 0.0f, 0.0f},
+      FloatSetting{&Tuning::depthDiscontinuityThreshold, 0.0f, 1.0f, 0.01f},
+      FloatSetting{&Tuning::velocityRejectionThreshold, 0.0f, 64.0f, 1.5f},
+      FloatSetting{&Tuning::velocityBlendScale, 0.0f, 4.0f, 0.22f},
+      FloatSetting{&Tuning::motionCurrentWeight, 0.0f, 1.0f, 0.22f},
+      FloatSetting{&Tuning::disocclusionCurrentWeight, 0.0f, 1.0f, 0.62f},
+      FloatSetting{&Tuning::clampCurrentWeight, 0.0f, 1.0f, 0.38f},
+      FloatSetting{&Tuning::clampBlendAttenuation, 0.0f, 1.0f, 0.35f},
+      FloatSetting{&Tuning::varianceGamma, 0.0f, 4.0f, 1.85f},
+      FloatSetting{&Tuning::hdrWeightStrength, 0.0f, 1.0f, 0.50f},
+      FloatSetting{&Tuning::reactiveCurrentWeight, 0.0f, 1.0f, 0.85f},
+      FloatSetting{&Tuning::reactiveStrength, 0.0f, 4.0f, 1.0f},
+      FloatSetting{&Tuning::velocityDilationDepthThreshold, 0.0f, 1.0f, 0.01f},
   };
   for (const FloatSetting &spec : floatSettings) {
-    float &value = settings.debug.*spec.field;
+    float &value = settings.temporalTuning.*spec.field;
     value = finiteClamp(value, spec.minimum, spec.maximum, spec.fallback);
   }
-  settings.debug.taaHistoryFilterMode =
-      sanitizeTemporalAAHistoryFilterMode(settings.debug.taaHistoryFilterMode);
+  settings.temporalTuning.motionCurrentWeight =
+      std::max(settings.temporalTuning.motionCurrentWeight,
+               settings.temporalTuning.currentFrameWeight);
+  settings.temporalTuning.disocclusionCurrentWeight =
+      std::max(settings.temporalTuning.disocclusionCurrentWeight,
+               settings.temporalTuning.currentFrameWeight);
+  settings.temporalTuning.clampCurrentWeight =
+      std::max(settings.temporalTuning.clampCurrentWeight,
+               settings.temporalTuning.currentFrameWeight);
+  settings.temporalTuning.historyFilterMode =
+      sanitizeTemporalAAHistoryFilterMode(
+          settings.temporalTuning.historyFilterMode);
+  settings.debug.diagnosticLogIntervalSeconds = finiteClamp(
+      settings.debug.diagnosticLogIntervalSeconds, 0.033f, 5.0f, 0.25f);
   if (settings.mode != AntiAliasingMode::TAA) {
     settings.debug.jitterEnabled = false;
     settings.debug.freezeJitter = false;
   }
 }
 
-inline void copyTemporalAAPresetTuning(
-    RenderSettings::AntiAliasingDebugSettings &dst,
-    const RenderSettings::AntiAliasingDebugSettings &src) {
-  dst.spatialPostTaaCleanup = src.spatialPostTaaCleanup;
-  dst.taaSharpenEnabled = src.taaSharpenEnabled;
-  dst.taaMaterialMipBiasEnabled = src.taaMaterialMipBiasEnabled;
-  dst.transparentPostTaaSpatialCleanup = src.transparentPostTaaSpatialCleanup;
-  dst.taaJitterScale = src.taaJitterScale;
-  dst.taaCurrentFrameWeight = src.taaCurrentFrameWeight;
-  dst.taaSharpenStrength = src.taaSharpenStrength;
-  dst.taaSharpenConfidenceThreshold = src.taaSharpenConfidenceThreshold;
-  dst.taaMaterialMipBias = src.taaMaterialMipBias;
-  dst.taaDepthDiscontinuityThreshold = src.taaDepthDiscontinuityThreshold;
-  dst.taaVelocityRejectionThreshold = src.taaVelocityRejectionThreshold;
-  dst.taaVelocityBlendScale = src.taaVelocityBlendScale;
-  dst.taaMotionCurrentWeight = src.taaMotionCurrentWeight;
-  dst.taaDisocclusionCurrentWeight = src.taaDisocclusionCurrentWeight;
-  dst.taaClampCurrentWeight = src.taaClampCurrentWeight;
-  dst.taaClampBlendAttenuation = src.taaClampBlendAttenuation;
-  dst.taaVarianceGamma = src.taaVarianceGamma;
-  dst.taaHdrWeightStrength = src.taaHdrWeightStrength;
-  dst.taaReactiveCurrentWeight = src.taaReactiveCurrentWeight;
-  dst.taaReactiveStrength = src.taaReactiveStrength;
-  dst.taaVelocityDilationDepthThreshold = src.taaVelocityDilationDepthThreshold;
-  dst.taaClampMode = src.taaClampMode;
-  dst.taaHdrWeightingMode = src.taaHdrWeightingMode;
-  dst.taaVelocityDilationMode = src.taaVelocityDilationMode;
-  dst.taaHistoryFilterMode = src.taaHistoryFilterMode;
-}
-
-[[nodiscard]] inline RenderSettings::AntiAliasingDebugSettings
-temporalAAQualityPresetDebugSettings(TemporalAAQualityPreset preset) {
-  RenderSettings::AntiAliasingDebugSettings debug{};
-  debug.spatialPostTaaCleanup = true;
-  debug.transparentPostTaaSpatialCleanup = true;
-  debug.taaClampMode = TemporalAAClampMode::VarianceYCoCg;
-  debug.taaHdrWeightingMode = TemporalAAHdrWeightingMode::Luminance;
-  debug.taaVelocityDilationMode = TemporalAAVelocityDilationMode::ClosestDepth;
-  debug.taaHistoryFilterMode = TemporalAAHistoryFilterMode::CatmullRom;
+[[nodiscard]] inline TemporalAATuning
+temporalAAQualityPresetTuning(TemporalAAQualityPreset preset) {
   struct Preset {
     float jitterScale;
     float currentWeight;
@@ -1542,39 +1547,29 @@ temporalAAQualityPresetDebugSettings(TemporalAAQualityPreset preset) {
       presets[static_cast<uint8_t>(sanitized == TemporalAAQualityPreset::Custom
                                        ? TemporalAAQualityPreset::Quality
                                        : sanitized)];
-  debug.taaJitterScale = values.jitterScale;
-  debug.taaCurrentFrameWeight = values.currentWeight;
-  debug.taaMotionCurrentWeight = values.motionWeight;
-  debug.taaDisocclusionCurrentWeight = values.disocclusionWeight;
-  debug.taaClampCurrentWeight = values.clampWeight;
-  debug.taaVelocityBlendScale = values.velocityBlend;
-  debug.taaVarianceGamma = values.varianceGamma;
-  debug.taaSharpenStrength = values.sharpenStrength;
-  debug.taaSharpenConfidenceThreshold = values.sharpenConfidence;
-  debug.taaHistoryFilterMode = values.historyFilter;
-  RenderSettings::AntiAliasingSettings settings{
-      .mode = AntiAliasingMode::TAA,
-      .qualityPreset = TemporalAAQualityPreset::Custom,
-      .debug = debug,
-  };
-  sanitizeAntiAliasingSettings(settings);
-  return settings.debug;
+  TemporalAATuning tuning{};
+  tuning.jitterScale = values.jitterScale;
+  tuning.currentFrameWeight = values.currentWeight;
+  tuning.motionCurrentWeight = values.motionWeight;
+  tuning.disocclusionCurrentWeight = values.disocclusionWeight;
+  tuning.clampCurrentWeight = values.clampWeight;
+  tuning.velocityBlendScale = values.velocityBlend;
+  tuning.varianceGamma = values.varianceGamma;
+  tuning.sharpenStrength = values.sharpenStrength;
+  tuning.sharpenConfidenceThreshold = values.sharpenConfidence;
+  tuning.historyFilterMode = values.historyFilter;
+  return tuning;
 }
 
-[[nodiscard]] inline RenderSettings::AntiAliasingDebugSettings
-effectiveTemporalAADebugSettings(
+[[nodiscard]] inline TemporalAATuning effectiveTemporalAATuning(
     const RenderSettings::AntiAliasingSettings &settings) {
   RenderSettings::AntiAliasingSettings sanitized = settings;
   sanitizeAntiAliasingSettings(sanitized);
-  RenderSettings::AntiAliasingDebugSettings effective = sanitized.debug;
   const TemporalAAQualityPreset preset =
       sanitizeTemporalAAQualityPreset(sanitized.qualityPreset);
-  if (preset != TemporalAAQualityPreset::Custom) {
-    const RenderSettings::AntiAliasingDebugSettings presetDebug =
-        temporalAAQualityPresetDebugSettings(preset);
-    copyTemporalAAPresetTuning(effective, presetDebug);
-  }
-  return effective;
+  return preset == TemporalAAQualityPreset::Custom
+             ? sanitized.temporalTuning
+             : temporalAAQualityPresetTuning(preset);
 }
 
 [[nodiscard]] inline bool isTemporalAAResolvedSceneColorOutput(
@@ -1582,10 +1577,8 @@ effectiveTemporalAADebugSettings(
   if (sanitizeAntiAliasingMode(settings.mode) != AntiAliasingMode::TAA) {
     return false;
   }
-  const RenderSettings::AntiAliasingDebugSettings aaDebug =
-      effectiveTemporalAADebugSettings(settings);
   const AntiAliasingDebugView debugView =
-      sanitizeAntiAliasingDebugView(aaDebug.view);
+      sanitizeAntiAliasingDebugView(settings.debug.view);
   return debugView == AntiAliasingDebugView::None ||
          debugView == AntiAliasingDebugView::TAAResolved ||
          debugView == AntiAliasingDebugView::TAASceneColorHalfRes ||
@@ -1601,9 +1594,7 @@ inline void copyTemporalAAQualityPresetToCustom(
       sanitizeTemporalAAQualityPreset(sanitized.qualityPreset);
   settings = sanitized;
   if (preset != TemporalAAQualityPreset::Custom) {
-    const RenderSettings::AntiAliasingDebugSettings presetDebug =
-        temporalAAQualityPresetDebugSettings(preset);
-    copyTemporalAAPresetTuning(settings.debug, presetDebug);
+    settings.temporalTuning = temporalAAQualityPresetTuning(preset);
   }
   settings.qualityPreset = TemporalAAQualityPreset::Custom;
 }
@@ -1929,8 +1920,8 @@ temporalRenderScaleChanged(const TemporalCameraHistoryState &history,
   state.temporalDataValid = true;
   state.renderExtent = desc.renderExtent;
   const AntiAliasingMode mode = sanitizeAntiAliasingMode(antiAliasing.mode);
-  const RenderSettings::AntiAliasingDebugSettings aaDebug =
-      effectiveTemporalAADebugSettings(antiAliasing);
+  const RenderSettings::AntiAliasingDebugSettings &aaDebug = antiAliasing.debug;
+  const TemporalAATuning taaTuning = effectiveTemporalAATuning(antiAliasing);
   const bool taaSelected = mode == AntiAliasingMode::TAA;
   const bool hasRenderExtent =
       desc.renderExtent.x > 0u && desc.renderExtent.y > 0u;
@@ -1964,8 +1955,8 @@ temporalRenderScaleChanged(const TemporalCameraHistoryState &history,
           history.nextJitterIndex % kTemporalJitterSequenceLength;
     }
     const float jitterScale =
-        std::isfinite(aaDebug.taaJitterScale)
-            ? std::clamp(aaDebug.taaJitterScale, 0.0f, 1.0f)
+        std::isfinite(taaTuning.jitterScale)
+            ? std::clamp(taaTuning.jitterScale, 0.0f, 1.0f)
             : 0.75f;
     state.jitterPixelOffset =
         temporalJitterPixelOffset(state.jitterIndex) * jitterScale;
@@ -2245,12 +2236,6 @@ struct ForwardSceneGpuData {
   ForwardSceneFrameData postTaaFrameData{};
   uint64_t frameDataAddress = 0;
   uint64_t postTaaFrameDataAddress = 0;
-  uint64_t directionalLightBufferAddress = 0;
-  uint64_t localLightBufferAddress = 0;
-  uint64_t shadowFrameBufferAddress = 0;
-  uint32_t directionalLightCount = 0;
-  uint32_t localLightCount = 0;
-  uint32_t shadowFlags = 0;
   std::span<const BufferHandle> indirectDependencyBuffers{};
   std::span<const TextureHandle> indirectDependencyTextures{};
 };
@@ -2275,18 +2260,33 @@ struct DDGIFrameGpuDataHandle {
   uint32_t diagnosticRayCount = 0u;
 };
 
+enum class MaterialTableRegion : uint8_t {
+  Header,
+  Clearcoat,
+  Sheen,
+  Transmission,
+  Specular,
+  Count,
+};
+
+struct MaterialTableGpuRegion {
+  BufferHandle buffer{};
+  uint64_t address = 0u;
+};
+
 struct MaterialTableGpuData {
-  BufferHandle headerBuffer{};
-  BufferHandle clearcoatBuffer{};
-  BufferHandle sheenBuffer{};
-  BufferHandle transmissionBuffer{};
-  BufferHandle specularBuffer{};
-  uint64_t headerBufferAddress = 0;
-  uint64_t clearcoatBufferAddress = 0;
-  uint64_t sheenBufferAddress = 0;
-  uint64_t transmissionBufferAddress = 0;
-  uint64_t specularBufferAddress = 0;
+  std::array<MaterialTableGpuRegion,
+             static_cast<size_t>(MaterialTableRegion::Count)>
+      regions{};
   uint64_t version = 0;
+  [[nodiscard]] MaterialTableGpuRegion &
+  operator[](MaterialTableRegion region) noexcept {
+    return regions[static_cast<size_t>(region)];
+  }
+  [[nodiscard]] const MaterialTableGpuRegion &
+  operator[](MaterialTableRegion region) const noexcept {
+    return regions[static_cast<size_t>(region)];
+  }
 };
 
 struct OpaqueFrameMetrics {
@@ -3220,6 +3220,45 @@ static constexpr FrameTextureRequirementFlags
         FrameTextureRequirementFlags::SceneDepth |
         FrameTextureRequirementFlags::SceneColorMipChain;
 
+enum class FrameTextureSlot : uint8_t {
+  SceneDepth,
+  TransmissionVisibilityDepth,
+  MsaaSceneDepth,
+  Normal,
+  AmbientOcclusion,
+  DdgiOpaqueSurfaceCache,
+  ShadowDebugPreview,
+  SceneColor,
+  MsaaSceneColor,
+  FrameColor,
+  PresentCapture,
+  MotionVector,
+  ReactiveMask,
+  MotionClass,
+  Count,
+};
+
+enum class FrameHistoryTextureSlot : uint8_t {
+  PreviousSceneDepth,
+  PreviousAmbientOcclusion,
+  ColorRead,
+  ColorWrite,
+  ExposureRead,
+  ExposureWrite,
+  PreviousMotionVector,
+  Count,
+};
+
+struct FrameTextureBinding {
+  TextureHandle texture{};
+  RenderGraphTextureId graph{};
+};
+
+struct FrameHistoryTextureBinding {
+  TextureHandle texture{};
+  RenderGraphTextureId graph{};
+};
+
 struct FrameSharedResources {
   const SceneDrawDatabase *sceneDrawDatabase = nullptr;
   std::optional<RayTracingSceneFrameView> rayTracingScene{};
@@ -3235,21 +3274,11 @@ struct FrameSharedResources {
       kBaselineFrameTextureRequirements;
   FrameTextureRequirementFlags historyWriteRequirements =
       FrameTextureRequirementFlags::None;
-  TextureHandle sceneDepthTexture{};
-  TextureHandle previousSceneDepthTexture{};
-  TextureHandle transmissionVisibilityDepthTexture{};
-  RenderGraphTextureId sceneDepthGraphTexture{};
-  RenderGraphTextureId previousSceneDepthGraphTexture{};
-  RenderGraphTextureId transmissionVisibilityDepthGraphTexture{};
-  TextureHandle msaaSceneDepthTexture{};
-  RenderGraphTextureId msaaSceneDepthGraphTexture{};
-  TextureHandle normalTexture{};
-  RenderGraphTextureId normalGraphTexture{};
-  TextureHandle ambientOcclusionTexture{};
-  TextureHandle previousAmbientOcclusionTexture{};
-  RenderGraphTextureId ambientOcclusionGraphTexture{};
-  TextureHandle ddgiOpaqueSurfaceCacheTexture{};
-  RenderGraphTextureId ddgiOpaqueSurfaceCacheGraphTexture{};
+  std::array<FrameTextureBinding, static_cast<size_t>(FrameTextureSlot::Count)>
+      frameTextures{};
+  std::array<FrameHistoryTextureBinding,
+             static_cast<size_t>(FrameHistoryTextureSlot::Count)>
+      historyTextures{};
   std::array<TextureHandle, kMaxSceneDepthPyramidLevels>
       sceneDepthPyramidTextures{};
   std::array<RenderGraphTextureId, kMaxSceneDepthPyramidLevels>
@@ -3259,37 +3288,13 @@ struct FrameSharedResources {
   std::array<TextureHandle, kMaxShadowCascades> shadowCascadeTextures{};
   std::array<RenderGraphTextureId, kMaxShadowCascades>
       shadowCascadeGraphTextures{};
-  TextureHandle shadowDebugPreviewTexture{};
-  RenderGraphTextureId shadowDebugPreviewGraphTexture{};
   uint32_t shadowRawSamplerId = kInvalidShadowBindlessIndex;
   uint32_t shadowCompareSamplerId = kInvalidShadowBindlessIndex;
   uint32_t sceneDepthPyramidLevelCount = 0;
   uint32_t sceneDepthSamplerId = 0;
-  TextureHandle sceneColorTexture{};
-  TextureHandle msaaSceneColorTexture{};
   TextureHandle sceneColorHalfResTexture{};
   TextureHandle sceneColorQuarterResTexture{};
-  RenderGraphTextureId sceneColorGraphTexture{};
-  RenderGraphTextureId msaaSceneColorGraphTexture{};
-  TextureHandle frameColorTexture{};
-  RenderGraphTextureId frameColorGraphTexture{};
-  TextureHandle presentCaptureTexture{};
-  RenderGraphTextureId presentCaptureGraphTexture{};
-  TextureHandle historyColorReadTexture{};
-  TextureHandle historyColorWriteTexture{};
   bool historyColorReadValid = false;
-  TextureHandle exposureReadTexture{};
-  TextureHandle exposureWriteTexture{};
-  RenderGraphTextureId exposureReadGraphTexture{};
-  RenderGraphTextureId exposureWriteGraphTexture{};
-  TextureHandle motionVectorTexture{};
-  TextureHandle previousMotionVectorTexture{};
-  TextureHandle reactiveMaskTexture{};
-  TextureHandle motionClassTexture{};
-  RenderGraphTextureId motionVectorGraphTexture{};
-  RenderGraphTextureId previousMotionVectorGraphTexture{};
-  RenderGraphTextureId reactiveMaskGraphTexture{};
-  RenderGraphTextureId motionClassGraphTexture{};
   RenderGraphTextureId opaquePickGraphTexture{};
   RenderGraphTextureId opaquePickDepthGraphTexture{};
   std::optional<LightId> selectedLightId{};
@@ -3298,6 +3303,23 @@ struct FrameSharedResources {
   bool transparentStageEnabled = false;
   bool transparentTransmissionStageEnabled = false;
   bool exposureHistoryValid = false;
+
+  [[nodiscard]] FrameTextureBinding &
+  operator[](FrameTextureSlot slot) noexcept {
+    return frameTextures[static_cast<size_t>(slot)];
+  }
+  [[nodiscard]] const FrameTextureBinding &
+  operator[](FrameTextureSlot slot) const noexcept {
+    return frameTextures[static_cast<size_t>(slot)];
+  }
+  [[nodiscard]] FrameHistoryTextureBinding &
+  operator[](FrameHistoryTextureSlot slot) noexcept {
+    return historyTextures[static_cast<size_t>(slot)];
+  }
+  [[nodiscard]] const FrameHistoryTextureBinding &
+  operator[](FrameHistoryTextureSlot slot) const noexcept {
+    return historyTextures[static_cast<size_t>(slot)];
+  }
 };
 
 enum class TransparentStageFeedbackRefreshMode : uint8_t {
@@ -3307,10 +3329,13 @@ enum class TransparentStageFeedbackRefreshMode : uint8_t {
 
 using TransparentStageAppendFeedbackRefreshFn = Result<bool, std::string> (*)(
     void *user, RenderFrameContext &frame, RenderGraphBuilder &graph);
+using TransparentStageApplyFeedbackBindingsFn =
+    Result<bool, std::string> (*)(void *user, DrawItem &draw);
 
 struct TransparentStageFeedbackRefresh {
   void *user = nullptr;
   TransparentStageAppendFeedbackRefreshFn appendRefresh = nullptr;
+  TransparentStageApplyFeedbackBindingsFn applyDrawBindings = nullptr;
   TransparentStageFeedbackRefreshMode mode =
       TransparentStageFeedbackRefreshMode::BeforeEachDraw;
 };
@@ -3371,9 +3396,7 @@ struct RenderFrameContext {
   AmbientOcclusionExecutionPlan ambientOcclusion{};
   GpuTimingReport gpuTiming{};
   TemporalFrameService *temporalFrameService = nullptr;
-  const RenderSettings *settings = nullptr;
-  RenderSettings resolvedSettings{};
-  bool settingsResolved = false;
+  ResolvedRenderSettings settings{};
   RenderFrameMetrics metrics{};
   std::optional<OpaquePickRequest> opaquePickRequest{};
   std::optional<OpaquePickResult> opaquePickResult{};
@@ -3393,14 +3416,23 @@ struct RenderFrameContext {
   SubmissionHandle submission{};
 };
 
-[[nodiscard]] inline RenderSettings
+[[nodiscard]] inline ResolvedRenderSettings
 resolveRenderSettings(const RenderSettings &source) {
+  return ResolvedRenderSettings::fromAuthored(source);
+}
+
+inline ResolvedRenderSettings
+ResolvedRenderSettings::fromAuthored(const RenderSettings &source) {
   RenderSettings resolved = source;
   sanitizeVisibilitySettings(resolved.visibility);
   resolved.antiAliasing.temporalProvider =
       sanitizeTemporalReconstructionProvider(
           resolved.antiAliasing.temporalProvider);
   sanitizeAntiAliasingSettings(resolved.antiAliasing);
+  if (resolved.antiAliasing.qualityPreset != TemporalAAQualityPreset::Custom) {
+    resolved.antiAliasing.temporalTuning =
+        temporalAAQualityPresetTuning(resolved.antiAliasing.qualityPreset);
+  }
   sanitizeAmbientOcclusionSettings(resolved.ambientOcclusion, resolved.opaque,
                                    resolved.antiAliasing);
   sanitizeTextureFilteringSettings(resolved.textureFiltering);
@@ -3409,29 +3441,13 @@ resolveRenderSettings(const RenderSettings &source) {
   sanitizeTransmissionSettings(resolved.transmission);
   sanitizeShadowSettings(resolved.shadow);
   sanitizeDDGISettings(resolved.ddgi);
-  return resolved;
-}
-
-inline void resolveRenderSettingsForFrame(RenderFrameContext &frame) {
-  static const RenderSettings kDefaultSettings{};
-  frame.resolvedSettings = resolveRenderSettings(
-      frame.settings ? *frame.settings : kDefaultSettings);
-  frame.settingsResolved = true;
+  return ResolvedRenderSettings(std::move(resolved));
 }
 
 [[nodiscard]] inline bool
 isRenderCaptureRequested(const RenderFrameContext &frame,
                          std::string_view name) noexcept {
   return !frame.captureRequests.empty() && frame.captureRequests.contains(name);
-}
-
-[[nodiscard]] inline const RenderSettings &
-renderSettingsOrDefault(const RenderFrameContext &frame) {
-  static const RenderSettings kDefaultSettings{};
-  if (frame.settingsResolved) {
-    return frame.resolvedSettings;
-  }
-  return frame.settings ? *frame.settings : kDefaultSettings;
 }
 
 inline void resetFrameSharedResources(RenderFrameContext &frame) {
@@ -3442,7 +3458,8 @@ inline void resetFrameSharedResources(RenderFrameContext &frame) {
 
 [[nodiscard]] inline TextureHandle
 resolveFrameDepthTexture(const RenderFrameContext &frame) {
-  const TextureHandle depth = frame.sharedResources.sceneDepthTexture;
+  const TextureHandle depth =
+      frame.sharedResources[FrameTextureSlot::SceneDepth].texture;
   return nuri::isValid(depth) ? depth : frame.sharedDepthTexture;
 }
 
@@ -3450,7 +3467,7 @@ resolveFrameDepthTexture(const RenderFrameContext &frame) {
 resolveSceneColorMipTexture(const RenderFrameContext &frame,
                             uint32_t mipLevel) {
   const std::array textures{
-      frame.sharedResources.sceneColorTexture,
+      frame.sharedResources[FrameTextureSlot::SceneColor].texture,
       frame.sharedResources.sceneColorHalfResTexture,
       frame.sharedResources.sceneColorQuarterResTexture,
   };

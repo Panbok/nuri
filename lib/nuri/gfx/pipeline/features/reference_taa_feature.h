@@ -3,7 +3,6 @@
 #include "nuri/defines.h"
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/gfx/pipeline/render_pipeline.h"
-#include "nuri/gfx/shader.h"
 #include <array>
 #include <filesystem>
 #include <memory>
@@ -22,7 +21,6 @@ public:
 
 private:
   GPUDevice &gpu_;
-  std::unique_ptr<Shader> shader_{};
   ShaderHandle vertexShader_{};
   ShaderHandle fragmentShader_{};
   SamplerHandle linearClampSampler_{};

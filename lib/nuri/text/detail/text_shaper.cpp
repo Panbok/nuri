@@ -1,7 +1,6 @@
-#include "nuri/text/text_shaper.h"
+#include "nuri/text/detail/text_shaper.h"
 #include "nuri/core/containers/hash_map.h"
 #include "nuri/core/profiling.h"
-#include "nuri/pch.h"
 #include <hb.h>
 namespace nuri {
 namespace {

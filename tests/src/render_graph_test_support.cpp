@@ -391,6 +391,27 @@ FakeExecutorGPUDevice::createTexture(const TextureDesc &desc,
   return createTextureImpl(desc);
 }
 
+Result<bool, std::string>
+FakeExecutorGPUDevice::retainGraphicsRecordingReferences(
+    RecordingContextHandle, const GraphicsRecordingReferences &references) {
+  ++retainReferencesCallCount;
+  retainedBuffers.assign(references.buffers.begin(), references.buffers.end());
+  retainedTextures.assign(references.textures.begin(),
+                          references.textures.end());
+  retainedAccelerationStructures.assign(
+      references.accelerationStructures.begin(),
+      references.accelerationStructures.end());
+  retainedRenderPipelines.assign(references.renderPipelines.begin(),
+                                 references.renderPipelines.end());
+  retainedComputePipelines.assign(references.computePipelines.begin(),
+                                  references.computePipelines.end());
+  retainedMeshletPipelines.assign(references.meshletPipelines.begin(),
+                                  references.meshletPipelines.end());
+  retainedRayQueryBindings.assign(references.rayQueryBindings.begin(),
+                                  references.rayQueryBindings.end());
+  return Result<bool, std::string>::makeResult(true);
+}
+
 Result<TextureHandle, std::string>
 FakeGPUDeviceBase::createFramebufferTexture(const TextureDesc &desc,
                                             std::string_view) {

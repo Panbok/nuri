@@ -109,7 +109,6 @@ namespace {
 [[nodiscard]] nuri::ApplicationConfig
 makeSampleApplicationConfig(const nuri::RuntimeConfig &config) {
   nuri::ApplicationConfig appConfig = nuri::makeApplicationConfig(config);
-  appConfig.renderComposition = nuri::RenderCompositionMode::PipelineOnly;
   return appConfig;
 }
 
@@ -652,12 +651,8 @@ private:
   }
 
   void buildFrameContext(const nuri::Camera &camera, double timeSeconds) {
-    nuri::sanitizeHDRPostProcessSettings(renderSettings_.hdrPostProcess);
-    nuri::sanitizeTransmissionSettings(renderSettings_.transmission);
-    nuri::sanitizeAntiAliasingSettings(renderSettings_.antiAliasing);
-    nuri::sanitizeAmbientOcclusionSettings(renderSettings_.ambientOcclusion,
-                                           renderSettings_.opaque,
-                                           renderSettings_.antiAliasing);
+    nuri::ResolvedRenderSettings resolvedSettings =
+        nuri::resolveRenderSettings(renderSettings_);
     frameContext_.scene = &scene_;
     nuri::ResourceManager &resources = getRenderer().resources();
     frameContext_.resources = &resources;
@@ -671,12 +666,12 @@ private:
         .environmentVersion = scene_.environmentVersion(),
     };
     auto planResult = nuri::buildPresentationAAPlan(
-        renderSettings_, {}, getGPU().getMultisampleCapabilities());
+        resolvedSettings, {}, getGPU().getMultisampleCapabilities());
     NURI_ASSERT(!planResult.hasError(), "Invalid presentation AA plan: %s",
                 planResult.error().c_str());
     frameContext_.presentationAA = planResult.value();
     auto cameraResult = temporalFrameService_.prepareFrame(
-        camera, getAspectRatio(), renderSettings_.antiAliasing,
+        camera, getAspectRatio(), resolvedSettings.antiAliasing,
         frameContext_.presentationAA,
         nuri::TemporalCameraFrameDesc{
             .renderExtent =
@@ -690,7 +685,8 @@ private:
     frameContext_.camera = cameraResult.value();
     frameContext_.temporalFrameService = &temporalFrameService_;
     renderSettings_.antiAliasing.debug.resetHistoryRequested = false;
-    frameContext_.settings = &renderSettings_;
+    resolvedSettings.antiAliasing.debug.resetHistoryRequested = false;
+    frameContext_.settings = std::move(resolvedSettings);
     frameContext_.metrics = {};
     frameContext_.metrics.frameIndex = frameContext_.frameIndex;
     frameContext_.metrics.antiAliasing =

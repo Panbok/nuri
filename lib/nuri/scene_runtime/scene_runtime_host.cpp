@@ -1,11 +1,21 @@
 #include "nuri/scene_runtime/scene_runtime_host.h"
 #include "nuri/core/profiling.h"
-#include "nuri/pch.h"
 #include "nuri/sim/backends/animation_pose_simulation_backend.h"
 namespace nuri {
 namespace {
 [[nodiscard]] bool hasBindingTableData(const SceneRuntimeBindings &bindings) {
   return !bindings.nodes().empty() || !bindings.renderables().empty();
+}
+template <typename T>
+std::shared_ptr<const T>
+shareImmutable(const T *source,
+               std::unordered_map<const T *, std::weak_ptr<const T>> &owners) {
+  if (auto existing = owners[source].lock()) {
+    return existing;
+  }
+  auto owned = std::make_shared<const T>(*source);
+  owners[source] = owned;
+  return owned;
 }
 } // namespace
 
@@ -28,7 +38,6 @@ SimulationTickResult SceneRuntimeHost::tick(const SimulationTickInput &input) {
     lastTickResult_ = {};
     return lastTickResult_;
   }
-  gpuContext_.beginFrame(input.frameIndex);
   SimulationTickResult result = scheduler_.tick(*this, input);
   lastTickResult_ = result;
   return result;
@@ -80,8 +89,9 @@ SceneRuntimeHost::createAnimationPoseSimulation(
   }
   SimulationDesc desc = std::move(descResult.value());
   pendingAnimationPoseCreatePayload_ = AnimationPoseSimulationCreatePayload{
-      .prefab = createInfo.prefab,
-      .instantiationMap = createInfo.instantiationMap,
+      .prefab = shareImmutable(createInfo.prefab, animationPrefabOwners_),
+      .instantiationMap = shareImmutable(createInfo.instantiationMap,
+                                         animationInstantiationOwners_),
       .controlledPrefabNodeIndices = createInfo.controlledPrefabNodeIndices,
       .params = createInfo.params,
   };
@@ -105,9 +115,10 @@ SceneRuntimeHost::animationSceneFrameData() const noexcept {
 void SceneRuntimeHost::reset() {
   registry_.clear();
   bindings_.clear();
-  gpuContext_.reset();
   scheduler_.reset();
   animationPoseBackend_->reset();
+  animationPrefabOwners_.clear();
+  animationInstantiationOwners_.clear();
   bindingVersion_ = 0u;
   topologyVersion_ = scene_ != nullptr ? scene_->graph().topologyVersion() : 0u;
   lastTickResult_ = {};

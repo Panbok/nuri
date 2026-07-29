@@ -1,8 +1,9 @@
 #pragma once
 #include "nuri/defines.h"
-#include "nuri/pch.h"
 #include <cstdint>
+#include <exception>
 #include <string>
+#include <string_view>
 #include <vector>
 namespace nuri {
 
@@ -23,23 +24,12 @@ struct LogConfig {
   bool coloredConsole = true;
 };
 
-class NURI_API Log {
+class NURI_API Log final {
 public:
-  static std::unique_ptr<Log> create();
-  static std::unique_ptr<Log> create(const LogConfig &config);
   static void initialize();
   static void initialize(const LogConfig &config);
   static void shutdown();
-  static Log *get();
-  virtual ~Log() = default;
-  Log(const Log &) = delete;
-  Log &operator=(const Log &) = delete;
-  Log(Log &&) = delete;
-  Log &operator=(Log &&) = delete;
-  virtual void write(LogLevel level, std::string_view message) = 0;
-
-protected:
-  Log() = default;
+  Log() = delete;
 };
 
 NURI_API void logMessage(LogLevel level, std::string_view message);

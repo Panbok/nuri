@@ -1,5 +1,4 @@
 #include "nuri/resources/detail/gltf_buffer_utils.h"
-#include "nuri/pch.h"
 #include "nuri/resources/detail/gltf_json_utils.h"
 #include "nuri/resources/storage/cache_utils.h"
 namespace nuri::detail {
@@ -286,7 +285,7 @@ loadGltfBuffers(const std::filesystem::path &path, yyjson_val *root,
                   std::string>::makeResult(std::move(buffers));
   }
   std::vector<std::byte> glbBinaryChunk;
-  const bool isGlb = hasExtensionCaseInsensitive(path, ".glb");
+  const bool isGlb = pathHasExtensionCaseInsensitive(path, ".glb");
   if (isGlb) {
     auto glbChunkResult = loadGlbBinaryChunk(sourceBytes);
     if (glbChunkResult.hasError()) {

@@ -1,7 +1,6 @@
 #include "nuri/gfx/pipeline/render_pipeline.h"
 #include "nuri/core/profiling.h"
 #include "nuri/gfx/frame/presentation_aa_plan.h"
-#include "nuri/pch.h"
 #include "nuri/resources/gpu/resource_manager.h"
 namespace nuri {
 
@@ -62,17 +61,15 @@ RenderPipeline::buildRenderGraph(RenderFrameContext &frame,
   aaMetrics.msaaDepthResolveMinSupported = gpuCapabilities.depthResolveMin;
   aaMetrics.msaaAlphaToCoverageSupported = gpuCapabilities.alphaToCoverage;
   aaMetrics.msaaSampleRateShadingSupported = gpuCapabilities.sampleRateShading;
-  const AntiAliasingMode antiAliasingMode = sanitizeAntiAliasingMode(
-      renderSettingsOrDefault(frame).antiAliasing.mode);
+  const AntiAliasingMode antiAliasingMode = frame.settings.antiAliasing.mode;
   aaMetrics.msaaAlphaCoverageRequested = isMsaaMode(antiAliasingMode);
-  frame.metrics.ddgi.requested =
-      renderSettingsOrDefault(frame).ddgi.enabled ? 1u : 0u;
+  frame.metrics.ddgi.requested = frame.settings.ddgi.enabled ? 1u : 0u;
   aaMetrics.msaaUnsupportedReason =
       isMsaaMode(antiAliasingMode)
           ? msaaUnsupportedReason(antiAliasingMode, gpuCapabilities)
           : PresentationAAUnsupportedReason::None;
-  auto presentationPlan = buildPresentationAAPlan(
-      renderSettingsOrDefault(frame), {}, gpuCapabilities);
+  auto presentationPlan =
+      buildPresentationAAPlan(frame.settings, {}, gpuCapabilities);
   if (presentationPlan.hasError()) {
     return Result<bool, std::string>::makeError(presentationPlan.error());
   }

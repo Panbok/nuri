@@ -221,19 +221,25 @@ TEST(DDGISchedulerTests, TieredSchedulerGuaranteesOneProbePerReadyTier) {
   const std::array candidates{
       nuri::DDGITieredProbeScheduleCandidate{
           .tierStableKey = 11u,
-          .volumeStableId = 0u,
-          .probeId = 10u,
-          .state = nuri::DDGIProbeState::Vigilant},
+          .probe =
+              nuri::DDGIProbeScheduleCandidate{
+                  .volumeStableId = 0u,
+                  .probeId = 10u,
+                  .state = nuri::DDGIProbeState::Vigilant}},
       nuri::DDGITieredProbeScheduleCandidate{
           .tierStableKey = 11u,
-          .volumeStableId = 0u,
-          .probeId = 11u,
-          .state = nuri::DDGIProbeState::Vigilant},
+          .probe =
+              nuri::DDGIProbeScheduleCandidate{
+                  .volumeStableId = 0u,
+                  .probeId = 11u,
+                  .state = nuri::DDGIProbeState::Vigilant}},
       nuri::DDGITieredProbeScheduleCandidate{
           .tierStableKey = 22u,
-          .volumeStableId = 1u,
-          .probeId = 20u,
-          .state = nuri::DDGIProbeState::Vigilant},
+          .probe =
+              nuri::DDGIProbeScheduleCandidate{
+                  .volumeStableId = 1u,
+                  .probeId = 20u,
+                  .state = nuri::DDGIProbeState::Vigilant}},
   };
   std::array<nuri::DDGITieredProbeScheduleCandidate, candidates.size()>
       workspace{};
@@ -265,42 +271,54 @@ TEST(DDGISchedulerTests,
   const std::array tiers{nuri::DDGITierScheduleInput{
       .stableKey = 1u, .effectiveOrder = 0u, .weight = 1u}};
   const std::array candidates{
-      nuri::DDGITieredProbeScheduleCandidate{.tierStableKey = 1u,
-                                             .volumeStableId = 2u,
-                                             .probeId = 4u,
-                                             .state =
-                                                 nuri::DDGIProbeState::Vigilant,
-                                             .lastSubmittedUpdate = 8u},
-      nuri::DDGITieredProbeScheduleCandidate{.tierStableKey = 1u,
-                                             .volumeStableId = 2u,
-                                             .probeId = 7u,
-                                             .state =
-                                                 nuri::DDGIProbeState::Vigilant,
-                                             .lastSubmittedUpdate = 2u},
-      nuri::DDGITieredProbeScheduleCandidate{.tierStableKey = 1u,
-                                             .volumeStableId = 1u,
-                                             .probeId = 9u,
-                                             .state =
-                                                 nuri::DDGIProbeState::Vigilant,
-                                             .lastSubmittedUpdate = 3u},
-      nuri::DDGITieredProbeScheduleCandidate{.tierStableKey = 1u,
-                                             .volumeStableId = 1u,
-                                             .probeId = 3u,
-                                             .state =
-                                                 nuri::DDGIProbeState::Vigilant,
-                                             .lastSubmittedUpdate = 1u},
-      nuri::DDGITieredProbeScheduleCandidate{.tierStableKey = 1u,
-                                             .volumeStableId = 1u,
-                                             .probeId = 5u,
-                                             .state =
-                                                 nuri::DDGIProbeState::Vigilant,
-                                             .lastSubmittedUpdate = 2u},
-      nuri::DDGITieredProbeScheduleCandidate{.tierStableKey = 1u,
-                                             .volumeStableId = 3u,
-                                             .probeId = 0u,
-                                             .state =
-                                                 nuri::DDGIProbeState::Vigilant,
-                                             .lastSubmittedUpdate = 9u},
+      nuri::DDGITieredProbeScheduleCandidate{
+          .tierStableKey = 1u,
+          .probe =
+              nuri::DDGIProbeScheduleCandidate{
+                  .volumeStableId = 2u,
+                  .probeId = 4u,
+                  .state = nuri::DDGIProbeState::Vigilant,
+                  .lastSubmittedUpdate = 8u}},
+      nuri::DDGITieredProbeScheduleCandidate{
+          .tierStableKey = 1u,
+          .probe =
+              nuri::DDGIProbeScheduleCandidate{
+                  .volumeStableId = 2u,
+                  .probeId = 7u,
+                  .state = nuri::DDGIProbeState::Vigilant,
+                  .lastSubmittedUpdate = 2u}},
+      nuri::DDGITieredProbeScheduleCandidate{
+          .tierStableKey = 1u,
+          .probe =
+              nuri::DDGIProbeScheduleCandidate{
+                  .volumeStableId = 1u,
+                  .probeId = 9u,
+                  .state = nuri::DDGIProbeState::Vigilant,
+                  .lastSubmittedUpdate = 3u}},
+      nuri::DDGITieredProbeScheduleCandidate{
+          .tierStableKey = 1u,
+          .probe =
+              nuri::DDGIProbeScheduleCandidate{
+                  .volumeStableId = 1u,
+                  .probeId = 3u,
+                  .state = nuri::DDGIProbeState::Vigilant,
+                  .lastSubmittedUpdate = 1u}},
+      nuri::DDGITieredProbeScheduleCandidate{
+          .tierStableKey = 1u,
+          .probe =
+              nuri::DDGIProbeScheduleCandidate{
+                  .volumeStableId = 1u,
+                  .probeId = 5u,
+                  .state = nuri::DDGIProbeState::Vigilant,
+                  .lastSubmittedUpdate = 2u}},
+      nuri::DDGITieredProbeScheduleCandidate{
+          .tierStableKey = 1u,
+          .probe =
+              nuri::DDGIProbeScheduleCandidate{
+                  .volumeStableId = 3u,
+                  .probeId = 0u,
+                  .state = nuri::DDGIProbeState::Vigilant,
+                  .lastSubmittedUpdate = 9u}},
   };
   std::array<nuri::DDGITieredProbeScheduleCandidate, candidates.size()>
       workspace{};
@@ -331,18 +349,22 @@ TEST(DDGISchedulerTests,
   const std::array candidates{
       nuri::DDGITieredProbeScheduleCandidate{
           .tierStableKey = 1u,
-          .volumeStableId = 0u,
-          .probeId = 10u,
-          .state = nuri::DDGIProbeState::Uninitialized,
-          .lastSubmittedUpdate = 1u,
-          .classificationIteration = 0u},
+          .probe =
+              nuri::DDGIProbeScheduleCandidate{
+                  .volumeStableId = 0u,
+                  .probeId = 10u,
+                  .state = nuri::DDGIProbeState::Uninitialized,
+                  .lastSubmittedUpdate = 1u,
+                  .classificationIteration = 0u}},
       nuri::DDGITieredProbeScheduleCandidate{
           .tierStableKey = 1u,
-          .volumeStableId = 0u,
-          .probeId = 20u,
-          .state = nuri::DDGIProbeState::Uninitialized,
-          .lastSubmittedUpdate = 9u,
-          .classificationIteration = 4u},
+          .probe =
+              nuri::DDGIProbeScheduleCandidate{
+                  .volumeStableId = 0u,
+                  .probeId = 20u,
+                  .state = nuri::DDGIProbeState::Uninitialized,
+                  .lastSubmittedUpdate = 9u,
+                  .classificationIteration = 4u}},
   };
   std::array<nuri::DDGITieredProbeScheduleCandidate, candidates.size()>
       workspace{};
@@ -372,30 +394,40 @@ TEST(DDGISchedulerTests,
   const std::array candidates{
       nuri::DDGITieredProbeScheduleCandidate{
           .tierStableKey = 1u,
-          .volumeStableId = 0u,
-          .probeId = 10u,
-          .state = nuri::DDGIProbeState::Vigilant},
-      nuri::DDGITieredProbeScheduleCandidate{.tierStableKey = 1u,
-                                             .volumeStableId = 0u,
-                                             .probeId = 11u,
-                                             .state =
-                                                 nuri::DDGIProbeState::Awake},
+          .probe =
+              nuri::DDGIProbeScheduleCandidate{
+                  .volumeStableId = 0u,
+                  .probeId = 10u,
+                  .state = nuri::DDGIProbeState::Vigilant}},
+      nuri::DDGITieredProbeScheduleCandidate{
+          .tierStableKey = 1u,
+          .probe =
+              nuri::DDGIProbeScheduleCandidate{
+                  .volumeStableId = 0u,
+                  .probeId = 11u,
+                  .state = nuri::DDGIProbeState::Awake}},
       nuri::DDGITieredProbeScheduleCandidate{
           .tierStableKey = 2u,
-          .volumeStableId = 1u,
-          .probeId = 20u,
-          .state = nuri::DDGIProbeState::Uninitialized},
+          .probe =
+              nuri::DDGIProbeScheduleCandidate{
+                  .volumeStableId = 1u,
+                  .probeId = 20u,
+                  .state = nuri::DDGIProbeState::Uninitialized}},
       nuri::DDGITieredProbeScheduleCandidate{
           .tierStableKey = 2u,
-          .volumeStableId = 1u,
-          .probeId = 21u,
-          .state = nuri::DDGIProbeState::NewlyAwake},
-      nuri::DDGITieredProbeScheduleCandidate{.tierStableKey = 2u,
-                                             .volumeStableId = 1u,
-                                             .probeId = 22u,
-                                             .state =
-                                                 nuri::DDGIProbeState::Vigilant,
-                                             .invalidated = true},
+          .probe =
+              nuri::DDGIProbeScheduleCandidate{
+                  .volumeStableId = 1u,
+                  .probeId = 21u,
+                  .state = nuri::DDGIProbeState::NewlyAwake}},
+      nuri::DDGITieredProbeScheduleCandidate{
+          .tierStableKey = 2u,
+          .probe =
+              nuri::DDGIProbeScheduleCandidate{
+                  .volumeStableId = 1u,
+                  .probeId = 22u,
+                  .state = nuri::DDGIProbeState::Vigilant,
+                  .invalidated = true}},
   };
   std::array<nuri::DDGITieredProbeScheduleCandidate, candidates.size()>
       workspace{};
@@ -433,24 +465,32 @@ TEST(DDGISchedulerTests, TieredSchedulerReservesHalfCapacityForUrgentWork) {
   const std::array candidates{
       nuri::DDGITieredProbeScheduleCandidate{
           .tierStableKey = 2u,
-          .volumeStableId = 1u,
-          .probeId = 3u,
-          .state = nuri::DDGIProbeState::NewlyAwake},
+          .probe =
+              nuri::DDGIProbeScheduleCandidate{
+                  .volumeStableId = 1u,
+                  .probeId = 3u,
+                  .state = nuri::DDGIProbeState::NewlyAwake}},
       nuri::DDGITieredProbeScheduleCandidate{
           .tierStableKey = 2u,
-          .volumeStableId = 1u,
-          .probeId = 1u,
-          .state = nuri::DDGIProbeState::Uninitialized},
+          .probe =
+              nuri::DDGIProbeScheduleCandidate{
+                  .volumeStableId = 1u,
+                  .probeId = 1u,
+                  .state = nuri::DDGIProbeState::Uninitialized}},
       nuri::DDGITieredProbeScheduleCandidate{
           .tierStableKey = 2u,
-          .volumeStableId = 1u,
-          .probeId = 2u,
-          .state = nuri::DDGIProbeState::Uninitialized},
+          .probe =
+              nuri::DDGIProbeScheduleCandidate{
+                  .volumeStableId = 1u,
+                  .probeId = 2u,
+                  .state = nuri::DDGIProbeState::Uninitialized}},
       nuri::DDGITieredProbeScheduleCandidate{
           .tierStableKey = 1u,
-          .volumeStableId = 0u,
-          .probeId = 9u,
-          .state = nuri::DDGIProbeState::Vigilant},
+          .probe =
+              nuri::DDGIProbeScheduleCandidate{
+                  .volumeStableId = 0u,
+                  .probeId = 9u,
+                  .state = nuri::DDGIProbeState::Vigilant}},
   };
   std::array<nuri::DDGITieredProbeScheduleCandidate, candidates.size()>
       workspace{};
@@ -482,24 +522,32 @@ TEST(DDGISchedulerTests, TieredSchedulerRollsUnusedQuotaInEffectiveOrder) {
   const std::array candidates{
       nuri::DDGITieredProbeScheduleCandidate{
           .tierStableKey = 10u,
-          .volumeStableId = 0u,
-          .probeId = 0u,
-          .state = nuri::DDGIProbeState::Vigilant},
+          .probe =
+              nuri::DDGIProbeScheduleCandidate{
+                  .volumeStableId = 0u,
+                  .probeId = 0u,
+                  .state = nuri::DDGIProbeState::Vigilant}},
       nuri::DDGITieredProbeScheduleCandidate{
           .tierStableKey = 20u,
-          .volumeStableId = 1u,
-          .probeId = 0u,
-          .state = nuri::DDGIProbeState::Vigilant},
+          .probe =
+              nuri::DDGIProbeScheduleCandidate{
+                  .volumeStableId = 1u,
+                  .probeId = 0u,
+                  .state = nuri::DDGIProbeState::Vigilant}},
       nuri::DDGITieredProbeScheduleCandidate{
           .tierStableKey = 20u,
-          .volumeStableId = 1u,
-          .probeId = 1u,
-          .state = nuri::DDGIProbeState::Vigilant},
+          .probe =
+              nuri::DDGIProbeScheduleCandidate{
+                  .volumeStableId = 1u,
+                  .probeId = 1u,
+                  .state = nuri::DDGIProbeState::Vigilant}},
       nuri::DDGITieredProbeScheduleCandidate{
           .tierStableKey = 20u,
-          .volumeStableId = 1u,
-          .probeId = 2u,
-          .state = nuri::DDGIProbeState::Vigilant},
+          .probe =
+              nuri::DDGIProbeScheduleCandidate{
+                  .volumeStableId = 1u,
+                  .probeId = 2u,
+                  .state = nuri::DDGIProbeState::Vigilant}},
   };
   std::array<nuri::DDGITieredProbeScheduleCandidate, candidates.size()>
       workspace{};
@@ -530,14 +578,18 @@ TEST(DDGISchedulerTests, TieredSchedulerReturnsPendingStarvationFacts) {
   const std::array candidates{
       nuri::DDGITieredProbeScheduleCandidate{
           .tierStableKey = 100u,
-          .volumeStableId = 0u,
-          .probeId = 0u,
-          .state = nuri::DDGIProbeState::Vigilant},
+          .probe =
+              nuri::DDGIProbeScheduleCandidate{
+                  .volumeStableId = 0u,
+                  .probeId = 0u,
+                  .state = nuri::DDGIProbeState::Vigilant}},
       nuri::DDGITieredProbeScheduleCandidate{
           .tierStableKey = 200u,
-          .volumeStableId = 1u,
-          .probeId = 0u,
-          .state = nuri::DDGIProbeState::Vigilant},
+          .probe =
+              nuri::DDGIProbeScheduleCandidate{
+                  .volumeStableId = 1u,
+                  .probeId = 0u,
+                  .state = nuri::DDGIProbeState::Vigilant}},
   };
   std::array<nuri::DDGITieredProbeScheduleCandidate, candidates.size()>
       workspace{};
@@ -560,9 +612,10 @@ TEST(DDGISchedulerTests, TieredDeficitIgnoresUnusableFrameCapacity) {
       .stableKey = 1u, .effectiveOrder = 0u, .weight = 4u}};
   const std::array candidates{nuri::DDGITieredProbeScheduleCandidate{
       .tierStableKey = 1u,
-      .volumeStableId = 0u,
-      .probeId = 0u,
-      .state = nuri::DDGIProbeState::Vigilant}};
+      .probe = nuri::DDGIProbeScheduleCandidate{
+          .volumeStableId = 0u,
+          .probeId = 0u,
+          .state = nuri::DDGIProbeState::Vigilant}}};
   std::array<nuri::DDGITieredProbeScheduleCandidate, 1> workspace{};
   std::array<nuri::DDGIProbeUpdateEntry, 8> output{};
 
@@ -581,21 +634,27 @@ TEST(DDGISchedulerTests,
      TieredScheduleUsesRecoveredClassificationQueryCapacityExactly) {
   const std::array tiers{nuri::DDGITierScheduleInput{
       .stableKey = 1u, .effectiveOrder = 0u, .weight = 1u}};
-  const std::array candidates{nuri::DDGITieredProbeScheduleCandidate{
-                                  .tierStableKey = 1u,
-                                  .volumeStableId = 0u,
-                                  .probeId = 0u,
-                                  .state = nuri::DDGIProbeState::Uninitialized},
-                              nuri::DDGITieredProbeScheduleCandidate{
-                                  .tierStableKey = 1u,
-                                  .volumeStableId = 0u,
-                                  .probeId = 1u,
-                                  .state = nuri::DDGIProbeState::Uninitialized},
-                              nuri::DDGITieredProbeScheduleCandidate{
-                                  .tierStableKey = 1u,
-                                  .volumeStableId = 0u,
-                                  .probeId = 2u,
-                                  .state = nuri::DDGIProbeState::Vigilant}};
+  const std::array candidates{
+      nuri::DDGITieredProbeScheduleCandidate{
+          .tierStableKey = 1u,
+          .probe =
+              nuri::DDGIProbeScheduleCandidate{
+                  .volumeStableId = 0u,
+                  .probeId = 0u,
+                  .state = nuri::DDGIProbeState::Uninitialized}},
+      nuri::DDGITieredProbeScheduleCandidate{
+          .tierStableKey = 1u,
+          .probe =
+              nuri::DDGIProbeScheduleCandidate{
+                  .volumeStableId = 0u,
+                  .probeId = 1u,
+                  .state = nuri::DDGIProbeState::Uninitialized}},
+      nuri::DDGITieredProbeScheduleCandidate{
+          .tierStableKey = 1u,
+          .probe = nuri::DDGIProbeScheduleCandidate{
+              .volumeStableId = 0u,
+              .probeId = 2u,
+              .state = nuri::DDGIProbeState::Vigilant}}};
   std::array<nuri::DDGITieredProbeScheduleCandidate, candidates.size()>
       workspace{};
   std::array<nuri::DDGIProbeUpdateEntry, candidates.size()> output{};
@@ -635,34 +694,46 @@ TEST(DDGISchedulerTests,
   const std::array candidates{
       nuri::DDGITieredProbeScheduleCandidate{
           .tierStableKey = 1u,
-          .volumeStableId = 0u,
-          .probeId = 0u,
-          .state = nuri::DDGIProbeState::NewlyAwake},
+          .probe =
+              nuri::DDGIProbeScheduleCandidate{
+                  .volumeStableId = 0u,
+                  .probeId = 0u,
+                  .state = nuri::DDGIProbeState::NewlyAwake}},
       nuri::DDGITieredProbeScheduleCandidate{
           .tierStableKey = 1u,
-          .volumeStableId = 0u,
-          .probeId = 1u,
-          .state = nuri::DDGIProbeState::NewlyAwake},
+          .probe =
+              nuri::DDGIProbeScheduleCandidate{
+                  .volumeStableId = 0u,
+                  .probeId = 1u,
+                  .state = nuri::DDGIProbeState::NewlyAwake}},
       nuri::DDGITieredProbeScheduleCandidate{
           .tierStableKey = 1u,
-          .volumeStableId = 0u,
-          .probeId = 2u,
-          .state = nuri::DDGIProbeState::NewlyAwake},
+          .probe =
+              nuri::DDGIProbeScheduleCandidate{
+                  .volumeStableId = 0u,
+                  .probeId = 2u,
+                  .state = nuri::DDGIProbeState::NewlyAwake}},
       nuri::DDGITieredProbeScheduleCandidate{
           .tierStableKey = 2u,
-          .volumeStableId = 1u,
-          .probeId = 0u,
-          .state = nuri::DDGIProbeState::Uninitialized},
+          .probe =
+              nuri::DDGIProbeScheduleCandidate{
+                  .volumeStableId = 1u,
+                  .probeId = 0u,
+                  .state = nuri::DDGIProbeState::Uninitialized}},
       nuri::DDGITieredProbeScheduleCandidate{
           .tierStableKey = 2u,
-          .volumeStableId = 1u,
-          .probeId = 1u,
-          .state = nuri::DDGIProbeState::Uninitialized},
+          .probe =
+              nuri::DDGIProbeScheduleCandidate{
+                  .volumeStableId = 1u,
+                  .probeId = 1u,
+                  .state = nuri::DDGIProbeState::Uninitialized}},
       nuri::DDGITieredProbeScheduleCandidate{
           .tierStableKey = 2u,
-          .volumeStableId = 1u,
-          .probeId = 2u,
-          .state = nuri::DDGIProbeState::Uninitialized},
+          .probe =
+              nuri::DDGIProbeScheduleCandidate{
+                  .volumeStableId = 1u,
+                  .probeId = 2u,
+                  .state = nuri::DDGIProbeState::Uninitialized}},
   };
   std::array<nuri::DDGITieredProbeScheduleCandidate, candidates.size()>
       workspace{};

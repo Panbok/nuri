@@ -1,0 +1,33 @@
+{
+  "target": "ddgi_volume0_distance_atlas",
+  "capturePointVersion": 4,
+  "kind": "scalar",
+  "format": 14,
+  "width": 216,
+  "height": 216,
+  "mip": 0,
+  "layer": 0,
+  "rowStride": 864,
+  "origin": "top_left",
+  "colorSpace": "linear_normalized_distance",
+  "profile": "scalar",
+  "payload": "ddgi_volume0_distance_atlas.exr",
+  "hash": "sha256:36adc7ad8896f17d778ecbf4b2c97f52fd7544e9ed4d8b643c214b7681e7e8d6",
+  "ddgi": {
+    "valid": 1,
+    "effectiveKind": 0,
+    "effectiveKeyHash": 11247796127289098098,
+    "cascadeIndex": 4294967295,
+    "coverageGeneration": 1,
+    "layoutGeneration": 1,
+    "resourceGeneration": 1,
+    "sceneBoundsGeneration": 0,
+    "ringOrigin": [0, 0, 0],
+    "cameraCell": [0, 0, 0],
+    "requestedHalfExtents": [2.125, 1.275, 2.125],
+    "achievedHalfExtents": [2.125, 1.275, 2.125],
+    "fadeStartHalfExtents": [0, 0, 0],
+    "fadeEndHalfExtents": [2.125, 1.275, 2.125],
+    "transitionCells": 0
+  }
+}

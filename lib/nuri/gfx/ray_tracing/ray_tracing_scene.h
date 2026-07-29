@@ -4,7 +4,6 @@
 #include "nuri/gfx/owned_gpu_resource.h"
 #include "nuri/gfx/pipeline/render_pipeline.h"
 #include "nuri/gfx/ray_tracing/ray_tracing_types.h"
-#include "nuri/gfx/shader.h"
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -20,6 +19,7 @@ class GPUDevice;
 class Model;
 class SceneDrawDatabase;
 struct AnimationSceneFrameData;
+struct SceneDrawRecord;
 
 class NURI_API RayTracingScene final {
 public:
@@ -50,10 +50,6 @@ private:
 
   struct DecodeWork {
     DecodePushConstants constants{};
-    std::array<BufferHandle, 3u> dependencies{};
-    std::array<RenderGraphAccessMode, 3u> accessModes{
-        RenderGraphAccessMode::Read, RenderGraphAccessMode::Read,
-        RenderGraphAccessMode::Write};
   };
 
   struct DynamicVertexPushConstants {
@@ -114,9 +110,35 @@ private:
     bool boundsKnown = false;
   };
 
+  struct PendingFrame {
+    uint64_t frameIndex = UINT64_MAX;
+    uint64_t rebuildEpoch = 0u;
+    uint64_t transformVersion = 0u;
+    uint64_t animationVersion = 0u;
+    bool topology = false;
+    bool dynamic = false;
+    bool transform = false;
+  };
+
+  struct InstanceGeometrySource {
+    BufferHandle indexBuffer{};
+    uint64_t indexBaseOffset = 0u;
+    uint64_t vertexAddress = 0u;
+    uint64_t vertexDecodeAddress = 0u;
+    IndexFormat indexFormat = IndexFormat::U32;
+    uint32_t packedVertexFormat = 0u;
+    bool useDrawVertexLayout = false;
+  };
+
   [[nodiscard]] Result<bool, std::string> initialize();
   [[nodiscard]] Result<bool, std::string>
   rebuildStaticScene(FrameBuildContext &ctx, const SceneDrawDatabase &database);
+  [[nodiscard]] Result<bool, std::string>
+  appendInstance(std::span<const SceneDrawRecord> draws,
+                 uint32_t renderableIndex, const InstanceGeometrySource &source,
+                 uint32_t expectedGeometryCount,
+                 const glm::mat4 &worldFromObject,
+                 AccelerationStructureHandle blas, bool dynamic);
   [[nodiscard]] Result<bool, std::string>
   updateTransforms(FrameBuildContext &ctx, const SceneDrawDatabase &database);
   [[nodiscard]] Result<bool, std::string>
@@ -148,8 +170,6 @@ private:
   GPUDevice &gpu_;
   RuntimeDDGIShaderConfig config_{};
   std::pmr::memory_resource *memory_ = std::pmr::get_default_resource();
-  std::unique_ptr<Shader> decodeShader_{};
-  std::unique_ptr<Shader> dynamicVertexShader_{};
   OwnedComputePipelineHandle decodePipeline_{};
   OwnedComputePipelineHandle dynamicVertexPipeline_{};
   std::string initializationError_{};
@@ -170,8 +190,7 @@ private:
   std::pmr::vector<ComputeDispatchItem> decodeDispatches_;
   std::pmr::vector<DynamicVertexPushConstants> dynamicPushConstants_;
   std::pmr::vector<ComputeDispatchItem> dynamicDispatches_;
-  std::pmr::vector<BufferHandle> dependencyBuffers_;
-  std::pmr::vector<RenderGraphAccessMode> dependencyBufferModes_;
+  std::pmr::vector<RenderGraphBufferUse> dispatchBufferUses_;
   std::pmr::vector<AccelerationStructureBuildItem> blasBuildItems_;
   std::pmr::vector<RenderGraphBufferUse> blasBufferUses_;
   std::pmr::vector<RenderGraphAccelerationStructureUse> blasUses_;
@@ -186,15 +205,12 @@ private:
   uint64_t sceneId_ = 0u;
   uint64_t topologyVersion_ = 0u;
   uint64_t transformVersion_ = 0u;
-  uint64_t pendingTransformVersion_ = 0u;
   uint64_t deformationVersion_ = 0u;
   uint64_t geometryMutationVersion_ = 0u;
   uint64_t asScratchHighWaterBytes_ = 0u;
   uint64_t animationVersion_ = 0u;
-  uint64_t pendingAnimationVersion_ = 0u;
   uint64_t consumedRebuildEpoch_ = 0u;
-  uint64_t pendingRebuildEpoch_ = 0u;
-  uint64_t scheduledFrameIndex_ = UINT64_MAX;
+  PendingFrame pendingFrame_{};
   uint32_t excludedDynamicInstances_ = 0u;
   uint32_t staticInstanceCount_ = 0u;
   uint32_t staticSurfaceBoundsCount_ = 0u;
@@ -204,9 +220,6 @@ private:
   uint64_t geometryChangeFrameIndex_ = UINT64_MAX;
   bool geometryChangeOverflow_ = false;
   bool committedGeometryChangeOverflow_ = false;
-  bool topologyBuildScheduled_ = false;
-  bool dynamicUpdateScheduled_ = false;
-  bool transformUpdateScheduled_ = false;
   bool indirectReferencesDirty_ = true;
   bool ready_ = false;
   bool failed_ = false;

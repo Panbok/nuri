@@ -225,7 +225,7 @@ refreshImportedPrefabSceneResources(EditorRuntime &runtime,
 
 void loadImportedLightsForScene(std::string_view sceneName,
                                 std::string_view modelPath,
-                                std::vector<ImportedSceneLight> &outLights) {
+                                std::vector<ScenePrefabLight> &outLights) {
   auto loadResult = SceneImporter::loadSceneFromFile(modelPath);
   if (loadResult.hasError()) {
     NURI_LOG_WARNING("loadImportedLightsForScene: failed to import %s punctual "

@@ -2,7 +2,6 @@
 #include "nuri/core/profiling.h"
 #include "nuri/math/light.h"
 #include "nuri/math/utils.h"
-#include "nuri/pch.h"
 namespace nuri {
 namespace {
 constexpr uint32_t kMaxDirectionalLightCount = 4u;
@@ -50,50 +49,49 @@ template <typename Store>
   }
 }
 template <typename Store>
-void attachComponentToNode(Store &store, std::pmr::vector<uint32_t> &head,
-                           std::pmr::vector<uint32_t> &tail,
-                           uint32_t componentIndex, uint32_t nodeIndex) {
+void attachComponentToNode(Store &store, auto &links, uint32_t componentIndex,
+                           uint32_t nodeIndex) {
+  auto &link = links[nodeIndex];
   componentNode(store, componentIndex) = nodeIndex;
-  componentPrevious(store, componentIndex) = tail[nodeIndex];
+  componentPrevious(store, componentIndex) = link.tail;
   componentNext(store, componentIndex) = kInvalidSceneGraphIndex;
-  if (tail[nodeIndex] != kInvalidSceneGraphIndex) {
-    componentNext(store, tail[nodeIndex]) = componentIndex;
+  if (link.tail != kInvalidSceneGraphIndex) {
+    componentNext(store, link.tail) = componentIndex;
   } else {
-    head[nodeIndex] = componentIndex;
+    link.head = componentIndex;
   }
-  tail[nodeIndex] = componentIndex;
+  link.tail = componentIndex;
 }
 template <typename Store>
-void detachComponentFromNode(Store &store, std::pmr::vector<uint32_t> &head,
-                             std::pmr::vector<uint32_t> &tail,
+void detachComponentFromNode(Store &store, auto &links,
                              uint32_t componentIndex) {
   const uint32_t nodeIndex = componentNode(store, componentIndex);
-  if (nodeIndex == kInvalidSceneGraphIndex || nodeIndex >= head.size()) {
+  if (nodeIndex == kInvalidSceneGraphIndex || nodeIndex >= links.size()) {
     componentNode(store, componentIndex) = kInvalidSceneGraphIndex;
     componentPrevious(store, componentIndex) = kInvalidSceneGraphIndex;
     componentNext(store, componentIndex) = kInvalidSceneGraphIndex;
     return;
   }
+  auto &link = links[nodeIndex];
   const uint32_t prevIndex = componentPrevious(store, componentIndex);
   const uint32_t nextIndex = componentNext(store, componentIndex);
   if (prevIndex != kInvalidSceneGraphIndex) {
     componentNext(store, prevIndex) = nextIndex;
   } else {
-    head[nodeIndex] = nextIndex;
+    link.head = nextIndex;
   }
   if (nextIndex != kInvalidSceneGraphIndex) {
     componentPrevious(store, nextIndex) = prevIndex;
   } else {
-    tail[nodeIndex] = prevIndex;
+    link.tail = prevIndex;
   }
   componentNode(store, componentIndex) = kInvalidSceneGraphIndex;
   componentPrevious(store, componentIndex) = kInvalidSceneGraphIndex;
   componentNext(store, componentIndex) = kInvalidSceneGraphIndex;
 }
 template <typename Store>
-void recycleLightSlot(Store &store, std::pmr::vector<uint32_t> &head,
-                      std::pmr::vector<uint32_t> &tail, uint32_t lightIndex) {
-  detachComponentFromNode(store, head, tail, lightIndex);
+void recycleLightSlot(Store &store, auto &links, uint32_t lightIndex) {
+  detachComponentFromNode(store, links, lightIndex);
   store.slots.release(lightIndex);
 }
 template <typename Record>
@@ -187,7 +185,7 @@ template <typename Pool, typename Links>
   const uint32_t linkedIndex = links[indexOf(node)];
   out = linkedIndex == kInvalidSceneGraphIndex
             ? kInvalidNodeId
-            : makeNodeId(linkedIndex, slots.generation(linkedIndex));
+            : NodeId::fromParts(linkedIndex, slots.generation(linkedIndex));
   return true;
 }
 template <typename Pool, typename Storage, typename Id, typename Value,
@@ -251,7 +249,7 @@ void SceneGraph::clear() {
   const SlotReservation root = rootResult.value();
   const uint32_t rootIndex = root.index;
   nodes_.names[rootIndex] = "Root";
-  rootNode_ = makeNodeId(rootIndex, root.generation);
+  rootNode_ = NodeId::fromParts(rootIndex, root.generation);
 }
 
 Result<bool, std::string>
@@ -283,12 +281,10 @@ SceneGraph::reserveCapacityStep(SceneGraphCapacityReservation &reservation,
         reserveAll(nodeCapacity, nodes_.slots, nodes_.parent, nodes_.firstChild,
                    nodes_.nextSibling, nodes_.prevSibling, nodes_.depth,
                    nodes_.localFromParent, nodes_.worldFromRoot, nodes_.dirty,
-                   nodes_.dirtyRootQueued, nodes_.names, nodes_.renderableHead,
-                   nodes_.renderableTail, nodes_.ddgiVolumeHead,
-                   nodes_.ddgiVolumeTail);
+                   nodes_.dirtyRootQueued, nodes_.names, nodes_.renderableLinks,
+                   nodes_.ddgiVolumeLinks);
         for (size_t typeIndex = 0; typeIndex < kLightTypeCount; ++typeIndex) {
-          reserveAll(nodeCapacity, nodes_.lightHead[typeIndex],
-                     nodes_.lightTail[typeIndex]);
+          nodes_.lightLinks[typeIndex].reserve(nodeCapacity);
         }
         break;
       case 2u:
@@ -333,13 +329,10 @@ Result<SlotReservation, std::string> SceneGraph::allocateNodeSlot() {
     nodes_.dirty.push_back(0u);
     nodes_.dirtyRootQueued.push_back(0u);
     nodes_.names.emplace_back();
-    nodes_.renderableHead.push_back(kInvalidIndex);
-    nodes_.renderableTail.push_back(kInvalidIndex);
-    nodes_.ddgiVolumeHead.push_back(kInvalidIndex);
-    nodes_.ddgiVolumeTail.push_back(kInvalidIndex);
+    nodes_.renderableLinks.emplace_back();
+    nodes_.ddgiVolumeLinks.emplace_back();
     for (size_t typeIndex = 0; typeIndex < kLightTypeCount; ++typeIndex) {
-      nodes_.lightHead[typeIndex].push_back(kInvalidIndex);
-      nodes_.lightTail[typeIndex].push_back(kInvalidIndex);
+      nodes_.lightLinks[typeIndex].emplace_back();
     }
   }
   return Result<SlotReservation, std::string>::makeResult(slot);
@@ -494,8 +487,7 @@ void SceneGraph::markDDGIVolumeTransformsDirty(uint32_t rootIndex) noexcept {
 }
 
 void SceneGraph::recycleRenderableSlot(uint32_t index) noexcept {
-  detachComponentFromNode(renderableComponents_, nodes_.renderableHead,
-                          nodes_.renderableTail, index);
+  detachComponentFromNode(renderableComponents_, nodes_.renderableLinks, index);
   renderableComponents_.morphWeights[index].clear();
   renderableComponents_.skinPalette[index].clear();
   renderableComponents_.slots.release(index);
@@ -646,7 +638,7 @@ SceneGraph::createNode(NodeId parent, std::string_view name,
   noteTopologyMutation();
   noteTransformMutation();
   return Result<NodeId, std::string>::makeResult(
-      makeNodeId(index, slot.generation));
+      NodeId::fromParts(index, slot.generation));
 }
 
 bool SceneGraph::destroyNodeSubtree(NodeId node) {
@@ -669,23 +661,22 @@ bool SceneGraph::destroyNodeSubtree(NodeId node) {
   }
   detachNode(rootIndex);
   for (const uint32_t nodeIndex : nodesToDestroy) {
-    while (nodes_.renderableHead[nodeIndex] != kInvalidIndex) {
-      recycleRenderableSlot(nodes_.renderableHead[nodeIndex]);
+    while (nodes_.renderableLinks[nodeIndex].head != kInvalidIndex) {
+      recycleRenderableSlot(nodes_.renderableLinks[nodeIndex].head);
       renderableTopologyDirty_ = true;
     }
     for (size_t typeIndex = 0; typeIndex < kLightTypeCount; ++typeIndex) {
-      auto &head = nodes_.lightHead[typeIndex];
-      while (head[nodeIndex] != kInvalidIndex) {
-        recycleLightSlot(lights_[typeIndex], head, nodes_.lightTail[typeIndex],
-                         head[nodeIndex]);
+      auto &links = nodes_.lightLinks[typeIndex];
+      while (links[nodeIndex].head != kInvalidIndex) {
+        recycleLightSlot(lights_[typeIndex], links, links[nodeIndex].head);
         lightTopologyDirty_ = true;
         lightDataDirty_ = true;
       }
     }
-    while (nodes_.ddgiVolumeHead[nodeIndex] != kInvalidIndex) {
-      const uint32_t volumeIndex = nodes_.ddgiVolumeHead[nodeIndex];
-      detachComponentFromNode(ddgiVolumes_, nodes_.ddgiVolumeHead,
-                              nodes_.ddgiVolumeTail, volumeIndex);
+    while (nodes_.ddgiVolumeLinks[nodeIndex].head != kInvalidIndex) {
+      const uint32_t volumeIndex = nodes_.ddgiVolumeLinks[nodeIndex].head;
+      detachComponentFromNode(ddgiVolumes_, nodes_.ddgiVolumeLinks,
+                              volumeIndex);
       ddgiVolumes_.slots.release(volumeIndex);
       ddgiVolumeTopologyDirty_ = true;
       ddgiVolumeTransformsDirty_ = true;
@@ -816,8 +807,8 @@ SceneGraph::addRenderable(NodeId node, ModelRef model, MaterialRef material) {
   }
   const SlotReservation slot = slotResult.value();
   const uint32_t index = slot.index;
-  attachComponentToNode(renderableComponents_, nodes_.renderableHead,
-                        nodes_.renderableTail, index, indexOf(node));
+  attachComponentToNode(renderableComponents_, nodes_.renderableLinks, index,
+                        indexOf(node));
   renderableComponents_.models[index] = model;
   renderableComponents_.materials[index] = material;
   renderableComponents_.materialOverrides[index] = kInvalidMaterialRef;
@@ -826,7 +817,7 @@ SceneGraph::addRenderable(NodeId node, ModelRef model, MaterialRef material) {
   markTransformDependentsDirty();
   noteTopologyMutation();
   return Result<RenderableId, std::string>::makeResult(
-      makeRenderableId(index, slot.generation));
+      RenderableId::fromParts(index, slot.generation));
 }
 
 Result<uint32_t, std::string>
@@ -972,7 +963,7 @@ bool SceneGraph::getRenderableNode(RenderableId id, NodeId &out) const {
     return false;
   }
   const uint32_t nodeIndex = renderableComponents_.node[indexOf(id)];
-  out = makeNodeId(nodeIndex, nodes_.slots.generation(nodeIndex));
+  out = NodeId::fromParts(nodeIndex, nodes_.slots.generation(nodeIndex));
   return true;
 }
 
@@ -1001,8 +992,8 @@ Result<LightId, std::string> SceneGraph::addLight(NodeId node,
   auto &store = lights_[typeIndex];
   auto &record = store.records[slot.index];
   record.packedIndex = kInvalidIndex;
-  attachComponentToNode(store, nodes_.lightHead[typeIndex],
-                        nodes_.lightTail[typeIndex], slot.index, indexOf(node));
+  attachComponentToNode(store, nodes_.lightLinks[typeIndex], slot.index,
+                        indexOf(node));
   writeLightRecord(record, sanitized);
   lightTopologyDirty_ = true;
   lightDataDirty_ = true;
@@ -1016,8 +1007,8 @@ bool SceneGraph::removeLight(LightId id) {
     return false;
   }
   const size_t typeIndex = static_cast<size_t>(id.type);
-  recycleLightSlot(lights_[typeIndex], nodes_.lightHead[typeIndex],
-                   nodes_.lightTail[typeIndex], indexOf(id));
+  recycleLightSlot(lights_[typeIndex], nodes_.lightLinks[typeIndex],
+                   indexOf(id));
   lightTopologyDirty_ = true;
   lightDataDirty_ = true;
   return true;
@@ -1050,7 +1041,7 @@ bool SceneGraph::getLightNode(LightId id, NodeId &out) const {
   }
   const uint32_t nodeIndex =
       lights_[static_cast<size_t>(id.type)].records[indexOf(id)].node;
-  out = makeNodeId(nodeIndex, nodes_.slots.generation(nodeIndex));
+  out = NodeId::fromParts(nodeIndex, nodes_.slots.generation(nodeIndex));
   return true;
 }
 
@@ -1086,10 +1077,8 @@ bool SceneGraph::setLightNode(LightId id, NodeId node,
     localDesc = nuri::lightLocalFromWorld(worldDesc,
                                           nodes_.worldFromRoot[indexOf(node)]);
   }
-  detachComponentFromNode(store, nodes_.lightHead[typeIndex],
-                          nodes_.lightTail[typeIndex], indexOf(id));
-  attachComponentToNode(store, nodes_.lightHead[typeIndex],
-                        nodes_.lightTail[typeIndex], indexOf(id),
+  detachComponentFromNode(store, nodes_.lightLinks[typeIndex], indexOf(id));
+  attachComponentToNode(store, nodes_.lightLinks[typeIndex], indexOf(id),
                         indexOf(node));
   record.localPosition = localDesc.position;
   record.localRotation = localDesc.rotation;
@@ -1113,14 +1102,14 @@ SceneGraph::addDDGIVolume(NodeId node, const DDGIVolumeDesc &desc) {
     return Result<DDGIVolumeId, std::string>::makeError(slotResult.error());
   }
   const SlotReservation slot = slotResult.value();
-  attachComponentToNode(ddgiVolumes_, nodes_.ddgiVolumeHead,
-                        nodes_.ddgiVolumeTail, slot.index, indexOf(node));
+  attachComponentToNode(ddgiVolumes_, nodes_.ddgiVolumeLinks, slot.index,
+                        indexOf(node));
   writeDDGIVolumeRecord(ddgiVolumes_.records[slot.index], desc);
   ddgiVolumeTopologyDirty_ = true;
   ddgiVolumeTransformsDirty_ = true;
   ddgiVolumeSettingsDirty_ = true;
   return Result<DDGIVolumeId, std::string>::makeResult(
-      makeDDGIVolumeId(slot.index, slot.generation));
+      DDGIVolumeId::fromParts(slot.index, slot.generation));
 }
 
 bool SceneGraph::removeDDGIVolume(DDGIVolumeId id) {
@@ -1128,8 +1117,7 @@ bool SceneGraph::removeDDGIVolume(DDGIVolumeId id) {
   if (!ddgiVolumeSlotValid(id)) {
     return false;
   }
-  detachComponentFromNode(ddgiVolumes_, nodes_.ddgiVolumeHead,
-                          nodes_.ddgiVolumeTail, indexOf(id));
+  detachComponentFromNode(ddgiVolumes_, nodes_.ddgiVolumeLinks, indexOf(id));
   ddgiVolumes_.slots.release(indexOf(id));
   ddgiVolumeTopologyDirty_ = true;
   ddgiVolumeTransformsDirty_ = true;
@@ -1167,7 +1155,7 @@ bool SceneGraph::getDDGIVolumeNode(DDGIVolumeId id, NodeId &out) const {
     return false;
   }
   const uint32_t nodeIndex = ddgiVolumes_.records[indexOf(id)].node;
-  out = makeNodeId(nodeIndex, nodes_.slots.generation(nodeIndex));
+  out = NodeId::fromParts(nodeIndex, nodes_.slots.generation(nodeIndex));
   return true;
 }
 
@@ -1375,10 +1363,8 @@ void SceneGraph::clearRenderables() {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
   const bool hadRenderables = renderableComponents_.slots.liveCount() != 0u;
   renderableComponents_ = RenderableStore(memory_);
-  std::fill(nodes_.renderableHead.begin(), nodes_.renderableHead.end(),
-            kInvalidIndex);
-  std::fill(nodes_.renderableTail.begin(), nodes_.renderableTail.end(),
-            kInvalidIndex);
+  std::fill(nodes_.renderableLinks.begin(), nodes_.renderableLinks.end(),
+            NodeComponentLink{});
   renderableTopologyDirty_ = true;
   renderableTransformsDirty_ = false;
   if (hadRenderables) {
@@ -1390,10 +1376,8 @@ void SceneGraph::clearLights() {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
   for (size_t typeIndex = 0; typeIndex < kLightTypeCount; ++typeIndex) {
     lights_[typeIndex] = LightStore(memory_);
-    std::fill(nodes_.lightHead[typeIndex].begin(),
-              nodes_.lightHead[typeIndex].end(), kInvalidIndex);
-    std::fill(nodes_.lightTail[typeIndex].begin(),
-              nodes_.lightTail[typeIndex].end(), kInvalidIndex);
+    std::fill(nodes_.lightLinks[typeIndex].begin(),
+              nodes_.lightLinks[typeIndex].end(), NodeComponentLink{});
   }
   lightTopologyDirty_ = true;
   lightDataDirty_ = false;
@@ -1403,10 +1387,8 @@ void SceneGraph::clearDDGIVolumes() {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
   const bool hadVolumes = ddgiVolumes_.slots.liveCount() != 0u;
   ddgiVolumes_ = DDGIVolumeStore(memory_);
-  std::fill(nodes_.ddgiVolumeHead.begin(), nodes_.ddgiVolumeHead.end(),
-            kInvalidIndex);
-  std::fill(nodes_.ddgiVolumeTail.begin(), nodes_.ddgiVolumeTail.end(),
-            kInvalidIndex);
+  std::fill(nodes_.ddgiVolumeLinks.begin(), nodes_.ddgiVolumeLinks.end(),
+            NodeComponentLink{});
   ddgiVolumeTopologyDirty_ |= hadVolumes;
   ddgiVolumeTransformsDirty_ |= hadVolumes;
   ddgiVolumeSettingsDirty_ |= hadVolumes;

@@ -1,0 +1,33 @@
+{
+    "schemaVersion": 1,
+    "kind": "nuri.baseline.approval",
+    "caseId": "correctness.procedural.ddgi_thin_wall_360p",
+    "suite": "correctness",
+    "profileId": "local-nvrhi-visible",
+    "backend": "default",
+    "resolvedBackend": "nvrhi",
+    "reason": "User-authorized stable DDGI visual baseline; Hybrid coverage excluded in favor of SceneFit",
+    "actor": "Codex",
+    "approvedAtUtc": "2026-07-28T08:29:38Z",
+    "sourceCommit": "698d4e86f6923f1ca26185f3b1a5c1045273740d",
+    "sourceDigest": "sha256:cac45a227e49cb73a31b3b0e03e82e9ae678b7a5d60c68b33e3b46c6dc77c508",
+    "planDigest": "sha256:aa4cc93e7100f56b8d380d7e2cb7ef3d1ab64d8d48d23840e5790afbf17336e4",
+    "captures": [
+        {
+            "target": "final_color",
+            "newHash": "sha256:407b2a64fe4e86df6d83f2482910ca5fb23f81756943ad1d3c97a4d5bc1c217f"
+        },
+        {
+            "target": "ddgi_debug_preview",
+            "newHash": "sha256:669015aa2e72e1d01d3cf83d2eddf6d9bfab1a18688b0789626c0936cff76027"
+        },
+        {
+            "target": "ddgi_volume0_irradiance_atlas",
+            "newHash": "sha256:708b207542047d72a3ce4f5d128b423c851ebce174bd2012990e74f816ae8b49"
+        },
+        {
+            "target": "ddgi_volume0_distance_atlas",
+            "newHash": "sha256:fe120c82772d274aab0b526793e9ff1e544c402ef87a3d01478d1f9dace4543f"
+        }
+    ]
+}

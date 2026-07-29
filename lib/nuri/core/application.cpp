@@ -5,7 +5,6 @@
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/gfx/pipeline/default_render_pipeline.h"
 #include "nuri/gfx/renderer.h"
-#include "nuri/pch.h"
 #include <thread>
 namespace nuri {
 namespace {

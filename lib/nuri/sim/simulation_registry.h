@@ -56,14 +56,16 @@ public:
       if constexpr (std::is_same_v<
                         std::invoke_result_t<Fn &, SimulationHandle, Record &>,
                         bool>) {
-        if (!std::invoke(fn,
-                         makeSimulationHandle(index, slots_.generation(index)),
-                         records_[index])) {
+        if (!std::invoke(
+                fn,
+                SimulationHandle::fromParts(index, slots_.generation(index)),
+                records_[index])) {
           break;
         }
       } else {
-        std::invoke(fn, makeSimulationHandle(index, slots_.generation(index)),
-                    records_[index]);
+        std::invoke(
+            fn, SimulationHandle::fromParts(index, slots_.generation(index)),
+            records_[index]);
       }
     }
   }
@@ -75,14 +77,16 @@ public:
       if constexpr (std::is_same_v<std::invoke_result_t<Fn &, SimulationHandle,
                                                         const Record &>,
                                    bool>) {
-        if (!std::invoke(fn,
-                         makeSimulationHandle(index, slots_.generation(index)),
-                         records_[index])) {
+        if (!std::invoke(
+                fn,
+                SimulationHandle::fromParts(index, slots_.generation(index)),
+                records_[index])) {
           break;
         }
       } else {
-        std::invoke(fn, makeSimulationHandle(index, slots_.generation(index)),
-                    records_[index]);
+        std::invoke(
+            fn, SimulationHandle::fromParts(index, slots_.generation(index)),
+            records_[index]);
       }
     }
   }

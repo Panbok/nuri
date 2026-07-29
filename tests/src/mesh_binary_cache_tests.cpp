@@ -1,9 +1,9 @@
 #include "tests_pch.h"
 
 #include "nuri/resources/gpu/model.h"
+#include "nuri/resources/storage/cache_utils.h"
 #include "nuri/resources/storage/mesh/mesh_binary_format.h"
 #include "nuri/resources/storage/mesh/mesh_binary_serializer.h"
-#include "nuri/resources/storage/mesh/mesh_cache_utils.h"
 #include "render_graph_test_support.h"
 
 #include <gtest/gtest.h>

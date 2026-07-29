@@ -1,0 +1,21 @@
+{
+    "schemaVersion": 1,
+    "kind": "nuri.baseline.approval",
+    "caseId": "renderer.niagara_bistro.ddgi_high_volume_id_gtao_ultra_msaa8_540p",
+    "suite": "renderer",
+    "profileId": "local-nvrhi-visible",
+    "backend": "nvrhi",
+    "resolvedBackend": "nvrhi",
+    "reason": "User-authorized stable DDGI visual baseline; Hybrid coverage excluded in favor of SceneFit",
+    "actor": "Codex",
+    "approvedAtUtc": "2026-07-28T08:30:16Z",
+    "sourceCommit": "698d4e86f6923f1ca26185f3b1a5c1045273740d",
+    "sourceDigest": "sha256:7796c73d7a45d1ceb8f435e0f2bc7182e4ee4e5905591ce3e08461ebe12655db",
+    "planDigest": "sha256:a75c5667e19dc871a65e65f246e2b2aa02a4d7c3a69c82f1df1f10d7aa90dccc",
+    "captures": [
+        {
+            "target": "final_color",
+            "newHash": "sha256:408ff28f72a4873f6de667619c36e5dec75766233ababb6b8adcabf34b5bd51e"
+        }
+    ]
+}

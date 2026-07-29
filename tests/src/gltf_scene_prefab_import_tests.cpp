@@ -304,7 +304,7 @@ readSinglePrimitiveNodeMaterialExpectations(const std::filesystem::path &path) {
 }
 
 [[nodiscard]] std::vector<std::string>
-buildImportedNodePaths(const nuri::ImportedScene &scene) {
+buildImportedNodePaths(const nuri::ScenePrefab &scene) {
   std::vector<std::vector<uint32_t>> children(scene.nodes.size());
   for (uint32_t nodeIndex = 0u; nodeIndex < scene.nodes.size(); ++nodeIndex) {
     const uint32_t parentIndex = scene.nodes[nodeIndex].parentIndex;
@@ -472,7 +472,7 @@ TEST(GltfScenePrefabImport, LoadsPrefabHierarchyRenderablesAndLightsFromFile) {
   const std::filesystem::path gltfPath = dir.path / "prefab_scene.gltf";
   writeTextFile(gltfPath, json);
 
-  auto result = nuri::SceneImporter::loadScenePrefabFromFile(gltfPath.string());
+  auto result = nuri::SceneImporter::loadSceneFromFile(gltfPath.string());
   ASSERT_FALSE(result.hasError()) << result.error();
 
   const nuri::ScenePrefab &prefab = result.value();
@@ -771,7 +771,7 @@ TEST(GltfScenePrefabImport, PreservesSingleMeshPrimitiveMaterialBindings) {
       nuri::SceneImportOptions{.assetBuildOptions = options});
   ASSERT_FALSE(sceneResult.hasError()) << sceneResult.error();
 
-  const nuri::ImportedScene &scene = sceneResult.value();
+  const nuri::ScenePrefab &scene = sceneResult.value();
   ASSERT_EQ(scene.renderables.size(), 2u);
   ASSERT_EQ(scene.meshAssets.size(), 2u);
   ASSERT_GE(scene.materialAssets.size(), 2u);

@@ -1,7 +1,7 @@
 #include "nuri/gfx/render_graph/render_graph.h"
 #include "nuri/core/containers/hash_map.h"
+#include "nuri/core/log.h"
 #include "nuri/core/profiling.h"
-#include "nuri/pch.h"
 namespace nuri {
 namespace {
 [[nodiscard]] std::string_view
@@ -48,11 +48,295 @@ resolveResourceDebugName(std::string_view name, std::string_view fallback) {
 [[nodiscard]] uint64_t foldDependencyEdgeKey(uint32_t before, uint32_t after) {
   return (static_cast<uint64_t>(before) << 32u) | after;
 }
-[[nodiscard]] uint64_t mixFingerprintSeed(uint64_t seed,
-                                          uint64_t value) noexcept {
-  constexpr uint64_t kMix = 0x9e3779b97f4a7c15ull;
-  seed ^= value + kMix + (seed << 6u) + (seed >> 2u);
-  return seed;
+template <typename Ranges>
+[[nodiscard]] uint32_t rangeSlotCount(const Ranges &ranges) {
+  uint32_t count = 0u;
+  for (const auto range : ranges) {
+    count = std::max(count, range.offset + range.count);
+  }
+  return count;
+}
+[[nodiscard]] bool
+isWholeTextureRange(RenderGraphSubresourceRange range) noexcept {
+  return range.firstMip == 0u && range.mipCount == UINT32_MAX &&
+         range.firstLayer == 0u && range.layerCount == UINT32_MAX;
+}
+[[nodiscard]] bool textureRangesOverlap(RenderGraphSubresourceRange lhs,
+                                        RenderGraphSubresourceRange rhs) {
+  const auto intervalOverlaps = [](uint32_t lhsFirst, uint32_t lhsCount,
+                                   uint32_t rhsFirst, uint32_t rhsCount) {
+    const uint64_t lhsEnd = lhsCount == UINT32_MAX
+                                ? std::numeric_limits<uint64_t>::max()
+                                : static_cast<uint64_t>(lhsFirst) + lhsCount;
+    const uint64_t rhsEnd = rhsCount == UINT32_MAX
+                                ? std::numeric_limits<uint64_t>::max()
+                                : static_cast<uint64_t>(rhsFirst) + rhsCount;
+    return lhsFirst < rhsEnd && rhsFirst < lhsEnd;
+  };
+  return intervalOverlaps(lhs.firstMip, lhs.mipCount, rhs.firstMip,
+                          rhs.mipCount) &&
+         intervalOverlaps(lhs.firstLayer, lhs.layerCount, rhs.firstLayer,
+                          rhs.layerCount);
+}
+struct TextureLifetimeTag {};
+struct BufferLifetimeTag {};
+template <typename Tag> struct TransientLifetimeRanks {
+  std::pmr::vector<uint32_t> first;
+  std::pmr::vector<uint32_t> last;
+  TransientLifetimeRanks(std::pmr::memory_resource *memory, size_t count)
+      : first(memory), last(memory) {
+    first.resize(count, UINT32_MAX);
+    last.resize(count, 0u);
+  }
+};
+void ownPreDispatchPayload(FrameCommandArena &arena, size_t index,
+                           const ComputeDispatchItem &source,
+                           ComputeDispatchItem &destination) {
+  auto &label = arena.ownedPreDispatchDebugLabels[index];
+  label.assign(source.debugLabel.begin(), source.debugLabel.end());
+  destination.debugLabel = label;
+  auto &pushConstants = arena.ownedPreDispatchPushConstants[index];
+  pushConstants.assign(source.pushConstants.begin(),
+                       source.pushConstants.end());
+  destination.pushConstants = pushConstants;
+  auto &dependencyTextures = arena.ownedPreDispatchDependencyTextures[index];
+  dependencyTextures.assign(source.dependencyTextures.begin(),
+                            source.dependencyTextures.end());
+  destination.dependencyTextures = dependencyTextures;
+  auto &textureBindings = arena.ownedPreDispatchTextureBindings[index];
+  textureBindings.assign(source.pushConstantTextureBindings.begin(),
+                         source.pushConstantTextureBindings.end());
+  destination.pushConstantTextureBindings = textureBindings;
+}
+void ownDrawPayload(FrameCommandArena &arena, size_t index,
+                    const DrawItem &source, DrawItem &destination) {
+  auto &label = arena.ownedDrawDebugLabels[index];
+  label.assign(source.debugLabel.begin(), source.debugLabel.end());
+  destination.debugLabel = label;
+  auto &pushConstants = arena.ownedDrawPushConstants[index];
+  pushConstants.assign(source.pushConstants.begin(),
+                       source.pushConstants.end());
+  destination.pushConstants = pushConstants;
+  auto &textureBindings = arena.ownedDrawTextureBindings[index];
+  textureBindings.assign(source.pushConstantTextureBindings.begin(),
+                         source.pushConstantTextureBindings.end());
+  destination.pushConstantTextureBindings = textureBindings;
+}
+void ownMeshDispatchPayload(FrameCommandArena &arena, size_t index,
+                            const MeshDispatchItem &source,
+                            MeshDispatchItem &destination) {
+  auto &label = arena.ownedMeshDispatchDebugLabels[index];
+  label.assign(source.debugLabel.begin(), source.debugLabel.end());
+  destination.debugLabel = label;
+  auto &pushConstants = arena.ownedMeshDispatchPushConstants[index];
+  pushConstants.assign(source.pushConstants.begin(),
+                       source.pushConstants.end());
+  destination.pushConstants = pushConstants;
+  auto &dependencyBuffers = arena.ownedMeshDispatchDependencyBuffers[index];
+  dependencyBuffers.assign(source.dependencyBuffers.begin(),
+                           source.dependencyBuffers.end());
+  destination.dependencyBuffers = dependencyBuffers;
+  auto &dependencyTextures = arena.ownedMeshDispatchDependencyTextures[index];
+  dependencyTextures.assign(source.dependencyTextures.begin(),
+                            source.dependencyTextures.end());
+  destination.dependencyTextures = dependencyTextures;
+  auto &textureBindings = arena.ownedMeshDispatchTextureBindings[index];
+  textureBindings.assign(source.pushConstantTextureBindings.begin(),
+                         source.pushConstantTextureBindings.end());
+  destination.pushConstantTextureBindings = textureBindings;
+}
+void ownAccelerationStructureBuilds(FrameCommandArena &arena,
+                                    size_t orderedPassIndex,
+                                    const RenderPass &source,
+                                    RenderPass &destination) {
+  auto &builds = arena.ownedAccelerationStructureBuildsByPass[orderedPassIndex];
+  auto &geometries =
+      arena.ownedAccelerationStructureGeometriesByPass[orderedPassIndex];
+  auto &instances =
+      arena.ownedAccelerationStructureInstancesByPass[orderedPassIndex];
+  builds.clear();
+  geometries.clear();
+  instances.clear();
+  builds.reserve(source.accelerationStructureBuilds.size());
+  geometries.reserve(source.accelerationStructureBuilds.size());
+  instances.reserve(source.accelerationStructureBuilds.size());
+  for (const AccelerationStructureBuildItem &sourceBuild :
+       source.accelerationStructureBuilds) {
+    geometries.emplace_back();
+    instances.emplace_back();
+    auto &ownedGeometries = geometries.back();
+    auto &ownedInstances = instances.back();
+    std::visit(
+        [&](const auto &command) {
+          using Command = std::decay_t<decltype(command)>;
+          if constexpr (std::is_same_v<Command, BuildBlasItem> ||
+                        std::is_same_v<Command, UpdateBlasItem>) {
+            ownedGeometries.assign(command.geometries.begin(),
+                                   command.geometries.end());
+            builds.push_back(AccelerationStructureBuildItem{
+                .command = Command{.destination = command.destination,
+                                   .geometries = ownedGeometries}});
+          } else {
+            ownedInstances.assign(command.instances.begin(),
+                                  command.instances.end());
+            builds.push_back(AccelerationStructureBuildItem{
+                .command = Command{.destination = command.destination,
+                                   .instances = ownedInstances}});
+          }
+        },
+        sourceBuild.command);
+  }
+  destination.accelerationStructureBuilds = builds;
+}
+struct RecordingReferenceSet {
+  std::pmr::vector<BufferHandle> buffers;
+  std::pmr::vector<TextureHandle> textures;
+  std::pmr::vector<AccelerationStructureHandle> accelerationStructures;
+  std::pmr::vector<RenderPipelineHandle> renderPipelines;
+  std::pmr::vector<ComputePipelineHandle> computePipelines;
+  std::pmr::vector<MeshletPipelineHandle> meshletPipelines;
+  std::pmr::vector<RayQueryBindingHandle> rayQueryBindings;
+
+  explicit RecordingReferenceSet(std::pmr::memory_resource *memory)
+      : buffers(memory), textures(memory), accelerationStructures(memory),
+        renderPipelines(memory), computePipelines(memory),
+        meshletPipelines(memory), rayQueryBindings(memory) {}
+
+  template <typename Handle>
+  static void append(std::pmr::vector<Handle> &out, Handle handle) {
+    if (nuri::isValid(handle)) {
+      out.push_back(handle);
+    }
+  }
+  template <typename Handle>
+  static void append(std::pmr::vector<Handle> &out,
+                     std::span<const Handle> handles) {
+    for (const Handle handle : handles) {
+      append(out, handle);
+    }
+  }
+  template <typename Handle>
+  static void makeUnique(std::pmr::vector<Handle> &handles) {
+    std::sort(handles.begin(), handles.end(), [](Handle lhs, Handle rhs) {
+      return handleKey(lhs) < handleKey(rhs);
+    });
+    handles.erase(std::unique(handles.begin(), handles.end()), handles.end());
+  }
+  void normalize() {
+    makeUnique(buffers);
+    makeUnique(textures);
+    makeUnique(accelerationStructures);
+    makeUnique(renderPipelines);
+    makeUnique(computePipelines);
+    makeUnique(meshletPipelines);
+    makeUnique(rayQueryBindings);
+  }
+  [[nodiscard]] GraphicsRecordingReferences view() const {
+    return {
+        .buffers = buffers,
+        .textures = textures,
+        .accelerationStructures = accelerationStructures,
+        .renderPipelines = renderPipelines,
+        .computePipelines = computePipelines,
+        .meshletPipelines = meshletPipelines,
+        .rayQueryBindings = rayQueryBindings,
+    };
+  }
+};
+void appendRecordingReferences(RecordingReferenceSet &out,
+                               const RenderPass &pass) {
+  RecordingReferenceSet::append(out.textures, pass.colorTexture);
+  RecordingReferenceSet::append(out.textures, pass.colorResolveTexture);
+  RecordingReferenceSet::append(out.textures, pass.depthTexture);
+  RecordingReferenceSet::append(out.textures, pass.depthResolveTexture);
+  RecordingReferenceSet::append(out.buffers, pass.dependencyBuffers);
+  RecordingReferenceSet::append(out.textures, pass.dependencyTextures);
+  for (const ComputeDispatchItem &dispatch : pass.preDispatches) {
+    RecordingReferenceSet::append(out.computePipelines, dispatch.pipeline);
+    RecordingReferenceSet::append(out.rayQueryBindings,
+                                  dispatch.rayQueryBinding);
+    RecordingReferenceSet::append(out.buffers, dispatch.dependencyBuffers);
+    RecordingReferenceSet::append(out.textures, dispatch.dependencyTextures);
+    for (const PushConstantTextureBinding binding :
+         dispatch.pushConstantTextureBindings) {
+      RecordingReferenceSet::append(out.textures, binding.texture);
+    }
+  }
+  for (const DrawItem &draw : pass.draws) {
+    RecordingReferenceSet::append(out.renderPipelines, draw.pipeline);
+    RecordingReferenceSet::append(out.buffers, draw.vertexBuffer);
+    RecordingReferenceSet::append(out.buffers, draw.indexBuffer);
+    RecordingReferenceSet::append(out.buffers, draw.indirectBuffer);
+    RecordingReferenceSet::append(out.buffers, draw.indirectCountBuffer);
+    for (const PushConstantTextureBinding binding :
+         draw.pushConstantTextureBindings) {
+      RecordingReferenceSet::append(out.textures, binding.texture);
+    }
+  }
+  for (const MeshDispatchItem &dispatch : pass.meshDispatches) {
+    RecordingReferenceSet::append(out.meshletPipelines, dispatch.pipeline);
+    RecordingReferenceSet::append(out.buffers, dispatch.indirectBuffer);
+    RecordingReferenceSet::append(out.buffers, dispatch.indirectCountBuffer);
+    RecordingReferenceSet::append(out.buffers, dispatch.dependencyBuffers);
+    RecordingReferenceSet::append(out.textures, dispatch.dependencyTextures);
+    for (const PushConstantTextureBinding binding :
+         dispatch.pushConstantTextureBindings) {
+      RecordingReferenceSet::append(out.textures, binding.texture);
+    }
+  }
+  for (const BufferCopyRegion &copy : pass.bufferCopies) {
+    RecordingReferenceSet::append(out.buffers, copy.srcBuffer);
+    RecordingReferenceSet::append(out.buffers, copy.dstBuffer);
+  }
+  for (const TextureCopyItem &copy : pass.textureCopies) {
+    RecordingReferenceSet::append(out.textures, copy.sourceTexture);
+    RecordingReferenceSet::append(out.textures, copy.destinationTexture);
+  }
+  for (const AccelerationStructureBuildItem &build :
+       pass.accelerationStructureBuilds) {
+    std::visit(
+        [&out](const auto &command) {
+          RecordingReferenceSet::append(out.accelerationStructures,
+                                        command.destination);
+          using Command = std::decay_t<decltype(command)>;
+          if constexpr (std::is_same_v<Command, BuildBlasItem> ||
+                        std::is_same_v<Command, UpdateBlasItem>) {
+            for (const auto &geometry : command.geometries) {
+              RecordingReferenceSet::append(out.buffers, geometry.vertexBuffer);
+              RecordingReferenceSet::append(out.buffers, geometry.indexBuffer);
+              RecordingReferenceSet::append(out.buffers,
+                                            geometry.transformBuffer);
+            }
+          } else {
+            for (const auto &instance : command.instances) {
+              RecordingReferenceSet::append(out.accelerationStructures,
+                                            instance.bottomLevel);
+            }
+          }
+        },
+        build.command);
+  }
+  const auto &external = pass.externalTemporalDispatch.execute;
+  for (const TextureHandle texture :
+       {external.sceneColor, external.sceneDepth, external.motionVectors,
+        external.reactiveMask, external.compositionMask, external.exposure,
+        external.output}) {
+    RecordingReferenceSet::append(out.textures, texture);
+  }
+}
+void appendRecordingReferences(
+    RecordingReferenceSet &out,
+    std::span<const GraphicsBarrierRecord> barriers) {
+  for (const GraphicsBarrierRecord &barrier : barriers) {
+    if (barrier.isTexture()) {
+      RecordingReferenceSet::append(out.textures, barrier.textureHandle());
+    } else if (barrier.resourceKind == GraphicsBarrierResourceKind::Buffer) {
+      RecordingReferenceSet::append(out.buffers, barrier.bufferHandle());
+    } else {
+      RecordingReferenceSet::append(out.accelerationStructures,
+                                    barrier.accelerationStructureHandle());
+    }
+  }
 }
 [[nodiscard]] uint64_t quantizeToNextPow2(uint64_t value) noexcept {
   if (value <= 1u) {
@@ -126,16 +410,36 @@ computePassPayloadLayoutHash(const std::pmr::vector<RenderPass> &passes,
           },
           build.command);
     }
-    mix(pass.externalTemporalDispatch.provider != nullptr ? 1u : 0u);
+    mix(pass.externalTemporalDispatch.backend != nullptr ? 1u : 0u);
     for (const ComputeDispatchItem &dispatch : pass.preDispatches) {
       mix(static_cast<uint64_t>(dispatch.dependencyBuffers.size()));
       mix(static_cast<uint64_t>(dispatch.dependencyTextures.size()));
       mix(nuri::isValid(dispatch.rayQueryBinding) ? 1u : 0u);
+      for (const PushConstantTextureBinding binding :
+           dispatch.pushConstantTextureBindings) {
+        mix(binding.byteOffset);
+        mix(binding.graphTextureResourceIndex);
+        mix(static_cast<uint64_t>(binding.access));
+      }
+    }
+    for (const DrawItem &draw : pass.draws) {
+      for (const PushConstantTextureBinding binding :
+           draw.pushConstantTextureBindings) {
+        mix(binding.byteOffset);
+        mix(binding.graphTextureResourceIndex);
+        mix(static_cast<uint64_t>(binding.access));
+      }
     }
     for (const MeshDispatchItem &dispatch : pass.meshDispatches) {
       mix(static_cast<uint64_t>(dispatch.command));
       mix(nuri::isValid(dispatch.indirectBuffer) ? 1u : 0u);
       mix(nuri::isValid(dispatch.indirectCountBuffer) ? 1u : 0u);
+      for (const PushConstantTextureBinding binding :
+           dispatch.pushConstantTextureBindings) {
+        mix(binding.byteOffset);
+        mix(binding.graphTextureResourceIndex);
+        mix(static_cast<uint64_t>(binding.access));
+      }
     }
   }
   return hash;
@@ -169,7 +473,7 @@ validatePassExecutionMode(const RenderGraphGraphicsPassDesc &desc,
   const bool externalTemporal =
       isExternalTemporalExecutionMode(desc.executionMode);
   if (!computeOnly && !externalTemporal) {
-    if (desc.externalTemporalDispatch.provider != nullptr) {
+    if (desc.externalTemporalDispatch.backend != nullptr) {
       return Result<bool, std::string>::makeError(
           std::string(caller) +
           ": graphics pass cannot contain an external temporal dispatch");
@@ -228,7 +532,7 @@ validatePassExecutionMode(const RenderGraphGraphicsPassDesc &desc,
                                                 ": compute-only pass requires "
                                                 "at least one dispatch");
   }
-  if (computeOnly && desc.externalTemporalDispatch.provider != nullptr) {
+  if (computeOnly && desc.externalTemporalDispatch.backend != nullptr) {
     return Result<bool, std::string>::makeError(
         std::string(caller) +
         ": compute-only pass cannot contain an external temporal dispatch");
@@ -238,7 +542,7 @@ validatePassExecutionMode(const RenderGraphGraphicsPassDesc &desc,
         std::string(caller) +
         ": external temporal pass cannot contain native compute dispatches");
   }
-  if (externalTemporal && desc.externalTemporalDispatch.provider == nullptr) {
+  if (externalTemporal && desc.externalTemporalDispatch.backend == nullptr) {
     return Result<bool, std::string>::makeError(
         std::string(caller) +
         ": external temporal pass requires a typed provider dispatch");
@@ -311,7 +615,6 @@ void appendTransientBufferDescriptorFingerprint(uint64_t &hash,
 }
 constexpr size_t kMaxReusableTransientTextures = 32u;
 constexpr size_t kMaxReusableTransientBuffers = 64u;
-constexpr uint32_t kMinValidationItemsPerWorker = 256u;
 constexpr uint32_t kMinHazardGroupsPerWorker = 128u;
 constexpr uint32_t kMinPayloadPassesPerWorker = 24u;
 constexpr uint32_t kMinLifetimeItemsPerWorker = 256u;
@@ -329,11 +632,6 @@ makeAdaptiveRanges(uint32_t itemCount, uint32_t maxRangeCount,
     rangeCount = std::min(rangeCount, granularityLimitedCount);
   }
   return RenderGraphRuntime::makeRanges(itemCount, rangeCount);
-}
-[[nodiscard]] std::vector<RenderGraphContiguousRange>
-makeValidationRanges(uint32_t itemCount, uint32_t workerCount) {
-  return makeAdaptiveRanges(itemCount, workerCount,
-                            kMinValidationItemsPerWorker);
 }
 [[nodiscard]] std::vector<RenderGraphContiguousRange>
 makeHazardRanges(uint32_t itemCount, uint32_t workerCount) {
@@ -378,6 +676,8 @@ std::string_view toString(RenderGraphExecutionFailureStage stage) noexcept {
     return "materialize_transients";
   case RenderGraphExecutionFailureStage::AcquireRecordingContext:
     return "acquire_recording_context";
+  case RenderGraphExecutionFailureStage::RetainRecordingReferences:
+    return "retain_recording_references";
   case RenderGraphExecutionFailureStage::RecordGraphicsBarriers:
     return "record_graphics_barriers";
   case RenderGraphExecutionFailureStage::RecordGraphicsPasses:
@@ -407,14 +707,12 @@ RenderGraphBuilder::RenderGraphBuilder(std::pmr::memory_resource *memory)
       importedTextureIndicesByHandle_(memory_),
       importedBufferIndicesByHandle_(memory_),
       importedAccelerationStructureIndicesByHandle_(memory_),
-      explicitTextureAccessIndicesByPassResource_(memory_),
-      inferredTextureAccessIndicesByPassResource_(memory_),
       explicitBufferAccessIndicesByPassResource_(memory_),
       inferredBufferAccessIndicesByPassResource_(memory_),
       explicitAccelerationStructureAccessIndicesByPassResource_(memory_),
       inferredAccelerationStructureAccessIndicesByPassResource_(memory_),
       dependencyEdgeKeys_(memory_), dependencies_(memory_),
-      passResourceAccesses_(memory_), frameOutputTextureSet_(memory_),
+      resourceUses_(memory_), frameOutputTextureSet_(memory_),
       frameOutputTextureIndices_(memory_),
       sideEffectMarkIndicesByPass_(memory_), sideEffectPassMarks_(memory_) {}
 
@@ -438,15 +736,13 @@ void RenderGraphBuilder::beginFrame(uint64_t frameIndex) {
   importedTextureIndicesByHandle_.clear();
   importedBufferIndicesByHandle_.clear();
   importedAccelerationStructureIndicesByHandle_.clear();
-  explicitTextureAccessIndicesByPassResource_.clear();
-  inferredTextureAccessIndicesByPassResource_.clear();
   explicitBufferAccessIndicesByPassResource_.clear();
   inferredBufferAccessIndicesByPassResource_.clear();
   explicitAccelerationStructureAccessIndicesByPassResource_.clear();
   inferredAccelerationStructureAccessIndicesByPassResource_.clear();
   dependencyEdgeKeys_.clear();
   dependencies_.clear();
-  passResourceAccesses_.clear();
+  resourceUses_.clear();
   frameOutputTextureSet_.clear();
   frameOutputTextureIndices_.clear();
   sideEffectMarkIndicesByPass_.clear();
@@ -616,14 +912,19 @@ RenderGraphBuilder::computeGraphFingerprint() const noexcept {
     mixStructure(dependency.before);
     mixStructure(dependency.after);
   }
-  mixStructure(static_cast<uint64_t>(passResourceAccesses_.size()));
-  for (const PassResourceAccess &access : passResourceAccesses_) {
+  mixStructure(static_cast<uint64_t>(resourceUses_.size()));
+  for (const RenderGraphResourceUse &access : resourceUses_) {
     mixStructure(access.passIndex);
     mixStructure(static_cast<uint64_t>(access.resourceKind));
     mixStructure(access.resourceIndex);
-    mixStructure(static_cast<uint64_t>(access.mode));
-    mixStructure(static_cast<uint64_t>(access.requestedState));
-    mixStructure(access.inferred ? 1u : 0u);
+    mixStructure(static_cast<uint64_t>(access.access));
+    mixStructure(static_cast<uint64_t>(access.state));
+    mixStructure(static_cast<uint64_t>(access.stage));
+    mixStructure(access.subresources.firstMip);
+    mixStructure(access.subresources.mipCount);
+    mixStructure(access.subresources.firstLayer);
+    mixStructure(access.subresources.layerCount);
+    mixStructure(static_cast<uint64_t>(access.provenance));
   }
   mixU32Range(frameOutputTextureIndices_);
   mixStructure(static_cast<uint64_t>(sideEffectPassMarks_.size()));
@@ -689,7 +990,7 @@ RenderGraphBuilder::computeGraphFingerprint() const noexcept {
       .totalBufferCount = buffers_.size(),
       .totalAccelerationStructureCount = accelerationStructures_.size(),
       .edgeCount = dependencies_.size(),
-      .passAccessCount = passResourceAccesses_.size(),
+      .passAccessCount = resourceUses_.size(),
       .frameOutputCount = frameOutputTextureIndices_.size(),
       .sideEffectMarkCount = sideEffectPassMarks_.size(),
       .allPassesBorrowPayload = allPassesBorrowPayload_,
@@ -700,70 +1001,129 @@ RenderGraphBuilder::computeGraphFingerprint() const noexcept {
   };
 }
 
-void RenderGraphBuilder::refreshHandlesInCompileResult(
-    RenderGraphCompileResult &result) const {
+FrameCommandArena
+RenderGraphBuilder::buildFrameCommands(const RenderGraphPlan &plan) const {
+  FrameCommandArena commands(memory_);
+  commands.frameIndex = frameIndex_;
+  commands.textureHandlesByResource.resize(textures_.size());
+  commands.bufferHandlesByResource.resize(buffers_.size());
+  commands.accelerationStructureHandlesByResource.resize(
+      accelerationStructures_.size());
+  commands.orderedPasses.resize(plan.orderedPassIndices.size());
+  commands.passDebugNames.assign(passDebugNames_.begin(),
+                                 passDebugNames_.end());
+  commands.resolvedDependencyBuffers.resize(
+      plan.resolvedDependencyBufferResourceIndices.size());
+  commands.resolvedDependencyTextures.resize(
+      plan.resolvedDependencyTextureResourceIndices.size());
+  commands.resolvedPreDispatchDependencyBuffers.resize(
+      plan.resolvedPreDispatchDependencyBufferResourceIndices.size());
+  commands.ownedPreDispatches.resize(plan.preDispatchDependencyRanges.size());
+  commands.ownedPreDispatchDebugLabels.resize(
+      plan.preDispatchDependencyRanges.size());
+  commands.ownedPreDispatchPushConstants.resize(
+      plan.preDispatchDependencyRanges.size());
+  commands.ownedPreDispatchDependencyTextures.resize(
+      plan.preDispatchDependencyRanges.size());
+  commands.ownedPreDispatchTextureBindings.resize(
+      plan.preDispatchDependencyRanges.size());
+  const size_t fixedDrawCount = rangeSlotCount(plan.drawRangesByPass);
+  size_t dynamicDrawCount = 0u;
+  for (size_t i = 0u; i < plan.orderedPassIndices.size(); ++i) {
+    if (plan.drawRangesByPass[i].count == 0u) {
+      dynamicDrawCount += passes_[plan.orderedPassIndices[i]].draws.size();
+    }
+  }
+  commands.ownedDrawItems.resize(fixedDrawCount + dynamicDrawCount);
+  commands.ownedDrawDebugLabels.resize(commands.ownedDrawItems.size());
+  commands.ownedDrawPushConstants.resize(commands.ownedDrawItems.size());
+  commands.ownedDrawTextureBindings.resize(commands.ownedDrawItems.size());
+  const uint32_t meshDispatchCount =
+      rangeSlotCount(plan.meshDispatchRangesByPass);
+  commands.ownedMeshDispatchItems.resize(meshDispatchCount);
+  commands.ownedMeshDispatchDebugLabels.resize(meshDispatchCount);
+  commands.ownedMeshDispatchPushConstants.resize(meshDispatchCount);
+  commands.ownedMeshDispatchDependencyBuffers.resize(meshDispatchCount);
+  commands.ownedMeshDispatchDependencyTextures.resize(meshDispatchCount);
+  commands.ownedMeshDispatchTextureBindings.resize(meshDispatchCount);
+  commands.ownedBufferCopyItems.resize(
+      rangeSlotCount(plan.bufferCopyRangesByPass));
+  commands.ownedTextureCopyItems.resize(
+      rangeSlotCount(plan.textureCopyRangesByPass));
+  commands.ownedAccelerationStructureBuildsByPass.resize(
+      plan.orderedPassIndices.size());
+  commands.ownedAccelerationStructureGeometriesByPass.resize(
+      plan.orderedPassIndices.size());
+  commands.ownedAccelerationStructureInstancesByPass.resize(
+      plan.orderedPassIndices.size());
+  populateFrameCommands(plan, commands);
+  return commands;
+}
+
+void RenderGraphBuilder::populateFrameCommands(
+    const RenderGraphPlan &plan, FrameCommandArena &commands) const {
   for (size_t i = 0;
-       i < textures_.size() && i < result.textureHandlesByResource.size();
+       i < textures_.size() && i < commands.textureHandlesByResource.size();
        ++i) {
     if (textures_[i].imported) {
-      result.textureHandlesByResource[i] = textures_[i].importedHandle;
+      commands.textureHandlesByResource[i] = textures_[i].importedHandle;
     }
   }
   for (size_t i = 0;
-       i < buffers_.size() && i < result.bufferHandlesByResource.size(); ++i) {
+       i < buffers_.size() && i < commands.bufferHandlesByResource.size();
+       ++i) {
     if (buffers_[i].imported) {
-      result.bufferHandlesByResource[i] = buffers_[i].importedHandle;
+      commands.bufferHandlesByResource[i] = buffers_[i].importedHandle;
     }
   }
   for (size_t i = 0; i < accelerationStructures_.size() &&
-                     i < result.accelerationStructureHandlesByResource.size();
+                     i < commands.accelerationStructureHandlesByResource.size();
        ++i) {
-    result.accelerationStructureHandlesByResource[i] =
+    commands.accelerationStructureHandlesByResource[i] =
         accelerationStructures_[i].importedHandle;
   }
-  for (size_t i = 0;
-       i < result.resolvedDependencyBufferResourceIndices.size() &&
-       i < result.resolvedDependencyBuffers.size();
+  for (size_t i = 0; i < plan.resolvedDependencyBufferResourceIndices.size() &&
+                     i < commands.resolvedDependencyBuffers.size();
        ++i) {
     const uint32_t resourceIndex =
-        result.resolvedDependencyBufferResourceIndices[i];
+        plan.resolvedDependencyBufferResourceIndices[i];
     if (resourceIndex == UINT32_MAX || resourceIndex >= buffers_.size()) {
       continue;
     }
     if (buffers_[resourceIndex].imported) {
-      result.resolvedDependencyBuffers[i] =
+      commands.resolvedDependencyBuffers[i] =
           buffers_[resourceIndex].importedHandle;
     }
   }
-  for (size_t i = 0;
-       i < result.resolvedDependencyTextureResourceIndices.size() &&
-       i < result.resolvedDependencyTextures.size();
+  for (size_t i = 0; i < plan.resolvedDependencyTextureResourceIndices.size() &&
+                     i < commands.resolvedDependencyTextures.size();
        ++i) {
     const uint32_t resourceIndex =
-        result.resolvedDependencyTextureResourceIndices[i];
+        plan.resolvedDependencyTextureResourceIndices[i];
     if (resourceIndex == UINT32_MAX || resourceIndex >= textures_.size()) {
       continue;
     }
     if (textures_[resourceIndex].imported) {
-      result.resolvedDependencyTextures[i] =
+      commands.resolvedDependencyTextures[i] =
           textures_[resourceIndex].importedHandle;
     }
   }
   for (size_t i = 0;
-       i < result.resolvedPreDispatchDependencyBufferResourceIndices.size() &&
-       i < result.resolvedPreDispatchDependencyBuffers.size();
+       i < plan.resolvedPreDispatchDependencyBufferResourceIndices.size() &&
+       i < commands.resolvedPreDispatchDependencyBuffers.size();
        ++i) {
     const uint32_t resourceIndex =
-        result.resolvedPreDispatchDependencyBufferResourceIndices[i];
+        plan.resolvedPreDispatchDependencyBufferResourceIndices[i];
     if (resourceIndex == UINT32_MAX || resourceIndex >= buffers_.size()) {
       continue;
     }
     if (buffers_[resourceIndex].imported) {
-      result.resolvedPreDispatchDependencyBuffers[i] =
+      commands.resolvedPreDispatchDependencyBuffers[i] =
           buffers_[resourceIndex].importedHandle;
     }
   }
-  const size_t passCount = result.orderedPasses.size();
+  const size_t passCount = commands.orderedPasses.size();
+  size_t nextDynamicDrawIndex = rangeSlotCount(plan.drawRangesByPass);
   constexpr std::array attachmentBindings{
       std::pair{&RenderPass::colorTexture, &PassBindings::color},
       std::pair{&RenderPass::colorResolveTexture, &PassBindings::colorResolve},
@@ -771,18 +1131,18 @@ void RenderGraphBuilder::refreshHandlesInCompileResult(
       std::pair{&RenderPass::depthResolveTexture, &PassBindings::depthResolve},
   };
   for (size_t i = 0; i < passCount; ++i) {
-    const uint32_t passIndex = result.orderedPassIndices[i];
+    const uint32_t passIndex = plan.orderedPassIndices[i];
     for (const auto [target, binding] : attachmentBindings) {
       const uint32_t resource = passBindings_[passIndex].*binding;
       if (resource != UINT32_MAX && textures_[resource].imported) {
-        result.orderedPasses[i].*target = textures_[resource].importedHandle;
+        commands.orderedPasses[i].*target = textures_[resource].importedHandle;
       }
     }
   }
   for (size_t i = 0; i < passCount; ++i) {
-    const uint32_t passIndex = result.orderedPassIndices[i];
+    const uint32_t passIndex = plan.orderedPassIndices[i];
     const RenderPass &sourcePass = passes_[passIndex];
-    RenderPass &refreshedPass = result.orderedPasses[i];
+    RenderPass &refreshedPass = commands.orderedPasses[i];
     refreshedPass.color = sourcePass.color;
     refreshedPass.executionMode = sourcePass.executionMode;
     refreshedPass.hasColorAttachment = sourcePass.hasColorAttachment;
@@ -791,71 +1151,75 @@ void RenderGraphBuilder::refreshHandlesInCompileResult(
     refreshedPass.viewport = sourcePass.viewport;
     refreshedPass.payloadBorrowed = sourcePass.payloadBorrowed;
     refreshedPass.drawBuffersPreResolved = sourcePass.drawBuffersPreResolved;
+    refreshedPass.gpuTimingScope = sourcePass.gpuTimingScope;
     refreshedPass.debugLabel = sourcePass.debugLabel;
     refreshedPass.debugColor = sourcePass.debugColor;
-    refreshedPass.accelerationStructureBuilds =
-        sourcePass.accelerationStructureBuilds;
-    const auto dependencyRange = result.dependencyBufferRangesByPass[i];
+    refreshedPass.externalTemporalDispatch =
+        sourcePass.externalTemporalDispatch;
+    ownAccelerationStructureBuilds(commands, i, sourcePass, refreshedPass);
+    const auto dependencyRange = plan.dependencyBufferRangesByPass[i];
     if (dependencyRange.count > 0u &&
-        dependencyRange.offset <= result.resolvedDependencyBuffers.size() &&
-        dependencyRange.count <=
-            result.resolvedDependencyBuffers.size() - dependencyRange.offset) {
+        dependencyRange.offset <= commands.resolvedDependencyBuffers.size() &&
+        dependencyRange.count <= commands.resolvedDependencyBuffers.size() -
+                                     dependencyRange.offset) {
       refreshedPass.dependencyBuffers = std::span<const BufferHandle>(
-          result.resolvedDependencyBuffers.data() + dependencyRange.offset,
+          commands.resolvedDependencyBuffers.data() + dependencyRange.offset,
           dependencyRange.count);
     } else {
       refreshedPass.dependencyBuffers = {};
     }
-    const auto dependencyTextureRange = result.dependencyTextureRangesByPass[i];
+    const auto dependencyTextureRange = plan.dependencyTextureRangesByPass[i];
     if (dependencyTextureRange.count > 0u &&
         dependencyTextureRange.offset <=
-            result.resolvedDependencyTextures.size() &&
+            commands.resolvedDependencyTextures.size() &&
         dependencyTextureRange.count <=
-            result.resolvedDependencyTextures.size() -
+            commands.resolvedDependencyTextures.size() -
                 dependencyTextureRange.offset) {
       refreshedPass.dependencyTextures = std::span<const TextureHandle>(
-          result.resolvedDependencyTextures.data() +
+          commands.resolvedDependencyTextures.data() +
               dependencyTextureRange.offset,
           dependencyTextureRange.count);
     } else {
       refreshedPass.dependencyTextures = {};
     }
-    const auto preDispatchRange = result.preDispatchRangesByPass[i];
+    const auto preDispatchRange = plan.preDispatchRangesByPass[i];
     if (preDispatchRange.count > 0u) {
       if (sourcePass.preDispatches.size() == preDispatchRange.count &&
-          preDispatchRange.offset <= result.ownedPreDispatches.size() &&
+          preDispatchRange.offset <= commands.ownedPreDispatches.size() &&
           preDispatchRange.count <=
-              result.ownedPreDispatches.size() - preDispatchRange.offset) {
+              commands.ownedPreDispatches.size() - preDispatchRange.offset) {
         for (uint32_t dispatchIndex = 0; dispatchIndex < preDispatchRange.count;
              ++dispatchIndex) {
           const uint32_t globalDispatchIndex =
               preDispatchRange.offset + dispatchIndex;
-          if (globalDispatchIndex >=
-              result.preDispatchDependencyRanges.size()) {
+          if (globalDispatchIndex >= plan.preDispatchDependencyRanges.size()) {
             break;
           }
           ComputeDispatchItem refreshedDispatch =
               sourcePass.preDispatches[dispatchIndex];
           const auto depRange =
-              result.preDispatchDependencyRanges[globalDispatchIndex];
+              plan.preDispatchDependencyRanges[globalDispatchIndex];
           if (depRange.count > 0u &&
               depRange.offset <=
-                  result.resolvedPreDispatchDependencyBuffers.size() &&
+                  commands.resolvedPreDispatchDependencyBuffers.size() &&
               depRange.count <=
-                  result.resolvedPreDispatchDependencyBuffers.size() -
+                  commands.resolvedPreDispatchDependencyBuffers.size() -
                       depRange.offset) {
             refreshedDispatch.dependencyBuffers = std::span<const BufferHandle>(
-                result.resolvedPreDispatchDependencyBuffers.data() +
+                commands.resolvedPreDispatchDependencyBuffers.data() +
                     depRange.offset,
                 depRange.count);
           } else {
             refreshedDispatch.dependencyBuffers = {};
           }
           refreshedDispatch.dependencyBufferAccessModes = {};
-          result.ownedPreDispatches[globalDispatchIndex] = refreshedDispatch;
+          ownPreDispatchPayload(commands, globalDispatchIndex,
+                                sourcePass.preDispatches[dispatchIndex],
+                                refreshedDispatch);
+          commands.ownedPreDispatches[globalDispatchIndex] = refreshedDispatch;
         }
         refreshedPass.preDispatches = std::span<const ComputeDispatchItem>(
-            result.ownedPreDispatches.data() + preDispatchRange.offset,
+            commands.ownedPreDispatches.data() + preDispatchRange.offset,
             preDispatchRange.count);
       } else {
         refreshedPass.preDispatches = {};
@@ -863,26 +1227,45 @@ void RenderGraphBuilder::refreshHandlesInCompileResult(
     } else {
       refreshedPass.preDispatches = sourcePass.preDispatches;
     }
-    const auto drawRange = result.drawRangesByPass[i];
+    const auto drawRange = plan.drawRangesByPass[i];
     if (drawRange.count > 0u) {
       const uint32_t actualDrawCount =
           static_cast<uint32_t>(sourcePass.draws.size());
       if (actualDrawCount <= drawRange.count &&
-          drawRange.offset <= result.ownedDrawItems.size() &&
-          drawRange.count <= result.ownedDrawItems.size() - drawRange.offset) {
+          drawRange.offset <= commands.ownedDrawItems.size() &&
+          drawRange.count <=
+              commands.ownedDrawItems.size() - drawRange.offset) {
         for (uint32_t drawIndex = 0; drawIndex < actualDrawCount; ++drawIndex) {
-          result.ownedDrawItems[drawRange.offset + drawIndex] =
-              sourcePass.draws[drawIndex];
+          const size_t outputIndex = drawRange.offset + drawIndex;
+          DrawItem draw = sourcePass.draws[drawIndex];
+          ownDrawPayload(commands, outputIndex, sourcePass.draws[drawIndex],
+                         draw);
+          commands.ownedDrawItems[outputIndex] = draw;
         }
         refreshedPass.draws = std::span<const DrawItem>(
-            result.ownedDrawItems.data() + drawRange.offset, actualDrawCount);
+            commands.ownedDrawItems.data() + drawRange.offset, actualDrawCount);
       } else {
         refreshedPass.draws = {};
       }
     } else {
-      refreshedPass.draws = sourcePass.draws;
+      const uint32_t actualDrawCount =
+          static_cast<uint32_t>(sourcePass.draws.size());
+      for (uint32_t drawIndex = 0u; drawIndex < actualDrawCount; ++drawIndex) {
+        const size_t outputIndex = nextDynamicDrawIndex + drawIndex;
+        DrawItem draw = sourcePass.draws[drawIndex];
+        ownDrawPayload(commands, outputIndex, sourcePass.draws[drawIndex],
+                       draw);
+        commands.ownedDrawItems[outputIndex] = draw;
+      }
+      refreshedPass.draws =
+          actualDrawCount == 0u
+              ? std::span<const DrawItem>{}
+              : std::span<const DrawItem>(commands.ownedDrawItems.data() +
+                                              nextDynamicDrawIndex,
+                                          actualDrawCount);
+      nextDynamicDrawIndex += actualDrawCount;
     }
-    const auto meshDispatchRange = result.meshDispatchRangesByPass[i];
+    const auto meshDispatchRange = plan.meshDispatchRangesByPass[i];
     if (meshDispatchRange.count > 0u) {
       const uint32_t actualDispatchCount =
           static_cast<uint32_t>(sourcePass.meshDispatches.size());
@@ -900,17 +1283,19 @@ void RenderGraphBuilder::refreshHandlesInCompileResult(
         };
         dispatch.indirectBuffer = resolve(binding.indirect);
         dispatch.indirectCountBuffer = resolve(binding.indirectCount);
-        result
-            .ownedMeshDispatchItems[meshDispatchRange.offset + dispatchIndex] =
-            dispatch;
+        const size_t outputIndex = meshDispatchRange.offset + dispatchIndex;
+        ownMeshDispatchPayload(commands, outputIndex,
+                               sourcePass.meshDispatches[dispatchIndex],
+                               dispatch);
+        commands.ownedMeshDispatchItems[outputIndex] = dispatch;
       }
       refreshedPass.meshDispatches = std::span<const MeshDispatchItem>(
-          result.ownedMeshDispatchItems.data() + meshDispatchRange.offset,
+          commands.ownedMeshDispatchItems.data() + meshDispatchRange.offset,
           actualDispatchCount);
     } else {
       refreshedPass.meshDispatches = sourcePass.meshDispatches;
     }
-    const auto bufferCopyRange = result.bufferCopyRangesByPass[i];
+    const auto bufferCopyRange = plan.bufferCopyRangesByPass[i];
     if (bufferCopyRange.count > 0u) {
       const uint32_t actualCopyCount =
           static_cast<uint32_t>(sourcePass.bufferCopies.size());
@@ -922,15 +1307,16 @@ void RenderGraphBuilder::refreshHandlesInCompileResult(
             bufferCopyBindings_[bindingOffset + copyIndex];
         copy.srcBuffer = buffers_[binding.source].importedHandle;
         copy.dstBuffer = buffers_[binding.destination].importedHandle;
-        result.ownedBufferCopyItems[bufferCopyRange.offset + copyIndex] = copy;
+        commands.ownedBufferCopyItems[bufferCopyRange.offset + copyIndex] =
+            copy;
       }
       refreshedPass.bufferCopies = std::span<const BufferCopyRegion>(
-          result.ownedBufferCopyItems.data() + bufferCopyRange.offset,
+          commands.ownedBufferCopyItems.data() + bufferCopyRange.offset,
           actualCopyCount);
     } else {
       refreshedPass.bufferCopies = sourcePass.bufferCopies;
     }
-    const auto textureCopyRange = result.textureCopyRangesByPass[i];
+    const auto textureCopyRange = plan.textureCopyRangesByPass[i];
     if (textureCopyRange.count > 0u) {
       const uint32_t actualCopyCount =
           static_cast<uint32_t>(sourcePass.textureCopies.size());
@@ -942,15 +1328,17 @@ void RenderGraphBuilder::refreshHandlesInCompileResult(
             textureCopyBindings_[bindingOffset + copyIndex];
         copy.sourceTexture = textures_[binding.source].importedHandle;
         copy.destinationTexture = textures_[binding.destination].importedHandle;
-        result.ownedTextureCopyItems[textureCopyRange.offset + copyIndex] =
+        commands.ownedTextureCopyItems[textureCopyRange.offset + copyIndex] =
             copy;
       }
       refreshedPass.textureCopies = std::span<const TextureCopyItem>(
-          result.ownedTextureCopyItems.data() + textureCopyRange.offset,
+          commands.ownedTextureCopyItems.data() + textureCopyRange.offset,
           actualCopyCount);
     } else {
       refreshedPass.textureCopies = sourcePass.textureCopies;
     }
+    const std::pmr::string &name = commands.passDebugNames[passIndex];
+    refreshedPass.debugLabel = std::string_view(name.data(), name.size());
   }
 }
 
@@ -1104,7 +1492,8 @@ RenderGraphBuilder::createTransientBuffer(const BufferDesc &desc,
 
 Result<bool, std::string> RenderGraphBuilder::addTextureAccessInternal(
     RenderGraphPassId pass, RenderGraphTextureId texture,
-    RenderGraphAccessMode mode, bool inferred) {
+    RenderGraphAccessMode mode, bool inferred,
+    RenderGraphSubresourceRange subresources) {
   if (!isValid(pass) || !isValid(texture)) {
     return Result<bool, std::string>::makeError(
         "RenderGraphBuilder::addTextureAccessInternal: id is invalid");
@@ -1120,38 +1509,49 @@ Result<bool, std::string> RenderGraphBuilder::addTextureAccessInternal(
     return Result<bool, std::string>::makeError(
         "RenderGraphBuilder::addTextureAccessInternal: id is out of range");
   }
-  const uint64_t key = foldPassResourceKey(pass.value, texture.value);
-  auto &indexByKey = inferred ? inferredTextureAccessIndicesByPassResource_
-                              : explicitTextureAccessIndicesByPassResource_;
-  if (const auto existing = indexByKey.find(key);
-      existing != indexByKey.end()) {
-    PassResourceAccess &merged = passResourceAccesses_[existing->second];
-    merged.mode = merged.mode | mode;
+  if (subresources.mipCount == 0u || subresources.layerCount == 0u) {
+    return Result<bool, std::string>::makeError(
+        "RenderGraphBuilder::addTextureAccessInternal: subresource range is "
+        "empty");
+  }
+  const auto existing = std::ranges::find_if(
+      resourceUses_, [&](const RenderGraphResourceUse &use) {
+        return use.passIndex == pass.value &&
+               use.resourceKind == RenderGraphResourceKind::Texture &&
+               use.resourceIndex == texture.value &&
+               use.subresources == subresources &&
+               use.provenance ==
+                   (inferred ? RenderGraphResourceUseProvenance::Inferred
+                             : RenderGraphResourceUseProvenance::Explicit);
+      });
+  if (existing != resourceUses_.end()) {
+    RenderGraphResourceUse &merged = *existing;
+    merged.access = merged.access | mode;
     return Result<bool, std::string>::makeResult(true);
   }
-  const uint32_t accessIndex =
-      static_cast<uint32_t>(passResourceAccesses_.size());
+  const uint32_t accessIndex = static_cast<uint32_t>(resourceUses_.size());
   if (accessIndex == UINT32_MAX) {
     return Result<bool, std::string>::makeError(
         "RenderGraphBuilder::addTextureAccessInternal: access count exceeds "
         "uint32_t");
   }
-  passResourceAccesses_.push_back(PassResourceAccess{
+  resourceUses_.push_back(RenderGraphResourceUse{
       .passIndex = pass.value,
-      .resourceKind = AccessResourceKind::Texture,
+      .resourceKind = RenderGraphResourceKind::Texture,
       .resourceIndex = texture.value,
-      .mode = mode,
-      .inferred = inferred,
+      .access = mode,
+      .stage = passes_[pass.value].executionMode,
+      .subresources = subresources,
+      .provenance = inferred ? RenderGraphResourceUseProvenance::Inferred
+                             : RenderGraphResourceUseProvenance::Explicit,
   });
-  indexByKey.emplace(key, accessIndex);
   return Result<bool, std::string>::makeResult(true);
 }
 
-Result<bool, std::string>
-RenderGraphBuilder::addTextureAccess(RenderGraphPassId pass,
-                                     RenderGraphTextureId texture,
-                                     RenderGraphAccessMode mode) {
-  return addTextureAccessInternal(pass, texture, mode, false);
+Result<bool, std::string> RenderGraphBuilder::addTextureAccess(
+    RenderGraphPassId pass, RenderGraphTextureId texture,
+    RenderGraphAccessMode mode, RenderGraphSubresourceRange subresources) {
+  return addTextureAccessInternal(pass, texture, mode, false, subresources);
 }
 
 Result<bool, std::string> RenderGraphBuilder::addBufferAccessInternal(
@@ -1177,34 +1577,35 @@ Result<bool, std::string> RenderGraphBuilder::addBufferAccessInternal(
                               : explicitBufferAccessIndicesByPassResource_;
   if (const auto existing = indexByKey.find(key);
       existing != indexByKey.end()) {
-    PassResourceAccess &merged = passResourceAccesses_[existing->second];
-    if (merged.requestedState != RenderGraphResourceState::Unknown &&
+    RenderGraphResourceUse &merged = resourceUses_[existing->second];
+    if (merged.state != RenderGraphResourceState::Unknown &&
         requestedState != RenderGraphResourceState::Unknown &&
-        merged.requestedState != requestedState) {
+        merged.state != requestedState) {
       return Result<bool, std::string>::makeError(
           "RenderGraphBuilder::addBufferAccessInternal: contradictory "
           "resource states");
     }
-    merged.mode = merged.mode | mode;
-    if (merged.requestedState == RenderGraphResourceState::Unknown) {
-      merged.requestedState = requestedState;
+    merged.access = merged.access | mode;
+    if (merged.state == RenderGraphResourceState::Unknown) {
+      merged.state = requestedState;
     }
     return Result<bool, std::string>::makeResult(true);
   }
-  const uint32_t accessIndex =
-      static_cast<uint32_t>(passResourceAccesses_.size());
+  const uint32_t accessIndex = static_cast<uint32_t>(resourceUses_.size());
   if (accessIndex == UINT32_MAX) {
     return Result<bool, std::string>::makeError(
         "RenderGraphBuilder::addBufferAccessInternal: access count exceeds "
         "uint32_t");
   }
-  passResourceAccesses_.push_back(PassResourceAccess{
+  resourceUses_.push_back(RenderGraphResourceUse{
       .passIndex = pass.value,
-      .resourceKind = AccessResourceKind::Buffer,
+      .resourceKind = RenderGraphResourceKind::Buffer,
       .resourceIndex = buffer.value,
-      .mode = mode,
-      .requestedState = requestedState,
-      .inferred = inferred,
+      .access = mode,
+      .state = requestedState,
+      .stage = passes_[pass.value].executionMode,
+      .provenance = inferred ? RenderGraphResourceUseProvenance::Inferred
+                             : RenderGraphResourceUseProvenance::Explicit,
   });
   indexByKey.emplace(key, accessIndex);
   return Result<bool, std::string>::makeResult(true);
@@ -1255,29 +1656,30 @@ RenderGraphBuilder::addAccelerationStructureAccessInternal(
                : explicitAccelerationStructureAccessIndicesByPassResource_;
   if (const auto existing = indexByKey.find(key);
       existing != indexByKey.end()) {
-    PassResourceAccess &merged = passResourceAccesses_[existing->second];
-    if (merged.requestedState != state) {
+    RenderGraphResourceUse &merged = resourceUses_[existing->second];
+    if (merged.state != state) {
       return Result<bool, std::string>::makeError(
           "RenderGraphBuilder::addAccelerationStructureAccessInternal: "
           "contradictory access for the same pass and resource");
     }
-    merged.mode = merged.mode | mode;
+    merged.access = merged.access | mode;
     return Result<bool, std::string>::makeResult(true);
   }
-  if (passResourceAccesses_.size() >= UINT32_MAX) {
+  if (resourceUses_.size() >= UINT32_MAX) {
     return Result<bool, std::string>::makeError(
         "RenderGraphBuilder::addAccelerationStructureAccessInternal: access "
         "count exceeds uint32_t");
   }
-  const uint32_t accessIndex =
-      static_cast<uint32_t>(passResourceAccesses_.size());
-  passResourceAccesses_.push_back(PassResourceAccess{
+  const uint32_t accessIndex = static_cast<uint32_t>(resourceUses_.size());
+  resourceUses_.push_back(RenderGraphResourceUse{
       .passIndex = pass.value,
-      .resourceKind = AccessResourceKind::AccelerationStructure,
+      .resourceKind = RenderGraphResourceKind::AccelerationStructure,
       .resourceIndex = accelerationStructure.value,
-      .mode = mode,
-      .requestedState = state,
-      .inferred = inferred,
+      .access = mode,
+      .state = state,
+      .stage = passes_[pass.value].executionMode,
+      .provenance = inferred ? RenderGraphResourceUseProvenance::Inferred
+                             : RenderGraphResourceUseProvenance::Explicit,
   });
   indexByKey.emplace(key, accessIndex);
   return Result<bool, std::string>::makeResult(true);
@@ -1367,6 +1769,7 @@ RenderGraphBuilder::OwnedPassPayload RenderGraphBuilder::clonePassPayload(
   ownedPayload.preDispatchDependencyBufferAccessModes.reserve(
       desc.preDispatches.size());
   ownedPayload.preDispatchDependencyTextures.reserve(desc.preDispatches.size());
+  ownedPayload.preDispatchTextureBindings.reserve(desc.preDispatches.size());
   ownedPayload.preDispatches.reserve(desc.preDispatches.size());
   for (const ComputeDispatchItem &sourceDispatch : desc.preDispatches) {
     ownedPayload.preDispatchDebugLabels.push_back(std::pmr::string(memory_));
@@ -1396,6 +1799,11 @@ RenderGraphBuilder::OwnedPassPayload RenderGraphBuilder::clonePassPayload(
         ownedPayload.preDispatchDependencyTextures.back();
     dependencyTextures.assign(sourceDispatch.dependencyTextures.begin(),
                               sourceDispatch.dependencyTextures.end());
+    ownedPayload.preDispatchTextureBindings.push_back(
+        std::pmr::vector<PushConstantTextureBinding>(memory_));
+    ownedPayload.preDispatchTextureBindings.back().assign(
+        sourceDispatch.pushConstantTextureBindings.begin(),
+        sourceDispatch.pushConstantTextureBindings.end());
   }
   ownedPayload.preDispatches.resize(desc.preDispatches.size());
   for (size_t i = 0; i < desc.preDispatches.size(); ++i) {
@@ -1415,12 +1823,15 @@ RenderGraphBuilder::OwnedPassPayload RenderGraphBuilder::clonePassPayload(
     dispatch.dependencyTextures = std::span<const TextureHandle>(
         ownedPayload.preDispatchDependencyTextures[i].data(),
         ownedPayload.preDispatchDependencyTextures[i].size());
+    dispatch.pushConstantTextureBindings =
+        ownedPayload.preDispatchTextureBindings[i];
     dispatch.debugLabel =
         std::string_view(ownedPayload.preDispatchDebugLabels[i].data(),
                          ownedPayload.preDispatchDebugLabels[i].size());
   }
   ownedPayload.drawDebugLabels.reserve(desc.draws.size());
   ownedPayload.drawPushConstants.reserve(desc.draws.size());
+  ownedPayload.drawTextureBindings.reserve(desc.draws.size());
   ownedPayload.draws.reserve(desc.draws.size());
   for (const DrawItem &sourceDraw : desc.draws) {
     ownedPayload.drawDebugLabels.push_back(std::pmr::string(memory_));
@@ -1431,6 +1842,11 @@ RenderGraphBuilder::OwnedPassPayload RenderGraphBuilder::clonePassPayload(
     auto &pushConstants = ownedPayload.drawPushConstants.back();
     pushConstants.assign(sourceDraw.pushConstants.begin(),
                          sourceDraw.pushConstants.end());
+    ownedPayload.drawTextureBindings.push_back(
+        std::pmr::vector<PushConstantTextureBinding>(memory_));
+    ownedPayload.drawTextureBindings.back().assign(
+        sourceDraw.pushConstantTextureBindings.begin(),
+        sourceDraw.pushConstantTextureBindings.end());
   }
   ownedPayload.draws.resize(desc.draws.size());
   for (size_t i = 0; i < desc.draws.size(); ++i) {
@@ -1440,6 +1856,7 @@ RenderGraphBuilder::OwnedPassPayload RenderGraphBuilder::clonePassPayload(
     draw.pushConstants =
         std::span<const std::byte>(ownedPayload.drawPushConstants[i].data(),
                                    ownedPayload.drawPushConstants[i].size());
+    draw.pushConstantTextureBindings = ownedPayload.drawTextureBindings[i];
     draw.debugLabel = std::string_view(ownedPayload.drawDebugLabels[i].data(),
                                        ownedPayload.drawDebugLabels[i].size());
   }
@@ -1449,6 +1866,7 @@ RenderGraphBuilder::OwnedPassPayload RenderGraphBuilder::clonePassPayload(
       desc.meshDispatches.size());
   ownedPayload.meshDispatchDependencyTextures.reserve(
       desc.meshDispatches.size());
+  ownedPayload.meshDispatchTextureBindings.reserve(desc.meshDispatches.size());
   ownedPayload.meshDispatches.reserve(desc.meshDispatches.size());
   for (const MeshDispatchItem &sourceDispatch : desc.meshDispatches) {
     ownedPayload.meshDispatchDebugLabels.push_back(std::pmr::string(memory_));
@@ -1471,6 +1889,11 @@ RenderGraphBuilder::OwnedPassPayload RenderGraphBuilder::clonePassPayload(
         ownedPayload.meshDispatchDependencyTextures.back();
     dependencyTextures.assign(sourceDispatch.dependencyTextures.begin(),
                               sourceDispatch.dependencyTextures.end());
+    ownedPayload.meshDispatchTextureBindings.push_back(
+        std::pmr::vector<PushConstantTextureBinding>(memory_));
+    ownedPayload.meshDispatchTextureBindings.back().assign(
+        sourceDispatch.pushConstantTextureBindings.begin(),
+        sourceDispatch.pushConstantTextureBindings.end());
   }
   ownedPayload.meshDispatches.resize(desc.meshDispatches.size());
   for (size_t i = 0; i < desc.meshDispatches.size(); ++i) {
@@ -1486,6 +1909,8 @@ RenderGraphBuilder::OwnedPassPayload RenderGraphBuilder::clonePassPayload(
     dispatch.dependencyTextures = std::span<const TextureHandle>(
         ownedPayload.meshDispatchDependencyTextures[i].data(),
         ownedPayload.meshDispatchDependencyTextures[i].size());
+    dispatch.pushConstantTextureBindings =
+        ownedPayload.meshDispatchTextureBindings[i];
     dispatch.debugLabel =
         std::string_view(ownedPayload.meshDispatchDebugLabels[i].data(),
                          ownedPayload.meshDispatchDebugLabels[i].size());
@@ -1552,6 +1977,55 @@ Result<bool, std::string> RenderGraphBuilder::bindImplicitPassResources(
     return Result<bool, std::string>::makeError(
         "RenderGraphBuilder::bindImplicitPassResources: dependency texture "
         "access mode count does not match dependency texture count");
+  }
+  const auto bindPushConstantTextures =
+      [this, pass](const auto &commands) -> Result<bool, std::string> {
+    for (const auto &command : commands) {
+      for (const PushConstantTextureBinding binding :
+           command.pushConstantTextureBindings) {
+        if (binding.byteOffset == UINT32_MAX ||
+            binding.byteOffset % alignof(uint32_t) != 0u ||
+            binding.byteOffset > command.pushConstants.size() ||
+            sizeof(uint32_t) >
+                command.pushConstants.size() - binding.byteOffset) {
+          return Result<bool, std::string>::makeError(
+              "RenderGraphBuilder::bindImplicitPassResources: push-constant "
+              "texture binding offset is invalid");
+        }
+        if (binding.graphTextureResourceIndex == UINT32_MAX) {
+          if (!nuri::isValid(binding.texture)) {
+            return Result<bool, std::string>::makeError(
+                "RenderGraphBuilder::bindImplicitPassResources: "
+                "push-constant texture binding is unresolved");
+          }
+          continue;
+        }
+        const RenderGraphTextureId texture{
+            .value = binding.graphTextureResourceIndex};
+        if (binding.access == RenderGraphAccessMode::None) {
+          return Result<bool, std::string>::makeError(
+              "RenderGraphBuilder::bindImplicitPassResources: push-constant "
+              "texture binding access is empty");
+        }
+        auto accessResult = addTextureAccess(pass, texture, binding.access);
+        if (accessResult.hasError()) {
+          return accessResult;
+        }
+      }
+    }
+    return Result<bool, std::string>::makeResult(true);
+  };
+  auto dispatchTextureResult = bindPushConstantTextures(desc.preDispatches);
+  if (dispatchTextureResult.hasError()) {
+    return dispatchTextureResult;
+  }
+  auto drawTextureResult = bindPushConstantTextures(desc.draws);
+  if (drawTextureResult.hasError()) {
+    return drawTextureResult;
+  }
+  auto meshTextureResult = bindPushConstantTextures(desc.meshDispatches);
+  if (meshTextureResult.hasError()) {
+    return meshTextureResult;
   }
   if (nuri::isValid(desc.colorTexture)) {
     if (!desc.hasColorAttachment) {
@@ -1693,7 +2167,7 @@ Result<bool, std::string> RenderGraphBuilder::bindImplicitPassResources(
       }
       auto bindResult = bindMeshDispatchBuffer(
           pass, static_cast<uint32_t>(dispatchIndex),
-          RenderGraphCompileResult::MeshDispatchBufferBindingTarget::Indirect,
+          RenderGraphMeshDispatchBufferBindingTarget::Indirect,
           importResult.value(), RenderGraphAccessMode::Read);
       if (bindResult.hasError()) {
         return bindResult;
@@ -1707,8 +2181,7 @@ Result<bool, std::string> RenderGraphBuilder::bindImplicitPassResources(
       }
       auto bindResult = bindMeshDispatchBuffer(
           pass, static_cast<uint32_t>(dispatchIndex),
-          RenderGraphCompileResult::MeshDispatchBufferBindingTarget::
-              IndirectCount,
+          RenderGraphMeshDispatchBufferBindingTarget::IndirectCount,
           importResult.value(), RenderGraphAccessMode::Read);
       if (bindResult.hasError()) {
         return bindResult;
@@ -1740,19 +2213,14 @@ Result<bool, std::string> RenderGraphBuilder::bindImplicitPassResources(
     for (size_t drawIndex = 0; drawIndex < desc.draws.size(); ++drawIndex) {
       const DrawItem &draw = desc.draws[drawIndex];
       const std::array<
-          std::pair<BufferHandle,
-                    RenderGraphCompileResult::DrawBufferBindingTarget>,
-          4>
+          std::pair<BufferHandle, RenderGraphDrawBufferBindingTarget>, 4>
           bindings = {{
-              {draw.vertexBuffer,
-               RenderGraphCompileResult::DrawBufferBindingTarget::Vertex},
-              {draw.indexBuffer,
-               RenderGraphCompileResult::DrawBufferBindingTarget::Index},
+              {draw.vertexBuffer, RenderGraphDrawBufferBindingTarget::Vertex},
+              {draw.indexBuffer, RenderGraphDrawBufferBindingTarget::Index},
               {draw.indirectBuffer,
-               RenderGraphCompileResult::DrawBufferBindingTarget::Indirect},
+               RenderGraphDrawBufferBindingTarget::Indirect},
               {draw.indirectCountBuffer,
-               RenderGraphCompileResult::DrawBufferBindingTarget::
-                   IndirectCount},
+               RenderGraphDrawBufferBindingTarget::IndirectCount},
           }};
       for (const auto &[buffer, target] : bindings) {
         if (!nuri::isValid(buffer)) {
@@ -1782,7 +2250,70 @@ RenderGraphBuilder::addGraphicsPass(const RenderGraphGraphicsPassDesc &desc) {
     return Result<RenderGraphPassId, std::string>::makeError(
         executionModeResult.error());
   }
-  if (!desc.borrowPayload) {
+  const uint32_t bufferDependencyAuthorities = !desc.dependencyBuffers.empty() +
+                                               !desc.bufferUses.empty() +
+                                               !desc.importedBufferUses.empty();
+  const uint32_t textureDependencyAuthorities =
+      !desc.dependencyTextures.empty() + !desc.textureUses.empty() +
+      !desc.importedTextureUses.empty();
+  if (bufferDependencyAuthorities > 1u || textureDependencyAuthorities > 1u) {
+    return Result<RenderGraphPassId, std::string>::makeError(
+        "RenderGraphBuilder::addGraphicsPass: graph resource uses and "
+        "physical dependencies cannot describe the same resource kind");
+  }
+  std::pmr::vector<BufferHandle> graphDependencyBuffers(memory_);
+  graphDependencyBuffers.reserve(desc.bufferUses.size() +
+                                 desc.importedBufferUses.size());
+  for (const RenderGraphBufferUse use : desc.bufferUses) {
+    if (!isValidBufferIndex(use.buffer.value)) {
+      return Result<RenderGraphPassId, std::string>::makeError(
+          "RenderGraphBuilder::addGraphicsPass: buffer use is out of range");
+    }
+    graphDependencyBuffers.push_back(
+        buffers_[use.buffer.value].imported
+            ? buffers_[use.buffer.value].importedHandle
+            : BufferHandle{});
+  }
+  for (const RenderGraphImportedBufferUse use : desc.importedBufferUses) {
+    if (!nuri::isValid(use.buffer)) {
+      return Result<RenderGraphPassId, std::string>::makeError(
+          "RenderGraphBuilder::addGraphicsPass: imported buffer use is "
+          "invalid");
+    }
+    graphDependencyBuffers.push_back(use.buffer);
+  }
+  std::pmr::vector<TextureHandle> graphDependencyTextures(memory_);
+  graphDependencyTextures.reserve(desc.textureUses.size() +
+                                  desc.importedTextureUses.size());
+  for (const RenderGraphTextureUse use : desc.textureUses) {
+    if (!isValidTextureIndex(use.texture.value)) {
+      return Result<RenderGraphPassId, std::string>::makeError(
+          "RenderGraphBuilder::addGraphicsPass: texture use is out of range");
+    }
+    graphDependencyTextures.push_back(
+        textures_[use.texture.value].imported
+            ? textures_[use.texture.value].importedHandle
+            : TextureHandle{});
+  }
+  for (const RenderGraphImportedTextureUse use : desc.importedTextureUses) {
+    if (!nuri::isValid(use.texture)) {
+      return Result<RenderGraphPassId, std::string>::makeError(
+          "RenderGraphBuilder::addGraphicsPass: imported texture use is "
+          "invalid");
+    }
+    graphDependencyTextures.push_back(use.texture);
+  }
+  RenderGraphGraphicsPassDesc payloadDesc = desc;
+  if (!graphDependencyBuffers.empty()) {
+    payloadDesc.dependencyBuffers = graphDependencyBuffers;
+  }
+  if (!graphDependencyTextures.empty()) {
+    payloadDesc.dependencyTextures = graphDependencyTextures;
+  }
+  const bool borrowPayload = desc.borrowPayload &&
+                             graphDependencyBuffers.empty() &&
+                             graphDependencyTextures.empty();
+  if (!borrowPayload) {
     allPassesBorrowPayload_ = false;
   }
   RenderPass pass{};
@@ -1795,18 +2326,19 @@ RenderGraphBuilder::addGraphicsPass(const RenderGraphGraphicsPassDesc &desc) {
   pass.useViewport = desc.useViewport;
   pass.viewport = desc.viewport;
   pass.gpuTimingScope = desc.gpuTimingScope;
+  pass.externalTemporalDispatch = desc.externalTemporalDispatch;
   pass.debugColor = desc.debugColor;
-  pass.payloadBorrowed = desc.borrowPayload;
+  pass.payloadBorrowed = borrowPayload;
   pass.drawBuffersPreResolved = desc.drawBuffersPreResolved;
-  if (desc.borrowPayload) {
-    pass.preDispatches = desc.preDispatches;
-    pass.dependencyBuffers = desc.dependencyBuffers;
-    pass.dependencyTextures = desc.dependencyTextures;
-    pass.draws = desc.draws;
-    pass.meshDispatches = desc.meshDispatches;
-    pass.debugLabel = desc.debugLabel;
+  if (borrowPayload) {
+    pass.preDispatches = payloadDesc.preDispatches;
+    pass.dependencyBuffers = payloadDesc.dependencyBuffers;
+    pass.dependencyTextures = payloadDesc.dependencyTextures;
+    pass.draws = payloadDesc.draws;
+    pass.meshDispatches = payloadDesc.meshDispatches;
+    pass.debugLabel = payloadDesc.debugLabel;
   } else {
-    OwnedPassPayload ownedPayload = clonePassPayload(desc);
+    OwnedPassPayload ownedPayload = clonePassPayload(payloadDesc);
     ownedPassPayloads_.push_back(std::move(ownedPayload));
     OwnedPassPayload &storedPayload = ownedPassPayloads_.back();
     pass.preDispatches = std::span<const ComputeDispatchItem>(
@@ -1834,6 +2366,56 @@ RenderGraphBuilder::addGraphicsPass(const RenderGraphGraphicsPassDesc &desc) {
   if (bindResourcesResult.hasError()) {
     return Result<RenderGraphPassId, std::string>::makeError(
         bindResourcesResult.error());
+  }
+  for (uint32_t i = 0u; i < desc.bufferUses.size(); ++i) {
+    const RenderGraphBufferUse use = desc.bufferUses[i];
+    auto bindResult =
+        bindPassDependencyBuffer(passId, i, use.buffer, use.access);
+    if (bindResult.hasError()) {
+      return Result<RenderGraphPassId, std::string>::makeError(
+          bindResult.error());
+    }
+  }
+  for (uint32_t i = 0u; i < desc.textureUses.size(); ++i) {
+    const RenderGraphTextureUse use = desc.textureUses[i];
+    auto bindResult =
+        bindPassDependencyTexture(passId, i, use.texture, use.access);
+    if (bindResult.hasError()) {
+      return Result<RenderGraphPassId, std::string>::makeError(
+          bindResult.error());
+    }
+  }
+  const std::string bufferUseDebugName =
+      makePassResourceDebugName(desc.debugLabel, "imported_buffer_use");
+  for (uint32_t i = 0u; i < desc.importedBufferUses.size(); ++i) {
+    const RenderGraphImportedBufferUse use = desc.importedBufferUses[i];
+    auto imported = importBuffer(use.buffer, bufferUseDebugName);
+    if (imported.hasError()) {
+      return Result<RenderGraphPassId, std::string>::makeError(
+          imported.error());
+    }
+    auto bindResult =
+        bindPassDependencyBuffer(passId, i, imported.value(), use.access);
+    if (bindResult.hasError()) {
+      return Result<RenderGraphPassId, std::string>::makeError(
+          bindResult.error());
+    }
+  }
+  const std::string textureUseDebugName =
+      makePassResourceDebugName(desc.debugLabel, "imported_texture_use");
+  for (uint32_t i = 0u; i < desc.importedTextureUses.size(); ++i) {
+    const RenderGraphImportedTextureUse use = desc.importedTextureUses[i];
+    auto imported = importTexture(use.texture, textureUseDebugName);
+    if (imported.hasError()) {
+      return Result<RenderGraphPassId, std::string>::makeError(
+          imported.error());
+    }
+    auto bindResult =
+        bindPassDependencyTexture(passId, i, imported.value(), use.access);
+    if (bindResult.hasError()) {
+      return Result<RenderGraphPassId, std::string>::makeError(
+          bindResult.error());
+    }
   }
   auto rootResult = applyImplicitPassRoots(passId, desc);
   if (rootResult.hasError()) {
@@ -2142,13 +2724,21 @@ Result<RenderGraphPassId, std::string> RenderGraphBuilder::addTextureCopyPass(
     textureCopyBindings_[bindingIndex].destination =
         copy.destinationTexture.value;
     auto readResult = addTextureAccess(passId, copy.sourceTexture,
-                                       RenderGraphAccessMode::Read);
+                                       RenderGraphAccessMode::Read,
+                                       {.firstMip = copy.sourceMipLevel,
+                                        .mipCount = 1u,
+                                        .firstLayer = copy.sourceLayer,
+                                        .layerCount = 1u});
     if (readResult.hasError()) {
       return Result<RenderGraphPassId, std::string>::makeError(
           readResult.error());
     }
     auto writeResult = addTextureAccess(passId, copy.destinationTexture,
-                                        RenderGraphAccessMode::Write);
+                                        RenderGraphAccessMode::Write,
+                                        {.firstMip = copy.destinationMipLevel,
+                                         .mipCount = 1u,
+                                         .firstLayer = copy.destinationLayer,
+                                         .layerCount = 1u});
     if (writeResult.hasError()) {
       return Result<RenderGraphPassId, std::string>::makeError(
           writeResult.error());
@@ -2465,10 +3055,11 @@ Result<bool, std::string> RenderGraphBuilder::bindPreDispatchDependencyBuffer(
   return addBufferAccess(pass, buffer, mode);
 }
 
-Result<bool, std::string> RenderGraphBuilder::bindDrawBuffer(
-    RenderGraphPassId pass, uint32_t drawIndex,
-    RenderGraphCompileResult::DrawBufferBindingTarget target,
-    RenderGraphBufferId buffer, RenderGraphAccessMode mode) {
+Result<bool, std::string>
+RenderGraphBuilder::bindDrawBuffer(RenderGraphPassId pass, uint32_t drawIndex,
+                                   RenderGraphDrawBufferBindingTarget target,
+                                   RenderGraphBufferId buffer,
+                                   RenderGraphAccessMode mode) {
   if (!isValidPassIndex(pass.value) || !isValidBufferIndex(buffer.value)) {
     return Result<bool, std::string>::makeError(
         "RenderGraphBuilder::bindDrawBuffer: id is out of range");
@@ -2488,7 +3079,7 @@ Result<bool, std::string> RenderGraphBuilder::bindDrawBuffer(
 
 Result<bool, std::string> RenderGraphBuilder::bindMeshDispatchBuffer(
     RenderGraphPassId pass, uint32_t meshDispatchIndex,
-    RenderGraphCompileResult::MeshDispatchBufferBindingTarget target,
+    RenderGraphMeshDispatchBufferBindingTarget target,
     RenderGraphBufferId buffer, RenderGraphAccessMode mode) {
   if (!isValidPassIndex(pass.value) || !isValidBufferIndex(buffer.value)) {
     return Result<bool, std::string>::makeError(
@@ -2579,70 +3170,78 @@ RenderGraphBuilder::markTextureAsFrameOutput(RenderGraphTextureId texture) {
 }
 
 void RenderGraphBuilder::compileStageC0BuildResourceTables(
-    RenderGraphCompileResult &compiled,
+    CompiledRenderGraph &compiled,
     RenderGraphBuilder::CompileWorkState &work) const {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
-  compiled.textureHandlesByResource.resize(textures_.size());
+  compiled.commands.textureHandlesByResource.resize(textures_.size());
   for (uint32_t i = 0; i < textures_.size(); ++i) {
     const TextureResource &texture = textures_[i];
     if (texture.imported) {
-      compiled.textureHandlesByResource[i] = texture.importedHandle;
-      ++compiled.resourceStats.importedTextures;
+      compiled.commands.textureHandlesByResource[i] = texture.importedHandle;
+      ++compiled.plan.resourceStats.importedTextures;
     } else {
-      ++compiled.resourceStats.transientTextures;
+      ++compiled.plan.resourceStats.transientTextures;
     }
   }
-  compiled.bufferHandlesByResource.resize(buffers_.size());
+  compiled.commands.bufferHandlesByResource.resize(buffers_.size());
   for (uint32_t i = 0; i < buffers_.size(); ++i) {
     const BufferResource &buffer = buffers_[i];
     if (buffer.imported) {
-      compiled.bufferHandlesByResource[i] = buffer.importedHandle;
-      ++compiled.resourceStats.importedBuffers;
+      compiled.commands.bufferHandlesByResource[i] = buffer.importedHandle;
+      ++compiled.plan.resourceStats.importedBuffers;
     } else {
-      ++compiled.resourceStats.transientBuffers;
+      ++compiled.plan.resourceStats.transientBuffers;
     }
   }
-  compiled.accelerationStructureHandlesByResource.resize(
+  compiled.commands.accelerationStructureHandlesByResource.resize(
       accelerationStructures_.size());
   for (uint32_t i = 0; i < accelerationStructures_.size(); ++i) {
-    compiled.accelerationStructureHandlesByResource[i] =
+    compiled.commands.accelerationStructureHandlesByResource[i] =
         accelerationStructures_[i].importedHandle;
-    ++compiled.resourceStats.importedAccelerationStructures;
+    ++compiled.plan.resourceStats.importedAccelerationStructures;
   }
   work.passCount = static_cast<uint32_t>(passes_.size());
   work.activePassCount = work.passCount;
-  compiled.declaredPassCount = work.passCount;
+  compiled.plan.declaredPassCount = work.passCount;
 }
 
 Result<bool, std::string> RenderGraphBuilder::compileStageC1C2BuildTopology(
-    RenderGraphRuntime &runtime, RenderGraphCompileResult &compiled,
+    RenderGraphRuntime &runtime, CompiledRenderGraph &compiled,
     RenderGraphBuilder::CompileWorkState &work) const {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_BARRIER);
-  work.compiledAccesses = passResourceAccesses_;
-  std::sort(work.compiledAccesses.begin(), work.compiledAccesses.end(),
-            [](const PassResourceAccess &lhs, const PassResourceAccess &rhs) {
-              const uint8_t lhsKind = static_cast<uint8_t>(lhs.resourceKind);
-              const uint8_t rhsKind = static_cast<uint8_t>(rhs.resourceKind);
-              if (lhsKind != rhsKind) {
-                return lhsKind < rhsKind;
-              }
-              if (lhs.resourceIndex != rhs.resourceIndex) {
-                return lhs.resourceIndex < rhs.resourceIndex;
-              }
-              return lhs.passIndex < rhs.passIndex;
-            });
-  if (!work.compiledAccesses.empty()) {
+  work.compiledResourceUses = resourceUses_;
+  std::sort(
+      work.compiledResourceUses.begin(), work.compiledResourceUses.end(),
+      [](const RenderGraphResourceUse &lhs, const RenderGraphResourceUse &rhs) {
+        const uint8_t lhsKind = static_cast<uint8_t>(lhs.resourceKind);
+        const uint8_t rhsKind = static_cast<uint8_t>(rhs.resourceKind);
+        if (lhsKind != rhsKind) {
+          return lhsKind < rhsKind;
+        }
+        if (lhs.resourceIndex != rhs.resourceIndex) {
+          return lhs.resourceIndex < rhs.resourceIndex;
+        }
+        return std::tie(lhs.passIndex, lhs.subresources.firstMip,
+                        lhs.subresources.mipCount, lhs.subresources.firstLayer,
+                        lhs.subresources.layerCount) <
+               std::tie(rhs.passIndex, rhs.subresources.firstMip,
+                        rhs.subresources.mipCount, rhs.subresources.firstLayer,
+                        rhs.subresources.layerCount);
+      });
+  if (!work.compiledResourceUses.empty()) {
     size_t writeIndex = 0u;
     size_t groupBegin = 0u;
-    while (groupBegin < work.compiledAccesses.size()) {
+    while (groupBegin < work.compiledResourceUses.size()) {
       size_t groupEnd = groupBegin + 1u;
-      while (groupEnd < work.compiledAccesses.size() &&
-             work.compiledAccesses[groupEnd].resourceKind ==
-                 work.compiledAccesses[groupBegin].resourceKind &&
-             work.compiledAccesses[groupEnd].resourceIndex ==
-                 work.compiledAccesses[groupBegin].resourceIndex &&
-             work.compiledAccesses[groupEnd].passIndex ==
-                 work.compiledAccesses[groupBegin].passIndex) {
+      while (groupEnd < work.compiledResourceUses.size() &&
+             work.compiledResourceUses[groupEnd].resourceKind ==
+                 work.compiledResourceUses[groupBegin].resourceKind &&
+             work.compiledResourceUses[groupEnd].resourceIndex ==
+                 work.compiledResourceUses[groupBegin].resourceIndex &&
+             work.compiledResourceUses[groupEnd].passIndex ==
+                 work.compiledResourceUses[groupBegin].passIndex &&
+             work.compiledResourceUses[groupEnd].subresources ==
+                 work.compiledResourceUses[groupBegin].subresources) {
         ++groupEnd;
       }
       RenderGraphAccessMode explicitMode = RenderGraphAccessMode::None;
@@ -2652,13 +3251,14 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC1C2BuildTopology(
       RenderGraphResourceState inferredState =
           RenderGraphResourceState::Unknown;
       for (size_t i = groupBegin; i < groupEnd; ++i) {
-        if (work.compiledAccesses[i].inferred) {
-          inferredMode = inferredMode | work.compiledAccesses[i].mode;
-          inferredState = work.compiledAccesses[i].requestedState;
+        if (work.compiledResourceUses[i].provenance ==
+            RenderGraphResourceUseProvenance::Inferred) {
+          inferredMode = inferredMode | work.compiledResourceUses[i].access;
+          inferredState = work.compiledResourceUses[i].state;
           continue;
         }
-        explicitMode = explicitMode | work.compiledAccesses[i].mode;
-        explicitState = work.compiledAccesses[i].requestedState;
+        explicitMode = explicitMode | work.compiledResourceUses[i].access;
+        explicitState = work.compiledResourceUses[i].state;
       }
       const bool hasExplicit =
           hasAccessFlag(explicitMode, RenderGraphAccessMode::Read) ||
@@ -2667,24 +3267,30 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC1C2BuildTopology(
           hasExplicit ? explicitMode : inferredMode;
       if (hasAccessFlag(selectedMode, RenderGraphAccessMode::Read) ||
           hasAccessFlag(selectedMode, RenderGraphAccessMode::Write)) {
-        work.compiledAccesses[writeIndex++] = PassResourceAccess{
-            .passIndex = work.compiledAccesses[groupBegin].passIndex,
-            .resourceKind = work.compiledAccesses[groupBegin].resourceKind,
-            .resourceIndex = work.compiledAccesses[groupBegin].resourceIndex,
-            .mode = selectedMode,
-            .requestedState = hasExplicit ? explicitState : inferredState,
-            .inferred = !hasExplicit,
+        work.compiledResourceUses[writeIndex++] = RenderGraphResourceUse{
+            .passIndex = work.compiledResourceUses[groupBegin].passIndex,
+            .resourceKind = work.compiledResourceUses[groupBegin].resourceKind,
+            .resourceIndex =
+                work.compiledResourceUses[groupBegin].resourceIndex,
+            .access = selectedMode,
+            .state = hasExplicit ? explicitState : inferredState,
+            .stage = work.compiledResourceUses[groupBegin].stage,
+            .subresources = work.compiledResourceUses[groupBegin].subresources,
+            .provenance = hasExplicit
+                              ? RenderGraphResourceUseProvenance::Explicit
+                              : RenderGraphResourceUseProvenance::Inferred,
         };
       }
       groupBegin = groupEnd;
     }
-    work.compiledAccesses.resize(writeIndex);
+    work.compiledResourceUses.resize(writeIndex);
   }
+  compiled.plan.resourceUses = work.compiledResourceUses;
   NURI_PROFILER_ZONE("RenderGraph.compile.build_topology",
                      NURI_PROFILER_COLOR_BARRIER);
   PmrHashSet<uint64_t> dependencyEdgeKeys(memory_);
   dependencyEdgeKeys.reserve(dependencies_.size() +
-                             work.compiledAccesses.size() * 2u);
+                             work.compiledResourceUses.size() * 2u);
   std::pmr::vector<DependencyEdge> allDependencies(memory_);
   for (const DependencyEdge edge : dependencies_) {
     const uint64_t key =
@@ -2694,11 +3300,12 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC1C2BuildTopology(
     }
   }
   allDependencies.reserve(dependencies_.size() +
-                          work.compiledAccesses.size() * 2u);
+                          work.compiledResourceUses.size() * 2u);
   struct ResourceAccessGroup {
     uint32_t resourceIndex = UINT32_MAX;
     size_t begin = 0u;
     size_t end = 0u;
+    bool hasPartialTextureRanges = false;
   };
   const auto mergeHazardEdgeKeys =
       [&allDependencies,
@@ -2713,25 +3320,31 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC1C2BuildTopology(
           });
         }
       };
-  const auto addResourceHazards = [&](AccessResourceKind resourceKind) {
+  const auto addResourceHazards = [&](RenderGraphResourceKind resourceKind) {
     std::vector<ResourceAccessGroup> groups{};
-    groups.reserve(work.compiledAccesses.size());
-    for (size_t i = 0u; i < work.compiledAccesses.size();) {
-      if (work.compiledAccesses[i].resourceKind != resourceKind) {
+    groups.reserve(work.compiledResourceUses.size());
+    for (size_t i = 0u; i < work.compiledResourceUses.size();) {
+      if (work.compiledResourceUses[i].resourceKind != resourceKind) {
         ++i;
         continue;
       }
-      const uint32_t resourceIndex = work.compiledAccesses[i].resourceIndex;
+      const uint32_t resourceIndex = work.compiledResourceUses[i].resourceIndex;
       const size_t begin = i;
+      bool hasPartialTextureRanges = false;
       do {
+        hasPartialTextureRanges =
+            hasPartialTextureRanges ||
+            (resourceKind == RenderGraphResourceKind::Texture &&
+             !isWholeTextureRange(work.compiledResourceUses[i].subresources));
         ++i;
-      } while (i < work.compiledAccesses.size() &&
-               work.compiledAccesses[i].resourceKind == resourceKind &&
-               work.compiledAccesses[i].resourceIndex == resourceIndex);
+      } while (i < work.compiledResourceUses.size() &&
+               work.compiledResourceUses[i].resourceKind == resourceKind &&
+               work.compiledResourceUses[i].resourceIndex == resourceIndex);
       groups.push_back(ResourceAccessGroup{
           .resourceIndex = resourceIndex,
           .begin = begin,
           .end = i,
+          .hasPartialTextureRanges = hasPartialTextureRanges,
       });
     }
     if (groups.empty()) {
@@ -2748,15 +3361,40 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC1C2BuildTopology(
            groupIndex < range.offset + range.count; ++groupIndex) {
         const ResourceAccessGroup &group = groups[groupIndex];
         (void)group.resourceIndex;
+        if (group.hasPartialTextureRanges) {
+          for (size_t accessIndex = group.begin; accessIndex < group.end;
+               ++accessIndex) {
+            const RenderGraphResourceUse &access =
+                work.compiledResourceUses[accessIndex];
+            for (size_t previousIndex = group.begin;
+                 previousIndex < accessIndex; ++previousIndex) {
+              const RenderGraphResourceUse &previous =
+                  work.compiledResourceUses[previousIndex];
+              if (previous.passIndex == access.passIndex ||
+                  !textureRangesOverlap(previous.subresources,
+                                        access.subresources)) {
+                continue;
+              }
+              if (hasAccessFlag(previous.access,
+                                RenderGraphAccessMode::Write) ||
+                  hasAccessFlag(access.access, RenderGraphAccessMode::Write)) {
+                edgeKeys.push_back(foldDependencyEdgeKey(previous.passIndex,
+                                                         access.passIndex));
+              }
+            }
+          }
+          continue;
+        }
         activeReaders.clear();
         uint32_t lastWriter = UINT32_MAX;
         for (size_t accessIndex = group.begin; accessIndex < group.end;
              ++accessIndex) {
-          const PassResourceAccess &access = work.compiledAccesses[accessIndex];
+          const RenderGraphResourceUse &access =
+              work.compiledResourceUses[accessIndex];
           const bool hasRead =
-              hasAccessFlag(access.mode, RenderGraphAccessMode::Read);
+              hasAccessFlag(access.access, RenderGraphAccessMode::Read);
           const bool hasWrite =
-              hasAccessFlag(access.mode, RenderGraphAccessMode::Write);
+              hasAccessFlag(access.access, RenderGraphAccessMode::Write);
           if (!hasRead && !hasWrite) {
             continue;
           }
@@ -2826,9 +3464,9 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC1C2BuildTopology(
         mergedEdgeKeys.end());
     mergeHazardEdgeKeys(mergedEdgeKeys);
   };
-  addResourceHazards(AccessResourceKind::Texture);
-  addResourceHazards(AccessResourceKind::Buffer);
-  addResourceHazards(AccessResourceKind::AccelerationStructure);
+  addResourceHazards(RenderGraphResourceKind::Texture);
+  addResourceHazards(RenderGraphResourceKind::Buffer);
+  addResourceHazards(RenderGraphResourceKind::AccelerationStructure);
   work.activePassMask.resize(work.passCount, 1u);
   if (!frameOutputTextureIndices_.empty() || !sideEffectPassMarks_.empty()) {
     std::fill(work.activePassMask.begin(), work.activePassMask.end(), 0u);
@@ -2862,7 +3500,7 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC1C2BuildTopology(
       }
       work.activePassMask[passIndex] = 1u;
       stack.push_back(passIndex);
-      ++compiled.rootPassCount;
+      ++compiled.plan.rootPassCount;
     };
     const bool hasExplicitFrameOutputRoots =
         !frameOutputTextureIndices_.empty();
@@ -2891,13 +3529,13 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC1C2BuildTopology(
       }
       std::fill(textureAccessByPass.begin(), textureAccessByPass.end(),
                 RenderGraphAccessMode::None);
-      for (const PassResourceAccess &access : work.compiledAccesses) {
-        if (access.resourceKind != AccessResourceKind::Texture ||
+      for (const RenderGraphResourceUse &access : work.compiledResourceUses) {
+        if (access.resourceKind != RenderGraphResourceKind::Texture ||
             access.resourceIndex != textureIndex) {
           continue;
         }
         textureAccessByPass[access.passIndex] =
-            textureAccessByPass[access.passIndex] | access.mode;
+            textureAccessByPass[access.passIndex] | access.access;
       }
       for (uint32_t passIndex = 0; passIndex < work.passCount; ++passIndex) {
         if (hasAccessFlag(textureAccessByPass[passIndex],
@@ -2924,7 +3562,7 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC1C2BuildTopology(
     for (const uint8_t isActive : work.activePassMask) {
       work.activePassCount += static_cast<uint32_t>(isActive != 0u);
     }
-    compiled.culledPassCount = work.passCount - work.activePassCount;
+    compiled.plan.culledPassCount = work.passCount - work.activePassCount;
   }
   work.scheduledDependencies.reserve(allDependencies.size());
   for (const DependencyEdge edge : allDependencies) {
@@ -3020,19 +3658,19 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC1C2BuildTopology(
 }
 
 Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
-    RenderGraphRuntime &runtime, RenderGraphCompileResult &compiled,
+    RenderGraphRuntime &runtime, CompiledRenderGraph &compiled,
     const RenderGraphBuilder::CompileWorkState &work) const {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
-  compiled.passDebugNames.reserve(passDebugNames_.size());
+  compiled.commands.passDebugNames.reserve(passDebugNames_.size());
   for (const std::pmr::string &name : passDebugNames_) {
     std::pmr::string copiedName(memory_);
     copiedName.assign(name.data(), name.size());
-    compiled.passDebugNames.push_back(std::move(copiedName));
+    compiled.commands.passDebugNames.push_back(std::move(copiedName));
   }
-  compiled.edges.reserve(work.scheduledDependencies.size());
+  compiled.plan.edges.reserve(work.scheduledDependencies.size());
   for (const DependencyEdge edge : work.scheduledDependencies) {
-    compiled.edges.push_back(RenderGraphCompileResult::Edge{
-        .before = edge.before, .after = edge.after});
+    compiled.plan.edges.push_back(
+        RenderGraphPlan::Edge{.before = edge.before, .after = edge.after});
   }
   struct PassResolvePlan {
     uint32_t passIndex = UINT32_MAX;
@@ -3054,6 +3692,7 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
     uint32_t drawCount = 0u;
     uint32_t drawBindingOffset = 0u;
     uint32_t drawOutputOffset = 0u;
+    uint32_t arenaDrawOutputOffset = 0u;
     uint32_t quantizedDrawCount = 0u;
     uint32_t meshDispatchCount = 0u;
     uint32_t meshDispatchBindingOffset = 0u;
@@ -3064,22 +3703,9 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
     uint32_t textureCopyCount = 0u;
     uint32_t textureCopyBindingOffset = 0u;
     uint32_t textureCopyOutputOffset = 0u;
-    uint32_t unresolvedTextureOffset = 0u;
-    uint32_t unresolvedTextureCount = 0u;
-    uint32_t unresolvedDependencyOffset = 0u;
-    uint32_t unresolvedDependencyCount = 0u;
-    uint32_t unresolvedDependencyTextureOffset = 0u;
-    uint32_t unresolvedDependencyTextureCount = 0u;
-    uint32_t unresolvedPreDispatchDependencyOffset = 0u;
-    uint32_t unresolvedPreDispatchDependencyCount = 0u;
-    uint32_t unresolvedDrawOffset = 0u;
-    uint32_t unresolvedDrawCount = 0u;
-    uint32_t unresolvedMeshDispatchOffset = 0u;
-    uint32_t unresolvedMeshDispatchCount = 0u;
-    uint32_t unresolvedBufferCopyOffset = 0u;
-    uint32_t unresolvedBufferCopyCount = 0u;
-    uint32_t unresolvedTextureCopyOffset = 0u;
-    uint32_t unresolvedTextureCopyCount = 0u;
+    uint32_t resourcePatchOffset = 0u;
+    uint32_t resourcePatchCount = 0u;
+    uint32_t drawPatchCount = 0u;
   };
   const auto countTransientBindings = [](const auto &bindings, uint32_t offset,
                                          uint32_t count,
@@ -3127,19 +3753,19 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
       plan.textureCopyCount = static_cast<uint32_t>(pass.textureCopies.size());
       plan.textureCopyBindingOffset =
           passBindings_[passIndex].textureCopies.offset;
-      const auto unresolvedTexture = [&](uint32_t resourceIndex) {
+      const auto needsTexturePatch = [&](uint32_t resourceIndex) {
         return resourceIndex != UINT32_MAX &&
                !textures_[resourceIndex].imported;
       };
-      plan.unresolvedTextureCount =
-          unresolvedTexture(plan.colorTextureIndex) +
-          unresolvedTexture(plan.colorResolveTextureIndex) +
-          unresolvedTexture(plan.depthTextureIndex) +
-          unresolvedTexture(plan.depthResolveTextureIndex);
-      plan.unresolvedDependencyCount = countTransientBindings(
+      plan.resourcePatchCount =
+          needsTexturePatch(plan.colorTextureIndex) +
+          needsTexturePatch(plan.colorResolveTextureIndex) +
+          needsTexturePatch(plan.depthTextureIndex) +
+          needsTexturePatch(plan.depthResolveTextureIndex);
+      plan.resourcePatchCount += countTransientBindings(
           passDependencyBufferBindingResourceIndices_,
           plan.dependencyBindingOffset, plan.dependencyCount, buffers_);
-      plan.unresolvedDependencyTextureCount =
+      plan.resourcePatchCount +=
           countTransientBindings(passDependencyTextureBindingResourceIndices_,
                                  plan.dependencyTextureBindingOffset,
                                  plan.dependencyTextureCount, textures_);
@@ -3150,7 +3776,7 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
         const uint32_t count =
             preDispatchDependencyBindings_[bindingIndex].count;
         plan.preDispatchDependencyCount += count;
-        plan.unresolvedPreDispatchDependencyCount +=
+        plan.resourcePatchCount +=
             countTransientBindings(preDispatchDependencyBindingResourceIndices_,
                                    offset, count, buffers_);
       }
@@ -3161,33 +3787,32 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
           for (const uint32_t resource :
                {binding.vertex, binding.index, binding.indirect,
                 binding.indirectCount}) {
-            plan.unresolvedDrawCount +=
+            const uint32_t needsPatch =
                 resource != UINT32_MAX && !buffers_[resource].imported;
+            plan.resourcePatchCount += needsPatch;
+            plan.drawPatchCount += needsPatch;
           }
         }
       }
       for (uint32_t i = 0; i < plan.meshDispatchCount; ++i) {
         const MeshDispatchBindings binding =
             meshDispatchBindings_[plan.meshDispatchBindingOffset + i];
-        plan.unresolvedMeshDispatchCount +=
-            (binding.indirect != UINT32_MAX &&
-             !buffers_[binding.indirect].imported) +
-            (binding.indirectCount != UINT32_MAX &&
-             !buffers_[binding.indirectCount].imported);
+        plan.resourcePatchCount += (binding.indirect != UINT32_MAX &&
+                                    !buffers_[binding.indirect].imported) +
+                                   (binding.indirectCount != UINT32_MAX &&
+                                    !buffers_[binding.indirectCount].imported);
       }
       for (uint32_t i = 0; i < plan.bufferCopyCount; ++i) {
         const BufferCopyBindings binding =
             bufferCopyBindings_[plan.bufferCopyBindingOffset + i];
-        plan.unresolvedBufferCopyCount += !buffers_[binding.source].imported;
-        plan.unresolvedBufferCopyCount +=
-            !buffers_[binding.destination].imported;
+        plan.resourcePatchCount += !buffers_[binding.source].imported;
+        plan.resourcePatchCount += !buffers_[binding.destination].imported;
       }
       for (uint32_t i = 0; i < plan.textureCopyCount; ++i) {
         const TextureCopyBindings binding =
             textureCopyBindings_[plan.textureCopyBindingOffset + i];
-        plan.unresolvedTextureCopyCount += !textures_[binding.source].imported;
-        plan.unresolvedTextureCopyCount +=
-            !textures_[binding.destination].imported;
+        plan.resourcePatchCount += !textures_[binding.source].imported;
+        plan.resourcePatchCount += !textures_[binding.destination].imported;
       }
     }
   };
@@ -3205,7 +3830,7 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
                           .offset = 0u,
                           .count = static_cast<uint32_t>(work.order.size())});
   }
-  compiled.usedParallelPayloadResolution = usedParallelPassResolution;
+  compiled.commands.usedParallelPayloadResolution = usedParallelPassResolution;
   size_t totalDependencyBufferSlots = 0u;
   size_t totalDependencyTextureSlots = 0u;
   size_t totalPreDispatchItems = 0u;
@@ -3214,14 +3839,7 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
   size_t totalMeshDispatchItems = 0u;
   size_t totalBufferCopyItems = 0u;
   size_t totalTextureCopyItems = 0u;
-  size_t totalUnresolvedTextureBindings = 0u;
-  size_t totalUnresolvedDependencyBufferBindings = 0u;
-  size_t totalUnresolvedDependencyTextureBindings = 0u;
-  size_t totalUnresolvedPreDispatchDependencyBufferBindings = 0u;
-  size_t totalUnresolvedDrawBufferBindings = 0u;
-  size_t totalUnresolvedMeshDispatchBufferBindings = 0u;
-  size_t totalUnresolvedBufferCopyBindings = 0u;
-  size_t totalUnresolvedTextureCopyBindings = 0u;
+  size_t totalResourcePatches = 0u;
   for (uint32_t orderedPassIndex = 0u; orderedPassIndex < passPlans.size();
        ++orderedPassIndex) {
     PassResolvePlan &plan = passPlans[orderedPassIndex];
@@ -3236,7 +3854,7 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
     plan.preDispatchDependencyOffset =
         static_cast<uint32_t>(totalPreDispatchDependencySlots);
     totalPreDispatchDependencySlots += plan.preDispatchDependencyCount;
-    if (plan.drawCount != 0u && (plan.unresolvedDrawCount != 0u ||
+    if (plan.drawCount != 0u && (plan.drawPatchCount != 0u ||
                                  !passes_[plan.passIndex].payloadBorrowed)) {
       if (totalDrawItems > UINT32_MAX) {
         return Result<bool, std::string>::makeError(
@@ -3244,6 +3862,7 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
             "uint32_t range");
       }
       plan.drawOutputOffset = static_cast<uint32_t>(totalDrawItems);
+      plan.arenaDrawOutputOffset = plan.drawOutputOffset;
       const uint64_t quantizedCount =
           quantizeToNextPow2(static_cast<uint64_t>(plan.drawCount));
       if (quantizedCount > UINT32_MAX) {
@@ -3267,6 +3886,7 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
       totalDrawItems += static_cast<size_t>(quantizedCount);
     } else {
       plan.drawOutputOffset = 0u;
+      plan.arenaDrawOutputOffset = 0u;
       plan.quantizedDrawCount = 0u;
     }
     if (totalMeshDispatchItems > UINT32_MAX) {
@@ -3309,93 +3929,97 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
           "RenderGraphBuilder::compile: total texture copy count overflow");
     }
     totalTextureCopyItems += plan.textureCopyCount;
-    plan.unresolvedTextureOffset =
-        static_cast<uint32_t>(totalUnresolvedTextureBindings);
-    totalUnresolvedTextureBindings += plan.unresolvedTextureCount;
-    plan.unresolvedDependencyOffset =
-        static_cast<uint32_t>(totalUnresolvedDependencyBufferBindings);
-    totalUnresolvedDependencyBufferBindings += plan.unresolvedDependencyCount;
-    plan.unresolvedDependencyTextureOffset =
-        static_cast<uint32_t>(totalUnresolvedDependencyTextureBindings);
-    totalUnresolvedDependencyTextureBindings +=
-        plan.unresolvedDependencyTextureCount;
-    plan.unresolvedPreDispatchDependencyOffset = static_cast<uint32_t>(
-        totalUnresolvedPreDispatchDependencyBufferBindings);
-    totalUnresolvedPreDispatchDependencyBufferBindings +=
-        plan.unresolvedPreDispatchDependencyCount;
-    plan.unresolvedDrawOffset =
-        static_cast<uint32_t>(totalUnresolvedDrawBufferBindings);
-    totalUnresolvedDrawBufferBindings += plan.unresolvedDrawCount;
-    plan.unresolvedMeshDispatchOffset =
-        static_cast<uint32_t>(totalUnresolvedMeshDispatchBufferBindings);
-    totalUnresolvedMeshDispatchBufferBindings +=
-        plan.unresolvedMeshDispatchCount;
-    plan.unresolvedBufferCopyOffset =
-        static_cast<uint32_t>(totalUnresolvedBufferCopyBindings);
-    totalUnresolvedBufferCopyBindings += plan.unresolvedBufferCopyCount;
-    plan.unresolvedTextureCopyOffset =
-        static_cast<uint32_t>(totalUnresolvedTextureCopyBindings);
-    totalUnresolvedTextureCopyBindings += plan.unresolvedTextureCopyCount;
+    plan.resourcePatchOffset = static_cast<uint32_t>(totalResourcePatches);
+    totalResourcePatches += plan.resourcePatchCount;
   }
-  compiled.resolvedDependencyBuffers.resize(totalDependencyBufferSlots);
-  compiled.resolvedDependencyBufferResourceIndices.assign(
+  size_t totalArenaDrawItems = totalDrawItems;
+  for (PassResolvePlan &plan : passPlans) {
+    if (plan.drawCount == 0u || plan.quantizedDrawCount != 0u) {
+      continue;
+    }
+    if (plan.drawCount >
+        std::numeric_limits<size_t>::max() - totalArenaDrawItems) {
+      return Result<bool, std::string>::makeError(
+          "RenderGraphBuilder::compile: dynamic draw item count overflow");
+    }
+    if (totalArenaDrawItems > UINT32_MAX ||
+        plan.drawCount > UINT32_MAX - totalArenaDrawItems) {
+      return Result<bool, std::string>::makeError(
+          "RenderGraphBuilder::compile: dynamic draw item count exceeds "
+          "uint32_t range");
+    }
+    plan.arenaDrawOutputOffset = static_cast<uint32_t>(totalArenaDrawItems);
+    totalArenaDrawItems += plan.drawCount;
+  }
+  compiled.commands.resolvedDependencyBuffers.resize(
+      totalDependencyBufferSlots);
+  compiled.plan.resolvedDependencyBufferResourceIndices.assign(
       totalDependencyBufferSlots, UINT32_MAX);
-  compiled.dependencyBufferRangesByPass.resize(work.order.size());
-  compiled.resolvedDependencyTextures.resize(totalDependencyTextureSlots);
-  compiled.resolvedDependencyTextureResourceIndices.assign(
+  compiled.plan.dependencyBufferRangesByPass.resize(work.order.size());
+  compiled.commands.resolvedDependencyTextures.resize(
+      totalDependencyTextureSlots);
+  compiled.plan.resolvedDependencyTextureResourceIndices.assign(
       totalDependencyTextureSlots, UINT32_MAX);
-  compiled.dependencyTextureRangesByPass.resize(work.order.size());
-  compiled.ownedPreDispatches.resize(totalPreDispatchItems);
-  compiled.preDispatchRangesByPass.resize(work.order.size());
-  compiled.resolvedPreDispatchDependencyBuffers.resize(
+  compiled.plan.dependencyTextureRangesByPass.resize(work.order.size());
+  compiled.commands.ownedPreDispatches.resize(totalPreDispatchItems);
+  compiled.commands.ownedPreDispatchDebugLabels.resize(totalPreDispatchItems);
+  compiled.commands.ownedPreDispatchPushConstants.resize(totalPreDispatchItems);
+  compiled.commands.ownedPreDispatchDependencyTextures.resize(
+      totalPreDispatchItems);
+  compiled.commands.ownedPreDispatchTextureBindings.resize(
+      totalPreDispatchItems);
+  compiled.plan.preDispatchRangesByPass.resize(work.order.size());
+  compiled.commands.resolvedPreDispatchDependencyBuffers.resize(
       totalPreDispatchDependencySlots);
-  compiled.resolvedPreDispatchDependencyBufferResourceIndices.assign(
+  compiled.plan.resolvedPreDispatchDependencyBufferResourceIndices.assign(
       totalPreDispatchDependencySlots, UINT32_MAX);
-  compiled.preDispatchDependencyRanges.resize(totalPreDispatchItems);
-  compiled.ownedDrawItems.resize(totalDrawItems);
-  compiled.drawRangesByPass.resize(work.order.size());
-  compiled.ownedMeshDispatchItems.resize(totalMeshDispatchItems);
-  compiled.ownedBufferCopyItems.resize(totalBufferCopyItems);
-  compiled.ownedTextureCopyItems.resize(totalTextureCopyItems);
+  compiled.plan.preDispatchDependencyRanges.resize(totalPreDispatchItems);
+  compiled.commands.ownedDrawItems.resize(totalArenaDrawItems);
+  compiled.commands.ownedDrawDebugLabels.resize(totalArenaDrawItems);
+  compiled.commands.ownedDrawPushConstants.resize(totalArenaDrawItems);
+  compiled.commands.ownedDrawTextureBindings.resize(totalArenaDrawItems);
+  compiled.plan.drawRangesByPass.resize(work.order.size());
+  compiled.commands.ownedMeshDispatchItems.resize(totalMeshDispatchItems);
+  compiled.commands.ownedBufferCopyItems.resize(totalBufferCopyItems);
+  compiled.commands.ownedTextureCopyItems.resize(totalTextureCopyItems);
+  compiled.commands.ownedAccelerationStructureBuildsByPass.resize(
+      work.order.size());
+  compiled.commands.ownedAccelerationStructureGeometriesByPass.resize(
+      work.order.size());
+  compiled.commands.ownedAccelerationStructureInstancesByPass.resize(
+      work.order.size());
   {
-    compiled.ownedMeshDispatchDebugLabels.clear();
-    compiled.ownedMeshDispatchPushConstants.clear();
-    compiled.ownedMeshDispatchDependencyBuffers.clear();
-    compiled.ownedMeshDispatchDependencyTextures.clear();
-    compiled.ownedMeshDispatchDebugLabels.reserve(totalMeshDispatchItems);
-    compiled.ownedMeshDispatchPushConstants.reserve(totalMeshDispatchItems);
-    compiled.ownedMeshDispatchDependencyBuffers.reserve(totalMeshDispatchItems);
-    compiled.ownedMeshDispatchDependencyTextures.reserve(
+    compiled.commands.ownedMeshDispatchDebugLabels.clear();
+    compiled.commands.ownedMeshDispatchPushConstants.clear();
+    compiled.commands.ownedMeshDispatchDependencyBuffers.clear();
+    compiled.commands.ownedMeshDispatchDependencyTextures.clear();
+    compiled.commands.ownedMeshDispatchTextureBindings.clear();
+    compiled.commands.ownedMeshDispatchDebugLabels.reserve(
+        totalMeshDispatchItems);
+    compiled.commands.ownedMeshDispatchPushConstants.reserve(
+        totalMeshDispatchItems);
+    compiled.commands.ownedMeshDispatchDependencyBuffers.reserve(
+        totalMeshDispatchItems);
+    compiled.commands.ownedMeshDispatchDependencyTextures.reserve(
+        totalMeshDispatchItems);
+    compiled.commands.ownedMeshDispatchTextureBindings.reserve(
         totalMeshDispatchItems);
     for (size_t i = 0u; i < totalMeshDispatchItems; ++i) {
-      compiled.ownedMeshDispatchDebugLabels.emplace_back();
-      compiled.ownedMeshDispatchPushConstants.emplace_back();
-      compiled.ownedMeshDispatchDependencyBuffers.emplace_back();
-      compiled.ownedMeshDispatchDependencyTextures.emplace_back();
+      compiled.commands.ownedMeshDispatchDebugLabels.emplace_back();
+      compiled.commands.ownedMeshDispatchPushConstants.emplace_back();
+      compiled.commands.ownedMeshDispatchDependencyBuffers.emplace_back();
+      compiled.commands.ownedMeshDispatchDependencyTextures.emplace_back();
+      compiled.commands.ownedMeshDispatchTextureBindings.emplace_back();
     }
   }
-  compiled.meshDispatchRangesByPass.resize(work.order.size());
-  compiled.bufferCopyRangesByPass.resize(work.order.size());
-  compiled.textureCopyRangesByPass.resize(work.order.size());
-  compiled.orderedPasses.resize(work.order.size());
-  compiled.orderedPassIndices.resize(work.order.size());
-  compiled.recordedGraphicsPasses.resize(work.order.size());
-  compiled.passBarrierPlans.resize(work.order.size());
-  compiled.unresolvedTextureBindings.resize(totalUnresolvedTextureBindings);
-  compiled.unresolvedDependencyBufferBindings.resize(
-      totalUnresolvedDependencyBufferBindings);
-  compiled.unresolvedDependencyTextureBindings.resize(
-      totalUnresolvedDependencyTextureBindings);
-  compiled.unresolvedPreDispatchDependencyBufferBindings.resize(
-      totalUnresolvedPreDispatchDependencyBufferBindings);
-  compiled.unresolvedDrawBufferBindings.resize(
-      totalUnresolvedDrawBufferBindings);
-  compiled.unresolvedMeshDispatchBufferBindings.resize(
-      totalUnresolvedMeshDispatchBufferBindings);
-  compiled.unresolvedBufferCopyBindings.resize(
-      totalUnresolvedBufferCopyBindings);
-  compiled.unresolvedTextureCopyBindings.resize(
-      totalUnresolvedTextureCopyBindings);
+  compiled.plan.meshDispatchRangesByPass.resize(work.order.size());
+  compiled.plan.bufferCopyRangesByPass.resize(work.order.size());
+  compiled.plan.textureCopyRangesByPass.resize(work.order.size());
+  compiled.commands.orderedPasses.resize(work.order.size());
+  compiled.plan.orderedPassIndices.resize(work.order.size());
+  compiled.plan.recordedGraphicsPasses.resize(work.order.size());
+  compiled.plan.passBarrierPlans.resize(work.order.size());
+  compiled.plan.commandResourcePatches.resize(totalResourcePatches);
   const auto fillPassRange = [&](uint32_t, RenderGraphContiguousRange range) {
     for (uint32_t orderedPassIndex = range.offset;
          orderedPassIndex < range.offset + range.count; ++orderedPassIndex) {
@@ -3403,18 +4027,17 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
       const uint32_t passIndex = plan.passIndex;
       const RenderPass &sourcePass = passes_[passIndex];
       RenderPass resolvedPass = sourcePass;
-      uint32_t unresolvedTextureWriteOffset = plan.unresolvedTextureOffset;
+      uint32_t resourcePatchWriteOffset = plan.resourcePatchOffset;
       if (plan.colorTextureIndex != UINT32_MAX) {
         const TextureResource &resource = textures_[plan.colorTextureIndex];
         if (resource.imported) {
           resolvedPass.colorTexture = resource.importedHandle;
         } else {
           resolvedPass.colorTexture = {};
-          compiled.unresolvedTextureBindings[unresolvedTextureWriteOffset++] = {
+          compiled.plan.commandResourcePatches[resourcePatchWriteOffset++] = {
               .orderedPassIndex = orderedPassIndex,
-              .textureResourceIndex = plan.colorTextureIndex,
-              .target =
-                  RenderGraphCompileResult::PassTextureBindingTarget::Color};
+              .resourceIndex = plan.colorTextureIndex,
+              .target = RenderGraphPlan::CommandResourcePatchTarget::PassColor};
         }
       }
       if (plan.colorResolveTextureIndex != UINT32_MAX) {
@@ -3424,11 +4047,11 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
           resolvedPass.colorResolveTexture = resource.importedHandle;
         } else {
           resolvedPass.colorResolveTexture = {};
-          compiled.unresolvedTextureBindings[unresolvedTextureWriteOffset++] = {
+          compiled.plan.commandResourcePatches[resourcePatchWriteOffset++] = {
               .orderedPassIndex = orderedPassIndex,
-              .textureResourceIndex = plan.colorResolveTextureIndex,
-              .target = RenderGraphCompileResult::PassTextureBindingTarget::
-                  ColorResolve};
+              .resourceIndex = plan.colorResolveTextureIndex,
+              .target = RenderGraphPlan::CommandResourcePatchTarget::
+                  PassColorResolve};
         }
       }
       if (plan.depthTextureIndex != UINT32_MAX) {
@@ -3437,11 +4060,10 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
           resolvedPass.depthTexture = resource.importedHandle;
         } else {
           resolvedPass.depthTexture = {};
-          compiled.unresolvedTextureBindings[unresolvedTextureWriteOffset++] = {
+          compiled.plan.commandResourcePatches[resourcePatchWriteOffset++] = {
               .orderedPassIndex = orderedPassIndex,
-              .textureResourceIndex = plan.depthTextureIndex,
-              .target =
-                  RenderGraphCompileResult::PassTextureBindingTarget::Depth};
+              .resourceIndex = plan.depthTextureIndex,
+              .target = RenderGraphPlan::CommandResourcePatchTarget::PassDepth};
         }
       }
       if (plan.depthResolveTextureIndex != UINT32_MAX) {
@@ -3451,25 +4073,24 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
           resolvedPass.depthResolveTexture = resource.importedHandle;
         } else {
           resolvedPass.depthResolveTexture = {};
-          compiled.unresolvedTextureBindings[unresolvedTextureWriteOffset++] = {
+          compiled.plan.commandResourcePatches[resourcePatchWriteOffset++] = {
               .orderedPassIndex = orderedPassIndex,
-              .textureResourceIndex = plan.depthResolveTextureIndex,
-              .target = RenderGraphCompileResult::PassTextureBindingTarget::
-                  DepthResolve};
+              .resourceIndex = plan.depthResolveTextureIndex,
+              .target = RenderGraphPlan::CommandResourcePatchTarget::
+                  PassDepthResolve};
         }
       }
-      compiled.dependencyBufferRangesByPass[orderedPassIndex] = {
+      compiled.plan.dependencyBufferRangesByPass[orderedPassIndex] = {
           .offset = plan.resolvedDependencyOffset,
           .count = plan.dependencyCount};
-      uint32_t unresolvedDependencyWriteOffset =
-          plan.unresolvedDependencyOffset;
       for (uint32_t depIndex = 0; depIndex < plan.dependencyCount; ++depIndex) {
         const uint32_t resourceIndex =
             passDependencyBufferBindingResourceIndices_
                 [plan.dependencyBindingOffset + depIndex];
         BufferHandle &resolvedHandle =
-            compiled.resolvedDependencyBuffers[plan.resolvedDependencyOffset +
-                                               depIndex];
+            compiled.commands
+                .resolvedDependencyBuffers[plan.resolvedDependencyOffset +
+                                           depIndex];
         if (resourceIndex == UINT32_MAX) {
           resolvedHandle = {};
           continue;
@@ -3477,37 +4098,37 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
         const BufferResource &resource = buffers_[resourceIndex];
         if (resource.imported) {
           resolvedHandle = resource.importedHandle;
-          compiled.resolvedDependencyBufferResourceIndices
+          compiled.plan.resolvedDependencyBufferResourceIndices
               [plan.resolvedDependencyOffset + depIndex] = resourceIndex;
         } else {
           resolvedHandle = {};
-          compiled.unresolvedDependencyBufferBindings
-              [unresolvedDependencyWriteOffset++] = {
+          compiled.plan.commandResourcePatches[resourcePatchWriteOffset++] = {
               .orderedPassIndex = orderedPassIndex,
-              .dependencyBufferIndex = depIndex,
-              .bufferResourceIndex = resourceIndex};
+              .dependencyIndex = depIndex,
+              .resourceIndex = resourceIndex,
+              .resourceKind = RenderGraphResourceKind::Buffer,
+              .target = RenderGraphPlan::CommandResourcePatchTarget::
+                  PassDependencyBuffer};
         }
       }
       if (plan.dependencyCount > 0u) {
         resolvedPass.dependencyBuffers = std::span<const BufferHandle>(
-            compiled.resolvedDependencyBuffers.data() +
+            compiled.commands.resolvedDependencyBuffers.data() +
                 plan.resolvedDependencyOffset,
             plan.dependencyCount);
       } else {
         resolvedPass.dependencyBuffers = {};
       }
-      compiled.dependencyTextureRangesByPass[orderedPassIndex] = {
+      compiled.plan.dependencyTextureRangesByPass[orderedPassIndex] = {
           .offset = plan.resolvedDependencyTextureOffset,
           .count = plan.dependencyTextureCount};
-      uint32_t unresolvedDependencyTextureWriteOffset =
-          plan.unresolvedDependencyTextureOffset;
       for (uint32_t depIndex = 0; depIndex < plan.dependencyTextureCount;
            ++depIndex) {
         const uint32_t resourceIndex =
             passDependencyTextureBindingResourceIndices_
                 [plan.dependencyTextureBindingOffset + depIndex];
         TextureHandle &resolvedHandle =
-            compiled.resolvedDependencyTextures
+            compiled.commands.resolvedDependencyTextures
                 [plan.resolvedDependencyTextureOffset + depIndex];
         if (resourceIndex == UINT32_MAX) {
           resolvedHandle = {};
@@ -3516,32 +4137,31 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
         const TextureResource &resource = textures_[resourceIndex];
         if (resource.imported) {
           resolvedHandle = resource.importedHandle;
-          compiled.resolvedDependencyTextureResourceIndices
+          compiled.plan.resolvedDependencyTextureResourceIndices
               [plan.resolvedDependencyTextureOffset + depIndex] = resourceIndex;
         } else {
           resolvedHandle = {};
-          compiled.unresolvedDependencyTextureBindings
-              [unresolvedDependencyTextureWriteOffset++] = {
+          compiled.plan.commandResourcePatches[resourcePatchWriteOffset++] = {
               .orderedPassIndex = orderedPassIndex,
-              .dependencyTextureIndex = depIndex,
-              .textureResourceIndex = resourceIndex};
+              .dependencyIndex = depIndex,
+              .resourceIndex = resourceIndex,
+              .target = RenderGraphPlan::CommandResourcePatchTarget::
+                  PassDependencyTexture};
         }
       }
       if (plan.dependencyTextureCount > 0u) {
         resolvedPass.dependencyTextures = std::span<const TextureHandle>(
-            compiled.resolvedDependencyTextures.data() +
+            compiled.commands.resolvedDependencyTextures.data() +
                 plan.resolvedDependencyTextureOffset,
             plan.dependencyTextureCount);
       } else {
         resolvedPass.dependencyTextures = {};
       }
-      compiled.preDispatchRangesByPass[orderedPassIndex] = {
+      compiled.plan.preDispatchRangesByPass[orderedPassIndex] = {
           .offset = plan.preDispatchOutputOffset,
           .count = plan.preDispatchCount};
       uint32_t nextPreDispatchDependencyOffset =
           plan.preDispatchDependencyOffset;
-      uint32_t unresolvedPreDispatchWriteOffset =
-          plan.unresolvedPreDispatchDependencyOffset;
       for (uint32_t dispatchIndex = 0; dispatchIndex < plan.preDispatchCount;
            ++dispatchIndex) {
         const ComputeDispatchItem &sourceDispatch =
@@ -3553,8 +4173,8 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
             preDispatchDependencyBindings_[globalDispatchBindingIndex].offset;
         const uint32_t dispatchDependencyCount =
             preDispatchDependencyBindings_[globalDispatchBindingIndex].count;
-        compiled.preDispatchDependencyRanges[plan.preDispatchOutputOffset +
-                                             dispatchIndex] = {
+        compiled.plan.preDispatchDependencyRanges[plan.preDispatchOutputOffset +
+                                                  dispatchIndex] = {
             .offset = nextPreDispatchDependencyOffset,
             .count = dispatchDependencyCount};
         for (uint32_t depIndex = 0; depIndex < dispatchDependencyCount;
@@ -3563,7 +4183,7 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
               preDispatchDependencyBindingResourceIndices_
                   [dispatchDependencyOffset + depIndex];
           BufferHandle &resolvedHandle =
-              compiled.resolvedPreDispatchDependencyBuffers
+              compiled.commands.resolvedPreDispatchDependencyBuffers
                   [nextPreDispatchDependencyOffset + depIndex];
           if (resourceIndex == UINT32_MAX) {
             resolvedHandle = {};
@@ -3572,65 +4192,85 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
           const BufferResource &resource = buffers_[resourceIndex];
           if (resource.imported) {
             resolvedHandle = resource.importedHandle;
-            compiled.resolvedPreDispatchDependencyBufferResourceIndices
+            compiled.plan.resolvedPreDispatchDependencyBufferResourceIndices
                 [nextPreDispatchDependencyOffset + depIndex] = resourceIndex;
           } else {
             resolvedHandle = {};
-            compiled.unresolvedPreDispatchDependencyBufferBindings
-                [unresolvedPreDispatchWriteOffset++] = {
+            compiled.plan.commandResourcePatches[resourcePatchWriteOffset++] = {
                 .orderedPassIndex = orderedPassIndex,
-                .preDispatchIndex = dispatchIndex,
-                .dependencyBufferIndex = depIndex,
-                .bufferResourceIndex = resourceIndex};
+                .commandIndex = dispatchIndex,
+                .dependencyIndex = depIndex,
+                .resourceIndex = resourceIndex,
+                .resourceKind = RenderGraphResourceKind::Buffer,
+                .target = RenderGraphPlan::CommandResourcePatchTarget::
+                    PreDispatchDependencyBuffer};
           }
         }
         if (dispatchDependencyCount > 0u) {
           resolvedDispatch.dependencyBuffers = std::span<const BufferHandle>(
-              compiled.resolvedPreDispatchDependencyBuffers.data() +
+              compiled.commands.resolvedPreDispatchDependencyBuffers.data() +
                   nextPreDispatchDependencyOffset,
               dispatchDependencyCount);
         } else {
           resolvedDispatch.dependencyBuffers = {};
         }
         resolvedDispatch.dependencyBufferAccessModes = {};
-        compiled
+        ownPreDispatchPayload(compiled.commands,
+                              plan.preDispatchOutputOffset + dispatchIndex,
+                              sourceDispatch, resolvedDispatch);
+        compiled.commands
             .ownedPreDispatches[plan.preDispatchOutputOffset + dispatchIndex] =
             resolvedDispatch;
         nextPreDispatchDependencyOffset += dispatchDependencyCount;
       }
       if (plan.preDispatchCount > 0u) {
         resolvedPass.preDispatches = std::span<const ComputeDispatchItem>(
-            compiled.ownedPreDispatches.data() + plan.preDispatchOutputOffset,
+            compiled.commands.ownedPreDispatches.data() +
+                plan.preDispatchOutputOffset,
             plan.preDispatchCount);
       } else {
         resolvedPass.preDispatches = {};
       }
-      if (plan.drawCount > 0u && plan.unresolvedDrawCount == 0u &&
+      if (plan.drawCount > 0u && plan.drawPatchCount == 0u &&
           sourcePass.payloadBorrowed) {
-        compiled.drawRangesByPass[orderedPassIndex] = {};
-        resolvedPass.draws = sourcePass.draws;
-      } else if (plan.unresolvedDrawCount == 0u) {
-        compiled.drawRangesByPass[orderedPassIndex] = {
-            .offset = plan.drawOutputOffset, .count = plan.quantizedDrawCount};
-        std::ranges::copy(sourcePass.draws, compiled.ownedDrawItems.begin() +
-                                                plan.drawOutputOffset);
+        compiled.plan.drawRangesByPass[orderedPassIndex] = {};
+        for (uint32_t drawIndex = 0u; drawIndex < plan.drawCount; ++drawIndex) {
+          const size_t outputIndex = plan.arenaDrawOutputOffset + drawIndex;
+          DrawItem draw = sourcePass.draws[drawIndex];
+          ownDrawPayload(compiled.commands, outputIndex,
+                         sourcePass.draws[drawIndex], draw);
+          compiled.commands.ownedDrawItems[outputIndex] = draw;
+        }
         resolvedPass.draws =
-            plan.drawCount == 0u
-                ? std::span<const DrawItem>{}
-                : std::span<const DrawItem>(compiled.ownedDrawItems.data() +
-                                                plan.drawOutputOffset,
-                                            plan.drawCount);
-      } else {
-        compiled.drawRangesByPass[orderedPassIndex] = {
+            std::span<const DrawItem>(compiled.commands.ownedDrawItems.data() +
+                                          plan.arenaDrawOutputOffset,
+                                      plan.drawCount);
+      } else if (plan.drawPatchCount == 0u) {
+        compiled.plan.drawRangesByPass[orderedPassIndex] = {
             .offset = plan.drawOutputOffset, .count = plan.quantizedDrawCount};
-        uint32_t unresolvedDrawWriteOffset = plan.unresolvedDrawOffset;
+        for (uint32_t drawIndex = 0; drawIndex < plan.drawCount; ++drawIndex) {
+          const size_t outputIndex = plan.drawOutputOffset + drawIndex;
+          DrawItem draw = sourcePass.draws[drawIndex];
+          ownDrawPayload(compiled.commands, outputIndex,
+                         sourcePass.draws[drawIndex], draw);
+          compiled.commands.ownedDrawItems[outputIndex] = draw;
+        }
+        resolvedPass.draws = plan.drawCount == 0u
+                                 ? std::span<const DrawItem>{}
+                                 : std::span<const DrawItem>(
+                                       compiled.commands.ownedDrawItems.data() +
+                                           plan.drawOutputOffset,
+                                       plan.drawCount);
+      } else {
+        compiled.plan.drawRangesByPass[orderedPassIndex] = {
+            .offset = plan.drawOutputOffset, .count = plan.quantizedDrawCount};
         for (uint32_t drawIndex = 0; drawIndex < plan.drawCount; ++drawIndex) {
           const DrawItem &sourceDraw = sourcePass.draws[drawIndex];
           DrawItem resolvedDraw = sourceDraw;
           const uint32_t globalDrawIndex = plan.drawBindingOffset + drawIndex;
           const auto resolveDrawBinding =
               [&](uint32_t resourceIndex,
-                  RenderGraphCompileResult::DrawBufferBindingTarget target,
+                  RenderGraphPlan::CommandResourcePatchTarget target,
                   BufferHandle &slotHandle) {
                 if (resourceIndex == UINT32_MAX) {
                   slotHandle = {};
@@ -3642,46 +4282,47 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
                   return;
                 }
                 slotHandle = {};
-                compiled
-                    .unresolvedDrawBufferBindings[unresolvedDrawWriteOffset++] =
-                    {.orderedPassIndex = orderedPassIndex,
-                     .drawIndex = drawIndex,
-                     .target = target,
-                     .bufferResourceIndex = resourceIndex};
+                compiled.plan
+                    .commandResourcePatches[resourcePatchWriteOffset++] = {
+                    .orderedPassIndex = orderedPassIndex,
+                    .commandIndex = drawIndex,
+                    .resourceIndex = resourceIndex,
+                    .resourceKind = RenderGraphResourceKind::Buffer,
+                    .target = target};
               };
           resolveDrawBinding(
               drawBindings_[globalDrawIndex].vertex,
-              RenderGraphCompileResult::DrawBufferBindingTarget::Vertex,
+              RenderGraphPlan::CommandResourcePatchTarget::DrawVertexBuffer,
               resolvedDraw.vertexBuffer);
           resolveDrawBinding(
               drawBindings_[globalDrawIndex].index,
-              RenderGraphCompileResult::DrawBufferBindingTarget::Index,
+              RenderGraphPlan::CommandResourcePatchTarget::DrawIndexBuffer,
               resolvedDraw.indexBuffer);
           resolveDrawBinding(
               drawBindings_[globalDrawIndex].indirect,
-              RenderGraphCompileResult::DrawBufferBindingTarget::Indirect,
+              RenderGraphPlan::CommandResourcePatchTarget::DrawIndirectBuffer,
               resolvedDraw.indirectBuffer);
-          resolveDrawBinding(
-              drawBindings_[globalDrawIndex].indirectCount,
-              RenderGraphCompileResult::DrawBufferBindingTarget::IndirectCount,
-              resolvedDraw.indirectCountBuffer);
-          compiled.ownedDrawItems[plan.drawOutputOffset + drawIndex] =
+          resolveDrawBinding(drawBindings_[globalDrawIndex].indirectCount,
+                             RenderGraphPlan::CommandResourcePatchTarget::
+                                 DrawIndirectCountBuffer,
+                             resolvedDraw.indirectCountBuffer);
+          ownDrawPayload(compiled.commands, plan.drawOutputOffset + drawIndex,
+                         sourceDraw, resolvedDraw);
+          compiled.commands.ownedDrawItems[plan.drawOutputOffset + drawIndex] =
               resolvedDraw;
         }
         if (plan.drawCount > 0u) {
           resolvedPass.draws = std::span<const DrawItem>(
-              compiled.ownedDrawItems.data() + plan.drawOutputOffset,
+              compiled.commands.ownedDrawItems.data() + plan.drawOutputOffset,
               plan.drawCount);
         } else {
           resolvedPass.draws = {};
         }
       }
-      compiled.meshDispatchRangesByPass[orderedPassIndex] = {
+      compiled.plan.meshDispatchRangesByPass[orderedPassIndex] = {
           .offset = plan.meshDispatchOutputOffset,
           .count = plan.meshDispatchCount};
       if (plan.meshDispatchCount > 0u) {
-        uint32_t unresolvedMeshDispatchWriteOffset =
-            plan.unresolvedMeshDispatchOffset;
         for (uint32_t dispatchIndex = 0; dispatchIndex < plan.meshDispatchCount;
              ++dispatchIndex) {
           const size_t outputIndex =
@@ -3694,8 +4335,7 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
               plan.meshDispatchBindingOffset + dispatchIndex;
           const auto resolveMeshDispatchBinding =
               [&](uint32_t resourceIndex,
-                  RenderGraphCompileResult::MeshDispatchBufferBindingTarget
-                      target,
+                  RenderGraphPlan::CommandResourcePatchTarget target,
                   BufferHandle &slotHandle) {
                 if (resourceIndex == UINT32_MAX) {
                   slotHandle = {};
@@ -3707,61 +4347,40 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
                   return;
                 }
                 slotHandle = {};
-                compiled.unresolvedMeshDispatchBufferBindings
-                    [unresolvedMeshDispatchWriteOffset++] = {
+                compiled.plan
+                    .commandResourcePatches[resourcePatchWriteOffset++] = {
                     .orderedPassIndex = orderedPassIndex,
-                    .meshDispatchIndex = dispatchIndex,
+                    .commandIndex = dispatchIndex,
+                    .resourceIndex = resourceIndex,
+                    .resourceKind = RenderGraphResourceKind::Buffer,
                     .target = target,
-                    .bufferResourceIndex = resourceIndex};
+                };
               };
           resolveMeshDispatchBinding(
               meshDispatchBindings_[globalDispatchIndex].indirect,
-              RenderGraphCompileResult::MeshDispatchBufferBindingTarget::
-                  Indirect,
+              RenderGraphPlan::CommandResourcePatchTarget::
+                  MeshDispatchIndirectBuffer,
               resolvedDispatch.indirectBuffer);
           resolveMeshDispatchBinding(
               meshDispatchBindings_[globalDispatchIndex].indirectCount,
-              RenderGraphCompileResult::MeshDispatchBufferBindingTarget::
-                  IndirectCount,
+              RenderGraphPlan::CommandResourcePatchTarget::
+                  MeshDispatchIndirectCountBuffer,
               resolvedDispatch.indirectCountBuffer);
-          std::pmr::string &debugLabel =
-              compiled.ownedMeshDispatchDebugLabels[outputIndex];
-          debugLabel.assign(sourceDispatch.debugLabel.data(),
-                            sourceDispatch.debugLabel.size());
-          resolvedDispatch.debugLabel =
-              std::string_view(debugLabel.data(), debugLabel.size());
-          std::pmr::vector<std::byte> &pushConstants =
-              compiled.ownedMeshDispatchPushConstants[outputIndex];
-          pushConstants.assign(sourceDispatch.pushConstants.begin(),
-                               sourceDispatch.pushConstants.end());
-          resolvedDispatch.pushConstants = std::span<const std::byte>(
-              pushConstants.data(), pushConstants.size());
-          std::pmr::vector<BufferHandle> &dependencyBuffers =
-              compiled.ownedMeshDispatchDependencyBuffers[outputIndex];
-          dependencyBuffers.assign(sourceDispatch.dependencyBuffers.begin(),
-                                   sourceDispatch.dependencyBuffers.end());
-          resolvedDispatch.dependencyBuffers = std::span<const BufferHandle>(
-              dependencyBuffers.data(), dependencyBuffers.size());
-          std::pmr::vector<TextureHandle> &dependencyTextures =
-              compiled.ownedMeshDispatchDependencyTextures[outputIndex];
-          dependencyTextures.assign(sourceDispatch.dependencyTextures.begin(),
-                                    sourceDispatch.dependencyTextures.end());
-          resolvedDispatch.dependencyTextures = std::span<const TextureHandle>(
-              dependencyTextures.data(), dependencyTextures.size());
-          compiled.ownedMeshDispatchItems[outputIndex] = resolvedDispatch;
+          ownMeshDispatchPayload(compiled.commands, outputIndex, sourceDispatch,
+                                 resolvedDispatch);
+          compiled.commands.ownedMeshDispatchItems[outputIndex] =
+              resolvedDispatch;
         }
         resolvedPass.meshDispatches = std::span<const MeshDispatchItem>(
-            compiled.ownedMeshDispatchItems.data() +
+            compiled.commands.ownedMeshDispatchItems.data() +
                 plan.meshDispatchOutputOffset,
             plan.meshDispatchCount);
       } else {
         resolvedPass.meshDispatches = {};
       }
-      compiled.bufferCopyRangesByPass[orderedPassIndex] = {
+      compiled.plan.bufferCopyRangesByPass[orderedPassIndex] = {
           .offset = plan.bufferCopyOutputOffset, .count = plan.bufferCopyCount};
       if (plan.bufferCopyCount > 0u) {
-        uint32_t unresolvedBufferCopyWriteOffset =
-            plan.unresolvedBufferCopyOffset;
         for (uint32_t copyIndex = 0; copyIndex < plan.bufferCopyCount;
              ++copyIndex) {
           BufferCopyRegion resolvedCopy = sourcePass.bufferCopies[copyIndex];
@@ -3769,7 +4388,7 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
               plan.bufferCopyBindingOffset + copyIndex;
           const auto resolveBufferCopyBinding =
               [&](uint32_t resourceIndex,
-                  RenderGraphCompileResult::BufferCopyBindingTarget target,
+                  RenderGraphPlan::CommandResourcePatchTarget target,
                   BufferHandle &slotHandle) {
                 if (resourceIndex == UINT32_MAX) {
                   slotHandle = {};
@@ -3781,37 +4400,39 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
                   return;
                 }
                 slotHandle = {};
-                compiled.unresolvedBufferCopyBindings
-                    [unresolvedBufferCopyWriteOffset++] = {
+                compiled.plan
+                    .commandResourcePatches[resourcePatchWriteOffset++] = {
                     .orderedPassIndex = orderedPassIndex,
-                    .bufferCopyIndex = copyIndex,
+                    .commandIndex = copyIndex,
+                    .resourceIndex = resourceIndex,
+                    .resourceKind = RenderGraphResourceKind::Buffer,
                     .target = target,
-                    .bufferResourceIndex = resourceIndex};
+                };
               };
           resolveBufferCopyBinding(
               bufferCopyBindings_[globalCopyIndex].source,
-              RenderGraphCompileResult::BufferCopyBindingTarget::Source,
+              RenderGraphPlan::CommandResourcePatchTarget::BufferCopySource,
               resolvedCopy.srcBuffer);
           resolveBufferCopyBinding(
               bufferCopyBindings_[globalCopyIndex].destination,
-              RenderGraphCompileResult::BufferCopyBindingTarget::Destination,
+              RenderGraphPlan::CommandResourcePatchTarget::
+                  BufferCopyDestination,
               resolvedCopy.dstBuffer);
-          compiled
+          compiled.commands
               .ownedBufferCopyItems[plan.bufferCopyOutputOffset + copyIndex] =
               resolvedCopy;
         }
         resolvedPass.bufferCopies = std::span<const BufferCopyRegion>(
-            compiled.ownedBufferCopyItems.data() + plan.bufferCopyOutputOffset,
+            compiled.commands.ownedBufferCopyItems.data() +
+                plan.bufferCopyOutputOffset,
             plan.bufferCopyCount);
       } else {
         resolvedPass.bufferCopies = {};
       }
-      compiled.textureCopyRangesByPass[orderedPassIndex] = {
+      compiled.plan.textureCopyRangesByPass[orderedPassIndex] = {
           .offset = plan.textureCopyOutputOffset,
           .count = plan.textureCopyCount};
       if (plan.textureCopyCount > 0u) {
-        uint32_t unresolvedTextureCopyWriteOffset =
-            plan.unresolvedTextureCopyOffset;
         for (uint32_t copyIndex = 0; copyIndex < plan.textureCopyCount;
              ++copyIndex) {
           TextureCopyItem resolvedCopy = sourcePass.textureCopies[copyIndex];
@@ -3819,7 +4440,7 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
               plan.textureCopyBindingOffset + copyIndex;
           const auto resolveTextureCopyBinding =
               [&](uint32_t resourceIndex,
-                  RenderGraphCompileResult::TextureCopyBindingTarget target,
+                  RenderGraphPlan::CommandResourcePatchTarget target,
                   TextureHandle &slotHandle) {
                 if (resourceIndex == UINT32_MAX) {
                   slotHandle = {};
@@ -3831,43 +4452,51 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
                   return;
                 }
                 slotHandle = {};
-                compiled.unresolvedTextureCopyBindings
-                    [unresolvedTextureCopyWriteOffset++] = {
+                compiled.plan
+                    .commandResourcePatches[resourcePatchWriteOffset++] = {
                     .orderedPassIndex = orderedPassIndex,
-                    .textureCopyIndex = copyIndex,
+                    .commandIndex = copyIndex,
+                    .resourceIndex = resourceIndex,
                     .target = target,
-                    .textureResourceIndex = resourceIndex};
+                };
               };
           resolveTextureCopyBinding(
               textureCopyBindings_[globalCopyIndex].source,
-              RenderGraphCompileResult::TextureCopyBindingTarget::Source,
+              RenderGraphPlan::CommandResourcePatchTarget::TextureCopySource,
               resolvedCopy.sourceTexture);
           resolveTextureCopyBinding(
               textureCopyBindings_[globalCopyIndex].destination,
-              RenderGraphCompileResult::TextureCopyBindingTarget::Destination,
+              RenderGraphPlan::CommandResourcePatchTarget::
+                  TextureCopyDestination,
               resolvedCopy.destinationTexture);
-          compiled
+          compiled.commands
               .ownedTextureCopyItems[plan.textureCopyOutputOffset + copyIndex] =
               resolvedCopy;
         }
         resolvedPass.textureCopies = std::span<const TextureCopyItem>(
-            compiled.ownedTextureCopyItems.data() +
+            compiled.commands.ownedTextureCopyItems.data() +
                 plan.textureCopyOutputOffset,
             plan.textureCopyCount);
       } else {
         resolvedPass.textureCopies = {};
       }
-      const std::pmr::string &compiledName = compiled.passDebugNames[passIndex];
+      ownAccelerationStructureBuilds(compiled.commands, orderedPassIndex,
+                                     sourcePass, resolvedPass);
+      const std::pmr::string &compiledName =
+          compiled.commands.passDebugNames[passIndex];
       resolvedPass.debugLabel =
           std::string_view(compiledName.data(), compiledName.size());
-      compiled.orderedPassIndices[orderedPassIndex] = passIndex;
-      compiled.recordedGraphicsPasses[orderedPassIndex] = {
+      compiled.plan.orderedPassIndices[orderedPassIndex] = passIndex;
+      compiled.plan.recordedGraphicsPasses[orderedPassIndex] = {
           .orderedPassIndex = orderedPassIndex, .declaredPassIndex = passIndex};
-      compiled.passBarrierPlans[orderedPassIndex] = {.orderedPassIndex =
-                                                         orderedPassIndex,
-                                                     .barrierOffset = 0u,
-                                                     .barrierCount = 0u};
-      compiled.orderedPasses[orderedPassIndex] = resolvedPass;
+      compiled.plan.passBarrierPlans[orderedPassIndex] = {.orderedPassIndex =
+                                                              orderedPassIndex,
+                                                          .barrierOffset = 0u,
+                                                          .barrierCount = 0u};
+      compiled.commands.orderedPasses[orderedPassIndex] = resolvedPass;
+      NURI_ASSERT(resourcePatchWriteOffset ==
+                      plan.resourcePatchOffset + plan.resourcePatchCount,
+                  "render-graph command resource patch count mismatch");
     }
   };
   if (usedParallelPassResolution) {
@@ -3881,19 +4510,19 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
 }
 
 Result<bool, std::string> RenderGraphBuilder::compileStageC4PlanBarriers(
-    RenderGraphCompileResult &compiled,
+    CompiledRenderGraph &compiled,
     const RenderGraphBuilder::CompileWorkState &work) const {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_BARRIER);
-  compiled.passBarrierRecords.clear();
-  compiled.finalBarrierPlan = {};
+  compiled.plan.passBarrierRecords.clear();
+  compiled.plan.finalBarrierPlan = {};
   std::pmr::vector<uint32_t> executionRankByPass(memory_);
   executionRankByPass.resize(work.passCount, UINT32_MAX);
   for (uint32_t rank = 0; rank < work.order.size(); ++rank) {
     executionRankByPass[work.order[rank]] = rank;
   }
-  std::pmr::vector<PassResourceAccess> orderedAccesses(memory_);
-  orderedAccesses.reserve(work.compiledAccesses.size());
-  for (const PassResourceAccess &access : work.compiledAccesses) {
+  std::pmr::vector<RenderGraphResourceUse> orderedAccesses(memory_);
+  orderedAccesses.reserve(work.compiledResourceUses.size());
+  for (const RenderGraphResourceUse &access : work.compiledResourceUses) {
     if (access.passIndex >= work.passCount ||
         work.activePassMask[access.passIndex] == 0u ||
         executionRankByPass[access.passIndex] == UINT32_MAX) {
@@ -3902,8 +4531,8 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC4PlanBarriers(
     orderedAccesses.push_back(access);
   }
   std::sort(orderedAccesses.begin(), orderedAccesses.end(),
-            [&executionRankByPass](const PassResourceAccess &lhs,
-                                   const PassResourceAccess &rhs) {
+            [&executionRankByPass](const RenderGraphResourceUse &lhs,
+                                   const RenderGraphResourceUse &rhs) {
               const uint8_t lhsKind = static_cast<uint8_t>(lhs.resourceKind);
               const uint8_t rhsKind = static_cast<uint8_t>(rhs.resourceKind);
               if (lhsKind != rhsKind) {
@@ -3919,13 +4548,13 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC4PlanBarriers(
               }
               return lhs.passIndex < rhs.passIndex;
             });
-  const auto resolveResourceState = [&](const PassResourceAccess &access) {
-    if (access.requestedState != RenderGraphResourceState::Unknown) {
-      return access.requestedState;
+  const auto resolveResourceState = [&](const RenderGraphResourceUse &access) {
+    if (access.state != RenderGraphResourceState::Unknown) {
+      return access.state;
     }
     const bool hasWrite =
-        hasAccessFlag(access.mode, RenderGraphAccessMode::Write);
-    if (access.resourceKind == AccessResourceKind::Texture &&
+        hasAccessFlag(access.access, RenderGraphAccessMode::Write);
+    if (access.resourceKind == RenderGraphResourceKind::Texture &&
         (passBindings_[access.passIndex].color == access.resourceIndex ||
          passBindings_[access.passIndex].colorResolve == access.resourceIndex ||
          passBindings_[access.passIndex].depth == access.resourceIndex ||
@@ -3950,12 +4579,22 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC4PlanBarriers(
                                     RenderGraphResourceState::Unknown);
   std::pmr::vector<uint8_t> hasLastTextureAccess(memory_);
   hasLastTextureAccess.resize(textures_.size(), 0u);
-  AccessResourceKind previousKind = AccessResourceKind::Texture;
+  std::pmr::vector<uint8_t> hasPartialTextureRanges(memory_);
+  hasPartialTextureRanges.resize(textures_.size(), 0u);
+  for (const RenderGraphResourceUse &access : orderedAccesses) {
+    if (access.resourceKind == RenderGraphResourceKind::Texture &&
+        access.resourceIndex < textures_.size() &&
+        !isWholeTextureRange(access.subresources)) {
+      hasPartialTextureRanges[access.resourceIndex] = 1u;
+    }
+  }
+  std::pmr::vector<RenderGraphResourceUse> priorSubresourceAccesses(memory_);
+  RenderGraphResourceKind previousKind = RenderGraphResourceKind::Texture;
   uint32_t previousResourceIndex = UINT32_MAX;
   RenderGraphAccessMode previousAccess = RenderGraphAccessMode::None;
   RenderGraphResourceState previousState = RenderGraphResourceState::Unknown;
   bool havePreviousResource = false;
-  for (const PassResourceAccess &access : orderedAccesses) {
+  for (const RenderGraphResourceUse &access : orderedAccesses) {
     const bool sameResource = havePreviousResource &&
                               previousKind == access.resourceKind &&
                               previousResourceIndex == access.resourceIndex;
@@ -3965,44 +4604,78 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC4PlanBarriers(
       previousAccess = RenderGraphAccessMode::None;
       previousState = RenderGraphResourceState::Unknown;
       havePreviousResource = true;
+      priorSubresourceAccesses.clear();
     }
     const RenderGraphResourceState nextState = resolveResourceState(access);
+    if (access.resourceKind == RenderGraphResourceKind::Texture &&
+        access.resourceIndex < hasPartialTextureRanges.size() &&
+        hasPartialTextureRanges[access.resourceIndex] != 0u) {
+      RenderGraphAccessMode beforeAccess = RenderGraphAccessMode::None;
+      RenderGraphResourceState beforeState = RenderGraphResourceState::Unknown;
+      for (auto previous = priorSubresourceAccesses.rbegin();
+           previous != priorSubresourceAccesses.rend(); ++previous) {
+        if (textureRangesOverlap(previous->subresources, access.subresources)) {
+          beforeAccess = previous->access;
+          beforeState = resolveResourceState(*previous);
+          break;
+        }
+      }
+      const uint32_t orderedPassIndex = executionRankByPass[access.passIndex];
+      stagedBarrierRecords.push_back(RenderGraphBarrierRecord{
+          .resourceKind = RenderGraphBarrierResourceKind::Texture,
+          .resourceIndex = access.resourceIndex,
+          .beforeAccess = beforeAccess,
+          .afterAccess = access.access,
+          .beforeState = beforeState,
+          .afterState = nextState,
+          .subresources = access.subresources});
+      stagedBarrierPassIndices.push_back(orderedPassIndex);
+      ++barrierCounts[orderedPassIndex];
+      priorSubresourceAccesses.push_back(access);
+      lastTextureAccessByResource[access.resourceIndex] = access.access;
+      lastTextureStateByResource[access.resourceIndex] = nextState;
+      hasLastTextureAccess[access.resourceIndex] = 1u;
+      previousAccess = access.access;
+      previousState = nextState;
+      continue;
+    }
     const bool needsBarrier =
         previousState == RenderGraphResourceState::Unknown ||
         previousState != nextState ||
         hasAccessFlag(previousAccess, RenderGraphAccessMode::Write) ||
-        hasAccessFlag(access.mode, RenderGraphAccessMode::Write);
+        hasAccessFlag(access.access, RenderGraphAccessMode::Write);
     if (needsBarrier) {
       const uint32_t orderedPassIndex = executionRankByPass[access.passIndex];
       stagedBarrierRecords.push_back(RenderGraphBarrierRecord{
           .resourceKind =
               [&]() {
                 switch (access.resourceKind) {
-                case AccessResourceKind::Texture:
+                case RenderGraphResourceKind::Texture:
                   return RenderGraphBarrierResourceKind::Texture;
-                case AccessResourceKind::Buffer:
+                case RenderGraphResourceKind::Buffer:
                   return RenderGraphBarrierResourceKind::Buffer;
-                case AccessResourceKind::AccelerationStructure:
+                case RenderGraphResourceKind::AccelerationStructure:
                   return RenderGraphBarrierResourceKind::AccelerationStructure;
                 }
                 return RenderGraphBarrierResourceKind::Texture;
               }(),
           .resourceIndex = access.resourceIndex,
           .beforeAccess = previousAccess,
-          .afterAccess = access.mode,
+          .afterAccess = access.access,
           .beforeState = previousState,
           .afterState = nextState,
+          .subresources = access.subresources,
       });
       stagedBarrierPassIndices.push_back(orderedPassIndex);
       ++barrierCounts[orderedPassIndex];
     }
-    if (access.resourceKind == AccessResourceKind::Texture &&
+    if (access.resourceKind == RenderGraphResourceKind::Texture &&
         access.resourceIndex < textures_.size()) {
-      lastTextureAccessByResource[access.resourceIndex] = access.mode;
+      lastTextureAccessByResource[access.resourceIndex] = access.access;
       lastTextureStateByResource[access.resourceIndex] = nextState;
       hasLastTextureAccess[access.resourceIndex] = 1u;
     }
-    previousAccess = access.mode;
+    previousAccess = access.access;
     previousState = nextState;
   }
   if (!frameOutputTextureIndices_.empty()) {
@@ -4031,32 +4704,33 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC4PlanBarriers(
       });
     }
   }
-  compiled.passBarrierRecords.resize(stagedBarrierRecords.size() +
-                                     stagedFinalBarrierRecords.size());
+  compiled.plan.passBarrierRecords.resize(stagedBarrierRecords.size() +
+                                          stagedFinalBarrierRecords.size());
   std::pmr::vector<uint32_t> nextBarrierOffset(memory_);
-  nextBarrierOffset.resize(compiled.passBarrierPlans.size(), 0u);
+  nextBarrierOffset.resize(compiled.plan.passBarrierPlans.size(), 0u);
   uint32_t runningBarrierOffset = 0u;
   for (uint32_t orderedPassIndex = 0u;
-       orderedPassIndex < compiled.passBarrierPlans.size();
+       orderedPassIndex < compiled.plan.passBarrierPlans.size();
        ++orderedPassIndex) {
-    compiled.passBarrierPlans[orderedPassIndex].barrierOffset =
+    compiled.plan.passBarrierPlans[orderedPassIndex].barrierOffset =
         runningBarrierOffset;
-    compiled.passBarrierPlans[orderedPassIndex].barrierCount =
+    compiled.plan.passBarrierPlans[orderedPassIndex].barrierCount =
         barrierCounts[orderedPassIndex];
     nextBarrierOffset[orderedPassIndex] = runningBarrierOffset;
     runningBarrierOffset += barrierCounts[orderedPassIndex];
   }
-  compiled.finalBarrierPlan = FinalBarrierPlan{
+  compiled.plan.finalBarrierPlan = FinalBarrierPlan{
       .barrierOffset = runningBarrierOffset,
       .barrierCount = static_cast<uint32_t>(stagedFinalBarrierRecords.size()),
   };
   for (uint32_t i = 0u; i < stagedBarrierRecords.size(); ++i) {
     const uint32_t orderedPassIndex = stagedBarrierPassIndices[i];
-    compiled.passBarrierRecords[nextBarrierOffset[orderedPassIndex]++] =
+    compiled.plan.passBarrierRecords[nextBarrierOffset[orderedPassIndex]++] =
         stagedBarrierRecords[i];
   }
   for (uint32_t i = 0u; i < stagedFinalBarrierRecords.size(); ++i) {
-    compiled.passBarrierRecords[compiled.finalBarrierPlan.barrierOffset + i] =
+    compiled.plan
+        .passBarrierRecords[compiled.plan.finalBarrierPlan.barrierOffset + i] =
         stagedFinalBarrierRecords[i];
   }
   return Result<bool, std::string>::makeResult(true);
@@ -4064,7 +4738,7 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC4PlanBarriers(
 
 Result<bool, std::string>
 RenderGraphBuilder::compileStageC5PlanTransientLifetimes(
-    RenderGraphRuntime &runtime, RenderGraphCompileResult &compiled,
+    RenderGraphRuntime &runtime, CompiledRenderGraph &compiled,
     RenderGraphBuilder::CompileWorkState &work) const {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
   std::pmr::vector<uint32_t> executionRankByPass(memory_);
@@ -4072,14 +4746,10 @@ RenderGraphBuilder::compileStageC5PlanTransientLifetimes(
   for (uint32_t rank = 0; rank < work.order.size(); ++rank) {
     executionRankByPass[work.order[rank]] = rank;
   }
-  std::pmr::vector<uint32_t> transientTextureFirstRank(memory_);
-  std::pmr::vector<uint32_t> transientTextureLastRank(memory_);
-  transientTextureFirstRank.resize(textures_.size(), UINT32_MAX);
-  transientTextureLastRank.resize(textures_.size(), 0u);
-  std::pmr::vector<uint32_t> transientBufferFirstRank(memory_);
-  std::pmr::vector<uint32_t> transientBufferLastRank(memory_);
-  transientBufferFirstRank.resize(buffers_.size(), UINT32_MAX);
-  transientBufferLastRank.resize(buffers_.size(), 0u);
+  TransientLifetimeRanks<TextureLifetimeTag> textureRanks(memory_,
+                                                          textures_.size());
+  TransientLifetimeRanks<BufferLifetimeTag> bufferRanks(memory_,
+                                                        buffers_.size());
   const auto updateLifetimeRanks = [](std::span<uint32_t> firstRanks,
                                       std::span<uint32_t> lastRanks,
                                       uint32_t resourceIndex, uint32_t rank) {
@@ -4098,7 +4768,8 @@ RenderGraphBuilder::compileStageC5PlanTransientLifetimes(
                                       RenderGraphContiguousRange range) {
     for (uint32_t accessIndex = range.offset;
          accessIndex < range.offset + range.count; ++accessIndex) {
-      const PassResourceAccess &access = work.compiledAccesses[accessIndex];
+      const RenderGraphResourceUse &access =
+          work.compiledResourceUses[accessIndex];
       if (access.passIndex >= work.passCount ||
           work.activePassMask[access.passIndex] == 0u) {
         continue;
@@ -4107,7 +4778,7 @@ RenderGraphBuilder::compileStageC5PlanTransientLifetimes(
       if (rank == UINT32_MAX) {
         continue;
       }
-      if (access.resourceKind == AccessResourceKind::Texture) {
+      if (access.resourceKind == RenderGraphResourceKind::Texture) {
         if (access.resourceIndex >= textures_.size() ||
             textures_[access.resourceIndex].imported) {
           continue;
@@ -4116,7 +4787,7 @@ RenderGraphBuilder::compileStageC5PlanTransientLifetimes(
                             access.resourceIndex, rank);
         continue;
       }
-      if (access.resourceKind == AccessResourceKind::Buffer) {
+      if (access.resourceKind == RenderGraphResourceKind::Buffer) {
         if (access.resourceIndex >= buffers_.size() ||
             buffers_[access.resourceIndex].imported) {
           continue;
@@ -4127,26 +4798,19 @@ RenderGraphBuilder::compileStageC5PlanTransientLifetimes(
     }
   };
   struct WorkerLifetimeRanks {
-    std::pmr::vector<uint32_t> textureFirst;
-    std::pmr::vector<uint32_t> textureLast;
-    std::pmr::vector<uint32_t> bufferFirst;
-    std::pmr::vector<uint32_t> bufferLast;
+    TransientLifetimeRanks<TextureLifetimeTag> textures;
+    TransientLifetimeRanks<BufferLifetimeTag> buffers;
     WorkerLifetimeRanks(std::pmr::memory_resource *memory, size_t textureCount,
                         size_t bufferCount)
-        : textureFirst(memory), textureLast(memory), bufferFirst(memory),
-          bufferLast(memory) {
-      textureFirst.resize(textureCount, UINT32_MAX);
-      textureLast.resize(textureCount, 0u);
-      bufferFirst.resize(bufferCount, UINT32_MAX);
-      bufferLast.resize(bufferCount, 0u);
-    }
+        : textures(memory, textureCount), buffers(memory, bufferCount) {}
   };
   bool usedParallelLifetimeAnalysis = false;
-  if (!work.compiledAccesses.empty()) {
+  if (!work.compiledResourceUses.empty()) {
     const std::vector<RenderGraphContiguousRange> stdRanges =
-        runtime.parallelCompileEnabled() && work.compiledAccesses.size() > 1u
+        runtime.parallelCompileEnabled() &&
+                work.compiledResourceUses.size() > 1u
             ? makeLifetimeRanges(
-                  static_cast<uint32_t>(work.compiledAccesses.size()),
+                  static_cast<uint32_t>(work.compiledResourceUses.size()),
                   runtime.workerCount())
             : std::vector<RenderGraphContiguousRange>{};
     if (stdRanges.size() > 1u) {
@@ -4162,293 +4826,223 @@ RenderGraphBuilder::compileStageC5PlanTransientLifetimes(
                                                       ranges.size()),
           [&](uint32_t workerIndex, RenderGraphContiguousRange range) {
             WorkerLifetimeRanks &worker = workerRanks[workerIndex];
-            analyzeAccessRange(std::span<uint32_t>(worker.textureFirst.data(),
-                                                   worker.textureFirst.size()),
-                               std::span<uint32_t>(worker.textureLast.data(),
-                                                   worker.textureLast.size()),
-                               std::span<uint32_t>(worker.bufferFirst.data(),
-                                                   worker.bufferFirst.size()),
-                               std::span<uint32_t>(worker.bufferLast.data(),
-                                                   worker.bufferLast.size()),
-                               range);
+            analyzeAccessRange(std::span<uint32_t>(worker.textures.first),
+                               std::span<uint32_t>(worker.textures.last),
+                               std::span<uint32_t>(worker.buffers.first),
+                               std::span<uint32_t>(worker.buffers.last), range);
           });
       usedParallelLifetimeAnalysis = true;
       for (const WorkerLifetimeRanks &worker : workerRanks) {
         for (uint32_t textureIndex = 0; textureIndex < textures_.size();
              ++textureIndex) {
-          if (worker.textureFirst[textureIndex] == UINT32_MAX) {
+          if (worker.textures.first[textureIndex] == UINT32_MAX) {
             continue;
           }
-          updateLifetimeRanks(
-              std::span<uint32_t>(transientTextureFirstRank.data(),
-                                  transientTextureFirstRank.size()),
-              std::span<uint32_t>(transientTextureLastRank.data(),
-                                  transientTextureLastRank.size()),
-              textureIndex, worker.textureFirst[textureIndex]);
-          transientTextureLastRank[textureIndex] =
-              std::max(transientTextureLastRank[textureIndex],
-                       worker.textureLast[textureIndex]);
+          updateLifetimeRanks(textureRanks.first, textureRanks.last,
+                              textureIndex,
+                              worker.textures.first[textureIndex]);
+          textureRanks.last[textureIndex] =
+              std::max(textureRanks.last[textureIndex],
+                       worker.textures.last[textureIndex]);
         }
         for (uint32_t bufferIndex = 0; bufferIndex < buffers_.size();
              ++bufferIndex) {
-          if (worker.bufferFirst[bufferIndex] == UINT32_MAX) {
+          if (worker.buffers.first[bufferIndex] == UINT32_MAX) {
             continue;
           }
-          updateLifetimeRanks(
-              std::span<uint32_t>(transientBufferFirstRank.data(),
-                                  transientBufferFirstRank.size()),
-              std::span<uint32_t>(transientBufferLastRank.data(),
-                                  transientBufferLastRank.size()),
-              bufferIndex, worker.bufferFirst[bufferIndex]);
-          transientBufferLastRank[bufferIndex] =
-              std::max(transientBufferLastRank[bufferIndex],
-                       worker.bufferLast[bufferIndex]);
+          updateLifetimeRanks(bufferRanks.first, bufferRanks.last, bufferIndex,
+                              worker.buffers.first[bufferIndex]);
+          bufferRanks.last[bufferIndex] = std::max(
+              bufferRanks.last[bufferIndex], worker.buffers.last[bufferIndex]);
         }
       }
     } else {
       analyzeAccessRange(
-          std::span<uint32_t>(transientTextureFirstRank.data(),
-                              transientTextureFirstRank.size()),
-          std::span<uint32_t>(transientTextureLastRank.data(),
-                              transientTextureLastRank.size()),
-          std::span<uint32_t>(transientBufferFirstRank.data(),
-                              transientBufferFirstRank.size()),
-          std::span<uint32_t>(transientBufferLastRank.data(),
-                              transientBufferLastRank.size()),
-          RenderGraphContiguousRange{
-              .offset = 0u,
-              .count = static_cast<uint32_t>(work.compiledAccesses.size())});
+          textureRanks.first, textureRanks.last, bufferRanks.first,
+          bufferRanks.last,
+          RenderGraphContiguousRange{.offset = 0u,
+                                     .count = static_cast<uint32_t>(
+                                         work.compiledResourceUses.size())});
     }
   }
-  compiled.usedParallelHazardAnalysis = work.usedParallelHazardAnalysis;
-  compiled.usedParallelLifetimeAnalysis = usedParallelLifetimeAnalysis;
-  compiled.usedParallelCompile = compiled.usedParallelPayloadResolution ||
-                                 compiled.usedParallelHazardAnalysis ||
-                                 compiled.usedParallelLifetimeAnalysis;
+  compiled.plan.usedParallelHazardAnalysis = work.usedParallelHazardAnalysis;
+  compiled.plan.usedParallelLifetimeAnalysis = usedParallelLifetimeAnalysis;
+  compiled.plan.usedParallelCompile =
+      compiled.plan.usedParallelHazardAnalysis ||
+      compiled.plan.usedParallelLifetimeAnalysis;
   for (uint32_t textureIndex = 0; textureIndex < textures_.size();
        ++textureIndex) {
     if (textures_[textureIndex].imported ||
-        transientTextureFirstRank[textureIndex] == UINT32_MAX) {
+        textureRanks.first[textureIndex] == UINT32_MAX) {
       continue;
     }
-    compiled.transientTextureLifetimes.push_back(
+    compiled.plan.transientTextureLifetimes.push_back(
         {.resourceIndex = textureIndex,
-         .firstExecutionIndex = transientTextureFirstRank[textureIndex],
-         .lastExecutionIndex = transientTextureLastRank[textureIndex]});
+         .firstExecutionIndex = textureRanks.first[textureIndex],
+         .lastExecutionIndex = textureRanks.last[textureIndex]});
   }
   for (uint32_t bufferIndex = 0; bufferIndex < buffers_.size(); ++bufferIndex) {
     if (buffers_[bufferIndex].imported ||
-        transientBufferFirstRank[bufferIndex] == UINT32_MAX) {
+        bufferRanks.first[bufferIndex] == UINT32_MAX) {
       continue;
     }
-    compiled.transientBufferLifetimes.push_back(
+    compiled.plan.transientBufferLifetimes.push_back(
         {.resourceIndex = bufferIndex,
-         .firstExecutionIndex = transientBufferFirstRank[bufferIndex],
-         .lastExecutionIndex = transientBufferLastRank[bufferIndex]});
+         .firstExecutionIndex = bufferRanks.first[bufferIndex],
+         .lastExecutionIndex = bufferRanks.last[bufferIndex]});
   }
   return Result<bool, std::string>::makeResult(true);
 }
 
 Result<bool, std::string>
 RenderGraphBuilder::compileStageC6PlanTransientAliasing(
-    RenderGraphCompileResult &compiled) const {
+    CompiledRenderGraph &compiled) const {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
+  const auto planAliasing =
+      [this](const auto &resources, const auto &lifetimes,
+             auto &allocationByResource, auto &allocations,
+             auto &physicalAllocations, uint32_t &physicalCount,
+             const auto &isCompatible, const auto &makePhysicalAllocation) {
+        std::pmr::vector<uint32_t> orderIndices(memory_);
+        orderIndices.resize(lifetimes.size(), 0u);
+        std::iota(orderIndices.begin(), orderIndices.end(), 0u);
+        std::sort(orderIndices.begin(), orderIndices.end(),
+                  [&lifetimes](uint32_t lhs, uint32_t rhs) {
+                    const auto &a = lifetimes[lhs];
+                    const auto &b = lifetimes[rhs];
+                    return std::tie(a.firstExecutionIndex, a.lastExecutionIndex,
+                                    a.resourceIndex) <
+                           std::tie(b.firstExecutionIndex, b.lastExecutionIndex,
+                                    b.resourceIndex);
+                  });
+        std::pmr::vector<uint32_t> slotLastUse(memory_);
+        std::pmr::vector<uint32_t> slotRepresentativeResource(memory_);
+        slotLastUse.reserve(lifetimes.size());
+        slotRepresentativeResource.reserve(lifetimes.size());
+        for (const uint32_t lifetimeIndex : orderIndices) {
+          const auto &lifetime = lifetimes[lifetimeIndex];
+          uint32_t chosenSlot = UINT32_MAX;
+          for (uint32_t slot = 0u; slot < slotLastUse.size(); ++slot) {
+            if (slotLastUse[slot] >= lifetime.firstExecutionIndex) {
+              continue;
+            }
+            const uint32_t representative = slotRepresentativeResource[slot];
+            if (representative < resources.size() &&
+                lifetime.resourceIndex < resources.size() &&
+                isCompatible(resources[representative].transientDesc,
+                             resources[lifetime.resourceIndex].transientDesc)) {
+              chosenSlot = slot;
+              break;
+            }
+          }
+          if (chosenSlot == UINT32_MAX) {
+            chosenSlot = static_cast<uint32_t>(slotLastUse.size());
+            slotLastUse.push_back(lifetime.lastExecutionIndex);
+            slotRepresentativeResource.push_back(lifetime.resourceIndex);
+            physicalAllocations.push_back(makePhysicalAllocation(
+                chosenSlot, lifetime.resourceIndex,
+                resources[lifetime.resourceIndex].transientDesc));
+          } else {
+            slotLastUse[chosenSlot] = lifetime.lastExecutionIndex;
+          }
+          allocationByResource[lifetime.resourceIndex] = chosenSlot;
+          allocations.push_back(RenderGraphPlan::TransientAllocation{
+              .resourceIndex = lifetime.resourceIndex,
+              .allocationIndex = chosenSlot});
+        }
+        std::sort(allocations.begin(), allocations.end(),
+                  [](const auto &a, const auto &b) {
+                    return a.resourceIndex < b.resourceIndex;
+                  });
+        physicalCount = static_cast<uint32_t>(physicalAllocations.size());
+      };
   {
     NURI_PROFILER_ZONE("RenderGraph.compile.plan_texture_aliasing",
                        NURI_PROFILER_COLOR_CREATE);
-    std::pmr::vector<uint32_t> orderIndices(memory_);
-    orderIndices.resize(compiled.transientTextureLifetimes.size(), 0u);
-    std::iota(orderIndices.begin(), orderIndices.end(), 0u);
-    std::sort(orderIndices.begin(), orderIndices.end(),
-              [&compiled](uint32_t lhs, uint32_t rhs) {
-                const auto &a = compiled.transientTextureLifetimes[lhs];
-                const auto &b = compiled.transientTextureLifetimes[rhs];
-                if (a.firstExecutionIndex != b.firstExecutionIndex) {
-                  return a.firstExecutionIndex < b.firstExecutionIndex;
-                }
-                if (a.lastExecutionIndex != b.lastExecutionIndex) {
-                  return a.lastExecutionIndex < b.lastExecutionIndex;
-                }
-                return a.resourceIndex < b.resourceIndex;
-              });
-    std::pmr::vector<uint32_t> slotLastUse(memory_);
-    std::pmr::vector<uint32_t> slotRepresentativeResource(memory_);
-    slotLastUse.reserve(compiled.transientTextureLifetimes.size());
-    slotRepresentativeResource.reserve(
-        compiled.transientTextureLifetimes.size());
-    for (const uint32_t lifetimeIndex : orderIndices) {
-      const auto &lifetime = compiled.transientTextureLifetimes[lifetimeIndex];
-      uint32_t chosenSlot = UINT32_MAX;
-      for (uint32_t slot = 0; slot < slotLastUse.size(); ++slot) {
-        if (slotLastUse[slot] >= lifetime.firstExecutionIndex) {
-          continue;
-        }
-        const uint32_t representative = slotRepresentativeResource[slot];
-        if (representative >= textures_.size() ||
-            lifetime.resourceIndex >= textures_.size()) {
-          continue;
-        }
-        if (!isTextureDescAliasCompatible(
-                textures_[representative].transientDesc,
-                textures_[lifetime.resourceIndex].transientDesc)) {
-          continue;
-        }
-        chosenSlot = slot;
-        break;
-      }
-      if (chosenSlot == UINT32_MAX) {
-        chosenSlot = static_cast<uint32_t>(slotLastUse.size());
-        slotLastUse.push_back(lifetime.lastExecutionIndex);
-        slotRepresentativeResource.push_back(lifetime.resourceIndex);
-        TextureDesc desc = textures_[lifetime.resourceIndex].transientDesc;
-        desc.data = {};
-        compiled.transientTexturePhysicalAllocations.push_back(
-            RenderGraphCompileResult::TransientTexturePhysicalAllocation{
-                .allocationIndex = chosenSlot,
-                .representativeResourceIndex = lifetime.resourceIndex,
-                .desc = desc,
-            });
-      } else {
-        slotLastUse[chosenSlot] = lifetime.lastExecutionIndex;
-      }
-      compiled.transientTextureAllocationByResource[lifetime.resourceIndex] =
-          chosenSlot;
-      compiled.transientTextureAllocations.push_back(
-          RenderGraphCompileResult::TransientAllocation{
-              .resourceIndex = lifetime.resourceIndex,
-              .allocationIndex = chosenSlot,
-          });
-    }
-    std::sort(compiled.transientTextureAllocations.begin(),
-              compiled.transientTextureAllocations.end(),
-              [](const auto &a, const auto &b) {
-                return a.resourceIndex < b.resourceIndex;
-              });
-    compiled.transientTexturePhysicalCount = static_cast<uint32_t>(
-        compiled.transientTexturePhysicalAllocations.size());
+    planAliasing(
+        textures_, compiled.plan.transientTextureLifetimes,
+        compiled.plan.transientTextureAllocationByResource,
+        compiled.plan.transientTextureAllocations,
+        compiled.plan.transientTexturePhysicalAllocations,
+        compiled.plan.transientTexturePhysicalCount,
+        isTextureDescAliasCompatible,
+        [](uint32_t allocationIndex, uint32_t resourceIndex, TextureDesc desc) {
+          desc.data = {};
+          return RenderGraphPlan::TransientTexturePhysicalAllocation{
+              .allocationIndex = allocationIndex,
+              .representativeResourceIndex = resourceIndex,
+              .desc = desc};
+        });
     NURI_PROFILER_ZONE_END();
   }
   {
     NURI_PROFILER_ZONE("RenderGraph.compile.plan_buffer_aliasing",
                        NURI_PROFILER_COLOR_CREATE);
-    std::pmr::vector<uint32_t> orderIndices(memory_);
-    orderIndices.resize(compiled.transientBufferLifetimes.size(), 0u);
-    std::iota(orderIndices.begin(), orderIndices.end(), 0u);
-    std::sort(orderIndices.begin(), orderIndices.end(),
-              [&compiled](uint32_t lhs, uint32_t rhs) {
-                const auto &a = compiled.transientBufferLifetimes[lhs];
-                const auto &b = compiled.transientBufferLifetimes[rhs];
-                if (a.firstExecutionIndex != b.firstExecutionIndex) {
-                  return a.firstExecutionIndex < b.firstExecutionIndex;
-                }
-                if (a.lastExecutionIndex != b.lastExecutionIndex) {
-                  return a.lastExecutionIndex < b.lastExecutionIndex;
-                }
-                return a.resourceIndex < b.resourceIndex;
-              });
-    std::pmr::vector<uint32_t> slotLastUse(memory_);
-    std::pmr::vector<uint32_t> slotRepresentativeResource(memory_);
-    slotLastUse.reserve(compiled.transientBufferLifetimes.size());
-    slotRepresentativeResource.reserve(
-        compiled.transientBufferLifetimes.size());
-    for (const uint32_t lifetimeIndex : orderIndices) {
-      const auto &lifetime = compiled.transientBufferLifetimes[lifetimeIndex];
-      uint32_t chosenSlot = UINT32_MAX;
-      for (uint32_t slot = 0; slot < slotLastUse.size(); ++slot) {
-        if (slotLastUse[slot] >= lifetime.firstExecutionIndex) {
-          continue;
-        }
-        const uint32_t representative = slotRepresentativeResource[slot];
-        if (representative >= buffers_.size() ||
-            lifetime.resourceIndex >= buffers_.size()) {
-          continue;
-        }
-        if (!isBufferDescAliasCompatible(
-                buffers_[representative].transientDesc,
-                buffers_[lifetime.resourceIndex].transientDesc)) {
-          continue;
-        }
-        chosenSlot = slot;
-        break;
-      }
-      if (chosenSlot == UINT32_MAX) {
-        chosenSlot = static_cast<uint32_t>(slotLastUse.size());
-        slotLastUse.push_back(lifetime.lastExecutionIndex);
-        slotRepresentativeResource.push_back(lifetime.resourceIndex);
-        BufferDesc desc = buffers_[lifetime.resourceIndex].transientDesc;
-        desc.data = {};
-        compiled.transientBufferPhysicalAllocations.push_back(
-            RenderGraphCompileResult::TransientBufferPhysicalAllocation{
-                .allocationIndex = chosenSlot,
-                .representativeResourceIndex = lifetime.resourceIndex,
-                .desc = desc,
-            });
-      } else {
-        slotLastUse[chosenSlot] = lifetime.lastExecutionIndex;
-      }
-      compiled.transientBufferAllocationByResource[lifetime.resourceIndex] =
-          chosenSlot;
-      compiled.transientBufferAllocations.push_back(
-          RenderGraphCompileResult::TransientAllocation{
-              .resourceIndex = lifetime.resourceIndex,
-              .allocationIndex = chosenSlot,
-          });
-    }
-    std::sort(compiled.transientBufferAllocations.begin(),
-              compiled.transientBufferAllocations.end(),
-              [](const auto &a, const auto &b) {
-                return a.resourceIndex < b.resourceIndex;
-              });
-    compiled.transientBufferPhysicalCount = static_cast<uint32_t>(
-        compiled.transientBufferPhysicalAllocations.size());
+    planAliasing(
+        buffers_, compiled.plan.transientBufferLifetimes,
+        compiled.plan.transientBufferAllocationByResource,
+        compiled.plan.transientBufferAllocations,
+        compiled.plan.transientBufferPhysicalAllocations,
+        compiled.plan.transientBufferPhysicalCount, isBufferDescAliasCompatible,
+        [](uint32_t allocationIndex, uint32_t resourceIndex, BufferDesc desc) {
+          desc.data = {};
+          return RenderGraphPlan::TransientBufferPhysicalAllocation{
+              .allocationIndex = allocationIndex,
+              .representativeResourceIndex = resourceIndex,
+              .desc = desc};
+        });
     NURI_PROFILER_ZONE_END();
   }
   return Result<bool, std::string>::makeResult(true);
 }
 
-Result<RenderGraphCompileResult, std::string>
+Result<CompiledRenderGraph, std::string>
 RenderGraphBuilder::compile(RenderGraphRuntime &runtime) const {
   NURI_PROFILER_FUNCTION();
-  RenderGraphCompileResult compiled(memory_);
-  compiled.frameIndex = frameIndex_;
+  CompiledRenderGraph compiled(memory_);
+  compiled.commands.frameIndex = frameIndex_;
   CompileWorkState work(memory_);
   compileStageC0BuildResourceTables(compiled, work);
   if (passes_.empty()) {
-    return Result<RenderGraphCompileResult, std::string>::makeResult(
+    compiled.commands = buildFrameCommands(compiled.plan);
+    return Result<CompiledRenderGraph, std::string>::makeResult(
         std::move(compiled));
   }
   auto topologyResult = compileStageC1C2BuildTopology(runtime, compiled, work);
   if (topologyResult.hasError()) {
-    return Result<RenderGraphCompileResult, std::string>::makeError(
+    return Result<CompiledRenderGraph, std::string>::makeError(
         topologyResult.error());
   }
   auto resolveResult =
       compileStageC3ResolvePassPayloads(runtime, compiled, work);
   if (resolveResult.hasError()) {
-    return Result<RenderGraphCompileResult, std::string>::makeError(
+    return Result<CompiledRenderGraph, std::string>::makeError(
         resolveResult.error());
   }
   auto barrierResult = compileStageC4PlanBarriers(compiled, work);
   if (barrierResult.hasError()) {
-    return Result<RenderGraphCompileResult, std::string>::makeError(
+    return Result<CompiledRenderGraph, std::string>::makeError(
         barrierResult.error());
   }
   auto lifetimeResult =
       compileStageC5PlanTransientLifetimes(runtime, compiled, work);
   if (lifetimeResult.hasError()) {
-    return Result<RenderGraphCompileResult, std::string>::makeError(
+    return Result<CompiledRenderGraph, std::string>::makeError(
         lifetimeResult.error());
   }
-  compiled.transientTextureAllocationByResource.resize(textures_.size(),
-                                                       UINT32_MAX);
-  compiled.transientBufferAllocationByResource.resize(buffers_.size(),
-                                                      UINT32_MAX);
+  compiled.plan.transientTextureAllocationByResource.resize(textures_.size(),
+                                                            UINT32_MAX);
+  compiled.plan.transientBufferAllocationByResource.resize(buffers_.size(),
+                                                           UINT32_MAX);
   auto aliasingResult = compileStageC6PlanTransientAliasing(compiled);
   if (aliasingResult.hasError()) {
-    return Result<RenderGraphCompileResult, std::string>::makeError(
+    return Result<CompiledRenderGraph, std::string>::makeError(
         aliasingResult.error());
   }
-  return Result<RenderGraphCompileResult, std::string>::makeResult(
+  compiled.plan.usedParallelCompile =
+      compiled.plan.usedParallelCompile ||
+      compiled.commands.usedParallelPayloadResolution;
+  return Result<CompiledRenderGraph, std::string>::makeResult(
       std::move(compiled));
 }
 
@@ -4530,7 +5124,7 @@ void RenderGraphExecutor::collectRetiredResources(GPUDevice &gpu) {
 
 Result<RenderGraphExecutionMetadata, std::string>
 RenderGraphExecutor::execute(RenderGraphRuntime &runtime, GPUDevice &gpu,
-                             const RenderGraphCompileResult &compiled,
+                             CompiledRenderGraphView compiled,
                              RenderGraphExecutionOptions options) {
   RenderGraphExecutionMetadata metadata(memory_);
   auto result = executeInternal(&runtime, gpu, compiled, metadata, options);
@@ -4542,12 +5136,10 @@ RenderGraphExecutor::execute(RenderGraphRuntime &runtime, GPUDevice &gpu,
       std::move(metadata));
 }
 
-Result<bool, std::string>
-RenderGraphExecutor::executeInternal(RenderGraphRuntime *runtime,
-                                     GPUDevice &gpu,
-                                     const RenderGraphCompileResult &compiled,
-                                     RenderGraphExecutionMetadata &metadata,
-                                     RenderGraphExecutionOptions options) {
+Result<bool, std::string> RenderGraphExecutor::executeInternal(
+    RenderGraphRuntime *runtime, GPUDevice &gpu,
+    CompiledRenderGraphView compiled, RenderGraphExecutionMetadata &metadata,
+    RenderGraphExecutionOptions options) {
   NURI_PROFILER_FUNCTION();
   const bool captureTelemetry =
       options.telemetry != RenderGraphTelemetryLevel::None;
@@ -4567,16 +5159,16 @@ RenderGraphExecutor::executeInternal(RenderGraphRuntime *runtime,
     NURI_PROFILER_ZONE_END();
   }
   std::pmr::vector<TextureHandle> transientTextureHandles(memory_);
-  transientTextureHandles.resize(compiled.transientTexturePhysicalCount,
+  transientTextureHandles.resize(compiled.plan.transientTexturePhysicalCount,
                                  TextureHandle{});
   std::pmr::vector<TextureDesc> transientTextureDescs(memory_);
-  transientTextureDescs.resize(compiled.transientTexturePhysicalCount,
+  transientTextureDescs.resize(compiled.plan.transientTexturePhysicalCount,
                                TextureDesc{});
   std::pmr::vector<BufferHandle> transientBufferHandles(memory_);
-  transientBufferHandles.resize(compiled.transientBufferPhysicalCount,
+  transientBufferHandles.resize(compiled.plan.transientBufferPhysicalCount,
                                 BufferHandle{});
   std::pmr::vector<BufferDesc> transientBufferDescs(memory_);
-  transientBufferDescs.resize(compiled.transientBufferPhysicalCount,
+  transientBufferDescs.resize(compiled.plan.transientBufferPhysicalCount,
                               BufferDesc{});
   const auto destroyMaterializedResources = [&gpu, &transientTextureHandles,
                                              &transientBufferHandles]() {
@@ -4595,7 +5187,7 @@ RenderGraphExecutor::executeInternal(RenderGraphRuntime *runtime,
     NURI_PROFILER_ZONE("RenderGraph.execute.materialize_transients",
                        NURI_PROFILER_COLOR_CREATE);
     for (const auto &allocation :
-         compiled.transientTexturePhysicalAllocations) {
+         compiled.plan.transientTexturePhysicalAllocations) {
       TextureDesc desc = allocation.desc;
       desc.data = {};
       transientTextureDescs[allocation.allocationIndex] = desc;
@@ -4644,7 +5236,8 @@ RenderGraphExecutor::executeInternal(RenderGraphRuntime *runtime,
       }
       transientTextureHandles[allocation.allocationIndex] = transientTexture;
     }
-    for (const auto &allocation : compiled.transientBufferPhysicalAllocations) {
+    for (const auto &allocation :
+         compiled.plan.transientBufferPhysicalAllocations) {
       BufferDesc desc = allocation.desc;
       desc.data = {};
       transientBufferDescs[allocation.allocationIndex] = desc;
@@ -4695,252 +5288,225 @@ RenderGraphExecutor::executeInternal(RenderGraphRuntime *runtime,
     }
     NURI_PROFILER_ZONE_END();
   }
-  std::pmr::vector<RenderPass> executablePasses(memory_);
-  std::pmr::vector<BufferHandle> executableDependencyBuffers(memory_);
-  std::pmr::vector<TextureHandle> executableDependencyTextures(memory_);
-  std::pmr::vector<ComputeDispatchItem> executablePreDispatches(memory_);
-  std::pmr::vector<DrawItem> executableDrawItems(memory_);
-  std::pmr::vector<MeshDispatchItem> executableMeshDispatches(memory_);
-  std::pmr::vector<BufferCopyRegion> executableBufferCopies(memory_);
-  std::pmr::vector<TextureCopyItem> executableTextureCopies(memory_);
-  std::pmr::vector<BufferHandle> executablePreDispatchDependencyBuffers(
-      memory_);
+  FrameCommandArena &commands = compiled.commands;
+  auto &executablePasses = commands.orderedPasses;
+  auto &executableDependencyBuffers = commands.resolvedDependencyBuffers;
+  auto &executableDependencyTextures = commands.resolvedDependencyTextures;
+  auto &executablePreDispatches = commands.ownedPreDispatches;
+  auto &executableDrawItems = commands.ownedDrawItems;
+  auto &executableMeshDispatches = commands.ownedMeshDispatchItems;
+  auto &executableBufferCopies = commands.ownedBufferCopyItems;
+  auto &executableTextureCopies = commands.ownedTextureCopyItems;
+  auto &executablePreDispatchTextureBindings =
+      commands.ownedPreDispatchTextureBindings;
+  auto &executableDrawTextureBindings = commands.ownedDrawTextureBindings;
+  auto &executableMeshDispatchTextureBindings =
+      commands.ownedMeshDispatchTextureBindings;
+  auto &executablePreDispatchDependencyBuffers =
+      commands.resolvedPreDispatchDependencyBuffers;
   {
-    NURI_PROFILER_ZONE("RenderGraph.execute.build_executable_payload",
+    NURI_PROFILER_ZONE("RenderGraph.execute.resolve_command_bindings",
                        NURI_PROFILER_COLOR_CMD_COPY);
-    const bool needsMutableDependencyBuffers =
-        !compiled.unresolvedDependencyBufferBindings.empty();
-    const bool needsMutableDependencyTextures =
-        !compiled.unresolvedDependencyTextureBindings.empty();
-    const bool needsMutableDrawItems =
-        !compiled.unresolvedDrawBufferBindings.empty();
-    const bool needsMutableBufferCopies =
-        !compiled.unresolvedBufferCopyBindings.empty();
-    const bool needsMutableTextureCopies =
-        !compiled.unresolvedTextureCopyBindings.empty();
-    executablePasses = compiled.orderedPasses;
-    if (needsMutableDependencyBuffers) {
-      executableDependencyBuffers = compiled.resolvedDependencyBuffers;
+    const auto resolveTextureBinding = [&](PushConstantTextureBinding
+                                               &binding) {
+      if (binding.graphTextureResourceIndex == UINT32_MAX) {
+        return;
+      }
+      const uint32_t resourceIndex = binding.graphTextureResourceIndex;
+      binding.texture =
+          compiled.commands.textureHandlesByResource[resourceIndex];
+      if (!nuri::isValid(binding.texture)) {
+        binding.texture = transientTextureHandles
+            [compiled.plan.transientTextureAllocationByResource[resourceIndex]];
+      }
+    };
+    for (size_t i = 0u; i < executablePreDispatches.size(); ++i) {
+      for (auto &binding : executablePreDispatchTextureBindings[i]) {
+        resolveTextureBinding(binding);
+      }
+      executablePreDispatches[i].pushConstantTextureBindings =
+          executablePreDispatchTextureBindings[i];
     }
-    if (needsMutableDependencyTextures) {
-      executableDependencyTextures = compiled.resolvedDependencyTextures;
+    for (size_t i = 0u; i < executableDrawItems.size(); ++i) {
+      for (auto &binding : executableDrawTextureBindings[i]) {
+        resolveTextureBinding(binding);
+      }
+      executableDrawItems[i].pushConstantTextureBindings =
+          executableDrawTextureBindings[i];
     }
-    executablePreDispatches = compiled.ownedPreDispatches;
-    if (needsMutableDrawItems) {
-      executableDrawItems = compiled.ownedDrawItems;
-    }
-    executableMeshDispatches = compiled.ownedMeshDispatchItems;
-    if (needsMutableBufferCopies) {
-      executableBufferCopies = compiled.ownedBufferCopyItems;
-    }
-    if (needsMutableTextureCopies) {
-      executableTextureCopies = compiled.ownedTextureCopyItems;
-    }
-    executablePreDispatchDependencyBuffers =
-        compiled.resolvedPreDispatchDependencyBuffers;
-    for (uint32_t passIndex = 0; passIndex < executablePasses.size();
-         ++passIndex) {
-      RenderPass &pass = executablePasses[passIndex];
-      const auto &bufferRange =
-          compiled.dependencyBufferRangesByPass[passIndex];
-      if (needsMutableDependencyBuffers) {
-        pass.dependencyBuffers =
-            std::span<const BufferHandle>(executableDependencyBuffers)
-                .subspan(bufferRange.offset, bufferRange.count);
+    for (size_t i = 0u; i < executableMeshDispatches.size(); ++i) {
+      for (auto &binding : executableMeshDispatchTextureBindings[i]) {
+        resolveTextureBinding(binding);
       }
-      const auto &textureRange =
-          compiled.dependencyTextureRangesByPass[passIndex];
-      if (needsMutableDependencyTextures) {
-        pass.dependencyTextures =
-            std::span<const TextureHandle>(executableDependencyTextures)
-                .subspan(textureRange.offset, textureRange.count);
-      }
-      const auto &preDispatchRange =
-          compiled.preDispatchRangesByPass[passIndex];
-      pass.preDispatches =
-          std::span<const ComputeDispatchItem>(executablePreDispatches)
-              .subspan(preDispatchRange.offset, preDispatchRange.count);
-      for (uint32_t i = 0; i < preDispatchRange.count; ++i) {
-        const uint32_t dispatchIndex = preDispatchRange.offset + i;
-        const auto &range = compiled.preDispatchDependencyRanges[dispatchIndex];
-        executablePreDispatches[dispatchIndex].dependencyBuffers =
-            std::span<const BufferHandle>(
-                executablePreDispatchDependencyBuffers)
-                .subspan(range.offset, range.count);
-      }
-      const auto &drawRange = compiled.drawRangesByPass[passIndex];
-      if (needsMutableDrawItems) {
-        pass.draws = std::span<const DrawItem>(executableDrawItems)
-                         .subspan(drawRange.offset, drawRange.count);
-      }
-      const auto &meshRange = compiled.meshDispatchRangesByPass[passIndex];
-      pass.meshDispatches =
-          std::span<const MeshDispatchItem>(executableMeshDispatches)
-              .subspan(meshRange.offset, meshRange.count);
-      const auto &bufferCopyRange = compiled.bufferCopyRangesByPass[passIndex];
-      if (needsMutableBufferCopies) {
-        pass.bufferCopies =
-            std::span<const BufferCopyRegion>(executableBufferCopies)
-                .subspan(bufferCopyRange.offset, bufferCopyRange.count);
-      }
-      const auto &copyRange = compiled.textureCopyRangesByPass[passIndex];
-      if (needsMutableTextureCopies) {
-        pass.textureCopies =
-            std::span<const TextureCopyItem>(executableTextureCopies)
-                .subspan(copyRange.offset, copyRange.count);
-      }
+      executableMeshDispatches[i].pushConstantTextureBindings =
+          executableMeshDispatchTextureBindings[i];
     }
     NURI_PROFILER_ZONE_END();
   }
   {
-    NURI_PROFILER_ZONE("RenderGraph.execute.patch_unresolved_bindings",
+    NURI_PROFILER_ZONE("RenderGraph.execute.patch_graph_bindings",
                        NURI_PROFILER_COLOR_CMD_COPY);
     const auto transientTexture = [&](uint32_t resourceIndex) {
       return transientTextureHandles
-          [compiled.transientTextureAllocationByResource[resourceIndex]];
+          [compiled.plan.transientTextureAllocationByResource[resourceIndex]];
     };
     const auto transientBuffer = [&](uint32_t resourceIndex) {
       return transientBufferHandles
-          [compiled.transientBufferAllocationByResource[resourceIndex]];
+          [compiled.plan.transientBufferAllocationByResource[resourceIndex]];
     };
-    for (const auto &binding : compiled.unresolvedTextureBindings) {
-      RenderPass &pass = executablePasses[binding.orderedPassIndex];
-      const TextureHandle texture =
-          transientTexture(binding.textureResourceIndex);
-      switch (binding.target) {
-      case RenderGraphCompileResult::PassTextureBindingTarget::Color:
-        pass.colorTexture = texture;
+    using PatchTarget = RenderGraphPlan::CommandResourcePatchTarget;
+    for (const RenderGraphPlan::CommandResourcePatch &patch :
+         compiled.plan.commandResourcePatches) {
+      const auto texture = [&] {
+        return transientTexture(patch.resourceIndex);
+      };
+      const auto buffer = [&] { return transientBuffer(patch.resourceIndex); };
+      switch (patch.target) {
+      case PatchTarget::PassColor:
+        NURI_ASSERT(patch.resourceKind == RenderGraphResourceKind::Texture,
+                    "texture command patch has non-texture resource kind");
+        executablePasses[patch.orderedPassIndex].colorTexture = texture();
         break;
-      case RenderGraphCompileResult::PassTextureBindingTarget::Depth:
-        pass.depthTexture = texture;
+      case PatchTarget::PassDepth:
+        NURI_ASSERT(patch.resourceKind == RenderGraphResourceKind::Texture,
+                    "texture command patch has non-texture resource kind");
+        executablePasses[patch.orderedPassIndex].depthTexture = texture();
         break;
-      case RenderGraphCompileResult::PassTextureBindingTarget::ColorResolve:
-        pass.colorResolveTexture = texture;
+      case PatchTarget::PassColorResolve:
+        NURI_ASSERT(patch.resourceKind == RenderGraphResourceKind::Texture,
+                    "texture command patch has non-texture resource kind");
+        executablePasses[patch.orderedPassIndex].colorResolveTexture =
+            texture();
         break;
-      case RenderGraphCompileResult::PassTextureBindingTarget::DepthResolve:
-        pass.depthResolveTexture = texture;
+      case PatchTarget::PassDepthResolve:
+        NURI_ASSERT(patch.resourceKind == RenderGraphResourceKind::Texture,
+                    "texture command patch has non-texture resource kind");
+        executablePasses[patch.orderedPassIndex].depthResolveTexture =
+            texture();
         break;
-      }
-    }
-    for (const auto &binding : compiled.unresolvedDependencyBufferBindings) {
-      const auto &range =
-          compiled.dependencyBufferRangesByPass[binding.orderedPassIndex];
-      executableDependencyBuffers[range.offset +
-                                  binding.dependencyBufferIndex] =
-          transientBuffer(binding.bufferResourceIndex);
-    }
-    for (const auto &binding : compiled.unresolvedDependencyTextureBindings) {
-      const auto &range =
-          compiled.dependencyTextureRangesByPass[binding.orderedPassIndex];
-      executableDependencyTextures[range.offset +
-                                   binding.dependencyTextureIndex] =
-          transientTexture(binding.textureResourceIndex);
-    }
-    for (const auto &binding : compiled.unresolvedBufferCopyBindings) {
-      const auto &range =
-          compiled.bufferCopyRangesByPass[binding.orderedPassIndex];
-      BufferCopyRegion &copy =
-          executableBufferCopies[range.offset + binding.bufferCopyIndex];
-      const BufferHandle buffer = transientBuffer(binding.bufferResourceIndex);
-      switch (binding.target) {
-      case RenderGraphCompileResult::BufferCopyBindingTarget::Source:
-        copy.srcBuffer = buffer;
-        break;
-      case RenderGraphCompileResult::BufferCopyBindingTarget::Destination:
-        copy.dstBuffer = buffer;
+      case PatchTarget::PassDependencyBuffer: {
+        NURI_ASSERT(patch.resourceKind == RenderGraphResourceKind::Buffer,
+                    "buffer command patch has non-buffer resource kind");
+        const auto range =
+            compiled.plan.dependencyBufferRangesByPass[patch.orderedPassIndex];
+        executableDependencyBuffers[range.offset + patch.dependencyIndex] =
+            buffer();
         break;
       }
-    }
-    for (const auto &binding : compiled.unresolvedTextureCopyBindings) {
-      const auto &range =
-          compiled.textureCopyRangesByPass[binding.orderedPassIndex];
-      TextureCopyItem &copy =
-          executableTextureCopies[range.offset + binding.textureCopyIndex];
-      const TextureHandle texture =
-          transientTexture(binding.textureResourceIndex);
-      switch (binding.target) {
-      case RenderGraphCompileResult::TextureCopyBindingTarget::Source:
-        copy.sourceTexture = texture;
-        break;
-      case RenderGraphCompileResult::TextureCopyBindingTarget::Destination:
-        copy.destinationTexture = texture;
+      case PatchTarget::PassDependencyTexture: {
+        NURI_ASSERT(patch.resourceKind == RenderGraphResourceKind::Texture,
+                    "texture command patch has non-texture resource kind");
+        const auto range =
+            compiled.plan.dependencyTextureRangesByPass[patch.orderedPassIndex];
+        executableDependencyTextures[range.offset + patch.dependencyIndex] =
+            texture();
         break;
       }
-    }
-    for (const auto &binding :
-         compiled.unresolvedPreDispatchDependencyBufferBindings) {
-      const auto &passRange =
-          compiled.preDispatchRangesByPass[binding.orderedPassIndex];
-      const auto &range =
-          compiled.preDispatchDependencyRanges[passRange.offset +
-                                               binding.preDispatchIndex];
-      executablePreDispatchDependencyBuffers[range.offset +
-                                             binding.dependencyBufferIndex] =
-          transientBuffer(binding.bufferResourceIndex);
-    }
-    for (const auto &binding : compiled.unresolvedDrawBufferBindings) {
-      const auto &range = compiled.drawRangesByPass[binding.orderedPassIndex];
-      DrawItem &draw = executableDrawItems[range.offset + binding.drawIndex];
-      const BufferHandle buffer = transientBuffer(binding.bufferResourceIndex);
-      switch (binding.target) {
-      case RenderGraphCompileResult::DrawBufferBindingTarget::Vertex:
-        draw.vertexBuffer = buffer;
-        break;
-      case RenderGraphCompileResult::DrawBufferBindingTarget::Index:
-        draw.indexBuffer = buffer;
-        break;
-      case RenderGraphCompileResult::DrawBufferBindingTarget::Indirect:
-        draw.indirectBuffer = buffer;
-        break;
-      case RenderGraphCompileResult::DrawBufferBindingTarget::IndirectCount:
-        draw.indirectCountBuffer = buffer;
+      case PatchTarget::PreDispatchDependencyBuffer: {
+        NURI_ASSERT(patch.resourceKind == RenderGraphResourceKind::Buffer,
+                    "buffer command patch has non-buffer resource kind");
+        const auto passRange =
+            compiled.plan.preDispatchRangesByPass[patch.orderedPassIndex];
+        const auto range =
+            compiled.plan.preDispatchDependencyRanges[passRange.offset +
+                                                      patch.commandIndex];
+        executablePreDispatchDependencyBuffers[range.offset +
+                                               patch.dependencyIndex] =
+            buffer();
         break;
       }
-    }
-    for (const auto &binding : compiled.unresolvedMeshDispatchBufferBindings) {
-      const auto &range =
-          compiled.meshDispatchRangesByPass[binding.orderedPassIndex];
-      MeshDispatchItem &dispatch =
-          executableMeshDispatches[range.offset + binding.meshDispatchIndex];
-      const BufferHandle buffer = transientBuffer(binding.bufferResourceIndex);
-      switch (binding.target) {
-      case RenderGraphCompileResult::MeshDispatchBufferBindingTarget::Indirect:
-        dispatch.indirectBuffer = buffer;
+      case PatchTarget::DrawVertexBuffer:
+      case PatchTarget::DrawIndexBuffer:
+      case PatchTarget::DrawIndirectBuffer:
+      case PatchTarget::DrawIndirectCountBuffer: {
+        NURI_ASSERT(patch.resourceKind == RenderGraphResourceKind::Buffer,
+                    "buffer command patch has non-buffer resource kind");
+        const auto range =
+            compiled.plan.drawRangesByPass[patch.orderedPassIndex];
+        DrawItem &draw = executableDrawItems[range.offset + patch.commandIndex];
+        const BufferHandle handle = buffer();
+        if (patch.target == PatchTarget::DrawVertexBuffer)
+          draw.vertexBuffer = handle;
+        else if (patch.target == PatchTarget::DrawIndexBuffer)
+          draw.indexBuffer = handle;
+        else if (patch.target == PatchTarget::DrawIndirectBuffer)
+          draw.indirectBuffer = handle;
+        else
+          draw.indirectCountBuffer = handle;
         break;
-      case RenderGraphCompileResult::MeshDispatchBufferBindingTarget::
-          IndirectCount:
-        dispatch.indirectCountBuffer = buffer;
+      }
+      case PatchTarget::MeshDispatchIndirectBuffer:
+      case PatchTarget::MeshDispatchIndirectCountBuffer: {
+        NURI_ASSERT(patch.resourceKind == RenderGraphResourceKind::Buffer,
+                    "buffer command patch has non-buffer resource kind");
+        const auto range =
+            compiled.plan.meshDispatchRangesByPass[patch.orderedPassIndex];
+        MeshDispatchItem &dispatch =
+            executableMeshDispatches[range.offset + patch.commandIndex];
+        if (patch.target == PatchTarget::MeshDispatchIndirectBuffer)
+          dispatch.indirectBuffer = buffer();
+        else
+          dispatch.indirectCountBuffer = buffer();
         break;
+      }
+      case PatchTarget::BufferCopySource:
+      case PatchTarget::BufferCopyDestination: {
+        NURI_ASSERT(patch.resourceKind == RenderGraphResourceKind::Buffer,
+                    "buffer command patch has non-buffer resource kind");
+        const auto range =
+            compiled.plan.bufferCopyRangesByPass[patch.orderedPassIndex];
+        BufferCopyRegion &copy =
+            executableBufferCopies[range.offset + patch.commandIndex];
+        if (patch.target == PatchTarget::BufferCopySource)
+          copy.srcBuffer = buffer();
+        else
+          copy.dstBuffer = buffer();
+        break;
+      }
+      case PatchTarget::TextureCopySource:
+      case PatchTarget::TextureCopyDestination: {
+        NURI_ASSERT(patch.resourceKind == RenderGraphResourceKind::Texture,
+                    "texture command patch has non-texture resource kind");
+        const auto range =
+            compiled.plan.textureCopyRangesByPass[patch.orderedPassIndex];
+        TextureCopyItem &copy =
+            executableTextureCopies[range.offset + patch.commandIndex];
+        if (patch.target == PatchTarget::TextureCopySource)
+          copy.sourceTexture = texture();
+        else
+          copy.destinationTexture = texture();
+        break;
+      }
       }
     }
     NURI_PROFILER_ZONE_END();
   }
   std::pmr::vector<GraphicsBarrierRecord> executableBarrierRecords(memory_);
-  executableBarrierRecords.reserve(compiled.passBarrierRecords.size());
+  executableBarrierRecords.reserve(compiled.plan.passBarrierRecords.size());
   {
     NURI_PROFILER_ZONE("RenderGraph.execute.resolve_barriers",
                        NURI_PROFILER_COLOR_BARRIER);
     for (const RenderGraphBarrierRecord &barrier :
-         compiled.passBarrierRecords) {
+         compiled.plan.passBarrierRecords) {
       if (barrier.resourceKind == RenderGraphBarrierResourceKind::Texture) {
         TextureHandle texture =
-            compiled.textureHandlesByResource[barrier.resourceIndex];
+            compiled.commands.textureHandlesByResource[barrier.resourceIndex];
         if (!nuri::isValid(texture)) {
           texture =
-              transientTextureHandles[compiled
+              transientTextureHandles[compiled.plan
                                           .transientTextureAllocationByResource
                                               [barrier.resourceIndex]];
         }
         executableBarrierRecords.push_back(GraphicsBarrierRecord::ForTexture(
             texture, barrier.beforeAccess, barrier.afterAccess,
-            barrier.beforeState, barrier.afterState));
+            barrier.beforeState, barrier.afterState, barrier.subresources));
       } else if (barrier.resourceKind ==
                  RenderGraphBarrierResourceKind::Buffer) {
         BufferHandle buffer =
-            compiled.bufferHandlesByResource[barrier.resourceIndex];
+            compiled.commands.bufferHandlesByResource[barrier.resourceIndex];
         if (!nuri::isValid(buffer)) {
           buffer = transientBufferHandles
-              [compiled
+              [compiled.plan
                    .transientBufferAllocationByResource[barrier.resourceIndex]];
         }
         executableBarrierRecords.push_back(GraphicsBarrierRecord::ForBuffer(
@@ -4948,7 +5514,7 @@ RenderGraphExecutor::executeInternal(RenderGraphRuntime *runtime,
             barrier.beforeState, barrier.afterState));
       } else {
         const AccelerationStructureHandle accelerationStructure =
-            compiled
+            compiled.commands
                 .accelerationStructureHandlesByResource[barrier.resourceIndex];
         executableBarrierRecords.push_back(
             GraphicsBarrierRecord::ForAccelerationStructure(
@@ -4965,7 +5531,7 @@ RenderGraphExecutor::executeInternal(RenderGraphRuntime *runtime,
     NURI_PROFILER_ZONE("RenderGraph.execute.submit_frame",
                        NURI_PROFILER_COLOR_SUBMIT);
     if (captureTelemetry) {
-      metadata.usedParallelCompile = compiled.usedParallelCompile;
+      metadata.usedParallelCompile = compiled.plan.usedParallelCompile;
       metadata.usedParallelRecording = false;
       metadata.recordedCommandBuffers.clear();
       metadata.submitBatches.clear();
@@ -5035,6 +5601,32 @@ RenderGraphExecutor::executeInternal(RenderGraphRuntime *runtime,
           });
         }
       }
+      std::vector<RecordingReferenceSet> recordingReferences;
+      recordingReferences.reserve(ranges.size());
+      for (const RenderGraphContiguousRange range : ranges) {
+        RecordingReferenceSet &references =
+            recordingReferences.emplace_back(memory_);
+        for (uint32_t localIndex = 0u; localIndex < range.count; ++localIndex) {
+          const uint32_t orderedPassIndex = range.offset + localIndex;
+          appendRecordingReferences(references,
+                                    executablePasses[orderedPassIndex]);
+          const PassBarrierPlan &barrierPlan =
+              compiled.plan.passBarrierPlans[orderedPassIndex];
+          appendRecordingReferences(
+              references,
+              std::span<const GraphicsBarrierRecord>(executableBarrierRecords)
+                  .subspan(barrierPlan.barrierOffset,
+                           barrierPlan.barrierCount));
+        }
+        if (range.offset + range.count == executablePasses.size()) {
+          appendRecordingReferences(
+              references,
+              std::span<const GraphicsBarrierRecord>(executableBarrierRecords)
+                  .subspan(compiled.plan.finalBarrierPlan.barrierOffset,
+                           compiled.plan.finalBarrierPlan.barrierCount));
+        }
+        references.normalize();
+      }
       std::pmr::vector<RecordingContextHandle> recordingContexts(memory_);
       recordingContexts.resize(ranges.size());
       std::atomic<bool> recordingFailed = false;
@@ -5065,13 +5657,59 @@ RenderGraphExecutor::executeInternal(RenderGraphRuntime *runtime,
           return;
         }
         recordingContexts[workerIndex] = contextResult.value();
+        auto retainResult = gpu.retainGraphicsRecordingReferences(
+            recordingContexts[workerIndex],
+            recordingReferences[workerIndex].view());
+        if (retainResult.hasError()) {
+          setRecordingFailure(makeExecutionStageError(
+              RenderGraphExecutionFailureStage::RetainRecordingReferences,
+              "RenderGraphExecutor::execute: failed to retain recording "
+              "references: " +
+                  retainResult.error()));
+          return;
+        }
+        if (!capturePassTimings) {
+          std::pmr::vector<GraphicsRecordingStep> steps(memory_);
+          steps.reserve(range.count + 1u);
+          for (uint32_t localIndex = 0u; localIndex < range.count;
+               ++localIndex) {
+            const uint32_t orderedPassIndex = range.offset + localIndex;
+            const PassBarrierPlan &barrierPlan =
+                compiled.plan.passBarrierPlans[orderedPassIndex];
+            steps.push_back(GraphicsRecordingStep{
+                .barriers = std::span<const GraphicsBarrierRecord>(
+                                executableBarrierRecords)
+                                .subspan(barrierPlan.barrierOffset,
+                                         barrierPlan.barrierCount),
+                .pass = &executablePasses[orderedPassIndex]});
+          }
+          if (range.offset + range.count == executablePasses.size() &&
+              compiled.plan.finalBarrierPlan.barrierCount > 0u) {
+            steps.push_back(GraphicsRecordingStep{
+                .barriers =
+                    std::span<const GraphicsBarrierRecord>(
+                        executableBarrierRecords)
+                        .subspan(compiled.plan.finalBarrierPlan.barrierOffset,
+                                 compiled.plan.finalBarrierPlan.barrierCount)});
+          }
+          auto recordResult =
+              gpu.recordGraphicsRange(recordingContexts[workerIndex], steps);
+          if (recordResult.hasError()) {
+            setRecordingFailure(makeExecutionStageError(
+                RenderGraphExecutionFailureStage::RecordGraphicsPasses,
+                "RenderGraphExecutor::execute: failed to record graphics "
+                "range: " +
+                    recordResult.error()));
+          }
+          return;
+        }
         for (uint32_t localIndex = 0u; localIndex < range.count; ++localIndex) {
           if (recordingFailed.load()) {
             return;
           }
           const uint32_t orderedPassIndex = range.offset + localIndex;
           const PassBarrierPlan &barrierPlan =
-              compiled.passBarrierPlans[orderedPassIndex];
+              compiled.plan.passBarrierPlans[orderedPassIndex];
           if (barrierPlan.barrierCount > 0u) {
             auto barrierResult = gpu.recordGraphicsBarriers(
                 recordingContexts[workerIndex],
@@ -5114,12 +5752,12 @@ RenderGraphExecutor::executeInternal(RenderGraphRuntime *runtime,
           }
         }
         if (range.offset + range.count == executablePasses.size() &&
-            compiled.finalBarrierPlan.barrierCount > 0u) {
+            compiled.plan.finalBarrierPlan.barrierCount > 0u) {
           auto finalBarrierResult = gpu.recordGraphicsBarriers(
               recordingContexts[workerIndex],
               std::span<const GraphicsBarrierRecord>(executableBarrierRecords)
-                  .subspan(compiled.finalBarrierPlan.barrierOffset,
-                           compiled.finalBarrierPlan.barrierCount));
+                  .subspan(compiled.plan.finalBarrierPlan.barrierOffset,
+                           compiled.plan.finalBarrierPlan.barrierCount));
           if (finalBarrierResult.hasError()) {
             setRecordingFailure(makeExecutionStageError(
                 RenderGraphExecutionFailureStage::RecordGraphicsBarriers,

@@ -547,7 +547,7 @@ void flattenAutotestRendererMetrics(std::map<std::string, double> &out,
   addMetric(out, "renderer.ddgi.diagnostic_counters_enabled",
             ddgi.diagnosticCountersEnabled);
   addMetric(out, "renderer.ddgi.surface_gather_architecture",
-            static_cast<uint32_t>(ddgi.surfaceGatherArchitecture));
+            ddgi.opaqueGatherArchitecture);
   addMetric(out, "renderer.ddgi.surface_gather_width", ddgi.surfaceGatherWidth);
   addMetric(out, "renderer.ddgi.surface_gather_height",
             ddgi.surfaceGatherHeight);
@@ -695,36 +695,14 @@ void flattenAutotestRendererMetrics(std::map<std::string, double> &out,
     const auto addVolumeMetric = [&](std::string_view suffix, double value) {
       out[prefix + std::string(suffix)] = value;
     };
-    addVolumeMetric("active", volume.active);
     addVolumeMetric("effective_key_hash",
                     static_cast<double>(volume.effectiveKeyHash));
-    addVolumeMetric("effective_kind", volume.effectiveKind);
-    addVolumeMetric("tier", volume.tier);
-    addVolumeMetric("cascade_index", volume.cascadeIndex);
-    addVolumeMetric("total_probes", volume.totalProbes);
-    addVolumeMetric("initialized_probes", volume.initializedProbes);
-    addVolumeMetric("shading_enabled_probes", volume.shadingEnabledProbes);
-    addVolumeMetric("invalid_probes", volume.invalidProbes);
-    addVolumeMetric("newly_exposed_probes", volume.newlyExposedProbes);
-    addVolumeMetric("updates", volume.updates);
-    addVolumeMetric("primary_queries", volume.primaryQueries);
-    addVolumeMetric("primary_queries_issued", volume.primaryQueriesIssued);
-    addVolumeMetric("secondary_queries", volume.secondaryQueries);
-    addVolumeMetric("update_age_median", volume.updateAgeMedian);
-    addVolumeMetric("update_age_p95", volume.updateAgeP95);
-    addVolumeMetric("update_age_maximum", volume.updateAgeMaximum);
-    addVolumeMetric("scheduled_quota", volume.scheduledQuota);
-    addVolumeMetric("used_quota", volume.usedQuota);
-    addVolumeMetric("deficit", static_cast<double>(volume.deficit));
-    addVolumeMetric("starvation_frames", volume.starvationFrames);
-    addVolumeMetric("estimated_full_refresh_frames",
-                    volume.estimatedFullRefreshFrames);
+    for (const auto &[suffix, value] : ddgiVolumeMetricValues(volume)) {
+      addVolumeMetric(suffix, value);
+    }
     addVolumeMetric("persistent_mb",
                     static_cast<double>(volume.persistentBytes) /
                         (1024.0 * 1024.0));
-    addVolumeMetric("unique_coverage_percentage",
-                    volume.uniqueCoveragePercentage);
-    addVolumeMetric("redundant_coverage", volume.redundantCoverage);
     addVolumeMetric("interior_half_extent_x", volume.interiorHalfExtents.x);
     addVolumeMetric("interior_half_extent_y", volume.interiorHalfExtents.y);
     addVolumeMetric("interior_half_extent_z", volume.interiorHalfExtents.z);
@@ -737,10 +715,6 @@ void flattenAutotestRendererMetrics(std::map<std::string, double> &out,
     addVolumeMetric("camera_cell_x", volume.cameraCell.x);
     addVolumeMetric("camera_cell_y", volume.cameraCell.y);
     addVolumeMetric("camera_cell_z", volume.cameraCell.z);
-    addVolumeMetric("history_ready_percentage", volume.historyReadyPercentage);
-    addVolumeMetric("coverage_ready_percentage",
-                    volume.coverageReadyPercentage);
-    addVolumeMetric("confidence", volume.confidence);
   }
 
   const AntiAliasingFrameMetrics &aa = metrics.antiAliasing;
@@ -1008,93 +982,113 @@ void applyAutotestGpuTimingReport(
     std::map<uint64_t, std::map<std::string, double>> &frames,
     const GpuTimingReport &report) {
   applyGpuScope(frames, report, GpuTimingScope::WholeFrame,
-                report.wholeFrameSourceFrameIndex, "gpu.frame_ms",
-                report.wholeFrameTimeMs);
+                report[GpuTimingScope::WholeFrame].sourceFrameIndex,
+                "gpu.frame_ms", report[GpuTimingScope::WholeFrame].timeMs);
   applyGpuScope(frames, report, GpuTimingScope::Shadow,
-                report.shadowSourceFrameIndex, "gpu.scopes.shadow_ms",
-                report.shadowTimeMs);
+                report[GpuTimingScope::Shadow].sourceFrameIndex,
+                "gpu.scopes.shadow_ms", report[GpuTimingScope::Shadow].timeMs);
   applyGpuScope(frames, report, GpuTimingScope::ShadowDepth,
-                report.shadowDepthSourceFrameIndex,
-                "gpu.scopes.shadow_depth_ms", report.shadowDepthTimeMs);
+                report[GpuTimingScope::ShadowDepth].sourceFrameIndex,
+                "gpu.scopes.shadow_depth_ms",
+                report[GpuTimingScope::ShadowDepth].timeMs);
   applyGpuScope(frames, report, GpuTimingScope::ShadowSdsm,
-                report.shadowSdsmSourceFrameIndex, "gpu.scopes.shadow_sdsm_ms",
-                report.shadowSdsmTimeMs);
+                report[GpuTimingScope::ShadowSdsm].sourceFrameIndex,
+                "gpu.scopes.shadow_sdsm_ms",
+                report[GpuTimingScope::ShadowSdsm].timeMs);
   applyGpuScope(frames, report, GpuTimingScope::Opaque,
-                report.opaqueSourceFrameIndex, "gpu.scopes.opaque_ms",
-                report.opaqueTimeMs);
+                report[GpuTimingScope::Opaque].sourceFrameIndex,
+                "gpu.scopes.opaque_ms", report[GpuTimingScope::Opaque].timeMs);
   applyGpuScope(frames, report, GpuTimingScope::OpaqueDepth,
-                report.opaqueDepthSourceFrameIndex,
-                "gpu.scopes.opaque_depth_ms", report.opaqueDepthTimeMs);
+                report[GpuTimingScope::OpaqueDepth].sourceFrameIndex,
+                "gpu.scopes.opaque_depth_ms",
+                report[GpuTimingScope::OpaqueDepth].timeMs);
   applyGpuScope(frames, report, GpuTimingScope::OpaqueNormal,
-                report.opaqueNormalSourceFrameIndex,
-                "gpu.scopes.opaque_normal_ms", report.opaqueNormalTimeMs);
+                report[GpuTimingScope::OpaqueNormal].sourceFrameIndex,
+                "gpu.scopes.opaque_normal_ms",
+                report[GpuTimingScope::OpaqueNormal].timeMs);
   applyGpuScope(frames, report, GpuTimingScope::OpaqueMain,
-                report.opaqueMainSourceFrameIndex, "gpu.scopes.opaque_main_ms",
-                report.opaqueMainTimeMs);
+                report[GpuTimingScope::OpaqueMain].sourceFrameIndex,
+                "gpu.scopes.opaque_main_ms",
+                report[GpuTimingScope::OpaqueMain].timeMs);
   applyGpuScope(frames, report, GpuTimingScope::GTAO,
-                report.gtaoSourceFrameIndex, "gpu.scopes.gtao_ms",
-                report.gtaoTimeMs);
+                report[GpuTimingScope::GTAO].sourceFrameIndex,
+                "gpu.scopes.gtao_ms", report[GpuTimingScope::GTAO].timeMs);
   applyGpuScope(frames, report, GpuTimingScope::MsaaResolve,
-                report.msaaResolveSourceFrameIndex,
-                "gpu.scopes.msaa_resolve_ms", report.msaaResolveTimeMs);
+                report[GpuTimingScope::MsaaResolve].sourceFrameIndex,
+                "gpu.scopes.msaa_resolve_ms",
+                report[GpuTimingScope::MsaaResolve].timeMs);
   applyGpuScope(frames, report, GpuTimingScope::SceneColorDownsample,
-                report.sceneColorDownsampleSourceFrameIndex,
+                report[GpuTimingScope::SceneColorDownsample].sourceFrameIndex,
                 "gpu.scopes.scene_color_downsample_ms",
-                report.sceneColorDownsampleTimeMs);
+                report[GpuTimingScope::SceneColorDownsample].timeMs);
   applyGpuScope(frames, report, GpuTimingScope::TemporalAAResolve,
-                report.temporalAAResolveSourceFrameIndex,
-                "gpu.scopes.taa_resolve_ms", report.temporalAAResolveTimeMs);
+                report[GpuTimingScope::TemporalAAResolve].sourceFrameIndex,
+                "gpu.scopes.taa_resolve_ms",
+                report[GpuTimingScope::TemporalAAResolve].timeMs);
   applyGpuScope(frames, report, GpuTimingScope::TemporalAADebug,
-                report.temporalAADebugSourceFrameIndex,
-                "gpu.scopes.taa_debug_ms", report.temporalAADebugTimeMs);
+                report[GpuTimingScope::TemporalAADebug].sourceFrameIndex,
+                "gpu.scopes.taa_debug_ms",
+                report[GpuTimingScope::TemporalAADebug].timeMs);
   applyGpuScope(frames, report, GpuTimingScope::SpatialAA,
-                report.spatialAASourceFrameIndex, "gpu.scopes.spatial_aa_ms",
-                report.spatialAATimeMs);
+                report[GpuTimingScope::SpatialAA].sourceFrameIndex,
+                "gpu.scopes.spatial_aa_ms",
+                report[GpuTimingScope::SpatialAA].timeMs);
   applyGpuScope(frames, report, GpuTimingScope::Transmission,
-                report.transmissionSourceFrameIndex,
-                "gpu.scopes.transmission_ms", report.transmissionTimeMs);
+                report[GpuTimingScope::Transmission].sourceFrameIndex,
+                "gpu.scopes.transmission_ms",
+                report[GpuTimingScope::Transmission].timeMs);
   applyGpuScope(frames, report, GpuTimingScope::HDRPostProcess,
-                report.hdrPostProcessSourceFrameIndex,
-                "gpu.scopes.hdr_postprocess_ms", report.hdrPostProcessTimeMs);
+                report[GpuTimingScope::HDRPostProcess].sourceFrameIndex,
+                "gpu.scopes.hdr_postprocess_ms",
+                report[GpuTimingScope::HDRPostProcess].timeMs);
   applyGpuScope(frames, report, GpuTimingScope::Skybox,
-                report.skyboxSourceFrameIndex, "gpu.scopes.skybox_ms",
-                report.skyboxTimeMs);
+                report[GpuTimingScope::Skybox].sourceFrameIndex,
+                "gpu.scopes.skybox_ms", report[GpuTimingScope::Skybox].timeMs);
   applyGpuScope(frames, report, GpuTimingScope::Velocity,
-                report.velocitySourceFrameIndex, "gpu.scopes.velocity_ms",
-                report.velocityTimeMs);
+                report[GpuTimingScope::Velocity].sourceFrameIndex,
+                "gpu.scopes.velocity_ms",
+                report[GpuTimingScope::Velocity].timeMs);
   applyGpuScope(frames, report, GpuTimingScope::ReactiveMask,
-                report.reactiveMaskSourceFrameIndex,
-                "gpu.scopes.reactive_mask_ms", report.reactiveMaskTimeMs);
+                report[GpuTimingScope::ReactiveMask].sourceFrameIndex,
+                "gpu.scopes.reactive_mask_ms",
+                report[GpuTimingScope::ReactiveMask].timeMs);
   applyGpuScope(frames, report, GpuTimingScope::TemporalAACopyBack,
-                report.temporalAACopyBackSourceFrameIndex,
-                "gpu.scopes.taa_copy_back_ms", report.temporalAACopyBackTimeMs);
+                report[GpuTimingScope::TemporalAACopyBack].sourceFrameIndex,
+                "gpu.scopes.taa_copy_back_ms",
+                report[GpuTimingScope::TemporalAACopyBack].timeMs);
   applyGpuScope(frames, report, GpuTimingScope::GTAOTemporal,
-                report.gtaoTemporalSourceFrameIndex,
-                "gpu.scopes.gtao_temporal_ms", report.gtaoTemporalTimeMs);
+                report[GpuTimingScope::GTAOTemporal].sourceFrameIndex,
+                "gpu.scopes.gtao_temporal_ms",
+                report[GpuTimingScope::GTAOTemporal].timeMs);
   applyGpuScope(frames, report, GpuTimingScope::RayTracingScene,
-                report.rayTracingSceneSourceFrameIndex,
+                report[GpuTimingScope::RayTracingScene].sourceFrameIndex,
                 "gpu.scopes.ray_tracing_scene_ms",
-                report.rayTracingSceneTimeMs);
+                report[GpuTimingScope::RayTracingScene].timeMs);
   applyGpuScope(frames, report, GpuTimingScope::RayTracingBLAS,
-                report.rayTracingBlasSourceFrameIndex,
-                "gpu.scopes.ray_tracing_blas_ms", report.rayTracingBlasTimeMs);
+                report[GpuTimingScope::RayTracingBLAS].sourceFrameIndex,
+                "gpu.scopes.ray_tracing_blas_ms",
+                report[GpuTimingScope::RayTracingBLAS].timeMs);
   applyGpuScope(frames, report, GpuTimingScope::RayTracingTLAS,
-                report.rayTracingTlasSourceFrameIndex,
-                "gpu.scopes.ray_tracing_tlas_ms", report.rayTracingTlasTimeMs);
+                report[GpuTimingScope::RayTracingTLAS].sourceFrameIndex,
+                "gpu.scopes.ray_tracing_tlas_ms",
+                report[GpuTimingScope::RayTracingTLAS].timeMs);
   applyGpuScope(frames, report, GpuTimingScope::DDGI,
-                report.ddgiSourceFrameIndex, "gpu.scopes.ddgi_ms",
-                report.ddgiTimeMs);
+                report[GpuTimingScope::DDGI].sourceFrameIndex,
+                "gpu.scopes.ddgi_ms", report[GpuTimingScope::DDGI].timeMs);
   applyGpuScope(frames, report, GpuTimingScope::DDGITrace,
-                report.ddgiTraceSourceFrameIndex, "gpu.scopes.ddgi_trace_ms",
-                report.ddgiTraceTimeMs);
+                report[GpuTimingScope::DDGITrace].sourceFrameIndex,
+                "gpu.scopes.ddgi_trace_ms",
+                report[GpuTimingScope::DDGITrace].timeMs);
   applyGpuScope(frames, report, GpuTimingScope::DDGIUpdate,
-                report.ddgiUpdateSourceFrameIndex, "gpu.scopes.ddgi_update_ms",
-                report.ddgiUpdateTimeMs);
+                report[GpuTimingScope::DDGIUpdate].sourceFrameIndex,
+                "gpu.scopes.ddgi_update_ms",
+                report[GpuTimingScope::DDGIUpdate].timeMs);
   applyGpuScope(frames, report, GpuTimingScope::DDGIRelocateClassify,
-                report.ddgiRelocateClassifySourceFrameIndex,
+                report[GpuTimingScope::DDGIRelocateClassify].sourceFrameIndex,
                 "gpu.scopes.ddgi_relocate_classify_ms",
-                report.ddgiRelocateClassifyTimeMs);
-  if (auto frame = frames.find(report.wholeFrameSourceFrameIndex);
+                report[GpuTimingScope::DDGIRelocateClassify].timeMs);
+  if (auto frame =
+          frames.find(report[GpuTimingScope::WholeFrame].sourceFrameIndex);
       frame != frames.end()) {
     const auto addAbsent = [&](GpuTimingScope scope, std::string_view id) {
       if (!hasGpuTimingScope(report, scope)) {

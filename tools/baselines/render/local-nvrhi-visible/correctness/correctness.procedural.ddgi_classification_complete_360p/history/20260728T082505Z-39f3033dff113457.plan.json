@@ -1,0 +1,74 @@
+{
+    "schemaVersion": 1,
+    "kind": "nuri.snapshot.baseline_plan",
+    "caseId": "correctness.procedural.ddgi_classification_complete_360p",
+    "suite": "correctness",
+    "profileId": "local-nvrhi-visible",
+    "reason": "User-authorized stable DDGI visual baseline; Hybrid coverage excluded in favor of SceneFit",
+    "actor": "Codex",
+    "sourceCommit": "698d4e86f6923f1ca26185f3b1a5c1045273740d",
+    "sourceReportDigest": "sha256:13cf8a9ce45d57cb18f1200d360308763460074911ed94c43b9d4089622af7e6",
+    "planDigest": "sha256:39f3033dff1134570f5a464f1908c2a72a21102606bb79adfe66ebaa03730638",
+    "entries": [
+        {
+            "path": "approval.json",
+            "operation": "add",
+            "previousDigest": "",
+            "sourceDigest": "sha256:13cf8a9ce45d57cb18f1200d360308763460074911ed94c43b9d4089622af7e6"
+        },
+        {
+            "path": "ddgi_classification_debug_preview.exr",
+            "operation": "add",
+            "previousDigest": "",
+            "sourceDigest": "sha256:1574520ccc4a6c8d05849634fb03bbdeb4cc8576bed6e1ec83b2dc3e0579506a"
+        },
+        {
+            "path": "ddgi_classification_debug_preview.json",
+            "operation": "add",
+            "previousDigest": "",
+            "sourceDigest": "sha256:c9f9df5f62f24eec9414bfdb913fd2be5a30a6fd494d184a38efd319f02bafea"
+        },
+        {
+            "path": "ddgi_classification_debug_preview_preview.png",
+            "operation": "add",
+            "previousDigest": "",
+            "sourceDigest": "sha256:71647c76af7c3614b8992411ca9450de2e8484a676eba20ded20d3322c2347d5"
+        },
+        {
+            "path": "ddgi_volume0_distance_atlas.exr",
+            "operation": "add",
+            "previousDigest": "",
+            "sourceDigest": "sha256:e08df3e89587e2edc606cc599f01fda818544a81b812c0ed1a5c36360a2f0a24"
+        },
+        {
+            "path": "ddgi_volume0_distance_atlas.json",
+            "operation": "add",
+            "previousDigest": "",
+            "sourceDigest": "sha256:fdf08f5a8087aefc402a7495d5ea6dc7dfdb8da38a347ece412daa20ca95c9c0"
+        },
+        {
+            "path": "ddgi_volume0_distance_atlas_preview.png",
+            "operation": "add",
+            "previousDigest": "",
+            "sourceDigest": "sha256:072f5a135d238a8bf1e543d6481fa3a3c93a5b54c29df9de028e42bf674deac4"
+        },
+        {
+            "path": "final_color.json",
+            "operation": "add",
+            "previousDigest": "",
+            "sourceDigest": "sha256:97599ac6fd6b4a56d5f5730241b476572ec62cc58f5c01a2e4f8dfda8783c9e7"
+        },
+        {
+            "path": "final_color.png",
+            "operation": "add",
+            "previousDigest": "",
+            "sourceDigest": "sha256:4384cabe35a8b278c90bc7f34972fed9cb895c2364fec709f7e90b61321b5ea8"
+        },
+        {
+            "path": "final_color_preview.png",
+            "operation": "add",
+            "previousDigest": "",
+            "sourceDigest": "sha256:09387f8aa1bcee8d5e7fc8e4bce3d99ff4c249da43d784eb708082772484cac0"
+        }
+    ]
+}

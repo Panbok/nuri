@@ -1,10 +1,10 @@
 #pragma once
 #include "nuri/core/runtime_config.h"
 #include "nuri/defines.h"
-#include "nuri/gfx/dynamic_buffer.h"
 #include "nuri/gfx/frame/render_frame_context.h"
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/gfx/render_graph/render_graph.h"
+#include "nuri/gfx/renderers/detail/forward_rendering.h"
 #include "nuri/gfx/renderers/detail/instance_data.h"
 #include "nuri/gfx/renderers/scene_draw_database.h"
 #include "nuri/resources/cpu/mesh_data.h"
@@ -17,6 +17,7 @@
 #include <filesystem>
 #include <glm/glm.hpp>
 #include <limits>
+#include <memory>
 #include <memory_resource>
 #include <utility>
 #include <vector>
@@ -26,7 +27,7 @@ using TransparentRendererConfig = RuntimeOpaqueShaderConfig;
 
 class ResourceManager;
 class RenderPipeline;
-class Shader;
+class ForwardInstanceBuffers;
 
 class NURI_API TransparentRenderer {
 public:
@@ -41,6 +42,8 @@ public:
   void onAttach();
   void onDetach();
   void publishFrameData(RenderFrameContext &frame);
+  void onFrameSubmitted(const RenderFrameContext &frame) noexcept;
+  void onFrameAbandoned(const RenderFrameContext &frame) noexcept;
   Result<bool, std::string> prepareTransparentPasses(RenderFrameContext &frame);
   Result<bool, std::string>
   appendTransparentMainPass(RenderFrameContext &frame,
@@ -64,10 +67,6 @@ private:
   Result<bool, std::string> createShaders();
   Result<bool, std::string> ensurePipelines(Format colorFormat,
                                             Format depthFormat);
-  Result<bool, std::string>
-  ensureInstanceMatricesRingCapacity(size_t requiredBytes);
-  Result<bool, std::string>
-  ensureInstanceRemapRingCapacity(size_t requiredBytes);
   void rebuildSceneCache(const SceneDrawDatabase &database,
                          const RenderScene &scene,
                          bool excludeTransmissionBlend);
@@ -99,8 +98,7 @@ private:
   GPUDevice &gpu_;
   TransparentRendererConfig config_{};
   std::pmr::memory_resource *memory_ = std::pmr::get_default_resource();
-  std::pmr::vector<DynamicBufferSlot> instanceMatricesRing_;
-  std::pmr::vector<DynamicBufferSlot> instanceRemapRing_;
+  std::unique_ptr<ForwardInstanceBuffers> instanceBuffers_;
   std::array<ShaderHandle, 4> shaders_{};
   RenderPipelineHandle meshPipelineHandle_{};
   RenderPipelineHandle meshDoubleSidedPipelineHandle_{};
@@ -111,21 +109,9 @@ private:
   Format pickPipelineDepthFormat_ = Format::Count;
   bool initialized_ = false;
   bool transparentUsesJitteredProjection_ = true;
-  const RenderScene *cachedScene_ = nullptr;
-  uint64_t cachedTopologyVersion_ = std::numeric_limits<uint64_t>::max();
-  uint64_t cachedMaterialVersion_ = std::numeric_limits<uint64_t>::max();
-  uint64_t cachedModelMaterialBindingVersion_ =
-      std::numeric_limits<uint64_t>::max();
-  uint64_t cachedTransformVersion_ = std::numeric_limits<uint64_t>::max();
-  uint64_t cachedGeometryMutationVersion_ =
-      std::numeric_limits<uint64_t>::max();
+  ForwardSceneDrawCache sceneCache_;
   bool cachedExcludeTransmissionBlend_ = true;
   std::pmr::vector<MeshDrawTemplate> meshDrawTemplates_;
-  std::pmr::vector<InstanceData> instanceMatrices_;
-  std::pmr::vector<uint32_t> instanceRemap_;
-  std::pmr::vector<uint64_t> instanceDataRingUploadVersions_;
-  std::pmr::vector<TextureHandle> materialTextureAccessHandles_;
-  std::pmr::vector<TextureHandle> environmentTextureAccessHandles_;
   std::pmr::vector<TransparentStageSortableDraw> contributorSortableDraws_;
   std::pmr::vector<FixedDrawEntry> contributorFixedDraws_;
   std::pmr::vector<TextureHandle> contributorTextureReads_;

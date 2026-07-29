@@ -1,0 +1,93 @@
+{
+  "schemaVersion": 1,
+  "id": "text.procedural.text_2d_360p",
+  "suite": "text",
+  "description": "Deterministic MTSDF 2D text final-color coverage",
+  "scene": {
+    "kind": "procedural",
+    "generator": "nuri.procedural.text_2d.v1",
+    "seed": 1,
+    "contentHash": "nuri.procedural.text_2d.v1:1"
+  },
+  "backend": "default",
+  "resolution": [
+    640,
+    360
+  ],
+  "fixedDeltaSeconds": 0.016666667,
+  "authoritative": false,
+  "presentMode": "immediate",
+  "windowMode": "visible",
+  "renderGraph": {
+    "workerCount": 1,
+    "parallelCompile": false,
+    "parallelRecording": false
+  },
+  "camera": {
+    "position": [
+      0,
+      1,
+      4
+    ],
+    "target": [
+      0,
+      1,
+      0
+    ],
+    "verticalFovDegrees": 60,
+    "nearPlane": 0.05,
+    "farPlane": 100
+  },
+  "settings": {
+    "opaque": {
+      "enabled": true,
+      "enableDepthPrepass": false,
+      "enableInstanceCompute": false,
+      "enableMeshLod": false,
+      "enableTessellation": false,
+      "forcedMeshLod": 0
+    },
+    "antiAliasing": {
+      "mode": "None",
+      "qualityPreset": "Balanced"
+    },
+    "ambientOcclusion": {
+      "mode": "Disabled",
+      "preset": "Balanced"
+    },
+    "shadow": {
+      "enabled": false,
+      "qualityPreset": "Low"
+    },
+    "hdrPostProcess": {
+      "bloomEnabled": false,
+      "adaptationEnabled": false
+    },
+    "transmission": {
+      "enabled": false
+    },
+    "transparent": {
+      "enabled": true
+    },
+    "textureFiltering": {
+      "mode": "Bilinear",
+      "anisotropy": 1
+    }
+  },
+  "warmupFrames": 2,
+  "captureFrame": 4,
+  "requirements": {
+    "assets": [
+      "fontsRoot:default_ui.nfont"
+    ],
+    "backends": [],
+    "allowVisibleWindow": true
+  },
+  "captures": [
+    {
+      "target": "final_color",
+      "profile": "ldr_color",
+      "required": true
+    }
+  ]
+}

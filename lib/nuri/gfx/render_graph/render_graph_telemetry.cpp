@@ -1,5 +1,4 @@
 #include "nuri/gfx/render_graph/render_graph_telemetry.h"
-#include "nuri/pch.h"
 #include "nuri/utils/env_utils.h"
 namespace nuri {
 namespace {
@@ -31,7 +30,7 @@ ensureMemory(std::pmr::memory_resource *memory) {
 [[nodiscard]] std::string_view
 resolvePassName(const RenderGraphTelemetrySnapshot &snapshot,
                 uint32_t passIndex) {
-  const auto &names = snapshot.compile.passDebugNames;
+  const auto &names = snapshot.passDebugNames;
   if (passIndex >= names.size() || names[passIndex].empty()) {
     return kUnnamedPassName;
   }
@@ -58,25 +57,25 @@ void fingerprint(uint64_t &hash, std::string_view value) {
     hash = (hash ^ byte) * 1099511628211ull;
   }
 }
-[[nodiscard]] uint64_t
-compileFingerprint(const RenderGraphCompileResult &compiled) {
+[[nodiscard]] uint64_t compileFingerprint(CompiledRenderGraphView compiled) {
   uint64_t hash = 14695981039346656037ull;
-  fingerprintValues(hash, compiled.frameIndex, compiled.declaredPassCount,
-                    compiled.culledPassCount, compiled.rootPassCount,
-                    compiled.usedParallelCompile,
-                    compiled.usedParallelPayloadResolution,
-                    compiled.usedParallelHazardAnalysis,
-                    compiled.usedParallelLifetimeAnalysis);
-  for (const auto &name : compiled.passDebugNames) {
+  fingerprintValues(hash, compiled.commands.frameIndex,
+                    compiled.plan.declaredPassCount,
+                    compiled.plan.culledPassCount, compiled.plan.rootPassCount,
+                    compiled.plan.usedParallelCompile,
+                    compiled.commands.usedParallelPayloadResolution,
+                    compiled.plan.usedParallelHazardAnalysis,
+                    compiled.plan.usedParallelLifetimeAnalysis);
+  for (const auto &name : compiled.commands.passDebugNames) {
     fingerprint(hash, std::string_view(name));
   }
-  for (const uint32_t pass : compiled.orderedPassIndices) {
+  for (const uint32_t pass : compiled.plan.orderedPassIndices) {
     fingerprint(hash, pass);
   }
-  for (const auto &edge : compiled.edges) {
+  for (const auto &edge : compiled.plan.edges) {
     fingerprintValues(hash, edge.before, edge.after);
   }
-  for (const auto &pass : compiled.recordedGraphicsPasses) {
+  for (const auto &pass : compiled.plan.recordedGraphicsPasses) {
     fingerprintValues(hash, pass.orderedPassIndex, pass.declaredPassIndex);
   }
   const auto hashLifetimes = [&](const auto &lifetimes) {
@@ -86,28 +85,32 @@ compileFingerprint(const RenderGraphCompileResult &compiled) {
                         lifetime.lastExecutionIndex);
     }
   };
-  hashLifetimes(compiled.transientTextureLifetimes);
-  hashLifetimes(compiled.transientBufferLifetimes);
+  hashLifetimes(compiled.plan.transientTextureLifetimes);
+  hashLifetimes(compiled.plan.transientBufferLifetimes);
   const auto hashAllocations = [&](const auto &allocations) {
     for (const auto &allocation : allocations) {
       fingerprintValues(hash, allocation.resourceIndex,
                         allocation.allocationIndex);
     }
   };
-  hashAllocations(compiled.transientTextureAllocations);
-  hashAllocations(compiled.transientBufferAllocations);
+  hashAllocations(compiled.plan.transientTextureAllocations);
+  hashAllocations(compiled.plan.transientBufferAllocations);
+  for (const auto &patch : compiled.plan.commandResourcePatches) {
+    fingerprintValues(hash, patch.orderedPassIndex, patch.commandIndex,
+                      patch.dependencyIndex, patch.resourceIndex,
+                      patch.resourceKind, patch.target);
+  }
   return hash;
 }
-[[nodiscard]] uint64_t
-barrierFingerprint(const RenderGraphCompileResult &compiled) {
+[[nodiscard]] uint64_t barrierFingerprint(CompiledRenderGraphView compiled) {
   uint64_t hash = 14695981039346656037ull;
-  for (const auto &plan : compiled.passBarrierPlans) {
+  for (const auto &plan : compiled.plan.passBarrierPlans) {
     fingerprintValues(hash, plan.orderedPassIndex, plan.barrierOffset,
                       plan.barrierCount);
   }
-  fingerprintValues(hash, compiled.finalBarrierPlan.barrierOffset,
-                    compiled.finalBarrierPlan.barrierCount);
-  for (const auto &barrier : compiled.passBarrierRecords) {
+  fingerprintValues(hash, compiled.plan.finalBarrierPlan.barrierOffset,
+                    compiled.plan.finalBarrierPlan.barrierCount);
+  for (const auto &barrier : compiled.plan.passBarrierRecords) {
     fingerprintValues(hash, barrier.resourceKind, barrier.resourceIndex,
                       barrier.beforeAccess, barrier.afterAccess,
                       barrier.beforeState, barrier.afterState);
@@ -133,58 +136,56 @@ executionFingerprint(const RenderGraphExecutionMetadata &execution) {
   return hash;
 }
 [[nodiscard]] RenderGraphTelemetrySnapshot::Summary
-buildSummary(const RenderGraphCompileResult &compiled,
+buildSummary(CompiledRenderGraphView compiled,
              const RenderGraphExecutionMetadata *execution) {
   RenderGraphTelemetrySnapshot::Summary result{};
-  result.frameIndex = compiled.frameIndex;
-  result.declaredPassCount = compiled.declaredPassCount;
-  result.culledPassCount = compiled.culledPassCount;
-  result.rootPassCount = compiled.rootPassCount;
-  result.passCount = count(compiled.passDebugNames);
-  result.edgeCount = count(compiled.edges);
-  result.recordedGraphicsPassCount = count(compiled.recordedGraphicsPasses);
-  result.passBarrierPlanCount = count(compiled.passBarrierPlans);
-  result.finalBarrierRecordCount = compiled.finalBarrierPlan.barrierCount;
-  result.passBarrierRecordCount = count(compiled.passBarrierRecords);
-  result.importedTextures = compiled.resourceStats.importedTextures;
-  result.transientTextures = compiled.resourceStats.transientTextures;
-  result.importedBuffers = compiled.resourceStats.importedBuffers;
-  result.transientBuffers = compiled.resourceStats.transientBuffers;
+  result.frameIndex = compiled.commands.frameIndex;
+  result.declaredPassCount = compiled.plan.declaredPassCount;
+  result.culledPassCount = compiled.plan.culledPassCount;
+  result.rootPassCount = compiled.plan.rootPassCount;
+  result.passCount = count(compiled.commands.passDebugNames);
+  result.edgeCount = count(compiled.plan.edges);
+  result.recordedGraphicsPassCount =
+      count(compiled.plan.recordedGraphicsPasses);
+  result.passBarrierPlanCount = count(compiled.plan.passBarrierPlans);
+  result.finalBarrierRecordCount = compiled.plan.finalBarrierPlan.barrierCount;
+  result.passBarrierRecordCount = count(compiled.plan.passBarrierRecords);
+  result.importedTextures = compiled.plan.resourceStats.importedTextures;
+  result.transientTextures = compiled.plan.resourceStats.transientTextures;
+  result.importedBuffers = compiled.plan.resourceStats.importedBuffers;
+  result.transientBuffers = compiled.plan.resourceStats.transientBuffers;
   result.transientTextureLifetimeCount =
-      count(compiled.transientTextureLifetimes);
+      count(compiled.plan.transientTextureLifetimes);
   result.transientBufferLifetimeCount =
-      count(compiled.transientBufferLifetimes);
-  result.transientTexturePhysicalCount = compiled.transientTexturePhysicalCount;
-  result.transientBufferPhysicalCount = compiled.transientBufferPhysicalCount;
+      count(compiled.plan.transientBufferLifetimes);
+  result.transientTexturePhysicalCount =
+      compiled.plan.transientTexturePhysicalCount;
+  result.transientBufferPhysicalCount =
+      compiled.plan.transientBufferPhysicalCount;
   result.transientTextureAllocationMapSize =
-      count(compiled.transientTextureAllocationByResource);
+      count(compiled.plan.transientTextureAllocationByResource);
   result.transientBufferAllocationMapSize =
-      count(compiled.transientBufferAllocationByResource);
+      count(compiled.plan.transientBufferAllocationByResource);
   result.transientTexturePhysicalAllocationCount =
-      count(compiled.transientTexturePhysicalAllocations);
+      count(compiled.plan.transientTexturePhysicalAllocations);
   result.transientBufferPhysicalAllocationCount =
-      count(compiled.transientBufferPhysicalAllocations);
-  result.unresolvedTextureBindingCount =
-      count(compiled.unresolvedTextureBindings);
+      count(compiled.plan.transientBufferPhysicalAllocations);
+  result.commandResourcePatchCount =
+      count(compiled.plan.commandResourcePatches);
   result.resolvedDependencyBufferSlotCount =
-      count(compiled.resolvedDependencyBuffers);
-  result.unresolvedDependencyBufferBindingCount =
-      count(compiled.unresolvedDependencyBufferBindings);
-  result.ownedPreDispatchCount = count(compiled.ownedPreDispatches);
-  result.ownedDrawItemCount = count(compiled.ownedDrawItems);
-  result.ownedMeshDispatchItemCount = count(compiled.ownedMeshDispatchItems);
+      count(compiled.commands.resolvedDependencyBuffers);
+  result.ownedPreDispatchCount = count(compiled.commands.ownedPreDispatches);
+  result.ownedDrawItemCount = count(compiled.commands.ownedDrawItems);
+  result.ownedMeshDispatchItemCount =
+      count(compiled.commands.ownedMeshDispatchItems);
   result.resolvedPreDispatchDependencyBufferSlotCount =
-      count(compiled.resolvedPreDispatchDependencyBuffers);
-  result.unresolvedPreDispatchDependencyBufferBindingCount =
-      count(compiled.unresolvedPreDispatchDependencyBufferBindings);
-  result.unresolvedDrawBufferBindingCount =
-      count(compiled.unresolvedDrawBufferBindings);
-  result.unresolvedMeshDispatchBufferBindingCount =
-      count(compiled.unresolvedMeshDispatchBufferBindings);
-  result.usedParallelCompile = compiled.usedParallelCompile;
-  result.usedParallelPayloadResolution = compiled.usedParallelPayloadResolution;
-  result.usedParallelHazardAnalysis = compiled.usedParallelHazardAnalysis;
-  result.usedParallelLifetimeAnalysis = compiled.usedParallelLifetimeAnalysis;
+      count(compiled.commands.resolvedPreDispatchDependencyBuffers);
+  result.usedParallelCompile = compiled.plan.usedParallelCompile;
+  result.usedParallelPayloadResolution =
+      compiled.commands.usedParallelPayloadResolution;
+  result.usedParallelHazardAnalysis = compiled.plan.usedParallelHazardAnalysis;
+  result.usedParallelLifetimeAnalysis =
+      compiled.plan.usedParallelLifetimeAnalysis;
   result.compileFingerprint = compileFingerprint(compiled);
   result.barrierFingerprint = barrierFingerprint(compiled);
   if (execution != nullptr) {
@@ -223,18 +224,19 @@ makeOpenErrorMessage(const std::filesystem::path &path) {
 } // namespace
 RenderGraphTelemetrySnapshot::RenderGraphTelemetrySnapshot(
     std::pmr::memory_resource *memory)
-    : compile(ensureMemory(memory)), execution(ensureMemory(memory)) {}
+    : plan(ensureMemory(memory)), passDebugNames(ensureMemory(memory)),
+      execution(ensureMemory(memory)) {}
 
 void RenderGraphTelemetrySnapshot::captureFrom(
-    const RenderGraphCompileResult &compiled) {
+    CompiledRenderGraphView compiled) {
   reset();
   summary = buildSummary(compiled, nullptr);
-  compile = compiled;
-  compile.orderedPasses.clear();
+  plan = compiled.plan;
+  passDebugNames = compiled.commands.passDebugNames;
 }
 
 void RenderGraphTelemetrySnapshot::captureFrom(
-    const RenderGraphCompileResult &compiled,
+    CompiledRenderGraphView compiled,
     const RenderGraphExecutionMetadata &metadata) {
   captureFrom(compiled);
   summary = buildSummary(compiled, &metadata);
@@ -242,9 +244,10 @@ void RenderGraphTelemetrySnapshot::captureFrom(
 }
 
 void RenderGraphTelemetrySnapshot::reset() {
-  auto *memory = compile.passDebugNames.get_allocator().resource();
+  auto *memory = passDebugNames.get_allocator().resource();
   summary = {};
-  compile = RenderGraphCompileResult(memory);
+  plan = RenderGraphPlan(memory);
+  passDebugNames.clear();
   execution = RenderGraphExecutionMetadata(memory);
 }
 
@@ -268,15 +271,14 @@ RenderGraphTelemetryService::requestedCaptureLevel() const noexcept {
                             : pendingCapture_;
 }
 
-void RenderGraphTelemetryService::capture(
-    const RenderGraphCompileResult &compiled) {
+void RenderGraphTelemetryService::capture(CompiledRenderGraphView compiled) {
   snapshot_.captureFrom(compiled);
   pendingCapture_ = RenderGraphTelemetryLevel::None;
   hasSnapshot_ = true;
 }
 
 void RenderGraphTelemetryService::capture(
-    const RenderGraphCompileResult &compiled,
+    CompiledRenderGraphView compiled,
     const RenderGraphExecutionMetadata &execution) {
   snapshot_.captureFrom(compiled, execution);
   pendingCapture_ = RenderGraphTelemetryLevel::None;
@@ -353,6 +355,7 @@ writeRenderGraphTelemetryTextDump(const RenderGraphTelemetrySnapshot &snapshot,
       {"owned_pre_dispatches", summary.ownedPreDispatchCount},
       {"owned_draw_items", summary.ownedDrawItemCount},
       {"owned_mesh_dispatch_items", summary.ownedMeshDispatchItemCount},
+      {"command_resource_patches", summary.commandResourcePatchCount},
       {"used_parallel_compile", summary.usedParallelCompile},
       {"used_parallel_payload_resolution",
        summary.usedParallelPayloadResolution},
@@ -368,11 +371,11 @@ writeRenderGraphTelemetryTextDump(const RenderGraphTelemetrySnapshot &snapshot,
     file << name << ": " << value << "\n";
   }
   file << "\n";
-  const auto &compiled = snapshot.compile;
+  const auto &compiled = snapshot.plan;
   const auto &execution = snapshot.execution;
-  writeSection(file, "Passes", compiled.passDebugNames, [&](const auto &name) {
+  writeSection(file, "Passes", snapshot.passDebugNames, [&](const auto &name) {
     const uint32_t index =
-        static_cast<uint32_t>(&name - compiled.passDebugNames.data());
+        static_cast<uint32_t>(&name - snapshot.passDebugNames.data());
     file << "  [" << index << "] " << resolvePassName(snapshot, index) << "\n";
   });
   writeSection(file, "Dependencies", compiled.edges, [&](const auto &edge) {

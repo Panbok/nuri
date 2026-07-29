@@ -1,8 +1,7 @@
 #include "nuri/resources/async/scene_asset_preparation.h"
 #include "nuri/core/profiling.h"
-#include "nuri/pch.h"
 #include "nuri/resources/mesh_importer.h"
-#include "nuri/resources/storage/texture/material_texture_artifact.h"
+#include "nuri/resources/storage/cache_utils.h"
 #include "nuri/resources/storage/texture/texture_artifact_builder.h"
 #include "nuri/resources/storage/texture/texture_cache_utils.h"
 #include <array>
@@ -10,31 +9,6 @@
 #include <mutex>
 namespace nuri {
 namespace {
-constexpr std::array<std::string_view, kMaterialTextureSlotCount>
-    kTextureDebugSuffixes{
-        "base_color",          "metallic_roughness", "normal",
-        "occlusion",           "emissive",           "clearcoat",
-        "clearcoat_roughness", "clearcoat_normal",   "specular",
-        "specular_color",      "sheen_color",        "sheen_roughness",
-        "transmission",        "thickness",
-    };
-[[nodiscard]] bool hasExtensionCaseInsensitive(std::string_view path,
-                                               std::string_view extension) {
-  if (path.size() < extension.size()) {
-    return false;
-  }
-  const size_t offset = path.size() - extension.size();
-  for (size_t index = 0u; index < extension.size(); ++index) {
-    const char lhs = static_cast<char>(
-        std::tolower(static_cast<unsigned char>(path[offset + index])));
-    const char rhs = static_cast<char>(
-        std::tolower(static_cast<unsigned char>(extension[index])));
-    if (lhs != rhs) {
-      return false;
-    }
-  }
-  return true;
-}
 [[nodiscard]] std::string makeTextureDebugName(std::string_view prefix,
                                                std::string_view suffix,
                                                uint32_t materialIndex) {
@@ -57,24 +31,18 @@ prepareSceneManifest(std::string_view path, const SceneImportOptions &options) {
     return Result<PreparedSceneManifest, std::string>::makeError(
         imported.error());
   }
-  auto prefab = SceneImporter::buildScenePrefab(imported.value());
-  if (prefab.hasError()) {
-    return Result<PreparedSceneManifest, std::string>::makeError(
-        prefab.error());
-  }
-  PreparedSceneManifest manifest{
-      .prefab = std::move(prefab.value()),
-  };
-  manifest.meshes.assign(
-      std::make_move_iterator(imported.value().adaptedMeshes.begin()),
-      std::make_move_iterator(imported.value().adaptedMeshes.end()));
+  ScenePrefab &scene = imported.value();
+  PreparedSceneManifest manifest{};
+  manifest.meshes.assign(std::make_move_iterator(scene.adaptedMeshes.begin()),
+                         std::make_move_iterator(scene.adaptedMeshes.end()));
   manifest.embeddedTextures =
       std::make_shared<const std::vector<EmbeddedSceneTextureData>>(
-          std::move(imported.value().embeddedTextures));
-  manifest.materials.reserve(manifest.prefab.materialAssets.size());
-  for (const ScenePrefabAssetRef &asset : manifest.prefab.materialAssets)
+          std::move(scene.embeddedTextures));
+  manifest.materials.reserve(scene.materialAssets.size());
+  for (const ScenePrefabAssetRef &asset : scene.materialAssets)
     manifest.materials.push_back(
-        imported.value().adaptedMaterials.materials[asset.sourceIndex]);
+        scene.adaptedMaterials.materials[asset.sourceIndex]);
+  manifest.prefab = std::move(scene);
   return Result<PreparedSceneManifest, std::string>::makeResult(
       std::move(manifest));
 }
@@ -106,16 +74,17 @@ Result<PreparedImportedMaterial, std::string> prepareImportedMaterial(
         builderResult.error());
   }
   SceneTextureArtifactBuilder builder = std::move(builderResult.value());
-  for (size_t slotIndex = 0u; slotIndex < kMaterialTextureArtifactSpecs.size();
-       ++slotIndex) {
+  for (const MaterialTextureSlotDesc &slotDesc : kMaterialTextureSlotDescs) {
+    const size_t slotIndex = static_cast<size_t>(slotDesc.slot);
     const MaterialTextureSlotData &source = material.textures[slotIndex];
     if (source.sourceKind == MaterialTextureSourceKind::None) {
       continue;
     }
     const TextureArtifactBuildOptions buildOptions =
-        makeMaterialTextureArtifactBuildOptions(material, slotIndex);
+        materialTextureArtifactBuildOptions(material, slotDesc.slot);
     const std::string debugName = makeTextureDebugName(
-        debugNamePrefix, kTextureDebugSuffixes[slotIndex], sourceMaterialIndex);
+        debugNamePrefix, kMaterialTextureSlotDescs[slotIndex].debugToken,
+        sourceMaterialIndex);
     if (source.sourceKind == MaterialTextureSourceKind::ExternalFile &&
         hasExtensionCaseInsensitive(source.path, ".dds")) {
       prepared.textures[slotIndex] = TextureRequest{
@@ -142,7 +111,7 @@ Result<PreparedImportedMaterial, std::string> prepareImportedMaterial(
     }
     if (artifact.hasError()) {
       prepared.optionalTextureErrors.push_back(
-          std::string(kTextureDebugSuffixes[slotIndex]) + ": " +
+          std::string(kMaterialTextureSlotDescs[slotIndex].debugToken) + ": " +
           artifact.error());
       continue;
     }

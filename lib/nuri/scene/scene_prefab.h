@@ -69,12 +69,41 @@ struct NURI_API ScenePrefabLight {
   LightDesc light{};
 };
 
+struct NURI_API ScenePrefabLightSource {
+  using allocator_type = std::pmr::polymorphic_allocator<std::byte>;
+  explicit ScenePrefabLightSource(const allocator_type &alloc = {})
+      : sourceName(alloc.resource()) {}
+  ScenePrefabLightSource(const ScenePrefabLightSource &other,
+                         const allocator_type &alloc = {})
+      : sourceName(other.sourceName, alloc.resource()),
+        sourceNodeIndex(other.sourceNodeIndex) {}
+  ScenePrefabLightSource(ScenePrefabLightSource &&other,
+                         const allocator_type &alloc = {}) noexcept
+      : sourceName(std::move(other.sourceName), alloc.resource()),
+        sourceNodeIndex(other.sourceNodeIndex) {}
+  ScenePrefabLightSource &operator=(const ScenePrefabLightSource &) = default;
+  ScenePrefabLightSource &
+  operator=(ScenePrefabLightSource &&) noexcept = default;
+  std::pmr::string sourceName;
+  uint32_t sourceNodeIndex = kInvalidScenePrefabIndex;
+};
+
+struct NURI_API ScenePrefabAdaptedMesh {
+  explicit ScenePrefabAdaptedMesh(
+      std::pmr::memory_resource *memory = std::pmr::get_default_resource())
+      : mesh(memory) {}
+  uint32_t sourceSceneMeshIndex = kInvalidScenePrefabIndex;
+  uint32_t sourceMaterialIndex = kInvalidScenePrefabIndex;
+  MeshData mesh;
+};
+
 struct NURI_API ScenePrefab {
   explicit ScenePrefab(
       std::pmr::memory_resource *memory = std::pmr::get_default_resource())
       : nodes(memory), renderables(memory), meshAssets(memory),
         materialAssets(memory), lights(memory), skins(memory),
-        animations(memory), sourcePath(memory), sourceSceneName(memory) {}
+        animations(memory), sourcePath(memory), sourceSceneName(memory),
+        lightSources(memory), rootNodes(memory), adaptedMeshes(memory) {}
   std::pmr::vector<ScenePrefabNode> nodes;
   std::pmr::vector<ScenePrefabRenderable> renderables;
   std::pmr::vector<ScenePrefabAssetRef> meshAssets;
@@ -85,6 +114,11 @@ struct NURI_API ScenePrefab {
   std::pmr::string sourcePath;
   std::pmr::string sourceSceneName;
   MeshImportOptions importOptions{};
+  std::pmr::vector<ScenePrefabLightSource> lightSources;
+  std::pmr::vector<uint32_t> rootNodes;
+  std::pmr::vector<ScenePrefabAdaptedMesh> adaptedMeshes;
+  ImportedMaterialSet adaptedMaterials{};
+  std::vector<EmbeddedSceneTextureData> embeddedTextures{};
 };
 
 struct NURI_API ScenePrefabAssets {

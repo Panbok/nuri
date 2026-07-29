@@ -1949,6 +1949,13 @@ AutotestRunResult runAutotestCase(AutotestCase testCase,
               .height = static_cast<uint32_t>(framebufferHeight),
               .cameraCutRequested = frame.cameraCut,
           });
+      auto textCoverage = runtime->enqueueTextCoverage(frame.frame);
+      if (textCoverage.hasError()) {
+        result.exitCode = AutotestExitCode::RuntimeError;
+        result.message = textCoverage.error();
+        report.errors.push_back(result.message);
+        break;
+      }
       if (dynamicDDGIFixture) {
         auto animation = animationFixture.publish(*runtime, frame.frame);
         if (animation.hasError()) {

@@ -1011,7 +1011,7 @@ void EditorRuntime::resetSceneState() {
 }
 
 void EditorRuntime::finalizeSceneLighting(
-    std::span<const ImportedSceneLight> fallbackLights,
+    std::span<const ScenePrefabLight> fallbackLights,
     const glm::mat4 &baseModel) {
   if (!currentDocument().sceneHasAuthoredLights &&
       !applyImportedLights(fallbackLights, baseModel)) {
@@ -1498,14 +1498,9 @@ void EditorRuntime::buildFrameContext(const Camera &camera,
                                       double timeSecondsIn) {
   frameContext_.scene = &activeDocument_->scene;
   frameContext_.resources = &resources();
-  frameRenderSettings_ = activeDocument_->renderSettings;
-  applyDebugRenderEnvOverrides(frameRenderSettings_);
-  sanitizeHDRPostProcessSettings(frameRenderSettings_.hdrPostProcess);
-  sanitizeTransmissionSettings(frameRenderSettings_.transmission);
-  sanitizeAntiAliasingSettings(frameRenderSettings_.antiAliasing);
-  sanitizeAmbientOcclusionSettings(frameRenderSettings_.ambientOcclusion,
-                                   frameRenderSettings_.opaque,
-                                   frameRenderSettings_.antiAliasing);
+  RenderSettings authoredSettings = activeDocument_->renderSettings;
+  applyDebugRenderEnvOverrides(authoredSettings);
+  frameRenderSettings_ = resolveRenderSettings(authoredSettings);
   frameContext_.frameIndex = frameIndex_;
   const TemporalSceneContentState sceneContent{
       .lightTopologyVersion = activeDocument_->scene.lightTopologyVersion(),
@@ -1533,7 +1528,7 @@ void EditorRuntime::buildFrameContext(const Camera &camera,
   frameContext_.camera = cameraResult.value();
   frameContext_.temporalFrameService = &temporalFrameService_;
   frameRenderSettings_.antiAliasing.debug.resetHistoryRequested = false;
-  frameContext_.settings = &frameRenderSettings_;
+  frameContext_.settings = frameRenderSettings_;
   frameContext_.metrics = {};
   frameContext_.metrics.frameIndex = frameContext_.frameIndex;
   frameContext_.metrics.antiAliasing =
@@ -1563,7 +1558,7 @@ void EditorRuntime::submitPipelineFrame() {
   logDebugShadowInspectProbeResult();
   if (editorOverlay_ != nullptr) {
     if (auto settingsUpdate = editorOverlay_->takeRenderSettingsUpdate()) {
-      frameRenderSettings_ = std::move(*settingsUpdate);
+      frameRenderSettings_ = resolveRenderSettings(*settingsUpdate);
     }
   }
   persistFrameRenderSettings(activeDocument_->renderSettings,
@@ -1760,7 +1755,7 @@ bool EditorRuntime::enqueue3DTextSamples(FontHandle defaultFont,
 }
 
 bool EditorRuntime::applyImportedLights(
-    std::span<const ImportedSceneLight> importedLights,
+    std::span<const ScenePrefabLight> importedLights,
     const glm::mat4 &modelMatrix) {
   if (importedLights.empty()) {
     return false;
@@ -1771,7 +1766,7 @@ bool EditorRuntime::applyImportedLights(
     return false;
   }
   bool addedAny = false;
-  for (const ImportedSceneLight &importedLight : importedLights) {
+  for (const ScenePrefabLight &importedLight : importedLights) {
     auto lightNodeResult = scene().graph().createNode(
         rootNodeResult.value(), importedLight.light.name,
         makeTransformMatrix(importedLight.light.position,

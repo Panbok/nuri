@@ -4,7 +4,6 @@
 #include "nuri/core/profiling.h"
 #include "nuri/gfx/renderers/detail/instance_data.h"
 #include "nuri/gfx/sim/animation_gpu_services.h"
-#include "nuri/pch.h"
 #include "nuri/resources/gpu/resource_manager.h"
 #include "nuri/scene_runtime/scene_runtime_host.h"
 #include "nuri/sim/animation_pose_simulation.h"
@@ -12,6 +11,7 @@
 #include <array>
 #include <glm/gtx/matrix_decompose.hpp>
 #include <optional>
+#include <variant>
 #include <vector>
 namespace nuri {
 namespace {
@@ -337,17 +337,31 @@ void resetClipBuffers(AnimationClipGpuData &clip) {
   clip.sampledWeightsBuffer.reset();
 }
 struct AnimationPoseInstance {
-  explicit AnimationPoseInstance(
+  AnimationPoseInstance(
+      std::shared_ptr<const ScenePrefab> prefabOwnerIn,
+      std::shared_ptr<const SceneInstantiationMap> instantiationOwnerIn,
       std::pmr::memory_resource *memory = std::pmr::get_default_resource())
-      : prefab(memory), instantiationMap(memory), baseNodeStates(memory),
-        baseWeights(memory), nodeMeta(memory), depthOrderedNodes(memory),
-        depthBucketStarts(memory), depthBucketCounts(memory),
-        controlledNodeMask(memory), renderableBindings(memory),
-        animatedRenderables(memory), flattenedJointNodeIndices(memory),
-        flattenedInverseBindMatrices(memory),
+      : prefabOwner(std::move(prefabOwnerIn)),
+        instantiationOwner(std::move(instantiationOwnerIn)),
+        prefab(*prefabOwner), instantiationMap(*instantiationOwner),
+        baseNodeStates(memory), baseWeights(memory), nodeMeta(memory),
+        depthOrderedNodes(memory), depthBucketStarts(memory),
+        depthBucketCounts(memory), controlledNodeMask(memory),
+        renderableBindings(memory), animatedRenderables(memory),
+        flattenedJointNodeIndices(memory), flattenedInverseBindMatrices(memory),
         clips{AnimationClipGpuData(memory), AnimationClipGpuData(memory)} {}
-  ScenePrefab prefab;
-  SceneInstantiationMap instantiationMap;
+  AnimationPoseInstance(AnimationPoseInstance &&) noexcept = default;
+  AnimationPoseInstance &operator=(AnimationPoseInstance &&other) noexcept {
+    if (this != &other) {
+      std::destroy_at(this);
+      std::construct_at(this, std::move(other));
+    }
+    return *this;
+  }
+  std::shared_ptr<const ScenePrefab> prefabOwner;
+  std::shared_ptr<const SceneInstantiationMap> instantiationOwner;
+  const ScenePrefab &prefab;
+  const SceneInstantiationMap &instantiationMap;
   NodeId rootNode = kInvalidNodeId;
   AnimationPoseSimulationParams params{};
   uint64_t cachedSceneTopologyVersion = std::numeric_limits<uint64_t>::max();
@@ -374,19 +388,32 @@ struct AnimationPoseInstance {
   std::unique_ptr<Buffer> inverseBindMatricesBuffer;
   std::unique_ptr<Buffer> jointPaletteBuffer;
 };
+template <typename PushConstants, size_t DependencyCount>
+struct AnimationDispatchRecord {
+  PushConstants push{};
+  std::array<BufferHandle, DependencyCount> dependencies{};
+};
+using AnimationDispatch =
+    std::variant<AnimationDispatchRecord<SamplePushConstants, 4>,
+                 AnimationDispatchRecord<BlendPushConstants, 6>,
+                 AnimationDispatchRecord<WorldPushConstants, 4>,
+                 AnimationDispatchRecord<ScatterPushConstants, 4>,
+                 AnimationDispatchRecord<MorphPushConstants, 4>,
+                 AnimationDispatchRecord<SkinPalettePushConstants, 4>,
+                 AnimationDispatchRecord<SkinPushConstants, 4>>;
+
+template <typename Record>
+Record &appendAnimationDispatch(std::pmr::vector<AnimationDispatch> &records,
+                                Record record) {
+  records.emplace_back(std::move(record));
+  return std::get<Record>(records.back());
+}
 struct SceneFrameState {
   explicit SceneFrameState(
       std::pmr::memory_resource *memory = std::pmr::get_default_resource())
       : baseInstances(memory), geometryOverrides(memory),
         previousGeometryOverrides(memory), animatedRenderableIndices(memory),
-        preDispatches(memory), samplePushConstants(memory),
-        sampleDependencies(memory), blendPushConstants(memory),
-        blendDependencies(memory), worldPushConstants(memory),
-        worldDependencies(memory), scatterPushConstants(memory),
-        scatterDependencies(memory), morphPushConstants(memory),
-        morphDependencies(memory), skinPalettePushConstants(memory),
-        skinPaletteDependencies(memory), skinPushConstants(memory),
-        skinDependencies(memory) {}
+        preDispatches(memory), dispatchRecords(memory) {}
   std::array<std::unique_ptr<Buffer>, kAnimationSceneFrameHistorySlots>
       instanceMatricesBuffers;
   std::array<size_t, kAnimationSceneFrameHistorySlots>
@@ -397,20 +424,7 @@ struct SceneFrameState {
       previousGeometryOverrides;
   std::pmr::vector<uint32_t> animatedRenderableIndices;
   std::pmr::vector<ComputeDispatchItem> preDispatches;
-  std::pmr::vector<SamplePushConstants> samplePushConstants;
-  std::pmr::vector<std::array<BufferHandle, 4>> sampleDependencies;
-  std::pmr::vector<BlendPushConstants> blendPushConstants;
-  std::pmr::vector<std::array<BufferHandle, 6>> blendDependencies;
-  std::pmr::vector<WorldPushConstants> worldPushConstants;
-  std::pmr::vector<std::array<BufferHandle, 4>> worldDependencies;
-  std::pmr::vector<ScatterPushConstants> scatterPushConstants;
-  std::pmr::vector<std::array<BufferHandle, 4>> scatterDependencies;
-  std::pmr::vector<MorphPushConstants> morphPushConstants;
-  std::pmr::vector<std::array<BufferHandle, 4>> morphDependencies;
-  std::pmr::vector<SkinPalettePushConstants> skinPalettePushConstants;
-  std::pmr::vector<std::array<BufferHandle, 4>> skinPaletteDependencies;
-  std::pmr::vector<SkinPushConstants> skinPushConstants;
-  std::pmr::vector<std::array<BufferHandle, 4>> skinDependencies;
+  std::pmr::vector<AnimationDispatch> dispatchRecords;
   uint64_t version = 0u;
   uint64_t preparedFrameIndex = std::numeric_limits<uint64_t>::max();
   size_t currentHistorySlot = 0u;
@@ -426,20 +440,7 @@ struct SceneFrameState {
   mutable AnimationSceneFrameData publishedData{};
   void resetTransientDispatchState() noexcept {
     preDispatches.clear();
-    samplePushConstants.clear();
-    sampleDependencies.clear();
-    blendPushConstants.clear();
-    blendDependencies.clear();
-    worldPushConstants.clear();
-    worldDependencies.clear();
-    scatterPushConstants.clear();
-    scatterDependencies.clear();
-    morphPushConstants.clear();
-    morphDependencies.clear();
-    skinPalettePushConstants.clear();
-    skinPaletteDependencies.clear();
-    skinPushConstants.clear();
-    skinDependencies.clear();
+    dispatchRecords.clear();
     animatedRenderableIndices.clear();
   }
 };
@@ -922,9 +923,8 @@ AnimationPoseSimulationBackend::createInstance(SceneRuntimeHost &host,
   sanitizeAnimationPoseSimulationParams(params);
   const AnimationPoseSimulationCreatePayload &payload =
       *host.pendingAnimationPoseCreatePayload_;
-  AnimationPoseInstance instance(memory_);
-  instance.prefab = *payload.prefab;
-  instance.instantiationMap = *payload.instantiationMap;
+  AnimationPoseInstance instance(payload.prefab, payload.instantiationMap,
+                                 memory_);
   instance.rootNode = desc.binding.primaryTarget.prefabRoot;
   instance.params = params;
   instance.controlledNodeMask.assign(instance.prefab.nodes.size(), uint8_t{0u});
@@ -950,7 +950,7 @@ AnimationPoseSimulationBackend::createInstance(SceneRuntimeHost &host,
   if (bindingResult.hasError()) {
     return bindingResult;
   }
-  impl_->instances.insert_or_assign(handle, std::move(instance));
+  impl_->instances.emplace(handle, std::move(instance));
   invalidatePreparedSceneFrame(impl_->sceneFrame);
   return Result<bool, std::string>::makeResult(true);
 }
@@ -1150,26 +1150,8 @@ AnimationPoseSimulationBackend::prepareSceneFrame(SceneRuntimeHost &host,
   sceneFrame.preDispatches.reserve(counts.sample + counts.blend + counts.world +
                                    counts.scatter + counts.morph +
                                    counts.palette + counts.skin);
-  const auto reservePair = [](auto &payloads, auto &dependencies,
-                              size_t count) {
-    payloads.reserve(count);
-    dependencies.reserve(count);
-  };
-  reservePair(sceneFrame.samplePushConstants, sceneFrame.sampleDependencies,
-              counts.sample);
-  reservePair(sceneFrame.blendPushConstants, sceneFrame.blendDependencies,
-              counts.blend);
-  reservePair(sceneFrame.worldPushConstants, sceneFrame.worldDependencies,
-              counts.world);
-  reservePair(sceneFrame.scatterPushConstants, sceneFrame.scatterDependencies,
-              counts.scatter);
+  sceneFrame.dispatchRecords.reserve(sceneFrame.preDispatches.capacity());
   sceneFrame.animatedRenderableIndices.reserve(counts.animated);
-  reservePair(sceneFrame.morphPushConstants, sceneFrame.morphDependencies,
-              counts.morph);
-  reservePair(sceneFrame.skinPalettePushConstants,
-              sceneFrame.skinPaletteDependencies, counts.palette);
-  reservePair(sceneFrame.skinPushConstants, sceneFrame.skinDependencies,
-              counts.skin);
   const uint64_t instanceMatricesAddress =
       services_->gpu().getBufferDeviceAddress(
           sceneFrame.instanceMatricesBuffers[sceneFrame.currentHistorySlot]
@@ -1268,31 +1250,39 @@ AnimationPoseSimulationBackend::prepareSceneFrame(SceneRuntimeHost &host,
       if (clipGpu.channels.empty()) {
         return;
       }
-      sceneFrame.samplePushConstants.push_back(SamplePushConstants{
-          .channelsAddress = services_->gpu().getBufferDeviceAddress(
-              clipGpu.channelsBuffer->handle()),
-          .keyTimesAddress = services_->gpu().getBufferDeviceAddress(
-              clipGpu.keyTimesBuffer->handle()),
-          .valuesAddress = services_->gpu().getBufferDeviceAddress(
-              clipGpu.valuesBuffer->handle()),
-          .nodeStatesAddress = services_->gpu().getBufferDeviceAddress(
-              clipGpu.sampledNodeStatesBuffer->handle()),
-          .sampledWeightsAddress = services_->gpu().getBufferDeviceAddress(
-              clipGpu.sampledWeightsBuffer->handle()),
-          .sampleTimeSeconds = sampleTimeSeconds,
-          .channelCount = static_cast<uint32_t>(clipGpu.channels.size()),
-      });
-      sceneFrame.sampleDependencies.push_back(
-          {clipGpu.channelsBuffer->handle(), clipGpu.keyTimesBuffer->handle(),
-           clipGpu.sampledNodeStatesBuffer->handle(),
-           clipGpu.sampledWeightsBuffer->handle()});
+      const auto &dispatch = appendAnimationDispatch(
+          sceneFrame.dispatchRecords,
+          AnimationDispatchRecord<SamplePushConstants, 4>{
+              .push =
+                  {
+                      .channelsAddress =
+                          services_->gpu().getBufferDeviceAddress(
+                              clipGpu.channelsBuffer->handle()),
+                      .keyTimesAddress =
+                          services_->gpu().getBufferDeviceAddress(
+                              clipGpu.keyTimesBuffer->handle()),
+                      .valuesAddress = services_->gpu().getBufferDeviceAddress(
+                          clipGpu.valuesBuffer->handle()),
+                      .nodeStatesAddress =
+                          services_->gpu().getBufferDeviceAddress(
+                              clipGpu.sampledNodeStatesBuffer->handle()),
+                      .sampledWeightsAddress =
+                          services_->gpu().getBufferDeviceAddress(
+                              clipGpu.sampledWeightsBuffer->handle()),
+                      .sampleTimeSeconds = sampleTimeSeconds,
+                      .channelCount =
+                          static_cast<uint32_t>(clipGpu.channels.size()),
+                  },
+              .dependencies = {clipGpu.channelsBuffer->handle(),
+                               clipGpu.keyTimesBuffer->handle(),
+                               clipGpu.sampledNodeStatesBuffer->handle(),
+                               clipGpu.sampledWeightsBuffer->handle()},
+          });
       appendComputeDispatch(
           sceneFrame.preDispatches, services_->samplePipeline(),
-          dispatchCount(sceneFrame.samplePushConstants.back().channelCount),
-          sceneFrame.samplePushConstants.back(),
-          sceneFrame.sampleDependencies.back(),
-          sceneFrame.sampleDependencies.back().size(), kSampleDependencyAccess,
-          "AnimationPose Sample", 0xff5599ffu);
+          dispatchCount(dispatch.push.channelCount), dispatch.push,
+          dispatch.dependencies, dispatch.dependencies.size(),
+          kSampleDependencyAccess, "AnimationPose Sample", 0xff5599ffu);
     };
     if (!useSecondaryOnly) {
       appendSampleDispatch(primaryClipGpu, primarySampleTime);
@@ -1325,33 +1315,37 @@ AnimationPoseSimulationBackend::prepareSceneFrame(SceneRuntimeHost &host,
         nodeStatesBuffer = secondaryClipGpu->sampledNodeStatesBuffer->handle();
         sampledWeightsBuffer = secondaryClipGpu->sampledWeightsBuffer->handle();
       } else {
-        sceneFrame.blendPushConstants.push_back(BlendPushConstants{
-            .sourceNodeStatesAddressA = primaryNodeStatesAddress,
-            .sourceNodeStatesAddressB = secondaryNodeStatesAddress,
-            .outputNodeStatesAddress = blendedNodeStatesAddress,
-            .sourceWeightsAddressA = primaryWeightsAddress,
-            .sourceWeightsAddressB = secondaryWeightsAddress,
-            .outputWeightsAddress = blendedWeightsAddress,
-            .blendWeight = instance.params.blendWeight,
-            .nodeCount = static_cast<uint32_t>(instance.baseNodeStates.size()),
-            .weightCount = static_cast<uint32_t>(instance.baseWeights.size()),
-        });
-        sceneFrame.blendDependencies.push_back(
-            {primaryClipGpu.sampledNodeStatesBuffer->handle(),
-             secondaryClipGpu->sampledNodeStatesBuffer->handle(),
-             instance.blendedNodeStatesBuffer->handle(),
-             primaryClipGpu.sampledWeightsBuffer->handle(),
-             secondaryClipGpu->sampledWeightsBuffer->handle(),
-             instance.blendedWeightsBuffer->handle()});
+        const auto &dispatch = appendAnimationDispatch(
+            sceneFrame.dispatchRecords,
+            AnimationDispatchRecord<BlendPushConstants, 6>{
+                .push =
+                    {
+                        .sourceNodeStatesAddressA = primaryNodeStatesAddress,
+                        .sourceNodeStatesAddressB = secondaryNodeStatesAddress,
+                        .outputNodeStatesAddress = blendedNodeStatesAddress,
+                        .sourceWeightsAddressA = primaryWeightsAddress,
+                        .sourceWeightsAddressB = secondaryWeightsAddress,
+                        .outputWeightsAddress = blendedWeightsAddress,
+                        .blendWeight = instance.params.blendWeight,
+                        .nodeCount = static_cast<uint32_t>(
+                            instance.baseNodeStates.size()),
+                        .weightCount =
+                            static_cast<uint32_t>(instance.baseWeights.size()),
+                    },
+                .dependencies =
+                    {primaryClipGpu.sampledNodeStatesBuffer->handle(),
+                     secondaryClipGpu->sampledNodeStatesBuffer->handle(),
+                     instance.blendedNodeStatesBuffer->handle(),
+                     primaryClipGpu.sampledWeightsBuffer->handle(),
+                     secondaryClipGpu->sampledWeightsBuffer->handle(),
+                     instance.blendedWeightsBuffer->handle()},
+            });
         appendComputeDispatch(
             sceneFrame.preDispatches, services_->blendPipeline(),
             dispatchCount(
-                std::max(sceneFrame.blendPushConstants.back().nodeCount,
-                         sceneFrame.blendPushConstants.back().weightCount)),
-            sceneFrame.blendPushConstants.back(),
-            sceneFrame.blendDependencies.back(),
-            sceneFrame.blendDependencies.back().size(), kBlendDependencyAccess,
-            "AnimationPose Blend", 0xff6688ffu);
+                std::max(dispatch.push.nodeCount, dispatch.push.weightCount)),
+            dispatch.push, dispatch.dependencies, dispatch.dependencies.size(),
+            kBlendDependencyAccess, "AnimationPose Blend", 0xff6688ffu);
         nodeStatesAddress = blendedNodeStatesAddress;
         sampledWeightsAddress = blendedWeightsAddress;
         nodeStatesBuffer = instance.blendedNodeStatesBuffer->handle();
@@ -1362,26 +1356,32 @@ AnimationPoseSimulationBackend::prepareSceneFrame(SceneRuntimeHost &host,
          depthBucketIndex < instance.depthBucketStarts.size();
          ++depthBucketIndex) {
       const uint32_t nodeCount = instance.depthBucketCounts[depthBucketIndex];
-      sceneFrame.worldPushConstants.push_back(WorldPushConstants{
-          .nodeStatesAddress = nodeStatesAddress,
-          .nodeMetaAddress = services_->gpu().getBufferDeviceAddress(
-              instance.nodeMetaBuffer->handle()),
-          .depthOrderedNodesAddress = services_->gpu().getBufferDeviceAddress(
-              instance.depthOrderedNodesBuffer->handle()),
-          .worldMatricesAddress = worldMatricesAddress,
-          .rootTransform = rootTransform,
-          .nodeStart = instance.depthBucketStarts[depthBucketIndex],
-          .nodeCount = nodeCount,
-      });
-      sceneFrame.worldDependencies.push_back(
-          {nodeStatesBuffer, instance.nodeMetaBuffer->handle(),
-           instance.depthOrderedNodesBuffer->handle(),
-           instance.worldMatricesBuffer->handle()});
+      const auto &dispatch = appendAnimationDispatch(
+          sceneFrame.dispatchRecords,
+          AnimationDispatchRecord<WorldPushConstants, 4>{
+              .push =
+                  {
+                      .nodeStatesAddress = nodeStatesAddress,
+                      .nodeMetaAddress =
+                          services_->gpu().getBufferDeviceAddress(
+                              instance.nodeMetaBuffer->handle()),
+                      .depthOrderedNodesAddress =
+                          services_->gpu().getBufferDeviceAddress(
+                              instance.depthOrderedNodesBuffer->handle()),
+                      .worldMatricesAddress = worldMatricesAddress,
+                      .rootTransform = rootTransform,
+                      .nodeStart = instance.depthBucketStarts[depthBucketIndex],
+                      .nodeCount = nodeCount,
+                  },
+              .dependencies = {nodeStatesBuffer,
+                               instance.nodeMetaBuffer->handle(),
+                               instance.depthOrderedNodesBuffer->handle(),
+                               instance.worldMatricesBuffer->handle()},
+          });
       appendComputeDispatch(
           sceneFrame.preDispatches, services_->worldPipeline(),
-          dispatchCount(nodeCount), sceneFrame.worldPushConstants.back(),
-          sceneFrame.worldDependencies.back(),
-          sceneFrame.worldDependencies.back().size(), kWorldDependencyAccess,
+          dispatchCount(nodeCount), dispatch.push, dispatch.dependencies,
+          dispatch.dependencies.size(), kWorldDependencyAccess,
           "AnimationPose World", 0xff33aa55u);
     }
     if (!instance.renderableBindings.empty()) {
@@ -1390,26 +1390,32 @@ AnimationPoseSimulationBackend::prepareSceneFrame(SceneRuntimeHost &host,
         sceneFrame.animatedRenderableIndices.push_back(
             binding.runtimeRenderableIndex);
       }
-      sceneFrame.scatterPushConstants.push_back(ScatterPushConstants{
-          .renderableBindingsAddress = services_->gpu().getBufferDeviceAddress(
-              instance.renderableBindingsBuffer->handle()),
-          .worldMatricesAddress = worldMatricesAddress,
-          .instanceMatricesAddress = instanceMatricesAddress,
-          .bindingCount =
-              static_cast<uint32_t>(instance.renderableBindings.size()),
-      });
-      sceneFrame.scatterDependencies.push_back(
-          {instance.renderableBindingsBuffer->handle(),
-           instance.worldMatricesBuffer->handle(),
-           sceneFrame.instanceMatricesBuffers[sceneFrame.currentHistorySlot]
-               ->handle(),
-           BufferHandle{}});
+      const auto &dispatch = appendAnimationDispatch(
+          sceneFrame.dispatchRecords,
+          AnimationDispatchRecord<ScatterPushConstants, 4>{
+              .push =
+                  {
+                      .renderableBindingsAddress =
+                          services_->gpu().getBufferDeviceAddress(
+                              instance.renderableBindingsBuffer->handle()),
+                      .worldMatricesAddress = worldMatricesAddress,
+                      .instanceMatricesAddress = instanceMatricesAddress,
+                      .bindingCount = static_cast<uint32_t>(
+                          instance.renderableBindings.size()),
+                  },
+              .dependencies =
+                  {instance.renderableBindingsBuffer->handle(),
+                   instance.worldMatricesBuffer->handle(),
+                   sceneFrame
+                       .instanceMatricesBuffers[sceneFrame.currentHistorySlot]
+                       ->handle(),
+                   BufferHandle{}},
+          });
       appendComputeDispatch(
           sceneFrame.preDispatches, services_->scatterPipeline(),
-          dispatchCount(sceneFrame.scatterPushConstants.back().bindingCount),
-          sceneFrame.scatterPushConstants.back(),
-          sceneFrame.scatterDependencies.back(), size_t{3u},
-          kScatterDependencyAccess, "AnimationPose Scatter", 0xff33cc88u);
+          dispatchCount(dispatch.push.bindingCount), dispatch.push,
+          dispatch.dependencies, size_t{3u}, kScatterDependencyAccess,
+          "AnimationPose Scatter", 0xff33cc88u);
     }
     for (AnimatedRenderableState &animated : instance.animatedRenderables) {
       BufferHandle overrideBuffer{};
@@ -1449,27 +1455,29 @@ AnimationPoseSimulationBackend::prepareSceneFrame(SceneRuntimeHost &host,
         const uint64_t paletteAddress = services_->gpu().getBufferDeviceAddress(
             instance.jointPaletteBuffer->handle(),
             static_cast<size_t>(animated.paletteOffset) * sizeof(glm::mat4));
-        sceneFrame.skinPalettePushConstants.push_back(SkinPalettePushConstants{
-            .worldMatricesAddress = worldMatricesAddress,
-            .jointNodeIndicesAddress = jointNodeAddress,
-            .inverseBindMatricesAddress = inverseBindAddress,
-            .paletteAddress = paletteAddress,
-            .renderableNodeIndex = animated.nodeIndex,
-            .jointCount = animated.jointCount,
-        });
-        sceneFrame.skinPaletteDependencies.push_back(
-            {instance.worldMatricesBuffer->handle(),
-             instance.jointNodeIndicesBuffer->handle(),
-             instance.inverseBindMatricesBuffer->handle(),
-             instance.jointPaletteBuffer->handle()});
-        appendComputeDispatch(sceneFrame.preDispatches,
-                              services_->skinPalettePipeline(),
-                              dispatchCount(animated.jointCount),
-                              sceneFrame.skinPalettePushConstants.back(),
-                              sceneFrame.skinPaletteDependencies.back(),
-                              sceneFrame.skinPaletteDependencies.back().size(),
-                              kSkinPaletteDependencyAccess,
-                              "AnimationPose SkinPalette", 0xffaa55ccu);
+        const auto &dispatch = appendAnimationDispatch(
+            sceneFrame.dispatchRecords,
+            AnimationDispatchRecord<SkinPalettePushConstants, 4>{
+                .push =
+                    {
+                        .worldMatricesAddress = worldMatricesAddress,
+                        .jointNodeIndicesAddress = jointNodeAddress,
+                        .inverseBindMatricesAddress = inverseBindAddress,
+                        .paletteAddress = paletteAddress,
+                        .renderableNodeIndex = animated.nodeIndex,
+                        .jointCount = animated.jointCount,
+                    },
+                .dependencies = {instance.worldMatricesBuffer->handle(),
+                                 instance.jointNodeIndicesBuffer->handle(),
+                                 instance.inverseBindMatricesBuffer->handle(),
+                                 instance.jointPaletteBuffer->handle()},
+            });
+        appendComputeDispatch(
+            sceneFrame.preDispatches, services_->skinPalettePipeline(),
+            dispatchCount(animated.jointCount), dispatch.push,
+            dispatch.dependencies, dispatch.dependencies.size(),
+            kSkinPaletteDependencyAccess, "AnimationPose SkinPalette",
+            0xffaa55ccu);
       }
       if (animated.hasMorph) {
         const uint64_t outputVertexAddress =
@@ -1477,26 +1485,32 @@ AnimationPoseSimulationBackend::prepareSceneFrame(SceneRuntimeHost &host,
                 currentMorphOutput->handle());
         const uint64_t morphDeltaAddress =
             services_->gpu().getBufferDeviceAddress(animated.morphDeltaBuffer);
-        sceneFrame.morphPushConstants.push_back(MorphPushConstants{
-            .sourceVertexAddress = animated.sourceVertexAddress,
-            .outputVertexAddress = outputVertexAddress,
-            .morphDeltaAddress = morphDeltaAddress,
-            .weightAddress = sampledWeightsAddress,
-            .weightOffset = instance.nodeMeta[animated.nodeIndex].weightOffset,
-            .weightCount = instance.nodeMeta[animated.nodeIndex].weightCount,
-            .morphTargetCount = animated.morphTargetCount,
-            .vertexCount = animated.vertexCount,
-        });
-        sceneFrame.morphDependencies.push_back(
-            {animated.sourceVertexBuffer, animated.morphDeltaBuffer,
-             sampledWeightsBuffer, currentMorphOutput->handle()});
+        const auto &dispatch = appendAnimationDispatch(
+            sceneFrame.dispatchRecords,
+            AnimationDispatchRecord<MorphPushConstants, 4>{
+                .push =
+                    {
+                        .sourceVertexAddress = animated.sourceVertexAddress,
+                        .outputVertexAddress = outputVertexAddress,
+                        .morphDeltaAddress = morphDeltaAddress,
+                        .weightAddress = sampledWeightsAddress,
+                        .weightOffset =
+                            instance.nodeMeta[animated.nodeIndex].weightOffset,
+                        .weightCount =
+                            instance.nodeMeta[animated.nodeIndex].weightCount,
+                        .morphTargetCount = animated.morphTargetCount,
+                        .vertexCount = animated.vertexCount,
+                    },
+                .dependencies = {animated.sourceVertexBuffer,
+                                 animated.morphDeltaBuffer,
+                                 sampledWeightsBuffer,
+                                 currentMorphOutput->handle()},
+            });
         appendComputeDispatch(
             sceneFrame.preDispatches, services_->morphPipeline(),
-            dispatchCount(animated.vertexCount),
-            sceneFrame.morphPushConstants.back(),
-            sceneFrame.morphDependencies.back(),
-            sceneFrame.morphDependencies.back().size(), kMorphDependencyAccess,
-            "AnimationPose Morph", 0xffaa7733u);
+            dispatchCount(animated.vertexCount), dispatch.push,
+            dispatch.dependencies, dispatch.dependencies.size(),
+            kMorphDependencyAccess, "AnimationPose Morph", 0xffaa7733u);
         if (!animated.hasSkin) {
           overrideBuffer = currentMorphOutput->handle();
         }
@@ -1518,24 +1532,26 @@ AnimationPoseSimulationBackend::prepareSceneFrame(SceneRuntimeHost &host,
         const uint64_t paletteAddress = services_->gpu().getBufferDeviceAddress(
             instance.jointPaletteBuffer->handle(),
             static_cast<size_t>(animated.paletteOffset) * sizeof(glm::mat4));
-        sceneFrame.skinPushConstants.push_back(SkinPushConstants{
-            .sourceVertexAddress = skinSourceAddress,
-            .outputVertexAddress = outputVertexAddress,
-            .skinInfluenceAddress = skinInfluenceAddress,
-            .paletteAddress = paletteAddress,
-            .vertexCount = animated.vertexCount,
-        });
-        sceneFrame.skinDependencies.push_back(
-            {skinSourceBuffer, animated.skinInfluenceBuffer,
-             instance.jointPaletteBuffer->handle(),
-             currentSkinOutput->handle()});
+        const auto &dispatch = appendAnimationDispatch(
+            sceneFrame.dispatchRecords,
+            AnimationDispatchRecord<SkinPushConstants, 4>{
+                .push =
+                    {
+                        .sourceVertexAddress = skinSourceAddress,
+                        .outputVertexAddress = outputVertexAddress,
+                        .skinInfluenceAddress = skinInfluenceAddress,
+                        .paletteAddress = paletteAddress,
+                        .vertexCount = animated.vertexCount,
+                    },
+                .dependencies = {skinSourceBuffer, animated.skinInfluenceBuffer,
+                                 instance.jointPaletteBuffer->handle(),
+                                 currentSkinOutput->handle()},
+            });
         appendComputeDispatch(
             sceneFrame.preDispatches, services_->skinPipeline(),
-            dispatchCount(animated.vertexCount),
-            sceneFrame.skinPushConstants.back(),
-            sceneFrame.skinDependencies.back(),
-            sceneFrame.skinDependencies.back().size(), kSkinDependencyAccess,
-            "AnimationPose Skin", 0xffcc8844u);
+            dispatchCount(animated.vertexCount), dispatch.push,
+            dispatch.dependencies, dispatch.dependencies.size(),
+            kSkinDependencyAccess, "AnimationPose Skin", 0xffcc8844u);
         overrideBuffer = currentSkinOutput->handle();
       }
       sceneFrame.geometryOverrides[animated.runtimeRenderableIndex] =

@@ -5,7 +5,6 @@
 #include "nuri/gfx/gpu_types.h"
 #include <cstdint>
 #include <glm/glm.hpp>
-#include <memory>
 #include <string>
 #include <string_view>
 namespace nuri {
@@ -163,42 +162,9 @@ validateExternalTemporalExecuteDesc(
     const ExternalTemporalProviderExecuteDesc &desc,
     const ExternalTemporalProviderCapabilities &capabilities);
 
-class NURI_API ExternalTemporalProvider {
-public:
-  virtual ~ExternalTemporalProvider() = default;
-  ExternalTemporalProvider(const ExternalTemporalProvider &) = delete;
-  ExternalTemporalProvider &
-  operator=(const ExternalTemporalProvider &) = delete;
-  [[nodiscard]] virtual ExternalTemporalProviderProbe
-  probe() const noexcept = 0;
-  [[nodiscard]] virtual ExternalTemporalProviderCapabilities
-  capabilities() const noexcept = 0;
-  [[nodiscard]] virtual Result<ExternalTemporalProviderFramePlan, std::string>
-  prepareFrame(const ExternalTemporalProviderPrepareDesc &desc) = 0;
-  [[nodiscard]] virtual Result<TextureHandle, std::string>
-  execute(RecordingContextHandle recordingContext,
-          const ExternalTemporalProviderExecuteDesc &desc) = 0;
-
-protected:
-  ExternalTemporalProvider() = default;
-};
-
 struct ExternalTemporalDispatchItem {
-  ExternalTemporalProvider *provider = nullptr;
+  ExternalTemporalProviderBackend *backend = nullptr;
   ExternalTemporalProviderExecuteDesc execute{};
 };
-
-struct ExternalTemporalProviderCreateDesc {
-  ExternalTemporalProviderBackend *backend = nullptr;
-  bool buildRequested = false;
-  bool dependencyPresent = false;
-};
-
-[[nodiscard]] NURI_API std::unique_ptr<ExternalTemporalProvider>
-createExternalTemporalProvider();
-[[nodiscard]] NURI_API std::unique_ptr<ExternalTemporalProvider>
-createExternalTemporalProvider(ExternalTemporalProviderBackend *backend);
-[[nodiscard]] NURI_API std::unique_ptr<ExternalTemporalProvider>
-createExternalTemporalProvider(const ExternalTemporalProviderCreateDesc &desc);
 
 } // namespace nuri

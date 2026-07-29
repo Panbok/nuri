@@ -72,7 +72,7 @@ struct ImportedPrefabSceneResources {
   SceneLoadHandle sceneLoad{};
   ScenePrefab prefab{};
   ScenePrefabAssets assets{};
-  std::vector<ImportedSceneLight> fallbackLights{};
+  std::vector<ScenePrefabLight> fallbackLights{};
   bool ready = false;
   bool textureArtifactBakeQueued = false;
 
@@ -94,7 +94,7 @@ struct SimpleModelSceneAssets {
   std::filesystem::path sourcePath{};
   ModelRef model = kInvalidModelRef;
   MaterialRef material = kInvalidMaterialRef;
-  std::vector<ImportedSceneLight> fallbackLights{};
+  std::vector<ScenePrefabLight> fallbackLights{};
   bool ready = false;
   bool textureArtifactBakeQueued = false;
 

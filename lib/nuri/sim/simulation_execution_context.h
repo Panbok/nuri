@@ -4,7 +4,6 @@
 namespace nuri {
 
 class SceneRuntimeBindings;
-class SimulationGpuContext;
 struct SimulationSchedulerConfig;
 
 struct NURI_API SimulationExecutionContext {
@@ -16,7 +15,6 @@ struct NURI_API SimulationExecutionContext {
   uint32_t substepIndex = 0u;
   const SimulationSchedulerConfig *schedulerConfig = nullptr;
   const SceneRuntimeBindings *bindings = nullptr;
-  SimulationGpuContext *gpuContext = nullptr;
 };
 
 } // namespace nuri

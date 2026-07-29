@@ -1847,6 +1847,10 @@ resolveSnapshotPath(std::string_view base, const std::filesystem::path &path) {
     return Result<std::filesystem::path, std::string>::makeResult(
         config.roots.textures / path);
   }
+  if (base == "fontsRoot") {
+    return Result<std::filesystem::path, std::string>::makeResult(
+        config.roots.fonts / path);
+  }
   return Result<std::filesystem::path, std::string>::makeError(
       "resolveSnapshotPath: unsupported base '" + std::string(base) + "'");
 }

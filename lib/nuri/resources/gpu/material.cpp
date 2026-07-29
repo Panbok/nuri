@@ -1,15 +1,8 @@
 #include "nuri/resources/gpu/material.h"
 #include "nuri/core/log.h"
 #include "nuri/core/profiling.h"
-#include "nuri/pch.h"
 namespace nuri {
 namespace {
-constexpr std::array<std::string_view, kMaterialTextureSlotCount> kSlotNames{
-    "baseColor",          "metallicRoughness", "normal",
-    "occlusion",          "emissive",          "clearcoat",
-    "clearcoatRoughness", "clearcoatNormal",   "specular",
-    "specularColor",      "sheenColor",        "sheenRoughness",
-    "transmission",       "thickness"};
 constexpr std::array kCommonSlots{
     kMaterialTextureSlotBaseColor, kMaterialTextureSlotMetallicRoughness,
     kMaterialTextureSlotNormal, kMaterialTextureSlotOcclusion,
@@ -164,7 +157,8 @@ buildPackedGpuData(GPUDevice &gpu, const MaterialDesc &desc) {
   gpuData.header.materialFlags = packMaterialFlags(desc);
   MaterialTextureSlots<uint32_t> textureIndices{};
   for (size_t i = 0; i < textureIndices.size(); ++i) {
-    auto index = resolveBindlessIndex(gpu, desc.textures[i], kSlotNames[i]);
+    auto index = resolveBindlessIndex(gpu, desc.textures[i],
+                                      kMaterialTextureSlotDescs[i].name);
     if (index.hasError())
       return Result<MaterialPackedGpuData, std::string>::makeError(
           index.error());

@@ -190,18 +190,19 @@ TEST(RenderGraphAccelerationStructureTest,
   RenderGraphRuntime runtime;
   auto result = builder.compile(runtime);
   ASSERT_FALSE(result.hasError()) << result.error();
-  const RenderGraphCompileResult &compiled = result.value();
-  ASSERT_EQ(compiled.orderedPassIndices.size(), 4u);
-  EXPECT_EQ(compiled.orderedPassIndices[0u], 0u);
-  EXPECT_EQ(compiled.orderedPassIndices[1u], 1u);
-  EXPECT_EQ(compiled.orderedPassIndices[2u], 2u);
-  EXPECT_EQ(compiled.orderedPassIndices[3u], 3u);
-  EXPECT_EQ(compiled.resourceStats.importedAccelerationStructures, 2u);
+  const CompiledRenderGraph &compiled = result.value();
+  ASSERT_EQ(compiled.plan.orderedPassIndices.size(), 4u);
+  EXPECT_EQ(compiled.plan.orderedPassIndices[0u], 0u);
+  EXPECT_EQ(compiled.plan.orderedPassIndices[1u], 1u);
+  EXPECT_EQ(compiled.plan.orderedPassIndices[2u], 2u);
+  EXPECT_EQ(compiled.plan.orderedPassIndices[3u], 3u);
+  EXPECT_EQ(compiled.plan.resourceStats.importedAccelerationStructures, 2u);
 
   bool sawBuildInput = false;
   bool sawBlasWriteToRead = false;
   bool sawTlasWriteToQuery = false;
-  for (const RenderGraphBarrierRecord &barrier : compiled.passBarrierRecords) {
+  for (const RenderGraphBarrierRecord &barrier :
+       compiled.plan.passBarrierRecords) {
     sawBuildInput =
         sawBuildInput ||
         (barrier.resourceKind == RenderGraphBarrierResourceKind::Buffer &&
@@ -246,7 +247,7 @@ TEST(RenderGraphAccelerationStructureTest,
   RenderGraphRuntime runtime;
   auto compileResult = builder.compile(runtime);
   ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
-  RenderGraphCompileResult compiled = std::move(compileResult.value());
+  CompiledRenderGraph compiled = std::move(compileResult.value());
 
   builder.beginFrame(4u);
   const GraphInputs second{
@@ -258,13 +259,20 @@ TEST(RenderGraphAccelerationStructureTest,
   };
   ASSERT_FALSE(buildGraph(builder, second).hasError());
   EXPECT_EQ(builder.computeGraphFingerprint(), firstFingerprint);
-  builder.refreshHandlesInCompileResult(compiled);
-  ASSERT_EQ(compiled.accelerationStructureHandlesByResource.size(), 2u);
-  EXPECT_EQ(compiled.accelerationStructureHandlesByResource[0u], second.blas);
-  EXPECT_EQ(compiled.accelerationStructureHandlesByResource[1u], second.tlas);
-  ASSERT_EQ(compiled.orderedPasses[2u].accelerationStructureBuilds.size(), 1u);
-  const auto *tlasBuild = std::get_if<BuildTlasItem>(
-      &compiled.orderedPasses[2u].accelerationStructureBuilds[0u].command);
+  compiled.commands = builder.buildFrameCommands(compiled.plan);
+  ASSERT_EQ(compiled.commands.accelerationStructureHandlesByResource.size(),
+            2u);
+  EXPECT_EQ(compiled.commands.accelerationStructureHandlesByResource[0u],
+            second.blas);
+  EXPECT_EQ(compiled.commands.accelerationStructureHandlesByResource[1u],
+            second.tlas);
+  ASSERT_EQ(
+      compiled.commands.orderedPasses[2u].accelerationStructureBuilds.size(),
+      1u);
+  const auto *tlasBuild =
+      std::get_if<BuildTlasItem>(&compiled.commands.orderedPasses[2u]
+                                      .accelerationStructureBuilds[0u]
+                                      .command);
   ASSERT_NE(tlasBuild, nullptr);
   EXPECT_EQ(tlasBuild->destination, second.tlas);
   ASSERT_EQ(tlasBuild->instances.size(), 1u);

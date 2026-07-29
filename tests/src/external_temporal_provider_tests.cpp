@@ -44,30 +44,6 @@ TEST(ExternalTemporalProviderTest, ProbeRequiresEveryRuntimeCapability) {
   EXPECT_TRUE(probe.available);
 }
 
-TEST(ExternalTemporalProviderTest, DefaultProviderIsAnInactiveNoOp) {
-  std::unique_ptr<ExternalTemporalProvider> provider =
-      createExternalTemporalProvider();
-  ASSERT_NE(provider, nullptr);
-  EXPECT_FALSE(provider->probe().available);
-  EXPECT_FALSE(provider->capabilities().available);
-
-  auto plan = provider->prepareFrame({
-      .renderExtent = {1280u, 720u},
-      .outputExtent = {1280u, 720u},
-      .configurationEpoch = 7u,
-  });
-  ASSERT_FALSE(plan.hasError()) << plan.error();
-  EXPECT_FALSE(plan.value().reconstructionActive);
-  EXPECT_FALSE(plan.value().sceneJitterActive);
-  EXPECT_EQ(plan.value().outputExtent, glm::uvec2(1280u, 720u));
-  EXPECT_EQ(plan.value().configurationEpoch, 7u);
-
-  auto execute = provider->execute(RecordingContextHandle{},
-                                   ExternalTemporalProviderExecuteDesc{});
-  ASSERT_TRUE(execute.hasError());
-  EXPECT_NE(execute.error().find("unavailable"), std::string::npos);
-}
-
 TEST(ExternalTemporalProviderTest,
      ExecuteValidationRejectsInvalidMotionAndAcceptsNativeAaInputs) {
   const ExternalTemporalProviderProbe readyProbe = probeFidelityFxFsr31({

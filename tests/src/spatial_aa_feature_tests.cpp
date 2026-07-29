@@ -29,7 +29,8 @@ PresentationAAPlan requirePlan(const RenderSettings &settings) {
       .depthResolveMin = true,
       .alphaToCoverage = true,
   };
-  auto result = buildPresentationAAPlan(settings, {}, capabilities);
+  auto result = buildPresentationAAPlan(resolveRenderSettings(settings), {},
+                                        capabilities);
   EXPECT_FALSE(result.hasError()) << (result.hasError() ? result.error() : "");
   return result.hasError() ? PresentationAAPlan{} : result.value();
 }
@@ -148,14 +149,16 @@ TEST(SpatialAAFeatureTests, RetriesInitializationAfterBakeryPublishesLuts) {
   RenderFrameContext frame{};
   RenderSettings settings{};
   settings.antiAliasing.mode = AntiAliasingMode::TAA;
-  frame.settings = &settings;
+  frame.settings = settings;
   frame.camera.historyValid = false;
-  frame.sharedResources.sceneColorTexture =
+  frame.sharedResources[FrameTextureSlot::SceneColor].texture =
       createFrameTexture(gpu, "spatial_aa_test_scene_color");
-  frame.sharedResources.frameColorTexture =
+  frame.sharedResources[FrameTextureSlot::FrameColor].texture =
       createFrameTexture(gpu, "spatial_aa_test_frame_color");
-  ASSERT_TRUE(isValid(frame.sharedResources.sceneColorTexture));
-  ASSERT_TRUE(isValid(frame.sharedResources.frameColorTexture));
+  ASSERT_TRUE(
+      isValid(frame.sharedResources[FrameTextureSlot::SceneColor].texture));
+  ASSERT_TRUE(
+      isValid(frame.sharedResources[FrameTextureSlot::FrameColor].texture));
   FrameBuildContext ctx{
       .frame = frame,
       .graph = graph,
@@ -186,7 +189,7 @@ TEST(SpatialAAFeatureTests, RetriesInitializationAfterBakeryPublishesLuts) {
 }
 
 TEST(SpatialAAFeatureTests,
-     PostAAScratchLeasesRespectSubmissionAbandonAndCompletion) {
+     PostAAGraphTransientsAvoidScratchSaturationAndPreserveLedger) {
   ScopedTempDirectory temp("nuri_post_aa_lifecycle");
   publishSpatialAAAssets(temp.path());
   FakeSpatialAAGpuDevice gpu;
@@ -207,9 +210,9 @@ TEST(SpatialAAFeatureTests,
     RenderGraphBuilder graph;
     RenderFrameContext frame{};
     frame.frameIndex = frameIndex;
-    frame.settings = &settings;
+    frame.settings = settings;
     frame.presentationAA = requirePlan(settings);
-    frame.sharedResources.frameColorTexture = frameColor;
+    frame.sharedResources[FrameTextureSlot::FrameColor].texture = frameColor;
     FrameBuildContext ctx{.frame = frame,
                           .graph = graph,
                           .resources = resources,
@@ -234,38 +237,44 @@ TEST(SpatialAAFeatureTests,
     EXPECT_EQ(frame.metrics.antiAliasing.postAA.smaaSubmittedPassCount, 4u);
     const SpatialAALifecycleSnapshot snapshot = pass.lifecycleSnapshot();
     EXPECT_EQ(snapshot.recordingLeaseCount, 0u);
-    EXPECT_EQ(snapshot.submittedScratchCount, frameIndex + 1u);
     EXPECT_EQ(snapshot.submittedPostAALedgerCount, frameIndex + 1u);
   }
 
   ASSERT_FALSE(gpu.beginFrame(2u).hasError());
-  RenderGraphBuilder saturatedGraph;
-  RenderFrameContext saturatedFrame{};
-  saturatedFrame.frameIndex = 2u;
-  saturatedFrame.settings = &settings;
-  saturatedFrame.presentationAA = requirePlan(settings);
-  saturatedFrame.sharedResources.frameColorTexture = frameColor;
-  FrameBuildContext saturatedCtx{.frame = saturatedFrame,
-                                 .graph = saturatedGraph,
-                                 .resources = resources,
-                                 .shared = saturatedFrame.sharedResources};
-  auto saturated = pass.prepare(saturatedCtx);
-  ASSERT_FALSE(saturated.hasError()) << saturated.error();
-  EXPECT_FALSE(saturated.value());
-  EXPECT_NE(
+  RenderGraphBuilder thirdGraph;
+  RenderFrameContext thirdFrame{};
+  thirdFrame.frameIndex = 2u;
+  thirdFrame.settings = settings;
+  thirdFrame.presentationAA = requirePlan(settings);
+  thirdFrame.sharedResources[FrameTextureSlot::FrameColor].texture = frameColor;
+  FrameBuildContext thirdCtx{.frame = thirdFrame,
+                             .graph = thirdGraph,
+                             .resources = resources,
+                             .shared = thirdFrame.sharedResources};
+  auto third = pass.prepare(thirdCtx);
+  ASSERT_FALSE(third.hasError()) << third.error();
+  ASSERT_TRUE(third.value());
+  third = pass.build(thirdCtx);
+  ASSERT_FALSE(third.hasError()) << third.error();
+  ASSERT_TRUE(third.value());
+  EXPECT_EQ(
       static_cast<uint32_t>(
-          saturatedFrame.metrics.antiAliasing.postAA.degradation) &
+          thirdFrame.metrics.antiAliasing.postAA.degradation) &
           static_cast<uint32_t>(PostAADegradation::SmaaScratchRingSaturated),
       0u);
+  EXPECT_EQ(pass.lifecycleSnapshot().recordingLeaseCount, 1u);
+  pass.onFrameAbandoned(thirdFrame);
+  EXPECT_EQ(pass.lifecycleSnapshot().submittedPostAALedgerCount, 2u);
 
   gpu.waitIdle();
   ASSERT_FALSE(gpu.beginFrame(3u).hasError());
   RenderGraphBuilder abandonedGraph;
   RenderFrameContext abandonedFrame{};
   abandonedFrame.frameIndex = 3u;
-  abandonedFrame.settings = &settings;
+  abandonedFrame.settings = settings;
   abandonedFrame.presentationAA = requirePlan(settings);
-  abandonedFrame.sharedResources.frameColorTexture = frameColor;
+  abandonedFrame.sharedResources[FrameTextureSlot::FrameColor].texture =
+      frameColor;
   FrameBuildContext abandonedCtx{.frame = abandonedFrame,
                                  .graph = abandonedGraph,
                                  .resources = resources,
@@ -278,13 +287,11 @@ TEST(SpatialAAFeatureTests,
   pass.onFrameAbandoned(abandonedFrame);
   const SpatialAALifecycleSnapshot abandoned = pass.lifecycleSnapshot();
   EXPECT_EQ(abandoned.recordingLeaseCount, 0u);
-  EXPECT_EQ(abandoned.submittedScratchCount,
-            beforeAbandon.submittedScratchCount);
   EXPECT_EQ(abandoned.submittedPostAALedgerCount, 0u);
 }
 
 TEST(SpatialAAFeatureTests,
-     PostAAResizeRetiresInFlightScratchAndCompletionRequiresLedgerMatch) {
+     PostAAResizeKeepsTransientOwnershipAndCompletionRequiresLedgerMatch) {
   ScopedTempDirectory temp("nuri_post_aa_retirement");
   publishSpatialAAAssets(temp.path());
   FakeSpatialAAGpuDevice gpu;
@@ -303,9 +310,9 @@ TEST(SpatialAAFeatureTests,
   RenderGraphBuilder firstGraph;
   RenderFrameContext first{};
   first.frameIndex = 0u;
-  first.settings = &settings;
+  first.settings = settings;
   first.presentationAA = requirePlan(settings);
-  first.sharedResources.frameColorTexture =
+  first.sharedResources[FrameTextureSlot::FrameColor].texture =
       createFrameTexture(gpu, "post_aa_32", 32u);
   FrameBuildContext firstCtx{.frame = first,
                              .graph = firstGraph,
@@ -324,13 +331,13 @@ TEST(SpatialAAFeatureTests,
   RenderGraphBuilder resizedGraph;
   RenderFrameContext resized{};
   resized.frameIndex = 1u;
-  resized.settings = &settings;
+  resized.settings = settings;
   resized.presentationAA = requirePlan(settings);
-  resized.sharedResources.frameColorTexture =
+  resized.sharedResources[FrameTextureSlot::FrameColor].texture =
       createFrameTexture(gpu, "post_aa_64", 64u);
   resized.gpuTiming.availableScopeMask =
       gpuTimingScopeToBit(GpuTimingScope::SpatialAA);
-  resized.gpuTiming.spatialAASourceFrameIndex = 999u;
+  resized.gpuTiming[GpuTimingScope::SpatialAA].sourceFrameIndex = 999u;
   FrameBuildContext resizedCtx{.frame = resized,
                                .graph = resizedGraph,
                                .resources = resources,
@@ -339,17 +346,18 @@ TEST(SpatialAAFeatureTests,
   ASSERT_FALSE(prepared.hasError()) << prepared.error();
   ASSERT_TRUE(prepared.value());
   EXPECT_FALSE(resized.metrics.antiAliasing.postAA.smaaCompleted);
-  EXPECT_EQ(pass.lifecycleSnapshot().retiredScratchGroupCount, 1u);
+  EXPECT_EQ(pass.lifecycleSnapshot().recordingLeaseCount, 1u);
+  EXPECT_EQ(pass.lifecycleSnapshot().submittedPostAALedgerCount, 1u);
   pass.onFrameAbandoned(resized);
 
   ASSERT_FALSE(gpu.beginFrame(3u).hasError());
   RenderGraphBuilder completedGraph;
   RenderFrameContext completed{};
   completed.frameIndex = 3u;
-  completed.settings = &settings;
+  completed.settings = settings;
   completed.presentationAA = requirePlan(settings);
-  completed.sharedResources.frameColorTexture =
-      resized.sharedResources.frameColorTexture;
+  completed.sharedResources[FrameTextureSlot::FrameColor].texture =
+      resized.sharedResources[FrameTextureSlot::FrameColor].texture;
   FrameBuildContext completedCtx{.frame = completed,
                                  .graph = completedGraph,
                                  .resources = resources,
@@ -360,7 +368,7 @@ TEST(SpatialAAFeatureTests,
   EXPECT_TRUE(completed.metrics.antiAliasing.postAA.smaaCompleted);
   EXPECT_EQ(completed.metrics.antiAliasing.postAA.smaaCompletedSourceFrameIndex,
             0u);
-  EXPECT_EQ(pass.lifecycleSnapshot().retiredScratchGroupCount, 0u);
+  EXPECT_EQ(pass.lifecycleSnapshot().submittedPostAALedgerCount, 0u);
   pass.onFrameAbandoned(completed);
 }
 

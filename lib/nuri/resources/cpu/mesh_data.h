@@ -1,7 +1,11 @@
 #pragma once
 #include "nuri/math/types.h"
-#include "nuri/pch.h"
 #include "nuri/resources/cpu/animation_data.h"
+#include <array>
+#include <cstdint>
+#include <memory_resource>
+#include <string>
+#include <vector>
 namespace nuri {
 
 struct Vertex {

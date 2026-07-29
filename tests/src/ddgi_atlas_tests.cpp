@@ -123,24 +123,24 @@ TEST(DDGIAtlasTests, LayoutUsesCountMinusOneExtentsAndRejectsScale) {
       glm::translate(glm::mat4(1.0f), glm::vec3(5.0f, 0.0f, -2.0f)) *
       glm::rotate(glm::mat4(1.0f), glm::half_pi<float>(),
                   glm::vec3(0.0f, 1.0f, 0.0f));
-  auto layout = nuri::makeDDGIVolumeLayout(nuri::makeDDGIVolumeId(1u, 1u), desc,
-                                           rigid, *atlas, *atlas, 7u);
+  auto layout = nuri::makeDDGIVolumeLayout(
+      nuri::DDGIVolumeId::fromParts(1u, 1u), desc, rigid, *atlas, *atlas, 7u);
   ASSERT_TRUE(layout.hasValue());
   EXPECT_EQ(layout->probeCenterHalfExtents, glm::vec3(3.0f, 3.0f, 2.0f));
   EXPECT_EQ(nuri::ddgiLocalProbePosition(*layout, glm::uvec3(0u)),
             -layout->probeCenterHalfExtents);
 
-  auto tracked =
-      nuri::makeDDGIVolumeLayout(nuri::makeDDGIVolumeId(1u, 1u), desc, rigid,
-                                 *atlas, *atlas, 7u, glm::ivec3(2, -1, 3));
+  auto tracked = nuri::makeDDGIVolumeLayout(
+      nuri::DDGIVolumeId::fromParts(1u, 1u), desc, rigid, *atlas, *atlas, 7u,
+      glm::ivec3(2, -1, 3));
   ASSERT_TRUE(tracked.hasValue());
   EXPECT_EQ(nuri::ddgiLocalProbePosition(*tracked, glm::uvec3(0u)),
             -tracked->probeCenterHalfExtents +
                 glm::vec3(tracked->cameraCell) * tracked->probeSpacing);
 
   const glm::mat4 scaled = glm::scale(rigid, glm::vec3(2.0f, 1.0f, 1.0f));
-  auto invalid = nuri::makeDDGIVolumeLayout(nuri::makeDDGIVolumeId(1u, 1u),
-                                            desc, scaled, *atlas, *atlas, 8u);
+  auto invalid = nuri::makeDDGIVolumeLayout(
+      nuri::DDGIVolumeId::fromParts(1u, 1u), desc, scaled, *atlas, *atlas, 8u);
   ASSERT_TRUE(invalid.hasError());
   EXPECT_EQ(invalid.error().reason,
             nuri::DDGIVolumeValidationReason::NonRigidTransform);

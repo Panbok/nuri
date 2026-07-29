@@ -14,17 +14,12 @@
 #include <optional>
 namespace nuri {
 
-enum class RenderCompositionMode : uint8_t {
-  PipelineOnly = 0,
-};
-
 struct NURI_API ApplicationConfig {
   std::string title = "Nuri";
   std::int32_t width = 960;
   std::int32_t height = 540;
   WindowMode windowMode = WindowMode::Windowed;
   std::optional<RuntimeShaderConfig> shaderConfig{};
-  RenderCompositionMode renderComposition = RenderCompositionMode::PipelineOnly;
 };
 
 [[nodiscard]] NURI_API ApplicationConfig
@@ -60,9 +55,6 @@ public:
   inline std::int32_t getWidth() const { return width_; }
   inline std::int32_t getHeight() const { return height_; }
   const ApplicationConfig &config() const;
-  [[nodiscard]] RenderCompositionMode renderCompositionMode() const noexcept {
-    return appConfig_.renderComposition;
-  }
   Renderer &getRenderer();
   const Renderer &getRenderer() const;
   RenderPipeline &getRenderPipeline();

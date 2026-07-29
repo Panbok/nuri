@@ -20,7 +20,7 @@ refreshImportedPrefabSceneResources(EditorRuntime &runtime,
 
 void loadImportedLightsForScene(std::string_view sceneName,
                                 std::string_view modelPath,
-                                std::vector<ImportedSceneLight> &outLights);
+                                std::vector<ScenePrefabLight> &outLights);
 
 void queueSceneTextureArtifactBakeIfNeeded(
     EditorRuntime &runtime, ImportedPrefabSceneResources &assets);

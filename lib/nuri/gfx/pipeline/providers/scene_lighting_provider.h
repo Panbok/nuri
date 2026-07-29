@@ -21,10 +21,11 @@ public:
   SceneLightingProvider(SceneLightingProvider &&) = delete;
   SceneLightingProvider &operator=(SceneLightingProvider &&) = delete;
   Result<bool, std::string> prepare(FrameBuildContext &ctx);
+  void onFrameSubmitted(const RenderFrameContext &frame) noexcept;
+  void onFrameAbandoned(const RenderFrameContext &) noexcept;
 
 private:
   struct Slot {
-    DynamicBufferSlot buffer;
     const RenderScene *scene = nullptr;
     uint64_t sceneId = 0u;
     uint64_t lightTopologyVersion = 0u;
@@ -35,12 +36,11 @@ private:
     ForwardSceneFrameData frameData{};
     ForwardSceneFrameData postTaaFrameData{};
   };
-  Result<bool, std::string> ensureBufferRingCapacity(size_t requiredBytes,
-                                                     uint32_t requiredCount);
   Result<uint64_t, std::string> ensureDisabledShadowFrameBuffer();
   Result<uint32_t, std::string>
   resolveMaterialSamplerId(RenderFrameContext &frame);
   GPUDevice &gpu_;
+  DynamicBufferRing sceneDataBuffers_;
   std::vector<Slot> slots_;
   std::unique_ptr<Buffer> disabledShadowFrameBuffer_;
   SamplerHandle taaMaterialMipBiasSampler_{};

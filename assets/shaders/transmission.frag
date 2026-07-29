@@ -27,7 +27,23 @@ float transmissionJitterMinLod() {
   // This pass is post-TAA, so its screen-space refraction is not itself
   // temporally accumulated. The renderer stores a jitter/current-weight based
   // minimum scene-color LOD in this otherwise unused tessellation slot.
-  return clamp(pc.tessMaxFactor, 0.0, 2.0);
+  return pc.frameData.sceneColorTexId == kInvalidTextureBindlessIndex
+             ? 0.0
+             : clamp(pc.tessMaxFactor, 0.0, 2.0);
+}
+
+uint transmissionSceneColorTexId(uint level) {
+  if (pc.frameData.sceneColorTexId != kInvalidTextureBindlessIndex) {
+    return getSceneColorPyramidTexId(pc.frameData, level);
+  }
+  if (level == 0u) {
+    return pc.debugVisualizationMode;
+  }
+  if (level == 1u) {
+    return pc.shadowCascadeIndex;
+  }
+  return level == 2u ? floatBitsToUint(pc.tessMaxFactor)
+                     : kInvalidTextureBindlessIndex;
 }
 
 vec3 getVolumeTransmissionRay(vec3 n, vec3 v, float thickness, float ior,
@@ -61,19 +77,19 @@ float transmissionFramebufferLod(float roughness, float ior, uint alphaMode) {
 vec3 sampleTransmissionColor(vec2 uv, float roughness, float ior,
                              uint alphaMode) {
   vec2 clampedUv = clamp(uv, vec2(0.0), vec2(1.0));
-  vec3 level0 = textureBindless2D(getSceneColorPyramidTexId(pc.frameData, 0u),
+  vec3 level0 = textureBindless2D(transmissionSceneColorTexId(0u),
                                   pc.frameData.sceneColorSamplerId, clampedUv)
                     .rgb;
   vec3 level1 = level0;
   vec3 level2 = level0;
 
-  uint level1TexId = getSceneColorPyramidTexId(pc.frameData, 1u);
+  uint level1TexId = transmissionSceneColorTexId(1u);
   if (level1TexId != kInvalidTextureBindlessIndex) {
     level1 = textureBindless2D(level1TexId, pc.frameData.sceneColorSamplerId,
                                clampedUv)
                  .rgb;
   }
-  uint level2TexId = getSceneColorPyramidTexId(pc.frameData, 2u);
+  uint level2TexId = transmissionSceneColorTexId(2u);
   if (level2TexId != kInvalidTextureBindlessIndex) {
     level2 = textureBindless2D(level2TexId, pc.frameData.sceneColorSamplerId,
                                clampedUv)
@@ -100,7 +116,7 @@ vec3 sampleTransmissionColor(vec2 uv, float roughness, float ior,
 }
 
 vec2 currentScreenUv() {
-  ivec2 sceneSize = textureBindlessSize2D(pc.frameData.sceneColorTexId);
+  ivec2 sceneSize = textureBindlessSize2D(transmissionSceneColorTexId(0u));
   vec2 safeSize = max(vec2(sceneSize), vec2(1.0));
   return clamp(gl_FragCoord.xy / safeSize, vec2(0.0), vec2(1.0));
 }
@@ -467,7 +483,7 @@ void main() {
   vec3 indirectTransmission = vec3(0.0);
   if (hasTransmission &&
       (pc.frameData.flags & kFrameDataFlagHasSceneColor) != 0u &&
-      pc.frameData.sceneColorTexId != kInvalidTextureBindlessIndex) {
+      transmissionSceneColorTexId(0u) != kInvalidTextureBindlessIndex) {
     indirectTransmission = getIndirectTransmission(
         sm.nBase, sm.v, sm.roughness, sm.diffuseColor, sm.f0, sm.f90,
         vtx.worldPos, transmissionIor, thickness, attenuationColor,

@@ -255,6 +255,14 @@ public:
   }
 
 private:
+  template <typename Handle, typename State, State InitialState>
+  struct AssetNodeHeader {
+    Handle handle{};
+    State state = InitialState;
+    AssetPriority priority = AssetPriority::Normal;
+    uint32_t subscriberCount = 1u;
+    std::string error{};
+  };
   struct TexturePublicationState {
     TextureDesc desc{};
     std::string debugName{};
@@ -262,10 +270,8 @@ private:
   template <typename Handle, typename Request, typename Key, typename Prepared,
             typename PreparedGpu, typename Pending, typename Published,
             typename Publication = std::monostate>
-  struct GpuAssetNode {
-    Handle handle{};
-    AssetState state = AssetState::Queued;
-    AssetPriority priority = AssetPriority::Normal;
+  struct GpuAssetNode
+      : AssetNodeHeader<Handle, AssetState, AssetState::Queued> {
     Request request{};
     Key key{};
     AssetCpuTaskHandle cpuTask{};
@@ -276,16 +282,14 @@ private:
     Publication publication{};
     SubmissionHandle upload{};
     Published published{};
-    uint32_t subscriberCount = 1u;
     uint64_t cpuPayloadBytes = 0u;
-    std::string error{};
   };
   using TextureNode =
       GpuAssetNode<TextureAssetHandle, TextureRequest, TextureKey,
                    PreparedTextureData, PreparedGpuTexture, Texture, TextureRef,
                    TexturePublicationState>;
   using ModelNode =
-      GpuAssetNode<ModelAssetHandle, ModelRequest, ModelKey, PreparedModelData,
+      GpuAssetNode<ModelAssetHandle, ModelRequest, ModelKey, ModelUploadPlan,
                    PreparedGpuModelData, Model, ModelRef>;
   struct MaterialAssetKey {
     uint64_t descHash = 0u;
@@ -296,27 +300,20 @@ private:
   struct MaterialAssetKeyHash {
     size_t operator()(const MaterialAssetKey &key) const noexcept;
   };
-  struct MaterialNode {
-    MaterialAssetHandle handle{};
-    AssetState state = AssetState::CpuReady;
-    AssetPriority priority = AssetPriority::Normal;
+  struct MaterialNode
+      : AssetNodeHeader<MaterialAssetHandle, AssetState, AssetState::CpuReady> {
     MaterialAssetRequest request{};
     MaterialAssetKey key{};
     MaterialRef published = kInvalidMaterialRef;
-    uint32_t subscriberCount = 1u;
-    std::string error{};
   };
-  struct EnvironmentNode {
-    EnvironmentAssetHandle handle{};
-    AssetState state = AssetState::Queued;
+  struct EnvironmentNode : AssetNodeHeader<EnvironmentAssetHandle, AssetState,
+                                           AssetState::Queued> {
     EnvironmentAssetRequest request{};
     std::array<TextureAssetHandle, EnvironmentAssetRequest::kTextureCount>
         textures{};
     EnvironmentHandles published{};
     RenderScene *boundScene = nullptr;
-    uint32_t subscriberCount = 1u;
     bool environmentPublished = false;
-    std::string error{};
   };
   struct SceneKey {
     std::string canonicalPath{};
@@ -331,9 +328,8 @@ private:
   };
   using SceneDependency = std::variant<AssetCpuTaskHandle, TextureAssetHandle,
                                        ModelAssetHandle, MaterialAssetHandle>;
-  struct SceneNode {
-    SceneLoadHandle handle{};
-    SceneLoadState state = SceneLoadState::Requested;
+  struct SceneNode : AssetNodeHeader<SceneLoadHandle, SceneLoadState,
+                                     SceneLoadState::Requested> {
     SceneLoadRequest request{};
     SceneKey key{};
     AssetCpuTaskHandle manifestTask{};
@@ -355,14 +351,12 @@ private:
     uint32_t materialMappingCursor = 0u;
     uint32_t renderableCursor = 0u;
     uint32_t cancellationCursor = 0u;
-    uint32_t subscriberCount = 1u;
     uint32_t requiredFailures = 0u;
     uint32_t optionalFailures = 0u;
     uint64_t cpuPayloadBytes = 0u;
     float progress = 0.0f;
     bool hierarchyPublished = false;
     bool commitPending = false;
-    std::string error{};
   };
   struct ScenePublicationTargetNode {
     ScenePublicationTargetHandle handle{};
@@ -378,7 +372,7 @@ private:
   using TextureCpuCompletion =
       CpuAssetCompletion<TextureAssetHandle, PreparedTextureData>;
   using ModelCpuCompletion =
-      CpuAssetCompletion<ModelAssetHandle, PreparedModelData>;
+      CpuAssetCompletion<ModelAssetHandle, ModelUploadPlan>;
   template <typename Handle, typename Prepared,
             typename Publication = std::monostate>
   struct GpuAssetCompletion {
@@ -513,7 +507,7 @@ private:
   makeMaterialAssetKey(const MaterialAssetRequest &request);
   [[nodiscard]] Result<ModelAssetHandle, std::string>
   requestModelAsset(const ModelRequest &request,
-                    std::shared_ptr<AdaptedSceneMesh> source,
+                    std::shared_ptr<ScenePrefabAdaptedMesh> source,
                     AssetPriority priority);
   template <typename Node, typename Handle, typename Completion, typename Pool,
             typename Map, typename Request, typename Key, typename Published,

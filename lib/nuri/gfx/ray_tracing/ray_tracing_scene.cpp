@@ -3,9 +3,9 @@
 #include "nuri/core/containers/hash_map.h"
 #include "nuri/core/profiling.h"
 #include "nuri/gfx/renderers/scene_draw_database.h"
+#include "nuri/gfx/shader.h"
 #include "nuri/gfx/sim/animation_scene_frame_data.h"
 #include "nuri/math/utils.h"
-#include "nuri/pch.h"
 #include "nuri/resources/gpu/resource_manager.h"
 #include "nuri/scene/render_scene.h"
 
@@ -17,6 +17,24 @@ constexpr uint32_t kRtGeometryDoubleSided = 1u << 0u;
 constexpr uint32_t kRtGeometryAlphaMasked = 1u << 1u;
 constexpr uint32_t kRtGeometryAlphaBlended = 1u << 2u;
 constexpr uint32_t kRtGeometryTransmission = 1u << 3u;
+
+[[nodiscard]] AccelerationStructureTransform
+makeAccelerationStructureTransform(const glm::mat4 &matrix) noexcept {
+  return AccelerationStructureTransform{.rowMajor3x4 = {
+                                            matrix[0][0],
+                                            matrix[1][0],
+                                            matrix[2][0],
+                                            matrix[3][0],
+                                            matrix[0][1],
+                                            matrix[1][1],
+                                            matrix[2][1],
+                                            matrix[3][1],
+                                            matrix[0][2],
+                                            matrix[1][2],
+                                            matrix[2][2],
+                                            matrix[3][2],
+                                        }};
+}
 
 template <typename T>
 [[nodiscard]] std::span<const std::byte> bytesOf(std::span<T> values) {
@@ -52,20 +70,17 @@ void appendUnique(std::pmr::vector<BufferHandle> &output, BufferHandle handle) {
   output.push_back(handle);
 }
 
-void appendUnique(std::pmr::vector<BufferHandle> &output,
-                  std::pmr::vector<RenderGraphAccessMode> &modes,
-                  BufferHandle handle, RenderGraphAccessMode mode) {
-  if (!nuri::isValid(handle)) {
-    return;
-  }
-  const auto found = std::ranges::find(output, handle);
+void appendUnique(std::pmr::vector<RenderGraphBufferUse> &output,
+                  RenderGraphBufferId buffer, RenderGraphAccessMode access) {
+  const auto found =
+      std::ranges::find_if(output, [buffer](const RenderGraphBufferUse use) {
+        return use.buffer.value == buffer.value;
+      });
   if (found == output.end()) {
-    output.push_back(handle);
-    modes.push_back(mode);
+    output.push_back({.buffer = buffer, .access = access});
     return;
   }
-  const size_t index = static_cast<size_t>(found - output.begin());
-  modes[index] = modes[index] | mode;
+  found->access = found->access | access;
 }
 
 } // namespace
@@ -80,9 +95,9 @@ RayTracingScene::RayTracingScene(GPUDevice &gpu, RuntimeDDGIShaderConfig config,
       committedGeometryBounds_(memory_), tlasInstances_(memory_),
       decodeWork_(memory_), decodeDispatches_(memory_),
       dynamicPushConstants_(memory_), dynamicDispatches_(memory_),
-      dependencyBuffers_(memory_), dependencyBufferModes_(memory_),
-      blasBuildItems_(memory_), blasBufferUses_(memory_), blasUses_(memory_),
-      tlasUses_(memory_), indirectReferences_(memory_) {
+      dispatchBufferUses_(memory_), blasBuildItems_(memory_),
+      blasBufferUses_(memory_), blasUses_(memory_), tlasUses_(memory_),
+      indirectReferences_(memory_) {
   auto result = initialize();
   if (result.hasError()) {
     initializationError_ = result.error();
@@ -92,9 +107,9 @@ RayTracingScene::RayTracingScene(GPUDevice &gpu, RuntimeDDGIShaderConfig config,
 RayTracingScene::~RayTracingScene() { clearSceneResources(); }
 
 Result<bool, std::string> RayTracingScene::initialize() {
-  decodeShader_ = Shader::create("rt_decode_positions", gpu_);
-  auto shader = decodeShader_->compileFromFile(config_.decodePositions.string(),
-                                               ShaderStage::Compute);
+  auto shader =
+      compileShaderFile(gpu_, "rt_decode_positions",
+                        config_.decodePositions.string(), ShaderStage::Compute);
   if (shader.hasError()) {
     return Result<bool, std::string>::makeError(shader.error());
   }
@@ -105,8 +120,8 @@ Result<bool, std::string> RayTracingScene::initialize() {
     return Result<bool, std::string>::makeError(pipeline.error());
   }
   decodePipeline_.reset(gpu_, pipeline.value());
-  dynamicVertexShader_ = Shader::create("rt_prepare_dynamic_vertices", gpu_);
-  auto dynamicShader = dynamicVertexShader_->compileFromFile(
+  auto dynamicShader = compileShaderFile(
+      gpu_, "rt_prepare_dynamic_vertices",
       config_.prepareDynamicVertices.string(), ShaderStage::Compute);
   if (dynamicShader.hasError()) {
     return Result<bool, std::string>::makeError(dynamicShader.error());
@@ -136,8 +151,7 @@ void RayTracingScene::clearSceneResources(bool clearChangeTracking) noexcept {
   decodeDispatches_.clear();
   dynamicPushConstants_.clear();
   dynamicDispatches_.clear();
-  dependencyBuffers_.clear();
-  dependencyBufferModes_.clear();
+  dispatchBufferUses_.clear();
   blasBuildItems_.clear();
   blasBufferUses_.clear();
   blasUses_.clear();
@@ -148,14 +162,8 @@ void RayTracingScene::clearSceneResources(bool clearChangeTracking) noexcept {
   buildCompletion_ = {};
   ready_ = false;
   failed_ = false;
-  topologyBuildScheduled_ = false;
-  dynamicUpdateScheduled_ = false;
-  transformUpdateScheduled_ = false;
-  scheduledFrameIndex_ = UINT64_MAX;
-  pendingRebuildEpoch_ = consumedRebuildEpoch_;
+  pendingFrame_ = PendingFrame{.rebuildEpoch = consumedRebuildEpoch_};
   animationVersion_ = 0u;
-  pendingAnimationVersion_ = 0u;
-  pendingTransformVersion_ = 0u;
   sceneId_ = 0u;
   topologyVersion_ = 0u;
   transformVersion_ = 0u;
@@ -187,6 +195,72 @@ void RayTracingScene::pollCompletion() noexcept {
     buildCompletion_ = {};
     ready_ = true;
   }
+}
+
+Result<bool, std::string> RayTracingScene::appendInstance(
+    std::span<const SceneDrawRecord> draws, uint32_t renderableIndex,
+    const InstanceGeometrySource &source, uint32_t expectedGeometryCount,
+    const glm::mat4 &worldFromObject, AccelerationStructureHandle blas,
+    bool dynamic) {
+  if (instanceRecords_.size() > kRayTracingInstanceCustomIndexLimit) {
+    return Result<bool, std::string>::makeError(
+        "RayTracingScene: TLAS custom-index limit exceeded");
+  }
+  const uint32_t firstGeometry = static_cast<uint32_t>(geometryRecords_.size());
+  const uint64_t indexBaseAddress =
+      gpu_.getBufferDeviceAddress(source.indexBuffer, source.indexBaseOffset);
+  for (const SceneDrawRecord &draw : draws) {
+    if (draw.submesh == nullptr) {
+      continue;
+    }
+    const uint32_t flags = (draw.doubleSided ? kRtGeometryDoubleSided : 0u) |
+                           (draw.alphaMasked ? kRtGeometryAlphaMasked : 0u) |
+                           (draw.alphaBlended ? kRtGeometryAlphaBlended : 0u) |
+                           (draw.transmission ? kRtGeometryTransmission : 0u);
+    geometryRecords_.push_back(RtGeometryGpuData{
+        .indexBufferAddress = indexBaseAddress,
+        .vertexBufferAddress = source.useDrawVertexLayout
+                                   ? draw.baseVertexBufferAddress
+                                   : source.vertexAddress,
+        .vertexDecodeAddress = source.useDrawVertexLayout
+                                   ? draw.baseVertexDecodeBufferAddress
+                                   : source.vertexDecodeAddress,
+        .materialIndex = draw.materialIndex,
+        .indexOffset = lod0IndexOffset(*draw.submesh),
+        .vertexOffset = 0u,
+        .indexFormatAndVertexFormat = packRtGeometryFormats(
+            source.useDrawVertexLayout ? draw.indexFormat : source.indexFormat,
+            source.useDrawVertexLayout ? draw.basePackedVertexFormat
+                                       : source.packedVertexFormat),
+        .flags = flags,
+    });
+  }
+  const uint32_t geometryCount =
+      static_cast<uint32_t>(geometryRecords_.size()) - firstGeometry;
+  if (geometryCount != expectedGeometryCount) {
+    return Result<bool, std::string>::makeError(
+        dynamic ? "RayTracingScene: dynamic instance and BLAS layouts differ"
+                : "RayTracingScene: instance and BLAS geometry layouts differ");
+  }
+  const uint32_t rtInstanceIndex =
+      static_cast<uint32_t>(instanceRecords_.size());
+  instanceRecords_.push_back(RtInstanceGpuData{
+      .firstGeometryRecord = firstGeometry,
+      .geometryCount = geometryCount,
+      .renderableIndex = renderableIndex,
+      .flags = dynamic ? 1u : 0u,
+      .worldFromObject = worldFromObject,
+      .objectFromWorld = safeInverseOrIdentity(worldFromObject),
+  });
+  tlasInstances_.push_back(AccelerationStructureInstanceDesc{
+      .transform = makeAccelerationStructureTransform(worldFromObject),
+      .customIndex = rtInstanceIndex,
+      .mask = 0xffu,
+      .flags = AccelerationStructureInstanceFlags::TriangleCullDisable |
+               AccelerationStructureInstanceFlags::ForceNonOpaque,
+      .bottomLevel = blas,
+  });
+  return Result<bool, std::string>::makeResult(true);
 }
 
 Result<bool, std::string>
@@ -337,62 +411,23 @@ RayTracingScene::rebuildStaticScene(FrameBuildContext &ctx,
         return Result<bool, std::string>::makeError(blas.error());
       }
       entry.blas.reset(gpu_, blas.value());
-      if (instanceRecords_.size() > kRayTracingInstanceCustomIndexLimit) {
-        return Result<bool, std::string>::makeError(
-            "RayTracingScene: TLAS custom-index limit exceeded");
-      }
-      const uint32_t firstGeometry =
-          static_cast<uint32_t>(geometryRecords_.size());
-      uint32_t geometryCount = 0u;
-      const uint64_t indexBaseAddress = gpu_.getBufferDeviceAddress(
-          entry.sourceIndexBuffer, entry.sourceIndexBaseOffset);
       const uint64_t worldVertexAddress =
           gpu_.getBufferDeviceAddress(entry.worldVertices.get());
-      for (const SceneDrawRecord &draw : instanceDraws) {
-        if (draw.submesh == nullptr) {
-          continue;
-        }
-        uint32_t flags = 0u;
-        flags |= draw.doubleSided ? kRtGeometryDoubleSided : 0u;
-        flags |= draw.alphaMasked ? kRtGeometryAlphaMasked : 0u;
-        flags |= draw.alphaBlended ? kRtGeometryAlphaBlended : 0u;
-        flags |= draw.transmission ? kRtGeometryTransmission : 0u;
-        geometryRecords_.push_back(RtGeometryGpuData{
-            .indexBufferAddress = indexBaseAddress,
-            .vertexBufferAddress = worldVertexAddress,
-            .vertexDecodeAddress = 0u,
-            .materialIndex = draw.materialIndex,
-            .indexOffset = lod0IndexOffset(*draw.submesh),
-            .vertexOffset = 0u,
-            .indexFormatAndVertexFormat = packRtGeometryFormats(
-                entry.indexFormat,
-                static_cast<uint32_t>(PackedVertexFormat::AnimatedFloat32)),
-            .flags = flags,
-        });
-        ++geometryCount;
+      auto appended = appendInstance(
+          instanceDraws, instanceIndex,
+          InstanceGeometrySource{
+              .indexBuffer = entry.sourceIndexBuffer,
+              .indexBaseOffset = entry.sourceIndexBaseOffset,
+              .vertexAddress = worldVertexAddress,
+              .indexFormat = entry.indexFormat,
+              .packedVertexFormat =
+                  static_cast<uint32_t>(PackedVertexFormat::AnimatedFloat32),
+          },
+          static_cast<uint32_t>(entry.geometries.size()), glm::mat4(1.0f),
+          entry.blas.get(), true);
+      if (appended.hasError()) {
+        return appended;
       }
-      if (geometryCount != entry.geometries.size()) {
-        return Result<bool, std::string>::makeError(
-            "RayTracingScene: dynamic instance and BLAS layouts differ");
-      }
-      const uint32_t rtInstanceIndex =
-          static_cast<uint32_t>(instanceRecords_.size());
-      instanceRecords_.push_back(RtInstanceGpuData{
-          .firstGeometryRecord = firstGeometry,
-          .geometryCount = geometryCount,
-          .renderableIndex = instanceIndex,
-          .flags = 1u,
-          .worldFromObject = glm::mat4(1.0f),
-          .objectFromWorld = glm::mat4(1.0f),
-      });
-      tlasInstances_.push_back(AccelerationStructureInstanceDesc{
-          .transform = makeAccelerationStructureTransform(glm::mat4(1.0f)),
-          .customIndex = rtInstanceIndex,
-          .mask = 0xffu,
-          .flags = AccelerationStructureInstanceFlags::TriangleCullDisable |
-                   AccelerationStructureInstanceFlags::ForceNonOpaque,
-          .bottomLevel = entry.blas.get(),
-      });
       continue;
     }
     const uint64_t key = handleKey(instance.model->geometryHandle());
@@ -490,59 +525,19 @@ RayTracingScene::rebuildStaticScene(FrameBuildContext &ctx,
     }
 
     const StaticGeometryEntry &geometry = staticGeometries_[geometryIndex];
-    if (instanceRecords_.size() > kRayTracingInstanceCustomIndexLimit) {
-      return Result<bool, std::string>::makeError(
-          "RayTracingScene: TLAS custom-index limit exceeded");
-    }
-    const uint32_t firstGeometry =
-        static_cast<uint32_t>(geometryRecords_.size());
-    uint32_t geometryCount = 0u;
-    const uint64_t indexBaseAddress = gpu_.getBufferDeviceAddress(
-        geometry.sourceIndexBuffer, geometry.sourceIndexBaseOffset);
-    for (const SceneDrawRecord &draw : instanceDraws) {
-      if (draw.submesh == nullptr) {
-        continue;
-      }
-      uint32_t flags = 0u;
-      flags |= draw.doubleSided ? kRtGeometryDoubleSided : 0u;
-      flags |= draw.alphaMasked ? kRtGeometryAlphaMasked : 0u;
-      flags |= draw.alphaBlended ? kRtGeometryAlphaBlended : 0u;
-      flags |= draw.transmission ? kRtGeometryTransmission : 0u;
-      geometryRecords_.push_back(RtGeometryGpuData{
-          .indexBufferAddress = indexBaseAddress,
-          .vertexBufferAddress = draw.baseVertexBufferAddress,
-          .vertexDecodeAddress = draw.baseVertexDecodeBufferAddress,
-          .materialIndex = draw.materialIndex,
-          .indexOffset = lod0IndexOffset(*draw.submesh),
-          .vertexOffset = 0u,
-          .indexFormatAndVertexFormat = packRtGeometryFormats(
-              draw.indexFormat, draw.basePackedVertexFormat),
-          .flags = flags,
-      });
-      ++geometryCount;
-    }
-    if (geometryCount != geometry.geometries.size()) {
-      return Result<bool, std::string>::makeError(
-          "RayTracingScene: instance and BLAS geometry layouts differ");
-    }
     const glm::mat4 &world = instance.renderable->modelMatrix;
-    const uint32_t rtInstanceIndex =
-        static_cast<uint32_t>(instanceRecords_.size());
-    instanceRecords_.push_back(RtInstanceGpuData{
-        .firstGeometryRecord = firstGeometry,
-        .geometryCount = geometryCount,
-        .renderableIndex = instanceIndex,
-        .worldFromObject = world,
-        .objectFromWorld = safeInverseOrIdentity(world),
-    });
-    tlasInstances_.push_back(AccelerationStructureInstanceDesc{
-        .transform = makeAccelerationStructureTransform(world),
-        .customIndex = rtInstanceIndex,
-        .mask = 0xffu,
-        .flags = AccelerationStructureInstanceFlags::TriangleCullDisable |
-                 AccelerationStructureInstanceFlags::ForceNonOpaque,
-        .bottomLevel = geometry.blas.get(),
-    });
+    auto appended =
+        appendInstance(instanceDraws, instanceIndex,
+                       InstanceGeometrySource{
+                           .indexBuffer = geometry.sourceIndexBuffer,
+                           .indexBaseOffset = geometry.sourceIndexBaseOffset,
+                           .useDrawVertexLayout = true,
+                       },
+                       static_cast<uint32_t>(geometry.geometries.size()), world,
+                       geometry.blas.get(), false);
+    if (appended.hasError()) {
+      return appended;
+    }
     ++staticInstanceCount_;
   }
 
@@ -907,6 +902,7 @@ Result<bool, std::string> RayTracingScene::uploadTables() {
 Result<bool, std::string>
 RayTracingScene::appendTopologyBuildPasses(FrameBuildContext &ctx) {
   decodeWork_.clear();
+  dispatchBufferUses_.clear();
   size_t decodeCount = 0u;
   for (const StaticGeometryEntry &entry : staticGeometries_) {
     decodeCount += entry.model->submeshes().size();
@@ -917,6 +913,23 @@ RayTracingScene::appendTopologyBuildPasses(FrameBuildContext &ctx) {
         gpu_.getBufferDeviceAddress(entry.sourceVertexBuffer);
     const uint64_t decodeAddress =
         gpu_.getBufferDeviceAddress(entry.sourceDecodeBuffer);
+    const auto sourceVertices = ctx.graph.importBuffer(
+        entry.sourceVertexBuffer, "rt_decode_source_vertices");
+    const auto sourceDecode = ctx.graph.importBuffer(entry.sourceDecodeBuffer,
+                                                     "rt_decode_source_table");
+    const auto destinationPositions = ctx.graph.importBuffer(
+        entry.decodedPositions.get(), "rt_decode_destination_positions");
+    if (sourceVertices.hasError() || sourceDecode.hasError() ||
+        destinationPositions.hasError()) {
+      return Result<bool, std::string>::makeError(
+          "RayTracingScene: failed to import static decode buffers");
+    }
+    appendUnique(dispatchBufferUses_, sourceVertices.value(),
+                 RenderGraphAccessMode::Read);
+    appendUnique(dispatchBufferUses_, sourceDecode.value(),
+                 RenderGraphAccessMode::Read);
+    appendUnique(dispatchBufferUses_, destinationPositions.value(),
+                 RenderGraphAccessMode::Write);
     const std::span<const Submesh> submeshes = entry.model->submeshes();
     for (uint32_t submeshIndex = 0u;
          submeshIndex < static_cast<uint32_t>(submeshes.size());
@@ -937,8 +950,6 @@ RayTracingScene::appendTopologyBuildPasses(FrameBuildContext &ctx) {
                   .packedVertexFormat = static_cast<uint32_t>(
                       PackedVertexFormat::StaticQuantized20),
               },
-          .dependencies = {entry.sourceVertexBuffer, entry.sourceDecodeBuffer,
-                           entry.decodedPositions.get()},
       });
     }
   }
@@ -955,8 +966,6 @@ RayTracingScene::appendTopologyBuildPasses(FrameBuildContext &ctx) {
                 .z = 1u,
             },
         .pushConstants = bytesOf(work.constants),
-        .dependencyBuffers = work.dependencies,
-        .dependencyBufferAccessModes = work.accessModes,
         .debugLabel = "RT Decode Static Positions",
         .debugColor = 0xffbb66ffu,
     });
@@ -966,6 +975,7 @@ RayTracingScene::appendTopologyBuildPasses(FrameBuildContext &ctx) {
         .executionMode = RenderPassExecutionMode::ComputeOnly,
         .hasColorAttachment = false,
         .preDispatches = decodeDispatches_,
+        .bufferUses = dispatchBufferUses_,
         .gpuTimingScope = GpuTimingScope::RayTracingBLAS,
         .debugLabel = "RT Decode Static Positions",
         .debugColor = 0xffbb66ffu,
@@ -1097,8 +1107,8 @@ RayTracingScene::appendTopologyBuildPasses(FrameBuildContext &ctx) {
   if (tlasPass.hasError()) {
     return Result<bool, std::string>::makeError(tlasPass.error());
   }
-  topologyBuildScheduled_ = true;
-  scheduledFrameIndex_ = ctx.frame.frameIndex;
+  pendingFrame_.topology = true;
+  pendingFrame_.frameIndex = ctx.frame.frameIndex;
   publish(ctx, graphTlas.value());
   return Result<bool, std::string>::makeResult(true);
 }
@@ -1114,16 +1124,19 @@ Result<bool, std::string> RayTracingScene::appendDynamicVertexPass(
   }
   dynamicPushConstants_.clear();
   dynamicDispatches_.clear();
-  dependencyBuffers_.clear();
-  dependencyBufferModes_.clear();
+  dispatchBufferUses_.clear();
   size_t dispatchCount = 0u;
   for (const DynamicGeometryEntry &entry : dynamicGeometries_) {
     dispatchCount += entry.model->submeshes().size();
   }
   dynamicPushConstants_.reserve(dispatchCount);
   dynamicDispatches_.reserve(dispatchCount);
-  appendUnique(dependencyBuffers_, dependencyBufferModes_,
-               animationData.instanceMatricesBuffer,
+  const auto instanceMatrices = ctx.graph.importBuffer(
+      animationData.instanceMatricesBuffer, "rt_dynamic_instance_matrices");
+  if (instanceMatrices.hasError()) {
+    return Result<bool, std::string>::makeError(instanceMatrices.error());
+  }
+  appendUnique(dispatchBufferUses_, instanceMatrices.value(),
                RenderGraphAccessMode::Read);
   for (DynamicGeometryEntry &entry : dynamicGeometries_) {
     if (entry.renderableIndex >=
@@ -1187,12 +1200,27 @@ Result<bool, std::string> RayTracingScene::appendDynamicVertexPass(
           .debugColor = 0xffcc7744u,
       });
     }
-    appendUnique(dependencyBuffers_, dependencyBufferModes_,
-                 entry.sourceVertexBuffer, RenderGraphAccessMode::Read);
-    appendUnique(dependencyBuffers_, dependencyBufferModes_,
-                 entry.sourceDecodeBuffer, RenderGraphAccessMode::Read);
-    appendUnique(dependencyBuffers_, dependencyBufferModes_,
-                 entry.worldVertices.get(), RenderGraphAccessMode::Write);
+    const auto sourceVertices = ctx.graph.importBuffer(
+        entry.sourceVertexBuffer, "rt_dynamic_source_vertices");
+    const auto destinationVertices = ctx.graph.importBuffer(
+        entry.worldVertices.get(), "rt_dynamic_destination_vertices");
+    if (sourceVertices.hasError() || destinationVertices.hasError()) {
+      return Result<bool, std::string>::makeError(
+          "RayTracingScene: failed to import dynamic vertex buffers");
+    }
+    appendUnique(dispatchBufferUses_, sourceVertices.value(),
+                 RenderGraphAccessMode::Read);
+    if (nuri::isValid(entry.sourceDecodeBuffer)) {
+      const auto sourceDecode = ctx.graph.importBuffer(
+          entry.sourceDecodeBuffer, "rt_dynamic_source_decode");
+      if (sourceDecode.hasError()) {
+        return Result<bool, std::string>::makeError(sourceDecode.error());
+      }
+      appendUnique(dispatchBufferUses_, sourceDecode.value(),
+                   RenderGraphAccessMode::Read);
+    }
+    appendUnique(dispatchBufferUses_, destinationVertices.value(),
+                 RenderGraphAccessMode::Write);
   }
   if (dynamicDispatches_.empty()) {
     return Result<bool, std::string>::makeResult(true);
@@ -1201,8 +1229,7 @@ Result<bool, std::string> RayTracingScene::appendDynamicVertexPass(
       .executionMode = RenderPassExecutionMode::ComputeOnly,
       .hasColorAttachment = false,
       .preDispatches = dynamicDispatches_,
-      .dependencyBuffers = dependencyBuffers_,
-      .dependencyBufferAccessModes = dependencyBufferModes_,
+      .bufferUses = dispatchBufferUses_,
       .gpuTimingScope = GpuTimingScope::RayTracingBLAS,
       .debugLabel = "RT Prepare Dynamic Vertices",
       .debugColor = 0xffcc7744u,
@@ -1259,9 +1286,9 @@ Result<bool, std::string> RayTracingScene::appendDynamicUpdatePasses(
   if (blasPass.hasError()) {
     return Result<bool, std::string>::makeError(blasPass.error());
   }
-  pendingAnimationVersion_ = animationData.version;
-  dynamicUpdateScheduled_ = true;
-  scheduledFrameIndex_ = ctx.frame.frameIndex;
+  pendingFrame_.animationVersion = animationData.version;
+  pendingFrame_.dynamic = true;
+  pendingFrame_.frameIndex = ctx.frame.frameIndex;
   ctx.frame.metrics.rayTracingScene.dynamicBlasUpdates =
       static_cast<uint32_t>(dynamicGeometries_.size());
   return appendTlasUpdatePass(ctx);
@@ -1300,7 +1327,7 @@ RayTracingScene::updateTransforms(FrameBuildContext &ctx,
   if (upload.hasError()) {
     return upload;
   }
-  pendingTransformVersion_ = ctx.frame.scene->transformVersion();
+  pendingFrame_.transformVersion = ctx.frame.scene->transformVersion();
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -1367,11 +1394,17 @@ void RayTracingScene::rebuildIndirectReferences(
       instanceTable_.get(),
       geometryTable_.get(),
       surfaceBounds_.get(),
-      material != nullptr ? material->headerBuffer : BufferHandle{},
-      material != nullptr ? material->clearcoatBuffer : BufferHandle{},
-      material != nullptr ? material->sheenBuffer : BufferHandle{},
-      material != nullptr ? material->transmissionBuffer : BufferHandle{},
-      material != nullptr ? material->specularBuffer : BufferHandle{},
+      material != nullptr ? (*material)[MaterialTableRegion::Header].buffer
+                          : BufferHandle{},
+      material != nullptr ? (*material)[MaterialTableRegion::Clearcoat].buffer
+                          : BufferHandle{},
+      material != nullptr ? (*material)[MaterialTableRegion::Sheen].buffer
+                          : BufferHandle{},
+      material != nullptr
+          ? (*material)[MaterialTableRegion::Transmission].buffer
+          : BufferHandle{},
+      material != nullptr ? (*material)[MaterialTableRegion::Specular].buffer
+                          : BufferHandle{},
   };
   if (!indirectReferencesDirty_ && inputs == indirectReferenceInputs_) {
     return;
@@ -1392,11 +1425,9 @@ void RayTracingScene::rebuildIndirectReferences(
     appendUnique(indirectReferences_, entry.worldVertices.get());
   }
   if (material != nullptr) {
-    appendUnique(indirectReferences_, material->headerBuffer);
-    appendUnique(indirectReferences_, material->clearcoatBuffer);
-    appendUnique(indirectReferences_, material->sheenBuffer);
-    appendUnique(indirectReferences_, material->transmissionBuffer);
-    appendUnique(indirectReferences_, material->specularBuffer);
+    for (const MaterialTableGpuRegion &region : material->regions) {
+      appendUnique(indirectReferences_, region.buffer);
+    }
   }
   indirectReferenceInputs_ = inputs;
   indirectReferencesDirty_ = false;
@@ -1429,23 +1460,28 @@ void RayTracingScene::publish(FrameBuildContext &ctx,
       .graphTopLevelAccelerationStructure = graphTlas,
       .instanceTable = instanceTable_.get(),
       .geometryTable = geometryTable_.get(),
-      .materialTable =
-          materials != nullptr ? materials->headerBuffer : BufferHandle{},
+      .materialTable = materials != nullptr
+                           ? (*materials)[MaterialTableRegion::Header].buffer
+                           : BufferHandle{},
       .surfaceBounds = surfaceBounds_.get(),
       .instanceTableAddress = gpu_.getBufferDeviceAddress(instanceTable_.get()),
       .geometryTableAddress = gpu_.getBufferDeviceAddress(geometryTable_.get()),
       .materialTableAddress =
-          materials != nullptr ? materials->headerBufferAddress : 0u,
+          materials != nullptr
+              ? (*materials)[MaterialTableRegion::Header].address
+              : 0u,
       .surfaceBoundsAddress = gpu_.getBufferDeviceAddress(surfaceBounds_.get()),
       .indirectSubmissionReferences = indirectReferences_,
       .indirectSubmissionTextureReferences =
           ctx.shared.sceneDrawDatabase->rayTracingMaterialTextures(),
       .sceneId = sceneId_,
       .topologyVersion = topologyVersion_,
-      .transformVersion = transformUpdateScheduled_ ? pendingTransformVersion_
-                                                    : transformVersion_,
-      .deformationVersion = dynamicUpdateScheduled_ ? pendingAnimationVersion_
-                                                    : deformationVersion_,
+      .transformVersion = pendingFrame_.transform
+                              ? pendingFrame_.transformVersion
+                              : transformVersion_,
+      .deformationVersion = pendingFrame_.dynamic
+                                ? pendingFrame_.animationVersion
+                                : deformationVersion_,
       .geometryMutationVersion = geometryMutationVersion_,
       .instanceCount = static_cast<uint32_t>(instanceRecords_.size()),
       .geometryCount = static_cast<uint32_t>(geometryRecords_.size()),
@@ -1485,15 +1521,15 @@ void RayTracingScene::publish(FrameBuildContext &ctx,
           ? 1u
           : 0u;
   metrics.decodeDispatches = static_cast<uint32_t>(decodeWork_.size());
-  metrics.blasBuilds = topologyBuildScheduled_
+  metrics.blasBuilds = pendingFrame_.topology
                            ? static_cast<uint32_t>(staticGeometries_.size() +
                                                    dynamicGeometries_.size())
                            : 0u;
   metrics.dynamicVertexDispatches =
-      topologyBuildScheduled_ || dynamicUpdateScheduled_
+      pendingFrame_.topology || pendingFrame_.dynamic
           ? static_cast<uint32_t>(dynamicDispatches_.size())
           : 0u;
-  metrics.tlasBuilds = topologyBuildScheduled_ ? 1u : 0u;
+  metrics.tlasBuilds = pendingFrame_.topology ? 1u : 0u;
   metrics.queuedBlasBuilds =
       ready_ ? 0u : metrics.staticBlasCount + metrics.dynamicBlasCount;
   metrics.consumedRebuildEpoch = consumedRebuildEpoch_;
@@ -1533,17 +1569,16 @@ void RayTracingScene::publish(FrameBuildContext &ctx,
         }
       };
   for (const StaticGeometryEntry &entry : staticGeometries_) {
-    accumulateFacts(entry.blas.get(), true, topologyBuildScheduled_, false,
+    accumulateFacts(entry.blas.get(), true, pendingFrame_.topology, false,
                     metrics);
   }
   for (const DynamicGeometryEntry &entry : dynamicGeometries_) {
-    accumulateFacts(entry.blas.get(), true, topologyBuildScheduled_,
-                    dynamicUpdateScheduled_, metrics);
+    accumulateFacts(entry.blas.get(), true, pendingFrame_.topology,
+                    pendingFrame_.dynamic, metrics);
   }
   if (tlas_.valid()) {
-    accumulateFacts(tlas_.get(), false, topologyBuildScheduled_,
-                    dynamicUpdateScheduled_ || transformUpdateScheduled_,
-                    metrics);
+    accumulateFacts(tlas_.get(), false, pendingFrame_.topology,
+                    pendingFrame_.dynamic || pendingFrame_.transform, metrics);
   }
   asScratchHighWaterBytes_ =
       std::max(asScratchHighWaterBytes_, scheduledScratchBytes);
@@ -1569,17 +1604,20 @@ void RayTracingScene::publish(FrameBuildContext &ctx,
       geometryRecords_.size() * sizeof(RtGeometryGpuData) +
       surfaceBoundsRecords_.size() * sizeof(RtSurfaceBoundsGpuData);
   if (hasGpuTimingScope(ctx.frame.gpuTiming, GpuTimingScope::RayTracingScene)) {
-    metrics.gpuTimeMs = ctx.frame.gpuTiming.rayTracingSceneTimeMs;
+    metrics.gpuTimeMs =
+        ctx.frame.gpuTiming[GpuTimingScope::RayTracingScene].timeMs;
     metrics.gpuTimingSourceFrameIndex =
-        ctx.frame.gpuTiming.rayTracingSceneSourceFrameIndex;
+        ctx.frame.gpuTiming[GpuTimingScope::RayTracingScene].sourceFrameIndex;
     metrics.gpuTimingAvailable = 1u;
   }
   if (hasGpuTimingScope(ctx.frame.gpuTiming, GpuTimingScope::RayTracingBLAS)) {
-    metrics.blasGpuTimeMs = ctx.frame.gpuTiming.rayTracingBlasTimeMs;
+    metrics.blasGpuTimeMs =
+        ctx.frame.gpuTiming[GpuTimingScope::RayTracingBLAS].timeMs;
     metrics.blasGpuTimingAvailable = 1u;
   }
   if (hasGpuTimingScope(ctx.frame.gpuTiming, GpuTimingScope::RayTracingTLAS)) {
-    metrics.tlasGpuTimeMs = ctx.frame.gpuTiming.rayTracingTlasTimeMs;
+    metrics.tlasGpuTimeMs =
+        ctx.frame.gpuTiming[GpuTimingScope::RayTracingTLAS].timeMs;
     metrics.tlasGpuTimingAvailable = 1u;
   }
 }
@@ -1600,9 +1638,8 @@ Result<bool, std::string> RayTracingScene::prepare(FrameBuildContext &ctx) {
   } prepareCpuTimer{ctx.frame.metrics.rayTracingScene};
   ctx.frame.metrics.rayTracingScene.consumedRebuildEpoch =
       consumedRebuildEpoch_;
-  topologyBuildScheduled_ = false;
-  const RenderSettings::DDGISettings &settings =
-      renderSettingsOrDefault(ctx.frame).ddgi;
+  pendingFrame_.topology = false;
+  const RenderSettings::DDGISettings &settings = ctx.frame.settings.ddgi;
   if (!settings.enabled || ctx.frame.scene == nullptr) {
     clearSceneResources();
     ctx.frame.metrics.rayTracingScene.readiness =
@@ -1655,9 +1692,9 @@ Result<bool, std::string> RayTracingScene::prepare(FrameBuildContext &ctx) {
       failed_ = true;
       return rebuild;
     }
-    pendingRebuildEpoch_ = std::max(
+    pendingFrame_.rebuildEpoch = std::max(
         consumedRebuildEpoch_, settings.requestedEpochs.rebuildRayTracingScene);
-    scheduledFrameIndex_ = ctx.frame.frameIndex;
+    pendingFrame_.frameIndex = ctx.frame.frameIndex;
     if (!nuri::isValid(tlas_.get())) {
       ctx.frame.metrics.rayTracingScene.readiness =
           ready_ ? RayTracingSceneReadiness::Ready
@@ -1687,8 +1724,8 @@ Result<bool, std::string> RayTracingScene::prepare(FrameBuildContext &ctx) {
     if (transforms.hasError()) {
       return transforms;
     }
-    transformUpdateScheduled_ = true;
-    scheduledFrameIndex_ = ctx.frame.frameIndex;
+    pendingFrame_.transform = true;
+    pendingFrame_.frameIndex = ctx.frame.frameIndex;
   }
   const bool dynamicChanged = ready_ && !dynamicGeometries_.empty() &&
                               matchingAnimationData &&
@@ -1726,16 +1763,17 @@ Result<bool, std::string> RayTracingScene::prepare(FrameBuildContext &ctx) {
 void RayTracingScene::onFrameSubmitted(
     const RenderFrameContext &frame) noexcept {
   commitGeometryChanges(frame.frameIndex);
-  if (scheduledFrameIndex_ != frame.frameIndex) {
+  if (pendingFrame_.frameIndex != frame.frameIndex) {
     return;
   }
-  consumedRebuildEpoch_ = std::max(consumedRebuildEpoch_, pendingRebuildEpoch_);
-  pendingRebuildEpoch_ = consumedRebuildEpoch_;
+  consumedRebuildEpoch_ =
+      std::max(consumedRebuildEpoch_, pendingFrame_.rebuildEpoch);
+  pendingFrame_.rebuildEpoch = consumedRebuildEpoch_;
   if (frame.scene != nullptr) {
     (void)frame.scene->stageDDGIStaticCoverageBounds(
         currentStaticCoverageBounds_);
   }
-  if (topologyBuildScheduled_) {
+  if (pendingFrame_.topology) {
     auto completion = gpu_.captureWorkCompletion();
     if (completion.hasError()) {
       failed_ = true;
@@ -1746,38 +1784,38 @@ void RayTracingScene::onFrameSubmitted(
     // sufficient for consumers once this build submission has succeeded. Keep
     // the completion token for retirement/lifetime tracking, not readiness.
     ready_ = true;
-    topologyBuildScheduled_ = false;
+    pendingFrame_.topology = false;
   }
-  if (dynamicUpdateScheduled_) {
-    animationVersion_ = pendingAnimationVersion_;
-    deformationVersion_ = pendingAnimationVersion_;
-    dynamicUpdateScheduled_ = false;
+  if (pendingFrame_.dynamic) {
+    animationVersion_ = pendingFrame_.animationVersion;
+    deformationVersion_ = pendingFrame_.animationVersion;
+    pendingFrame_.dynamic = false;
   }
-  if (transformUpdateScheduled_) {
-    transformVersion_ = pendingTransformVersion_;
-    transformUpdateScheduled_ = false;
+  if (pendingFrame_.transform) {
+    transformVersion_ = pendingFrame_.transformVersion;
+    pendingFrame_.transform = false;
   }
-  scheduledFrameIndex_ = UINT64_MAX;
+  pendingFrame_.frameIndex = UINT64_MAX;
 }
 
 void RayTracingScene::onFrameAbandoned(
     const RenderFrameContext &frame) noexcept {
   abandonGeometryChanges(frame.frameIndex);
-  if (topologyBuildScheduled_ && scheduledFrameIndex_ == frame.frameIndex) {
+  if (pendingFrame_.topology && pendingFrame_.frameIndex == frame.frameIndex) {
     failed_ = true;
-    topologyBuildScheduled_ = false;
+    pendingFrame_.topology = false;
   }
-  if (dynamicUpdateScheduled_ && scheduledFrameIndex_ == frame.frameIndex) {
-    dynamicUpdateScheduled_ = false;
-    pendingAnimationVersion_ = animationVersion_;
+  if (pendingFrame_.dynamic && pendingFrame_.frameIndex == frame.frameIndex) {
+    pendingFrame_.dynamic = false;
+    pendingFrame_.animationVersion = animationVersion_;
   }
-  if (transformUpdateScheduled_ && scheduledFrameIndex_ == frame.frameIndex) {
-    transformUpdateScheduled_ = false;
-    pendingTransformVersion_ = transformVersion_;
+  if (pendingFrame_.transform && pendingFrame_.frameIndex == frame.frameIndex) {
+    pendingFrame_.transform = false;
+    pendingFrame_.transformVersion = transformVersion_;
   }
-  if (scheduledFrameIndex_ == frame.frameIndex) {
-    pendingRebuildEpoch_ = consumedRebuildEpoch_;
-    scheduledFrameIndex_ = UINT64_MAX;
+  if (pendingFrame_.frameIndex == frame.frameIndex) {
+    pendingFrame_.rebuildEpoch = consumedRebuildEpoch_;
+    pendingFrame_.frameIndex = UINT64_MAX;
   }
 }
 

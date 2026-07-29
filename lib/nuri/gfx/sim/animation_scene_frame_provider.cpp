@@ -1,5 +1,4 @@
 #include "nuri/gfx/sim/animation_scene_frame_provider.h"
-#include "nuri/pch.h"
 #include "nuri/scene_runtime/scene_runtime_host.h"
 namespace nuri {
 

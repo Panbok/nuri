@@ -1,13 +1,10 @@
 #include "nuri/resources/gpu/resource_manager.h"
 #include "nuri/core/log.h"
 #include "nuri/core/profiling.h"
-#include "nuri/pch.h"
 #include "nuri/resources/mesh_importer.h"
 #include "nuri/resources/storage/cache_utils.h"
 #include "nuri/resources/storage/material/material_binary_serializer.h"
-#include "nuri/resources/storage/material/material_cache_utils.h"
 #include "nuri/resources/storage/texture/dds_texture_pack.h"
-#include "nuri/resources/storage/texture/material_texture_artifact.h"
 #include "nuri/resources/storage/texture/texture_artifact_builder.h"
 #include "nuri/resources/storage/texture/texture_cache_utils.h"
 #include "nuri/utils/env_utils.h"
@@ -64,29 +61,12 @@ calculateDirtyRange(std::span<const T> previous, std::span<const T> current) {
       .count = static_cast<uint32_t>(current.size() - first),
   };
 }
-[[nodiscard]] bool hasTextureExtension(std::string_view path,
-                                       std::string_view extension) {
-  if (path.size() < extension.size()) {
-    return false;
-  }
-  const size_t start = path.size() - extension.size();
-  for (size_t i = 0; i < extension.size(); ++i) {
-    const char lhs = static_cast<char>(
-        std::tolower(static_cast<unsigned char>(path[start + i])));
-    const char rhs = static_cast<char>(
-        std::tolower(static_cast<unsigned char>(extension[i])));
-    if (lhs != rhs) {
-      return false;
-    }
-  }
-  return true;
-}
 [[nodiscard]] TextureRequestKind
 resolveTextureRequestKindForPath(std::string_view path,
                                  TextureRequestKind fallback) {
   if (fallback == TextureRequestKind::Texture2D &&
-      (hasTextureExtension(path, ".ktx2") ||
-       hasTextureExtension(path, ".ktx"))) {
+      (hasExtensionCaseInsensitive(path, ".ktx2") ||
+       hasExtensionCaseInsensitive(path, ".ktx"))) {
     return TextureRequestKind::Ktx2Texture2D;
   }
   return fallback;
@@ -119,32 +99,6 @@ validateTextureRequestContentContract(const TextureRequest &request) {
 [[nodiscard]] bool formatPreservesNormalVarianceAlpha(Format format) noexcept {
   return format == Format::RGBA8_UNORM || format == Format::BC7_RGBA_UNORM;
 }
-struct MaterialTextureSpec {
-  const char *name = nullptr;
-  const char *debugSuffix = nullptr;
-  MaterialTextureSlot slot = kMaterialTextureSlotBaseColor;
-};
-constexpr std::array<MaterialTextureSpec, kMaterialTextureSlotCount>
-    kMaterialTextureSpecs{{
-        {"baseColor", "_base_color_", kMaterialTextureSlotBaseColor},
-        {"metal/rough", "_metal_rough_", kMaterialTextureSlotMetallicRoughness},
-        {"normal", "_normal_", kMaterialTextureSlotNormal},
-        {"occlusion", "_occlusion_", kMaterialTextureSlotOcclusion},
-        {"emissive", "_emissive_", kMaterialTextureSlotEmissive},
-        {"clearcoat", "_clearcoat_", kMaterialTextureSlotClearcoat},
-        {"clearcoat roughness", "_clearcoat_roughness_",
-         kMaterialTextureSlotClearcoatRoughness},
-        {"clearcoat normal", "_clearcoat_normal_",
-         kMaterialTextureSlotClearcoatNormal},
-        {"specular", "_specular_", kMaterialTextureSlotSpecular},
-        {"specular color", "_specular_color_",
-         kMaterialTextureSlotSpecularColor},
-        {"sheen color", "_sheen_color_", kMaterialTextureSlotSheenColor},
-        {"sheen roughness", "_sheen_roughness_",
-         kMaterialTextureSlotSheenRoughness},
-        {"transmission", "_transmission_", kMaterialTextureSlotTransmission},
-        {"thickness", "_thickness_", kMaterialTextureSlotThickness},
-    }};
 [[nodiscard]] ModelKey makeSceneMeshModelKey(std::string_view canonicalPath,
                                              uint64_t optionsHash,
                                              uint32_t sceneMeshIndex) {
@@ -290,7 +244,8 @@ tryLoadSceneMaterialCache(std::string_view sourcePath) {
   }
   TextureRequest textureRequest{};
   textureRequest.path = slotData.path;
-  if (ddsPack != nullptr && hasTextureExtension(slotData.path, ".dds")) {
+  if (ddsPack != nullptr &&
+      hasExtensionCaseInsensitive(slotData.path, ".dds")) {
     const std::string canonicalPath = canonicalizeResourcePath(slotData.path);
     if (ddsPack->sourceFingerprint(canonicalPath).has_value()) {
       textureRequest.path = canonicalPath;
@@ -308,10 +263,10 @@ collectDdsTexturePackSources(const ImportedMaterialSet &materialSet) {
   std::vector<DdsTexturePackSource> sources{};
   std::unordered_set<std::string> seen{};
   for (const ImportedMaterialInfo &material : materialSet.materials) {
-    for (const MaterialTextureSpec &spec : kMaterialTextureSpecs) {
+    for (const MaterialTextureSlotDesc &spec : kMaterialTextureSlotDescs) {
       const ImportedMaterialTexture &slot = material.textures[spec.slot];
       if (slot.sourceKind != MaterialTextureSourceKind::ExternalFile ||
-          !hasTextureExtension(slot.path, ".dds")) {
+          !hasExtensionCaseInsensitive(slot.path, ".dds")) {
         continue;
       }
       const std::string canonicalPath = canonicalizeResourcePath(slot.path);
@@ -352,9 +307,9 @@ void releaseMaterialTextureRefs(ResourceManager &resources,
 }
 [[nodiscard]] std::string
 makeImportedTextureDebugName(std::string_view debugNamePrefix,
-                             std::string_view debugSuffix,
+                             std::string_view debugToken,
                              uint32_t sourceMaterialIndex) {
-  return std::string(debugNamePrefix) + std::string(debugSuffix) +
+  return std::string(debugNamePrefix) + "_" + std::string(debugToken) + "_" +
          std::to_string(sourceMaterialIndex);
 }
 [[nodiscard]] std::string
@@ -396,26 +351,27 @@ struct ImportedTextureRefsResult {
   SceneTextureArtifactBuilder builder = std::move(builderResult.value());
   const std::string canonicalScenePath = canonicalizeResourcePath(scenePath);
   const TextureCompressionCaps caps = resources.textureCompressionCaps();
-  for (size_t index = 0u; index < kMaterialTextureSpecs.size(); ++index) {
-    const MaterialTextureSpec &spec = kMaterialTextureSpecs[index];
+  for (const MaterialTextureSlotDesc &spec : kMaterialTextureSlotDescs) {
     const ImportedMaterialTexture &source = imported.textures[spec.slot];
     if (source.sourceKind == MaterialTextureSourceKind::None) {
       continue;
     }
     const TextureArtifactBuildOptions options =
-        makeMaterialTextureArtifactBuildOptions(imported, spec.slot);
+        materialTextureArtifactBuildOptions(imported, spec.slot);
     const std::string debugName = makeImportedTextureDebugName(
-        debugNamePrefix, spec.debugSuffix, sourceMaterialIndex);
+        debugNamePrefix, spec.debugToken, sourceMaterialIndex);
     Result<TextureRef, std::string> acquired =
         Result<TextureRef, std::string>::makeResult(kInvalidTextureRef);
     if (source.sourceKind == MaterialTextureSourceKind::ExternalFile &&
-        hasTextureExtension(source.path, ".dds")) {
+        hasExtensionCaseInsensitive(source.path, ".dds")) {
       acquired = acquireExternalImportedTexture(
           resources, source, options.loadOptions, TextureRequestKind::Texture2D,
           debugName, ddsPack);
     } else {
       uint64_t identity =
-          cached ? cached->textureCache[index].artifactIdentityHash : 0u;
+          cached ? cached->textureCache[static_cast<size_t>(spec.slot)]
+                       .artifactIdentityHash
+                 : 0u;
       if (identity == 0u) {
         identity = hashSceneTextureSourceIdentity(
             canonicalScenePath, source, options.loadOptions.srgb,
@@ -730,20 +686,30 @@ void ResourceManager::flushPublicationVersions() {
 
 std::optional<TextureRef>
 ResourceManager::tryAcquireTexture(const TextureRequest &request) {
-  if (request.path.empty()) {
-    return std::nullopt;
-  }
-  if (validateTextureRequestContentContract(request).hasError()) {
-    return std::nullopt;
-  }
-  const std::string canonicalPath = canonicalizeResourcePath(request.path);
-  TextureKey key{
-      .canonicalPath = canonicalPath,
+  return tryAcquireTexture(resolveTextureRequest(request));
+}
+
+ResolvedTextureRequest
+ResourceManager::resolveTextureRequest(const TextureRequest &request) const {
+  ResolvedTextureRequest resolved{.request = request};
+  resolved.key = TextureKey{
+      .canonicalPath = canonicalizeResourcePath(request.path),
       .optionsHash = hashTextureLoadOptions(request.loadOptions),
       .kind = request.kind,
       .contentContract = request.contentContract,
   };
-  if (auto it = textureCache_.find(key); it != textureCache_.end()) {
+  return resolved;
+}
+
+std::optional<TextureRef>
+ResourceManager::tryAcquireTexture(const ResolvedTextureRequest &resolved) {
+  if (resolved.request.path.empty()) {
+    return std::nullopt;
+  }
+  if (validateTextureRequestContentContract(resolved.request).hasError()) {
+    return std::nullopt;
+  }
+  if (auto it = textureCache_.find(resolved.key); it != textureCache_.end()) {
     if (TextureSlot *cached = tryGetSlotImpl(textures_, it->second)) {
       ++cached->refCount;
       return it->second;
@@ -755,7 +721,13 @@ ResourceManager::tryAcquireTexture(const TextureRequest &request) {
 
 Result<TextureRef, std::string>
 ResourceManager::acquireTexture(const TextureRequest &request) {
+  return acquireTexture(resolveTextureRequest(request));
+}
+
+Result<TextureRef, std::string>
+ResourceManager::acquireTexture(const ResolvedTextureRequest &resolved) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
+  const TextureRequest &request = resolved.request;
   if (request.path.empty()) {
     return Result<TextureRef, std::string>::makeError(
         "ResourceManager::acquireTexture: path is empty");
@@ -764,24 +736,18 @@ ResourceManager::acquireTexture(const TextureRequest &request) {
       validation.hasError()) {
     return Result<TextureRef, std::string>::makeError(validation.error());
   }
-  if (const std::optional<TextureRef> cached = tryAcquireTexture(request);
+  if (const std::optional<TextureRef> cached = tryAcquireTexture(resolved);
       cached.has_value()) {
     return Result<TextureRef, std::string>::makeResult(*cached);
   }
-  const std::string canonicalPath = canonicalizeResourcePath(request.path);
-  TextureKey key{
-      .canonicalPath = canonicalPath,
-      .optionsHash = hashTextureLoadOptions(request.loadOptions),
-      .kind = request.kind,
-      .contentContract = request.contentContract,
-  };
+  const std::string &canonicalPath = resolved.key.canonicalPath;
   Result<std::unique_ptr<Texture>, std::string> textureResult =
       Result<std::unique_ptr<Texture>, std::string>::makeError(
           "ResourceManager::acquireTexture: uninitialized result");
   switch (request.kind) {
   case TextureRequestKind::Texture2D:
     if (request.ddsPack != nullptr) {
-      if (!hasTextureExtension(canonicalPath, ".dds")) {
+      if (!hasExtensionCaseInsensitive(canonicalPath, ".dds")) {
         return Result<TextureRef, std::string>::makeError(
             "ResourceManager::acquireTexture: texture packs are only "
             "supported for DDS textures");
@@ -833,7 +799,7 @@ ResourceManager::acquireTexture(const TextureRequest &request) {
   if (textureResult.hasError()) {
     return Result<TextureRef, std::string>::makeError(textureResult.error());
   }
-  return storeAcquiredTexture(key, canonicalPath, request,
+  return storeAcquiredTexture(resolved.key, canonicalPath, request,
                               std::move(textureResult.value()));
 }
 
@@ -891,6 +857,14 @@ Result<TextureRef, std::string> ResourceManager::storeAcquiredTexture(
 Result<TextureRef, std::string>
 ResourceManager::adoptPreparedTexture(const TextureRequest &request,
                                       std::unique_ptr<Texture> texture) {
+  return adoptPreparedTexture(resolveTextureRequest(request),
+                              std::move(texture));
+}
+
+Result<TextureRef, std::string>
+ResourceManager::adoptPreparedTexture(const ResolvedTextureRequest &resolved,
+                                      std::unique_ptr<Texture> texture) {
+  const TextureRequest &request = resolved.request;
   if (request.path.empty()) {
     return Result<TextureRef, std::string>::makeError(
         "ResourceManager::adoptPreparedTexture: path is empty");
@@ -899,18 +873,12 @@ ResourceManager::adoptPreparedTexture(const TextureRequest &request,
       validation.hasError()) {
     return Result<TextureRef, std::string>::makeError(validation.error());
   }
-  if (const std::optional<TextureRef> cached = tryAcquireTexture(request);
+  if (const std::optional<TextureRef> cached = tryAcquireTexture(resolved);
       cached.has_value()) {
     return Result<TextureRef, std::string>::makeResult(*cached);
   }
-  const std::string canonicalPath = canonicalizeResourcePath(request.path);
-  const TextureKey key{
-      .canonicalPath = canonicalPath,
-      .optionsHash = hashTextureLoadOptions(request.loadOptions),
-      .kind = request.kind,
-      .contentContract = request.contentContract,
-  };
-  return storeAcquiredTexture(key, canonicalPath, request, std::move(texture));
+  return storeAcquiredTexture(resolved.key, resolved.key.canonicalPath, request,
+                              std::move(texture));
 }
 
 ModelRef ResourceManager::tryAcquireCachedModel(const ModelKey &key) {
@@ -926,16 +894,26 @@ ModelRef ResourceManager::tryAcquireCachedModel(const ModelKey &key) {
 
 std::optional<ModelRef>
 ResourceManager::tryAcquireModel(const ModelRequest &request) {
-  if (request.path.empty()) {
-    return std::nullopt;
-  }
-  const std::string canonicalPath = canonicalizeResourcePath(request.path);
-  const ModelKey key{
-      .canonicalPath = canonicalPath,
+  return tryAcquireModel(resolveModelRequest(request));
+}
+
+ResolvedModelRequest
+ResourceManager::resolveModelRequest(const ModelRequest &request) const {
+  ResolvedModelRequest resolved{.request = request};
+  resolved.key = ModelKey{
+      .canonicalPath = canonicalizeResourcePath(request.path),
       .importOptionsHash = hashModelImportOptions(request.importOptions),
       .sceneMeshIndex = request.sceneMeshIndex,
   };
-  const ModelRef ref = tryAcquireCachedModel(key);
+  return resolved;
+}
+
+std::optional<ModelRef>
+ResourceManager::tryAcquireModel(const ResolvedModelRequest &resolved) {
+  if (resolved.request.path.empty()) {
+    return std::nullopt;
+  }
+  const ModelRef ref = tryAcquireCachedModel(resolved.key);
   return isValid(ref) ? std::optional<ModelRef>(ref) : std::nullopt;
 }
 
@@ -970,20 +948,22 @@ Result<ModelRef, std::string> ResourceManager::storeAcquiredModel(
 
 Result<ModelRef, std::string>
 ResourceManager::acquireModel(const ModelRequest &request) {
+  return acquireModel(resolveModelRequest(request));
+}
+
+Result<ModelRef, std::string>
+ResourceManager::acquireModel(const ResolvedModelRequest &resolved) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
+  const ModelRequest &request = resolved.request;
   if (request.path.empty()) {
     return Result<ModelRef, std::string>::makeError(
         "ResourceManager::acquireModel: path is empty");
   }
-  if (const std::optional<ModelRef> cached = tryAcquireModel(request);
+  if (const std::optional<ModelRef> cached = tryAcquireModel(resolved);
       cached.has_value()) {
     return Result<ModelRef, std::string>::makeResult(*cached);
   }
-  const std::string canonicalPath = canonicalizeResourcePath(request.path);
-  const uint64_t optionsHash = hashModelImportOptions(request.importOptions);
-  ModelKey key{.canonicalPath = canonicalPath,
-               .importOptionsHash = optionsHash,
-               .sceneMeshIndex = request.sceneMeshIndex};
+  const std::string &canonicalPath = resolved.key.canonicalPath;
   Result<std::unique_ptr<Model>, std::string> modelResult =
       Result<std::unique_ptr<Model>, std::string>::makeError(
           "ResourceManager::acquireModel: uninitialized result");
@@ -1002,29 +982,31 @@ ResourceManager::acquireModel(const ModelRequest &request) {
   if (modelResult.hasError()) {
     return Result<ModelRef, std::string>::makeError(modelResult.error());
   }
-  return storeAcquiredModel(key, canonicalPath, optionsHash, request,
+  return storeAcquiredModel(resolved.key, canonicalPath,
+                            resolved.key.importOptionsHash, request,
                             std::move(modelResult.value()));
 }
 
 Result<ModelRef, std::string>
 ResourceManager::adoptPreparedModel(const ModelRequest &request,
                                     std::unique_ptr<Model> model) {
+  return adoptPreparedModel(resolveModelRequest(request), std::move(model));
+}
+
+Result<ModelRef, std::string>
+ResourceManager::adoptPreparedModel(const ResolvedModelRequest &resolved,
+                                    std::unique_ptr<Model> model) {
+  const ModelRequest &request = resolved.request;
   if (request.path.empty()) {
     return Result<ModelRef, std::string>::makeError(
         "ResourceManager::adoptPreparedModel: path is empty");
   }
-  if (const std::optional<ModelRef> cached = tryAcquireModel(request);
+  if (const std::optional<ModelRef> cached = tryAcquireModel(resolved);
       cached.has_value()) {
     return Result<ModelRef, std::string>::makeResult(*cached);
   }
-  const std::string canonicalPath = canonicalizeResourcePath(request.path);
-  const uint64_t optionsHash = hashModelImportOptions(request.importOptions);
-  const ModelKey key{
-      .canonicalPath = canonicalPath,
-      .importOptionsHash = optionsHash,
-      .sceneMeshIndex = request.sceneMeshIndex,
-  };
-  return storeAcquiredModel(key, canonicalPath, optionsHash, request,
+  return storeAcquiredModel(resolved.key, resolved.key.canonicalPath,
+                            resolved.key.importOptionsHash, request,
                             std::move(model));
 }
 
@@ -1063,24 +1045,41 @@ ResourceManager::acquireGeneratedModel(const MeshData &meshData,
 
 Result<MaterialRef, std::string>
 ResourceManager::acquireMaterial(const MaterialRequest &request) {
-  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
-  MaterialDesc resolvedDesc = request.desc;
-  for (const MaterialTextureSpec &spec : kMaterialTextureSpecs) {
+  auto resolved = resolveMaterialRequest(request);
+  if (resolved.hasError())
+    return Result<MaterialRef, std::string>::makeError(resolved.error());
+  return acquireMaterial(resolved.value());
+}
+
+Result<ResolvedMaterialRequest, std::string>
+ResourceManager::resolveMaterialRequest(const MaterialRequest &request) const {
+  ResolvedMaterialRequest resolved{.request = request};
+  MaterialDesc &resolvedDesc = resolved.request.desc;
+  for (const MaterialTextureSlotDesc &spec : kMaterialTextureSlotDescs) {
     const TextureRef ref = request.textureRefs[spec.slot];
     if (!isValid(ref))
       continue;
     const TextureRecord *record = tryGet(ref);
     if (!record) {
-      return Result<MaterialRef, std::string>::makeError(
-          "ResourceManager::acquireMaterial: stale texture ref for slot '" +
+      return Result<ResolvedMaterialRequest, std::string>::makeError(
+          "ResourceManager::resolveMaterialRequest: stale texture ref for slot "
+          "'" +
           std::string(spec.name) + "'");
     }
     resolvedDesc.textures[spec.slot] = record->texture;
   }
   Material::finalizeDesc(resolvedDesc);
-  const uint64_t descHash = hashMaterialDesc(resolvedDesc);
-  MaterialKey key{.descHash = descHash,
-                  .sourceIdentity = request.sourceIdentity};
+  resolved.key = MaterialKey{.descHash = hashMaterialDesc(resolvedDesc),
+                             .sourceIdentity = request.sourceIdentity};
+  return Result<ResolvedMaterialRequest, std::string>::makeResult(
+      std::move(resolved));
+}
+
+Result<MaterialRef, std::string>
+ResourceManager::acquireMaterial(const ResolvedMaterialRequest &resolved) {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
+  const MaterialRequest &request = resolved.request;
+  const MaterialKey &key = resolved.key;
   if (auto it = materialCache_.find(key); it != materialCache_.end()) {
     if (MaterialSlot *cached = tryGetSlotImpl(materials_, it->second)) {
       ++cached->refCount;
@@ -1088,7 +1087,7 @@ ResourceManager::acquireMaterial(const MaterialRequest &request) {
     }
     materialCache_.erase(it);
   }
-  auto materialResult = Material::create(gpu_, resolvedDesc, request.debugName);
+  auto materialResult = Material::create(gpu_, request.desc, request.debugName);
   if (materialResult.hasError()) {
     return Result<MaterialRef, std::string>::makeError(materialResult.error());
   }
@@ -1106,7 +1105,7 @@ ResourceManager::acquireMaterial(const MaterialRequest &request) {
   slot.record.desc = material.desc();
   slot.record.textureRefs = request.textureRefs;
   slot.record.packedGpuData = material.packedGpuData();
-  slot.record.descHash = descHash;
+  slot.record.descHash = key.descHash;
   slot.record.debugName = request.debugName;
   slot.record.sourceIdentity = request.sourceIdentity;
   forEachMaterialTextureRef(slot.record.textureRefs,
@@ -1119,7 +1118,7 @@ ResourceManager::acquireMaterial(const MaterialRequest &request) {
     materialHeaderTable_.resize(slotIndex + 1u);
   }
   markMaterialTablesDirty();
-  materialCache_.emplace(std::move(key), ref);
+  materialCache_.emplace(key, ref);
   return Result<MaterialRef, std::string>::makeResult(ref);
 }
 
@@ -1462,6 +1461,23 @@ ResourceManager::modelMaterialForSubmesh(ModelRef model,
     return kInvalidMaterialRef;
   }
   return record->materialForSubmesh(submeshIndex);
+}
+
+MaterialRef ResourceManager::resolveRenderableMaterial(
+    ModelRef model, uint32_t submeshIndex, MaterialRef fallback,
+    MaterialRef overrideMaterial) const noexcept {
+  if (isValid(overrideMaterial)) {
+    return overrideMaterial;
+  }
+  const ModelRecord *record = tryGet(model);
+  if (record == nullptr) {
+    return fallback;
+  }
+  MaterialRef material = record->materialForSubmesh(submeshIndex);
+  if (!isValid(material)) {
+    material = record->materialForSource(submeshIndex);
+  }
+  return isValid(material) ? material : fallback;
 }
 
 bool ResourceManager::setModelMaterialForSource(ModelRef model,

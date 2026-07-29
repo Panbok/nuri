@@ -3,6 +3,7 @@
 #include "nuri/core/log.h"
 #include "nuri/core/window.h"
 #include <GLFW/glfw3.h>
+#include <array>
 #include <atomic>
 #include <mutex>
 namespace nuri {
@@ -31,6 +32,26 @@ private:
 };
 
 namespace {
+struct WindowModePlan {
+  bool exclusive;
+  bool monitorSized;
+  bool visible;
+  bool decorated;
+  bool resizable;
+  const char *logSuffix;
+};
+
+constexpr std::array kWindowModePlans{
+    WindowModePlan{false, false, true, true, true, ""},
+    WindowModePlan{false, false, false, true, true, " [hidden]"},
+    WindowModePlan{true, true, true, false, false, " [fullscreen]"},
+    WindowModePlan{false, true, true, false, false, " [borderless fullscreen]"},
+};
+
+[[nodiscard]] constexpr const WindowModePlan &windowModePlan(WindowMode mode) {
+  return kWindowModePlans[static_cast<size_t>(mode)];
+}
+
 std::atomic<int> s_glfwRefCount{0};
 std::mutex s_glfwMutex;
 bool s_glfwInitialized = false;
@@ -133,64 +154,61 @@ EventManager *getEventManager(GLFWwindow *window) {
   }
   return static_cast<EventManager *>(glfwGetWindowUserPointer(window));
 }
-template <typename T> void emitRaw(GLFWwindow *window, const T &event) {
+void emitInput(GLFWwindow *window, const InputEvent &event) {
   EventManager *events = getEventManager(window);
   if (!events) {
     return;
   }
   events->emit(event, EventChannel::RawInput);
 }
-void emitRawKeyEvent(GLFWwindow *window, int key, int scancode, int action,
-                     int mods) {
-  const RawKeyEvent event{
-      .key = mapGlfwKey(key),
-      .scancode = scancode,
-      .action = mapGlfwKeyAction(action),
-      .mods = mapGlfwMods(mods),
-  };
-  emitRaw(window, event);
+void emitKeyEvent(GLFWwindow *window, int key, int scancode, int action,
+                  int mods) {
+  InputEvent event{};
+  event.type = InputEventType::Key;
+  event.payload.key = {.key = mapGlfwKey(key),
+                       .scancode = scancode,
+                       .action = mapGlfwKeyAction(action),
+                       .mods = mapGlfwMods(mods)};
+  emitInput(window, event);
 }
-void emitRawCharEvent(GLFWwindow *window, unsigned int codepoint) {
-  const RawCharEvent event{
-      .codepoint = static_cast<uint32_t>(codepoint),
-  };
-  emitRaw(window, event);
+void emitCharacterEvent(GLFWwindow *window, unsigned int codepoint) {
+  InputEvent event{};
+  event.type = InputEventType::Character;
+  event.payload.character = {.codepoint = static_cast<uint32_t>(codepoint)};
+  emitInput(window, event);
 }
-void emitRawMouseButtonEvent(GLFWwindow *window, int button, int action,
-                             int mods) {
-  const RawMouseButtonEvent event{
-      .button = mapGlfwMouseButton(button),
-      .action = mapGlfwMouseAction(action),
-      .mods = mapGlfwMods(mods),
-  };
-  emitRaw(window, event);
+void emitMouseButtonEvent(GLFWwindow *window, int button, int action,
+                          int mods) {
+  InputEvent event{};
+  event.type = InputEventType::MouseButton;
+  event.payload.mouseButton = {.button = mapGlfwMouseButton(button),
+                               .action = mapGlfwMouseAction(action),
+                               .mods = mapGlfwMods(mods)};
+  emitInput(window, event);
 }
-void emitRawMouseMoveEvent(GLFWwindow *window, double x, double y) {
-  const RawMouseMoveEvent event{
-      .x = x,
-      .y = y,
-  };
-  emitRaw(window, event);
+void emitMouseMoveEvent(GLFWwindow *window, double x, double y) {
+  InputEvent event{};
+  event.type = InputEventType::MouseMove;
+  event.payload.mouseMove = {.x = x, .y = y};
+  emitInput(window, event);
 }
-void emitRawMouseScrollEvent(GLFWwindow *window, double xOffset,
-                             double yOffset) {
-  const RawMouseScrollEvent event{
-      .xOffset = xOffset,
-      .yOffset = yOffset,
-  };
-  emitRaw(window, event);
+void emitMouseScrollEvent(GLFWwindow *window, double xOffset, double yOffset) {
+  InputEvent event{};
+  event.type = InputEventType::MouseScroll;
+  event.payload.mouseScroll = {.x = xOffset, .y = yOffset};
+  emitInput(window, event);
 }
-void emitRawFocusEvent(GLFWwindow *window, int focused) {
-  const RawFocusEvent event{
-      .focused = focused != 0,
-  };
-  emitRaw(window, event);
+void emitFocusEvent(GLFWwindow *window, int focused) {
+  InputEvent event{};
+  event.type = InputEventType::Focus;
+  event.payload.focus = {.focused = focused != 0};
+  emitInput(window, event);
 }
-void emitRawCursorEnterEvent(GLFWwindow *window, int entered) {
-  const RawCursorEnterEvent event{
-      .entered = entered != 0,
-  };
-  emitRaw(window, event);
+void emitCursorEnterEvent(GLFWwindow *window, int entered) {
+  InputEvent event{};
+  event.type = InputEventType::CursorEnter;
+  event.payload.cursorEnter = {.entered = entered != 0};
+  emitInput(window, event);
 }
 } // namespace
 
@@ -217,16 +235,12 @@ std::unique_ptr<GlfwWindow> GlfwWindow::create(std::string_view title,
     releaseGlfw();
     return nullptr;
   };
-  const bool wantExclusiveFullscreen = (mode == WindowMode::Fullscreen);
-  const bool wantBorderlessMonitorWindow =
-      (mode == WindowMode::BorderlessFullscreen);
-  const bool wantHiddenWindow = (mode == WindowMode::Hidden);
+  const WindowModePlan &plan = windowModePlan(mode);
   const bool wantMaxCoverageWindow =
       (mode == WindowMode::Windowed && width == 0 && height == 0);
   GLFWmonitor *primaryMonitor = nullptr;
   const GLFWvidmode *primaryMode = nullptr;
-  if (wantExclusiveFullscreen || wantBorderlessMonitorWindow ||
-      wantMaxCoverageWindow) {
+  if (plan.monitorSized || wantMaxCoverageWindow) {
     primaryMonitor = glfwGetPrimaryMonitor();
     if (!primaryMonitor) {
       NURI_LOG_WARNING("GlfwWindow::create: glfwGetPrimaryMonitor failed");
@@ -242,7 +256,7 @@ std::unique_ptr<GlfwWindow> GlfwWindow::create(std::string_view title,
   int workAreaY = 0;
   int32_t createWidth = width;
   int32_t createHeight = height;
-  if (wantExclusiveFullscreen || wantBorderlessMonitorWindow) {
+  if (plan.monitorSized) {
     createWidth = static_cast<int32_t>(primaryMode->width);
     createHeight = static_cast<int32_t>(primaryMode->height);
   } else if (wantMaxCoverageWindow) {
@@ -267,20 +281,13 @@ std::unique_ptr<GlfwWindow> GlfwWindow::create(std::string_view title,
       return fail();
     }
   }
-  GLFWmonitor *createMonitor =
-      wantExclusiveFullscreen ? primaryMonitor : nullptr;
+  GLFWmonitor *createMonitor = plan.exclusive ? primaryMonitor : nullptr;
   glfwWindowHint(GLFW_REFRESH_RATE, GLFW_DONT_CARE);
-  glfwWindowHint(GLFW_DECORATED, GLFW_TRUE);
-  glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
-  glfwWindowHint(GLFW_VISIBLE, wantHiddenWindow ? GLFW_FALSE : GLFW_TRUE);
-  if (wantExclusiveFullscreen) {
+  glfwWindowHint(GLFW_DECORATED, plan.decorated ? GLFW_TRUE : GLFW_FALSE);
+  glfwWindowHint(GLFW_RESIZABLE, plan.resizable ? GLFW_TRUE : GLFW_FALSE);
+  glfwWindowHint(GLFW_VISIBLE, plan.visible ? GLFW_TRUE : GLFW_FALSE);
+  if (plan.exclusive) {
     glfwWindowHint(GLFW_REFRESH_RATE, primaryMode->refreshRate);
-    glfwWindowHint(GLFW_DECORATED, GLFW_FALSE);
-    glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
-  } else if (wantBorderlessMonitorWindow) {
-    glfwWindowHint(GLFW_DECORATED, GLFW_FALSE);
-    glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
-  } else if (wantMaxCoverageWindow) {
   }
   window->window_ = glfwCreateWindow(createWidth, createHeight,
                                      titleStr.c_str(), createMonitor, nullptr);
@@ -288,24 +295,24 @@ std::unique_ptr<GlfwWindow> GlfwWindow::create(std::string_view title,
     NURI_LOG_WARNING(
         "GlfwWindow::create: glfwCreateWindow failed (%d x %d)%s", createWidth,
         createHeight,
-        wantExclusiveFullscreen
+        plan.exclusive
             ? " [exclusive fullscreen]"
-            : (wantBorderlessMonitorWindow
+            : (plan.monitorSized
                    ? " [borderless monitor-sized]"
                    : (wantMaxCoverageWindow ? " [max coverage]" : "")));
     return fail();
   }
   glfwSetWindowUserPointer(window->window_, nullptr);
-  glfwSetKeyCallback(window->window_, emitRawKeyEvent);
-  glfwSetCharCallback(window->window_, emitRawCharEvent);
-  glfwSetMouseButtonCallback(window->window_, emitRawMouseButtonEvent);
-  glfwSetCursorPosCallback(window->window_, emitRawMouseMoveEvent);
-  glfwSetScrollCallback(window->window_, emitRawMouseScrollEvent);
-  glfwSetWindowFocusCallback(window->window_, emitRawFocusEvent);
-  glfwSetCursorEnterCallback(window->window_, emitRawCursorEnterEvent);
+  glfwSetKeyCallback(window->window_, emitKeyEvent);
+  glfwSetCharCallback(window->window_, emitCharacterEvent);
+  glfwSetMouseButtonCallback(window->window_, emitMouseButtonEvent);
+  glfwSetCursorPosCallback(window->window_, emitMouseMoveEvent);
+  glfwSetScrollCallback(window->window_, emitMouseScrollEvent);
+  glfwSetWindowFocusCallback(window->window_, emitFocusEvent);
+  glfwSetCursorEnterCallback(window->window_, emitCursorEnterEvent);
   glfwSetInputMode(window->window_, GLFW_CURSOR,
                    toGlfwCursorMode(window->cursorMode_));
-  if ((wantBorderlessMonitorWindow || wantMaxCoverageWindow) &&
+  if (((!plan.exclusive && plan.monitorSized) || wantMaxCoverageWindow) &&
       primaryMonitor) {
     int targetX = 0;
     int targetY = 0;
@@ -318,14 +325,9 @@ std::unique_ptr<GlfwWindow> GlfwWindow::create(std::string_view title,
     glfwSetWindowPos(window->window_, targetX, targetY);
     glfwFocusWindow(window->window_);
   }
-  const char *modeStr = (mode == WindowMode::Fullscreen) ? " [fullscreen]"
-                        : (mode == WindowMode::BorderlessFullscreen)
-                            ? " [borderless fullscreen]"
-                        : (mode == WindowMode::Hidden) ? " [hidden]"
-                                                       : "";
   NURI_LOG_DEBUG("Window::create: Creating window '%.*s' (%d x %d)%s",
                  static_cast<int>(title.size()), title.data(), createWidth,
-                 createHeight, modeStr);
+                 createHeight, plan.logSuffix);
   return window;
 }
 

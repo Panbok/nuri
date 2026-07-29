@@ -1,5 +1,7 @@
 #pragma once
+#include <compare>
 #include <cstdint>
+#include <functional>
 namespace nuri {
 
 inline constexpr uint32_t kResourceHandleIndexBits = 20u,
@@ -12,7 +14,9 @@ inline constexpr uint32_t kResourceHandleIndexMask =
 
 template <typename Tag> struct PackedHandle {
   uint32_t value = 0;
-  constexpr bool operator==(const PackedHandle &) const noexcept = default;
+  constexpr auto operator<=>(const PackedHandle &) const noexcept = default;
+  [[nodiscard]] static constexpr PackedHandle
+  fromParts(uint32_t index, uint32_t generation) noexcept;
 };
 
 using TextureRef = PackedHandle<struct TextureRefTag>;
@@ -49,4 +53,18 @@ template <typename Tag>
 makePackedHandle(uint32_t index, uint32_t generation) {
   return {packResourceHandle(index, generation)};
 }
+
+template <typename Tag>
+constexpr PackedHandle<Tag>
+PackedHandle<Tag>::fromParts(uint32_t index, uint32_t generation) noexcept {
+  return makePackedHandle<Tag>(index, generation);
+}
 } // namespace nuri
+
+namespace std {
+template <typename Tag> struct hash<nuri::PackedHandle<Tag>> {
+  size_t operator()(nuri::PackedHandle<Tag> handle) const noexcept {
+    return hash<uint32_t>{}(handle.value);
+  }
+};
+} // namespace std

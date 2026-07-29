@@ -1,6 +1,5 @@
 #include "nuri/scene/camera.h"
 #include "nuri/core/log.h"
-#include "nuri/pch.h"
 namespace nuri {
 
 namespace {

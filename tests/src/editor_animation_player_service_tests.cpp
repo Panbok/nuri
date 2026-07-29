@@ -162,8 +162,7 @@ createServiceTestContext(const std::filesystem::path &path,
   ctx->runtime.bindScene(&ctx->scene);
   ctx->runtime.attachAnimationGpuServices(&ctx->animationGpuServices);
 
-  auto prefabResult =
-      nuri::SceneImporter::loadScenePrefabFromFile(path.string());
+  auto prefabResult = nuri::SceneImporter::loadSceneFromFile(path.string());
   if (prefabResult.hasError()) {
     return nuri::Result<std::unique_ptr<ServiceTestContext>,
                         std::string>::makeError(prefabResult.error());

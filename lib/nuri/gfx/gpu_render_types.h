@@ -78,6 +78,13 @@ struct DispatchSize {
   uint32_t z = 1;
 };
 
+struct PushConstantTextureBinding {
+  uint32_t byteOffset = UINT32_MAX;
+  TextureHandle texture{};
+  uint32_t graphTextureResourceIndex = UINT32_MAX;
+  RenderGraphAccessMode access = RenderGraphAccessMode::Read;
+};
+
 struct ComputeDispatchItem {
   ComputePipelineHandle pipeline{};
   RayQueryBindingHandle rayQueryBinding{};
@@ -86,6 +93,7 @@ struct ComputeDispatchItem {
   std::span<const BufferHandle> dependencyBuffers{};
   std::span<const RenderGraphAccessMode> dependencyBufferAccessModes{};
   std::span<const TextureHandle> dependencyTextures{};
+  std::span<const PushConstantTextureBinding> pushConstantTextureBindings{};
   std::string_view debugLabel{};
   uint32_t debugColor = 0xffffffffu;
 };
@@ -128,6 +136,7 @@ enum class GpuTimingScope : uint8_t {
   DDGIDistanceUpdate = 34,
   DDGIReadback = 35,
   DDGIOpaqueSurfaceCache = 36,
+  Count = 37,
 };
 
 [[nodiscard]] constexpr uint64_t
@@ -137,201 +146,83 @@ gpuTimingScopeToBit(GpuTimingScope scope) noexcept {
              : (1ull << (static_cast<uint8_t>(scope) - 1u));
 }
 
-[[nodiscard]] constexpr GpuTimingScope
-gpuTimingParentScope(GpuTimingScope scope) noexcept {
-  switch (scope) {
-  case GpuTimingScope::ShadowDepth:
-  case GpuTimingScope::ShadowSdsm:
-    return GpuTimingScope::Shadow;
-  case GpuTimingScope::Velocity:
-  case GpuTimingScope::ReactiveMask:
-  case GpuTimingScope::OpaqueDepth:
-  case GpuTimingScope::OpaqueNormal:
-  case GpuTimingScope::OpaqueMain:
-  case GpuTimingScope::DDGIOpaqueSurfaceCache:
-    return GpuTimingScope::Opaque;
-  case GpuTimingScope::TemporalAACopyBack:
-    return GpuTimingScope::TemporalAAResolve;
-  case GpuTimingScope::GTAOTemporal:
-  case GpuTimingScope::GTAOPrefilterEdges:
-  case GpuTimingScope::GTAOMain:
-  case GpuTimingScope::GTAODenoise:
-  case GpuTimingScope::GTAOUpscale:
-    return GpuTimingScope::GTAO;
-  case GpuTimingScope::RayTracingBLAS:
-  case GpuTimingScope::RayTracingTLAS:
-    return GpuTimingScope::RayTracingScene;
-  case GpuTimingScope::DDGITrace:
-  case GpuTimingScope::DDGIUpdate:
-  case GpuTimingScope::DDGIRelocateClassify:
-    return GpuTimingScope::DDGI;
-  case GpuTimingScope::DDGIIrradianceUpdate:
-  case GpuTimingScope::DDGIDistanceUpdate:
-    return GpuTimingScope::DDGIUpdate;
-  default:
-    return GpuTimingScope::None;
-  }
+struct GpuTimingScopeDesc {
+  GpuTimingScope scope = GpuTimingScope::None;
+  GpuTimingScope parent = GpuTimingScope::None;
+  std::string_view name{};
+};
+
+inline constexpr auto kGpuTimingScopeDescs = std::to_array<GpuTimingScopeDesc>({
+    {GpuTimingScope::Shadow, GpuTimingScope::None, "Shadow"},
+    {GpuTimingScope::ShadowDepth, GpuTimingScope::Shadow, "ShadowDepth"},
+    {GpuTimingScope::ShadowSdsm, GpuTimingScope::Shadow, "ShadowSdsm"},
+    {GpuTimingScope::SceneColorDownsample, GpuTimingScope::None,
+     "SceneColorDownsample"},
+    {GpuTimingScope::Transmission, GpuTimingScope::None, "Transmission"},
+    {GpuTimingScope::TemporalAAResolve, GpuTimingScope::None,
+     "TemporalAAResolve"},
+    {GpuTimingScope::TemporalAADebug, GpuTimingScope::None, "TemporalAADebug"},
+    {GpuTimingScope::SpatialAA, GpuTimingScope::None, "SpatialAA"},
+    {GpuTimingScope::Opaque, GpuTimingScope::None, "Opaque"},
+    {GpuTimingScope::MsaaResolve, GpuTimingScope::None, "MsaaResolve"},
+    {GpuTimingScope::GTAO, GpuTimingScope::None, "GTAO"},
+    {GpuTimingScope::HDRPostProcess, GpuTimingScope::None, "HDRPostProcess"},
+    {GpuTimingScope::Skybox, GpuTimingScope::None, "Skybox"},
+    {GpuTimingScope::Velocity, GpuTimingScope::Opaque, "Velocity"},
+    {GpuTimingScope::ReactiveMask, GpuTimingScope::Opaque, "ReactiveMask"},
+    {GpuTimingScope::TemporalAACopyBack, GpuTimingScope::TemporalAAResolve,
+     "TemporalAACopyBack"},
+    {GpuTimingScope::GTAOTemporal, GpuTimingScope::GTAO, "GTAOTemporal"},
+    {GpuTimingScope::WholeFrame, GpuTimingScope::None, "WholeFrame"},
+    {GpuTimingScope::RayTracingScene, GpuTimingScope::None, "RayTracingScene"},
+    {GpuTimingScope::RayTracingBLAS, GpuTimingScope::RayTracingScene,
+     "RayTracingBLAS"},
+    {GpuTimingScope::RayTracingTLAS, GpuTimingScope::RayTracingScene,
+     "RayTracingTLAS"},
+    {GpuTimingScope::DDGI, GpuTimingScope::None, "DDGI"},
+    {GpuTimingScope::DDGITrace, GpuTimingScope::DDGI, "DDGITrace"},
+    {GpuTimingScope::DDGIUpdate, GpuTimingScope::DDGI, "DDGIUpdate"},
+    {GpuTimingScope::DDGIRelocateClassify, GpuTimingScope::DDGI,
+     "DDGIRelocateClassify"},
+    {GpuTimingScope::OpaqueDepth, GpuTimingScope::Opaque, "OpaqueDepth"},
+    {GpuTimingScope::OpaqueNormal, GpuTimingScope::Opaque, "OpaqueNormal"},
+    {GpuTimingScope::OpaqueMain, GpuTimingScope::Opaque, "OpaqueMain"},
+    {GpuTimingScope::GTAOPrefilterEdges, GpuTimingScope::GTAO,
+     "GTAOPrefilterEdges"},
+    {GpuTimingScope::GTAOMain, GpuTimingScope::GTAO, "GTAOMain"},
+    {GpuTimingScope::GTAODenoise, GpuTimingScope::GTAO, "GTAODenoise"},
+    {GpuTimingScope::GTAOUpscale, GpuTimingScope::GTAO, "GTAOUpscale"},
+    {GpuTimingScope::DDGIIrradianceUpdate, GpuTimingScope::DDGIUpdate,
+     "DDGIIrradianceUpdate"},
+    {GpuTimingScope::DDGIDistanceUpdate, GpuTimingScope::DDGIUpdate,
+     "DDGIDistanceUpdate"},
+    {GpuTimingScope::DDGIReadback, GpuTimingScope::None, "DDGIReadback"},
+    {GpuTimingScope::DDGIOpaqueSurfaceCache, GpuTimingScope::Opaque,
+     "DDGIOpaqueSurfaceCache"},
+});
+
+[[nodiscard]] constexpr const GpuTimingScopeDesc *
+gpuTimingScopeDesc(GpuTimingScope scope) noexcept {
+  const size_t index = static_cast<size_t>(scope);
+  return index > 0u && index < static_cast<size_t>(GpuTimingScope::Count)
+             ? &kGpuTimingScopeDescs[index - 1u]
+             : nullptr;
 }
 
-constexpr uint64_t kGpuTimingScopeShadowBit =
-    gpuTimingScopeToBit(GpuTimingScope::Shadow);
-constexpr uint64_t kGpuTimingScopeShadowDepthBit =
-    gpuTimingScopeToBit(GpuTimingScope::ShadowDepth);
-constexpr uint64_t kGpuTimingScopeShadowSdsmBit =
-    gpuTimingScopeToBit(GpuTimingScope::ShadowSdsm);
-constexpr uint64_t kGpuTimingScopeSceneColorDownsampleBit =
-    gpuTimingScopeToBit(GpuTimingScope::SceneColorDownsample);
-constexpr uint64_t kGpuTimingScopeTransmissionBit =
-    gpuTimingScopeToBit(GpuTimingScope::Transmission);
-constexpr uint64_t kGpuTimingScopeTemporalAAResolveBit =
-    gpuTimingScopeToBit(GpuTimingScope::TemporalAAResolve);
-constexpr uint64_t kGpuTimingScopeTemporalAADebugBit =
-    gpuTimingScopeToBit(GpuTimingScope::TemporalAADebug);
-constexpr uint64_t kGpuTimingScopeSpatialAABit =
-    gpuTimingScopeToBit(GpuTimingScope::SpatialAA);
-constexpr uint64_t kGpuTimingScopeOpaqueBit =
-    gpuTimingScopeToBit(GpuTimingScope::Opaque);
-constexpr uint64_t kGpuTimingScopeMsaaResolveBit =
-    gpuTimingScopeToBit(GpuTimingScope::MsaaResolve);
-constexpr uint64_t kGpuTimingScopeGTAOBit =
-    gpuTimingScopeToBit(GpuTimingScope::GTAO);
-constexpr uint64_t kGpuTimingScopeHDRPostProcessBit =
-    gpuTimingScopeToBit(GpuTimingScope::HDRPostProcess);
-constexpr uint64_t kGpuTimingScopeSkyboxBit =
-    gpuTimingScopeToBit(GpuTimingScope::Skybox);
-constexpr uint64_t kGpuTimingScopeVelocityBit =
-    gpuTimingScopeToBit(GpuTimingScope::Velocity);
-constexpr uint64_t kGpuTimingScopeReactiveMaskBit =
-    gpuTimingScopeToBit(GpuTimingScope::ReactiveMask);
-constexpr uint64_t kGpuTimingScopeTemporalAACopyBackBit =
-    gpuTimingScopeToBit(GpuTimingScope::TemporalAACopyBack);
-constexpr uint64_t kGpuTimingScopeGTAOTemporalBit =
-    gpuTimingScopeToBit(GpuTimingScope::GTAOTemporal);
-constexpr uint64_t kGpuTimingScopeWholeFrameBit =
-    gpuTimingScopeToBit(GpuTimingScope::WholeFrame);
-constexpr uint64_t kGpuTimingScopeRayTracingSceneBit =
-    gpuTimingScopeToBit(GpuTimingScope::RayTracingScene);
-constexpr uint64_t kGpuTimingScopeRayTracingBLASBit =
-    gpuTimingScopeToBit(GpuTimingScope::RayTracingBLAS);
-constexpr uint64_t kGpuTimingScopeRayTracingTLASBit =
-    gpuTimingScopeToBit(GpuTimingScope::RayTracingTLAS);
-constexpr uint64_t kGpuTimingScopeDDGIBit =
-    gpuTimingScopeToBit(GpuTimingScope::DDGI);
-constexpr uint64_t kGpuTimingScopeDDGITraceBit =
-    gpuTimingScopeToBit(GpuTimingScope::DDGITrace);
-constexpr uint64_t kGpuTimingScopeDDGIUpdateBit =
-    gpuTimingScopeToBit(GpuTimingScope::DDGIUpdate);
-constexpr uint64_t kGpuTimingScopeDDGIRelocateClassifyBit =
-    gpuTimingScopeToBit(GpuTimingScope::DDGIRelocateClassify);
-constexpr uint64_t kGpuTimingScopeOpaqueDepthBit =
-    gpuTimingScopeToBit(GpuTimingScope::OpaqueDepth);
-constexpr uint64_t kGpuTimingScopeOpaqueNormalBit =
-    gpuTimingScopeToBit(GpuTimingScope::OpaqueNormal);
-constexpr uint64_t kGpuTimingScopeOpaqueMainBit =
-    gpuTimingScopeToBit(GpuTimingScope::OpaqueMain);
-constexpr uint64_t kGpuTimingScopeGTAOPrefilterEdgesBit =
-    gpuTimingScopeToBit(GpuTimingScope::GTAOPrefilterEdges);
-constexpr uint64_t kGpuTimingScopeGTAOMainBit =
-    gpuTimingScopeToBit(GpuTimingScope::GTAOMain);
-constexpr uint64_t kGpuTimingScopeGTAODenoiseBit =
-    gpuTimingScopeToBit(GpuTimingScope::GTAODenoise);
-constexpr uint64_t kGpuTimingScopeGTAOUpscaleBit =
-    gpuTimingScopeToBit(GpuTimingScope::GTAOUpscale);
-constexpr uint64_t kGpuTimingScopeDDGIIrradianceUpdateBit =
-    gpuTimingScopeToBit(GpuTimingScope::DDGIIrradianceUpdate);
-constexpr uint64_t kGpuTimingScopeDDGIDistanceUpdateBit =
-    gpuTimingScopeToBit(GpuTimingScope::DDGIDistanceUpdate);
-constexpr uint64_t kGpuTimingScopeDDGIReadbackBit =
-    gpuTimingScopeToBit(GpuTimingScope::DDGIReadback);
-constexpr uint64_t kGpuTimingScopeDDGIOpaqueSurfaceCacheBit =
-    gpuTimingScopeToBit(GpuTimingScope::DDGIOpaqueSurfaceCache);
+[[nodiscard]] constexpr GpuTimingScope
+gpuTimingParentScope(GpuTimingScope scope) noexcept {
+  const GpuTimingScopeDesc *desc = gpuTimingScopeDesc(scope);
+  return desc != nullptr ? desc->parent : GpuTimingScope::None;
+}
+
+struct GpuTimingSample {
+  float timeMs = 0.0f;
+  uint64_t sourceFrameIndex = std::numeric_limits<uint64_t>::max();
+};
 
 struct GpuTimingReport {
-  uint64_t shadowSourceFrameIndex = std::numeric_limits<uint64_t>::max();
-  uint64_t shadowDepthSourceFrameIndex = std::numeric_limits<uint64_t>::max();
-  uint64_t shadowSdsmSourceFrameIndex = std::numeric_limits<uint64_t>::max();
-  uint64_t sceneColorDownsampleSourceFrameIndex =
-      std::numeric_limits<uint64_t>::max();
-  uint64_t transmissionSourceFrameIndex = std::numeric_limits<uint64_t>::max();
-  uint64_t temporalAAResolveSourceFrameIndex =
-      std::numeric_limits<uint64_t>::max();
-  uint64_t temporalAADebugSourceFrameIndex =
-      std::numeric_limits<uint64_t>::max();
-  uint64_t spatialAASourceFrameIndex = std::numeric_limits<uint64_t>::max();
-  uint64_t opaqueSourceFrameIndex = std::numeric_limits<uint64_t>::max();
-  uint64_t msaaResolveSourceFrameIndex = std::numeric_limits<uint64_t>::max();
-  uint64_t gtaoSourceFrameIndex = std::numeric_limits<uint64_t>::max();
-  uint64_t hdrPostProcessSourceFrameIndex =
-      std::numeric_limits<uint64_t>::max();
-  uint64_t skyboxSourceFrameIndex = std::numeric_limits<uint64_t>::max();
-  uint64_t velocitySourceFrameIndex = std::numeric_limits<uint64_t>::max();
-  uint64_t reactiveMaskSourceFrameIndex = std::numeric_limits<uint64_t>::max();
-  uint64_t temporalAACopyBackSourceFrameIndex =
-      std::numeric_limits<uint64_t>::max();
-  uint64_t gtaoTemporalSourceFrameIndex = std::numeric_limits<uint64_t>::max();
-  uint64_t wholeFrameSourceFrameIndex = std::numeric_limits<uint64_t>::max();
-  uint64_t rayTracingSceneSourceFrameIndex =
-      std::numeric_limits<uint64_t>::max();
-  uint64_t rayTracingBlasSourceFrameIndex =
-      std::numeric_limits<uint64_t>::max();
-  uint64_t rayTracingTlasSourceFrameIndex =
-      std::numeric_limits<uint64_t>::max();
-  uint64_t ddgiSourceFrameIndex = std::numeric_limits<uint64_t>::max();
-  uint64_t ddgiTraceSourceFrameIndex = std::numeric_limits<uint64_t>::max();
-  uint64_t ddgiUpdateSourceFrameIndex = std::numeric_limits<uint64_t>::max();
-  uint64_t ddgiRelocateClassifySourceFrameIndex =
-      std::numeric_limits<uint64_t>::max();
-  uint64_t ddgiIrradianceUpdateSourceFrameIndex =
-      std::numeric_limits<uint64_t>::max();
-  uint64_t ddgiDistanceUpdateSourceFrameIndex =
-      std::numeric_limits<uint64_t>::max();
-  uint64_t ddgiReadbackSourceFrameIndex = std::numeric_limits<uint64_t>::max();
-  uint64_t ddgiOpaqueSurfaceCacheSourceFrameIndex =
-      std::numeric_limits<uint64_t>::max();
-  uint64_t opaqueDepthSourceFrameIndex = std::numeric_limits<uint64_t>::max();
-  uint64_t opaqueNormalSourceFrameIndex = std::numeric_limits<uint64_t>::max();
-  uint64_t opaqueMainSourceFrameIndex = std::numeric_limits<uint64_t>::max();
-  uint64_t gtaoPrefilterEdgesSourceFrameIndex =
-      std::numeric_limits<uint64_t>::max();
-  uint64_t gtaoMainSourceFrameIndex = std::numeric_limits<uint64_t>::max();
-  uint64_t gtaoDenoiseSourceFrameIndex = std::numeric_limits<uint64_t>::max();
-  uint64_t gtaoUpscaleSourceFrameIndex = std::numeric_limits<uint64_t>::max();
-  float shadowTimeMs = 0.0f;
-  float shadowDepthTimeMs = 0.0f;
-  float shadowSdsmTimeMs = 0.0f;
-  float sceneColorDownsampleTimeMs = 0.0f;
-  float transmissionTimeMs = 0.0f;
-  float temporalAAResolveTimeMs = 0.0f;
-  float temporalAADebugTimeMs = 0.0f;
-  float spatialAATimeMs = 0.0f;
-  float opaqueTimeMs = 0.0f;
-  float msaaResolveTimeMs = 0.0f;
-  float gtaoTimeMs = 0.0f;
-  float hdrPostProcessTimeMs = 0.0f;
-  float skyboxTimeMs = 0.0f;
-  float velocityTimeMs = 0.0f;
-  float reactiveMaskTimeMs = 0.0f;
-  float temporalAACopyBackTimeMs = 0.0f;
-  float gtaoTemporalTimeMs = 0.0f;
-  float wholeFrameTimeMs = 0.0f;
-  float rayTracingSceneTimeMs = 0.0f;
-  float rayTracingBlasTimeMs = 0.0f;
-  float rayTracingTlasTimeMs = 0.0f;
-  float ddgiTimeMs = 0.0f;
-  float ddgiTraceTimeMs = 0.0f;
-  float ddgiUpdateTimeMs = 0.0f;
-  float ddgiRelocateClassifyTimeMs = 0.0f;
-  float ddgiIrradianceUpdateTimeMs = 0.0f;
-  float ddgiDistanceUpdateTimeMs = 0.0f;
-  float ddgiReadbackTimeMs = 0.0f;
-  float ddgiOpaqueSurfaceCacheTimeMs = 0.0f;
-  float opaqueDepthTimeMs = 0.0f;
-  float opaqueNormalTimeMs = 0.0f;
-  float opaqueMainTimeMs = 0.0f;
-  float gtaoPrefilterEdgesTimeMs = 0.0f;
-  float gtaoMainTimeMs = 0.0f;
-  float gtaoDenoiseTimeMs = 0.0f;
-  float gtaoUpscaleTimeMs = 0.0f;
+  std::array<GpuTimingSample, static_cast<size_t>(GpuTimingScope::Count)>
+      samples{};
   bool opaquePipelineStatisticsRequested = false;
   bool opaquePipelineStatisticsAvailable = false;
   uint64_t opaquePipelineStatisticsSourceFrameIndex =
@@ -342,12 +233,22 @@ struct GpuTimingReport {
   uint64_t opaqueClippingPrimitives = 0u;
   uint64_t opaqueFragmentShaderInvocations = 0u;
   uint64_t availableScopeMask = 0u;
+
   struct PassTiming {
     std::string debugName{};
     uint64_t sourceFrameIndex = std::numeric_limits<uint64_t>::max();
     float timeMs = 0.0f;
   };
   std::vector<PassTiming> passTimings{};
+
+  [[nodiscard]] constexpr GpuTimingSample &
+  operator[](GpuTimingScope scope) noexcept {
+    return samples[static_cast<size_t>(scope)];
+  }
+  [[nodiscard]] constexpr const GpuTimingSample &
+  operator[](GpuTimingScope scope) const noexcept {
+    return samples[static_cast<size_t>(scope)];
+  }
 };
 
 [[nodiscard]] constexpr bool hasGpuTimingScope(const GpuTimingReport &report,
@@ -365,168 +266,26 @@ gpuTimingScopeContributesToScopedSum(const GpuTimingReport &report,
   return parent == GpuTimingScope::None || !hasGpuTimingScope(report, parent);
 }
 
-struct GpuTimingScopeMergeDesc {
-  GpuTimingScope scope = GpuTimingScope::None;
-  float GpuTimingReport::*timeMs = nullptr;
-  uint64_t GpuTimingReport::*sourceFrameIndex = nullptr;
-  uint64_t bit = 0u;
-};
-
-inline constexpr auto kGpuTimingScopeDescs =
-    std::to_array<GpuTimingScopeMergeDesc>({
-        {GpuTimingScope::Shadow, &GpuTimingReport::shadowTimeMs,
-         &GpuTimingReport::shadowSourceFrameIndex,
-         gpuTimingScopeToBit(GpuTimingScope::Shadow)},
-        {GpuTimingScope::ShadowDepth, &GpuTimingReport::shadowDepthTimeMs,
-         &GpuTimingReport::shadowDepthSourceFrameIndex,
-         gpuTimingScopeToBit(GpuTimingScope::ShadowDepth)},
-        {GpuTimingScope::ShadowSdsm, &GpuTimingReport::shadowSdsmTimeMs,
-         &GpuTimingReport::shadowSdsmSourceFrameIndex,
-         gpuTimingScopeToBit(GpuTimingScope::ShadowSdsm)},
-        {GpuTimingScope::SceneColorDownsample,
-         &GpuTimingReport::sceneColorDownsampleTimeMs,
-         &GpuTimingReport::sceneColorDownsampleSourceFrameIndex,
-         gpuTimingScopeToBit(GpuTimingScope::SceneColorDownsample)},
-        {GpuTimingScope::Transmission, &GpuTimingReport::transmissionTimeMs,
-         &GpuTimingReport::transmissionSourceFrameIndex,
-         gpuTimingScopeToBit(GpuTimingScope::Transmission)},
-        {GpuTimingScope::TemporalAAResolve,
-         &GpuTimingReport::temporalAAResolveTimeMs,
-         &GpuTimingReport::temporalAAResolveSourceFrameIndex,
-         gpuTimingScopeToBit(GpuTimingScope::TemporalAAResolve)},
-        {GpuTimingScope::TemporalAADebug,
-         &GpuTimingReport::temporalAADebugTimeMs,
-         &GpuTimingReport::temporalAADebugSourceFrameIndex,
-         gpuTimingScopeToBit(GpuTimingScope::TemporalAADebug)},
-        {GpuTimingScope::SpatialAA, &GpuTimingReport::spatialAATimeMs,
-         &GpuTimingReport::spatialAASourceFrameIndex,
-         gpuTimingScopeToBit(GpuTimingScope::SpatialAA)},
-        {GpuTimingScope::Opaque, &GpuTimingReport::opaqueTimeMs,
-         &GpuTimingReport::opaqueSourceFrameIndex,
-         gpuTimingScopeToBit(GpuTimingScope::Opaque)},
-        {GpuTimingScope::MsaaResolve, &GpuTimingReport::msaaResolveTimeMs,
-         &GpuTimingReport::msaaResolveSourceFrameIndex,
-         gpuTimingScopeToBit(GpuTimingScope::MsaaResolve)},
-        {GpuTimingScope::GTAO, &GpuTimingReport::gtaoTimeMs,
-         &GpuTimingReport::gtaoSourceFrameIndex,
-         gpuTimingScopeToBit(GpuTimingScope::GTAO)},
-        {GpuTimingScope::HDRPostProcess, &GpuTimingReport::hdrPostProcessTimeMs,
-         &GpuTimingReport::hdrPostProcessSourceFrameIndex,
-         gpuTimingScopeToBit(GpuTimingScope::HDRPostProcess)},
-        {GpuTimingScope::Skybox, &GpuTimingReport::skyboxTimeMs,
-         &GpuTimingReport::skyboxSourceFrameIndex,
-         gpuTimingScopeToBit(GpuTimingScope::Skybox)},
-        {GpuTimingScope::Velocity, &GpuTimingReport::velocityTimeMs,
-         &GpuTimingReport::velocitySourceFrameIndex,
-         gpuTimingScopeToBit(GpuTimingScope::Velocity)},
-        {GpuTimingScope::ReactiveMask, &GpuTimingReport::reactiveMaskTimeMs,
-         &GpuTimingReport::reactiveMaskSourceFrameIndex,
-         gpuTimingScopeToBit(GpuTimingScope::ReactiveMask)},
-        {GpuTimingScope::TemporalAACopyBack,
-         &GpuTimingReport::temporalAACopyBackTimeMs,
-         &GpuTimingReport::temporalAACopyBackSourceFrameIndex,
-         gpuTimingScopeToBit(GpuTimingScope::TemporalAACopyBack)},
-        {GpuTimingScope::GTAOTemporal, &GpuTimingReport::gtaoTemporalTimeMs,
-         &GpuTimingReport::gtaoTemporalSourceFrameIndex,
-         gpuTimingScopeToBit(GpuTimingScope::GTAOTemporal)},
-        {GpuTimingScope::WholeFrame, &GpuTimingReport::wholeFrameTimeMs,
-         &GpuTimingReport::wholeFrameSourceFrameIndex,
-         gpuTimingScopeToBit(GpuTimingScope::WholeFrame)},
-        {GpuTimingScope::RayTracingScene,
-         &GpuTimingReport::rayTracingSceneTimeMs,
-         &GpuTimingReport::rayTracingSceneSourceFrameIndex,
-         gpuTimingScopeToBit(GpuTimingScope::RayTracingScene)},
-        {GpuTimingScope::RayTracingBLAS, &GpuTimingReport::rayTracingBlasTimeMs,
-         &GpuTimingReport::rayTracingBlasSourceFrameIndex,
-         gpuTimingScopeToBit(GpuTimingScope::RayTracingBLAS)},
-        {GpuTimingScope::RayTracingTLAS, &GpuTimingReport::rayTracingTlasTimeMs,
-         &GpuTimingReport::rayTracingTlasSourceFrameIndex,
-         gpuTimingScopeToBit(GpuTimingScope::RayTracingTLAS)},
-        {GpuTimingScope::DDGI, &GpuTimingReport::ddgiTimeMs,
-         &GpuTimingReport::ddgiSourceFrameIndex,
-         gpuTimingScopeToBit(GpuTimingScope::DDGI)},
-        {GpuTimingScope::DDGITrace, &GpuTimingReport::ddgiTraceTimeMs,
-         &GpuTimingReport::ddgiTraceSourceFrameIndex,
-         gpuTimingScopeToBit(GpuTimingScope::DDGITrace)},
-        {GpuTimingScope::DDGIUpdate, &GpuTimingReport::ddgiUpdateTimeMs,
-         &GpuTimingReport::ddgiUpdateSourceFrameIndex,
-         gpuTimingScopeToBit(GpuTimingScope::DDGIUpdate)},
-        {GpuTimingScope::DDGIRelocateClassify,
-         &GpuTimingReport::ddgiRelocateClassifyTimeMs,
-         &GpuTimingReport::ddgiRelocateClassifySourceFrameIndex,
-         gpuTimingScopeToBit(GpuTimingScope::DDGIRelocateClassify)},
-        {GpuTimingScope::OpaqueDepth, &GpuTimingReport::opaqueDepthTimeMs,
-         &GpuTimingReport::opaqueDepthSourceFrameIndex,
-         gpuTimingScopeToBit(GpuTimingScope::OpaqueDepth)},
-        {GpuTimingScope::OpaqueNormal, &GpuTimingReport::opaqueNormalTimeMs,
-         &GpuTimingReport::opaqueNormalSourceFrameIndex,
-         gpuTimingScopeToBit(GpuTimingScope::OpaqueNormal)},
-        {GpuTimingScope::OpaqueMain, &GpuTimingReport::opaqueMainTimeMs,
-         &GpuTimingReport::opaqueMainSourceFrameIndex,
-         gpuTimingScopeToBit(GpuTimingScope::OpaqueMain)},
-        {GpuTimingScope::GTAOPrefilterEdges,
-         &GpuTimingReport::gtaoPrefilterEdgesTimeMs,
-         &GpuTimingReport::gtaoPrefilterEdgesSourceFrameIndex,
-         gpuTimingScopeToBit(GpuTimingScope::GTAOPrefilterEdges)},
-        {GpuTimingScope::GTAOMain, &GpuTimingReport::gtaoMainTimeMs,
-         &GpuTimingReport::gtaoMainSourceFrameIndex,
-         gpuTimingScopeToBit(GpuTimingScope::GTAOMain)},
-        {GpuTimingScope::GTAODenoise, &GpuTimingReport::gtaoDenoiseTimeMs,
-         &GpuTimingReport::gtaoDenoiseSourceFrameIndex,
-         gpuTimingScopeToBit(GpuTimingScope::GTAODenoise)},
-        {GpuTimingScope::GTAOUpscale, &GpuTimingReport::gtaoUpscaleTimeMs,
-         &GpuTimingReport::gtaoUpscaleSourceFrameIndex,
-         gpuTimingScopeToBit(GpuTimingScope::GTAOUpscale)},
-        {GpuTimingScope::DDGIIrradianceUpdate,
-         &GpuTimingReport::ddgiIrradianceUpdateTimeMs,
-         &GpuTimingReport::ddgiIrradianceUpdateSourceFrameIndex,
-         gpuTimingScopeToBit(GpuTimingScope::DDGIIrradianceUpdate)},
-        {GpuTimingScope::DDGIDistanceUpdate,
-         &GpuTimingReport::ddgiDistanceUpdateTimeMs,
-         &GpuTimingReport::ddgiDistanceUpdateSourceFrameIndex,
-         gpuTimingScopeToBit(GpuTimingScope::DDGIDistanceUpdate)},
-        {GpuTimingScope::DDGIReadback, &GpuTimingReport::ddgiReadbackTimeMs,
-         &GpuTimingReport::ddgiReadbackSourceFrameIndex,
-         gpuTimingScopeToBit(GpuTimingScope::DDGIReadback)},
-        {GpuTimingScope::DDGIOpaqueSurfaceCache,
-         &GpuTimingReport::ddgiOpaqueSurfaceCacheTimeMs,
-         &GpuTimingReport::ddgiOpaqueSurfaceCacheSourceFrameIndex,
-         gpuTimingScopeToBit(GpuTimingScope::DDGIOpaqueSurfaceCache)},
-    });
-
-[[nodiscard]] constexpr const GpuTimingScopeMergeDesc *
-gpuTimingScopeDesc(GpuTimingScope scope) noexcept {
-  for (const GpuTimingScopeMergeDesc &desc : kGpuTimingScopeDescs) {
-    if (desc.scope == scope) {
-      return &desc;
-    }
-  }
-  return nullptr;
-}
-
 [[nodiscard]] constexpr uint64_t
 gpuTimingScopeSourceFrame(const GpuTimingReport &report,
                           GpuTimingScope scope) noexcept {
-  const GpuTimingScopeMergeDesc *desc = gpuTimingScopeDesc(scope);
-  return desc != nullptr ? report.*desc->sourceFrameIndex
-                         : std::numeric_limits<uint64_t>::max();
+  return report[scope].sourceFrameIndex;
 }
 
 inline void mergeGpuTimingReportScope(GpuTimingReport &dst,
                                       const GpuTimingReport &src,
-                                      GpuTimingScopeMergeDesc desc) {
-  if (!hasGpuTimingScope(src, desc.scope)) {
+                                      GpuTimingScope scope) {
+  if (!hasGpuTimingScope(src, scope)) {
     return;
   }
-  dst.*desc.timeMs = src.*desc.timeMs;
-  dst.*desc.sourceFrameIndex = src.*desc.sourceFrameIndex;
-  dst.availableScopeMask |= desc.bit;
+  dst[scope] = src[scope];
+  dst.availableScopeMask |= gpuTimingScopeToBit(scope);
 }
 
 inline void mergeGpuTimingReportScopes(GpuTimingReport &dst,
                                        const GpuTimingReport &src) {
-  for (const GpuTimingScopeMergeDesc desc : kGpuTimingScopeDescs) {
-    mergeGpuTimingReportScope(dst, src, desc);
+  for (const GpuTimingScopeDesc &desc : kGpuTimingScopeDescs) {
+    mergeGpuTimingReportScope(dst, src, desc.scope);
   }
 }
 
@@ -537,6 +296,16 @@ enum class GraphicsBarrierResourceKind : uint8_t {
 };
 
 using GraphicsBarrierAccessMode = RenderGraphAccessMode;
+
+struct GraphicsTextureSubresourceRange {
+  uint32_t firstMip = 0u;
+  uint32_t mipCount = UINT32_MAX;
+  uint32_t firstLayer = 0u;
+  uint32_t layerCount = UINT32_MAX;
+
+  [[nodiscard]] bool
+  operator==(const GraphicsTextureSubresourceRange &) const noexcept = default;
+};
 
 [[nodiscard]] constexpr bool
 hasGraphicsBarrierAccessFlag(GraphicsBarrierAccessMode mode,
@@ -571,6 +340,7 @@ struct GraphicsBarrierRecord {
   GraphicsBarrierAccessMode afterAccess = GraphicsBarrierAccessMode::None;
   GraphicsBarrierState beforeState = GraphicsBarrierState::Unknown;
   GraphicsBarrierState afterState = GraphicsBarrierState::Unknown;
+  GraphicsTextureSubresourceRange subresources{};
   [[nodiscard]] static constexpr GraphicsBarrierRecord ForTexture(
       TextureHandle textureHandle,
       GraphicsBarrierAccessMode beforeAccessMode =
@@ -578,14 +348,15 @@ struct GraphicsBarrierRecord {
       GraphicsBarrierAccessMode afterAccessMode =
           GraphicsBarrierAccessMode::None,
       GraphicsBarrierState beforeBarrierState = GraphicsBarrierState::Unknown,
-      GraphicsBarrierState afterBarrierState =
-          GraphicsBarrierState::Unknown) noexcept {
+      GraphicsBarrierState afterBarrierState = GraphicsBarrierState::Unknown,
+      GraphicsTextureSubresourceRange textureSubresources = {}) noexcept {
     GraphicsBarrierRecord record{};
     record.setTextureHandle(textureHandle);
     record.beforeAccess = beforeAccessMode;
     record.afterAccess = afterAccessMode;
     record.beforeState = beforeBarrierState;
     record.afterState = afterBarrierState;
+    record.subresources = textureSubresources;
     return record;
   }
   [[nodiscard]] static constexpr GraphicsBarrierRecord ForBuffer(
@@ -690,6 +461,7 @@ struct DrawItem {
   float depthBiasSlope = 0.0f;
   float depthBiasClamp = 0.0f;
   std::span<const std::byte> pushConstants{};
+  std::span<const PushConstantTextureBinding> pushConstantTextureBindings{};
   std::string_view debugLabel{};
   uint32_t debugColor = 0xffffffffu;
 };
@@ -722,6 +494,7 @@ struct MeshDispatchItem {
   std::span<const std::byte> pushConstants{};
   std::span<const BufferHandle> dependencyBuffers{};
   std::span<const TextureHandle> dependencyTextures{};
+  std::span<const PushConstantTextureBinding> pushConstantTextureBindings{};
   std::string_view debugLabel{};
   uint32_t debugColor = 0xffffffffu;
 };
@@ -801,6 +574,21 @@ struct RenderPass {
   GpuTimingScope gpuTimingScope = GpuTimingScope::None;
   std::string_view debugLabel{};
   uint32_t debugColor = 0xffffffffu;
+};
+
+struct GraphicsRecordingStep {
+  std::span<const GraphicsBarrierRecord> barriers{};
+  const RenderPass *pass = nullptr;
+};
+
+struct GraphicsRecordingReferences {
+  std::span<const BufferHandle> buffers{};
+  std::span<const TextureHandle> textures{};
+  std::span<const AccelerationStructureHandle> accelerationStructures{};
+  std::span<const RenderPipelineHandle> renderPipelines{};
+  std::span<const ComputePipelineHandle> computePipelines{};
+  std::span<const MeshletPipelineHandle> meshletPipelines{};
+  std::span<const RayQueryBindingHandle> rayQueryBindings{};
 };
 
 struct SubmitBatchMeta {

@@ -17,13 +17,13 @@ namespace {
 using namespace nuri;
 using namespace nuri::test_support;
 
-Result<RenderGraphCompileResult, std::string>
+Result<CompiledRenderGraph, std::string>
 compileBuilder(RenderGraphBuilder &builder) {
   RenderGraphRuntime runtime;
   return builder.compile(runtime);
 }
 
-Result<RenderGraphCompileResult, std::string>
+Result<CompiledRenderGraph, std::string>
 compileBuilderWithConfig(RenderGraphBuilder &builder,
                          const RenderGraphRuntimeConfig &config) {
   RenderGraphRuntime runtime(config);
@@ -69,36 +69,97 @@ TEST(RenderGraphCompileBehaviorTest, CompileDeterminismAndTieBreak) {
     return;
   }
 
-  const RenderGraphCompileResult &compiledA = compileAResult.value();
-  const RenderGraphCompileResult &compiledB = compileBResult.value();
+  const CompiledRenderGraph &compiledA = compileAResult.value();
+  const CompiledRenderGraph &compiledB = compileBResult.value();
 
-  if (!(compiledA.orderedPassIndices.size() == 3u)) {
+  if (!(compiledA.plan.orderedPassIndices.size() == 3u)) {
     ADD_FAILURE() << "determinism graph should schedule 3 passes";
     return;
   }
-  if (!(compiledA.orderedPassIndices[0u] == 0u &&
-        compiledA.orderedPassIndices[1u] == 1u &&
-        compiledA.orderedPassIndices[2u] == 2u)) {
+  if (!(compiledA.plan.orderedPassIndices[0u] == 0u &&
+        compiledA.plan.orderedPassIndices[1u] == 1u &&
+        compiledA.plan.orderedPassIndices[2u] == 2u)) {
     ADD_FAILURE() << "tie-break ordering should follow pass declaration index";
     return;
   }
-  if (!(compiledA.orderedPassIndices == compiledB.orderedPassIndices)) {
+  if (!(compiledA.plan.orderedPassIndices ==
+        compiledB.plan.orderedPassIndices)) {
     ADD_FAILURE()
         << "ordered pass indices should be stable across compile calls";
     return;
   }
-  if (!(compiledA.edges.size() == compiledB.edges.size())) {
+  if (!(compiledA.plan.edges.size() == compiledB.plan.edges.size())) {
     ADD_FAILURE() << "edge count should be stable across compile calls";
     return;
   }
-  for (size_t i = 0; i < compiledA.edges.size(); ++i) {
-    if (!(compiledA.edges[i].before == compiledB.edges[i].before &&
-          compiledA.edges[i].after == compiledB.edges[i].after)) {
+  for (size_t i = 0; i < compiledA.plan.edges.size(); ++i) {
+    if (!(compiledA.plan.edges[i].before == compiledB.plan.edges[i].before &&
+          compiledA.plan.edges[i].after == compiledB.plan.edges[i].after)) {
       ADD_FAILURE()
           << "edge ordering/content should be stable across compile calls";
       return;
     }
   }
+}
+
+TEST(RenderGraphCompileBehaviorTest,
+     TextureSubresourceHazardsOrderOnlyOverlappingRanges) {
+  RenderGraphBuilder builder;
+  builder.beginFrame(202u);
+  TextureDesc textureDesc =
+      makeTransientTextureDesc(Format::RGBA8_UNORM, 32u, 32u);
+  textureDesc.numMipLevels = 2u;
+  auto textureResult =
+      builder.createTransientTexture(textureDesc, "subresource_texture");
+  ASSERT_FALSE(textureResult.hasError()) << textureResult.error();
+
+  std::array<RenderGraphPassId, 3u> passes{};
+  for (uint32_t i = 0u; i < passes.size(); ++i) {
+    auto passResult = addTestGraphicsPass(
+        builder, makeTestPass("subresource_pass"), "subresource_pass");
+    ASSERT_FALSE(passResult.hasError()) << passResult.error();
+    passes[i] = passResult.value();
+    ASSERT_FALSE(builder.markPassSideEffect(passes[i]).hasError());
+  }
+  constexpr RenderGraphSubresourceRange mip0{
+      .firstMip = 0u, .mipCount = 1u, .firstLayer = 0u, .layerCount = 1u};
+  constexpr RenderGraphSubresourceRange mip1{
+      .firstMip = 1u, .mipCount = 1u, .firstLayer = 0u, .layerCount = 1u};
+  ASSERT_FALSE(builder
+                   .addTextureAccess(passes[0], textureResult.value(),
+                                     RenderGraphAccessMode::Write, mip0)
+                   .hasError());
+  ASSERT_FALSE(builder
+                   .addTextureAccess(passes[1], textureResult.value(),
+                                     RenderGraphAccessMode::Write, mip1)
+                   .hasError());
+  ASSERT_FALSE(builder
+                   .addTextureAccess(passes[2], textureResult.value(),
+                                     RenderGraphAccessMode::Read, mip0)
+                   .hasError());
+
+  auto compileResult = compileBuilder(builder);
+  ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
+  const RenderGraphPlan &plan = compileResult.value().plan;
+  EXPECT_NE(std::ranges::find_if(plan.edges,
+                                 [](const auto &edge) {
+                                   return edge.before == 0u && edge.after == 2u;
+                                 }),
+            plan.edges.end());
+  EXPECT_EQ(std::ranges::find_if(plan.edges,
+                                 [](const auto &edge) {
+                                   return edge.before == 0u && edge.after == 1u;
+                                 }),
+            plan.edges.end());
+  EXPECT_EQ(std::ranges::find_if(plan.edges,
+                                 [](const auto &edge) {
+                                   return edge.before == 1u && edge.after == 2u;
+                                 }),
+            plan.edges.end());
+  ASSERT_EQ(plan.resourceUses.size(), 3u);
+  EXPECT_EQ(plan.resourceUses[0].subresources, mip0);
+  EXPECT_EQ(plan.resourceUses[1].subresources, mip1);
+  EXPECT_EQ(plan.resourceUses[2].subresources, mip0);
 }
 
 TEST(RenderGraphCompileBehaviorTest,
@@ -152,44 +213,46 @@ TEST(RenderGraphCompileBehaviorTest,
   ASSERT_FALSE(serialCompile.hasError());
   ASSERT_FALSE(parallelCompile.hasError());
 
-  const RenderGraphCompileResult &serial = serialCompile.value();
-  const RenderGraphCompileResult &parallel = parallelCompile.value();
+  const CompiledRenderGraph &serial = serialCompile.value();
+  const CompiledRenderGraph &parallel = parallelCompile.value();
 
-  EXPECT_FALSE(serial.usedParallelCompile);
-  EXPECT_TRUE(parallel.usedParallelCompile);
-  EXPECT_EQ(serial.orderedPassIndices, parallel.orderedPassIndices);
-  EXPECT_EQ(serial.edges.size(), parallel.edges.size());
-  EXPECT_EQ(serial.transientBufferLifetimes.size(),
-            parallel.transientBufferLifetimes.size());
-  EXPECT_EQ(serial.passBarrierPlans.size(), parallel.passBarrierPlans.size());
-  EXPECT_EQ(serial.passBarrierRecords.size(),
-            parallel.passBarrierRecords.size());
+  EXPECT_FALSE(serial.plan.usedParallelCompile);
+  EXPECT_TRUE(parallel.plan.usedParallelCompile ||
+              parallel.commands.usedParallelPayloadResolution);
+  EXPECT_EQ(serial.plan.orderedPassIndices, parallel.plan.orderedPassIndices);
+  EXPECT_EQ(serial.plan.edges.size(), parallel.plan.edges.size());
+  EXPECT_EQ(serial.plan.transientBufferLifetimes.size(),
+            parallel.plan.transientBufferLifetimes.size());
+  EXPECT_EQ(serial.plan.passBarrierPlans.size(),
+            parallel.plan.passBarrierPlans.size());
+  EXPECT_EQ(serial.plan.passBarrierRecords.size(),
+            parallel.plan.passBarrierRecords.size());
 
-  for (size_t i = 0; i < serial.edges.size(); ++i) {
-    const auto &lhs = serial.edges[i];
-    const auto &rhs = parallel.edges[i];
+  for (size_t i = 0; i < serial.plan.edges.size(); ++i) {
+    const auto &lhs = serial.plan.edges[i];
+    const auto &rhs = parallel.plan.edges[i];
     EXPECT_EQ(lhs.before, rhs.before);
     EXPECT_EQ(lhs.after, rhs.after);
   }
 
-  for (size_t i = 0; i < serial.transientBufferLifetimes.size(); ++i) {
-    const auto &lhs = serial.transientBufferLifetimes[i];
-    const auto &rhs = parallel.transientBufferLifetimes[i];
+  for (size_t i = 0; i < serial.plan.transientBufferLifetimes.size(); ++i) {
+    const auto &lhs = serial.plan.transientBufferLifetimes[i];
+    const auto &rhs = parallel.plan.transientBufferLifetimes[i];
     EXPECT_EQ(lhs.resourceIndex, rhs.resourceIndex);
     EXPECT_EQ(lhs.firstExecutionIndex, rhs.firstExecutionIndex);
     EXPECT_EQ(lhs.lastExecutionIndex, rhs.lastExecutionIndex);
   }
 
-  for (size_t i = 0; i < serial.passBarrierPlans.size(); ++i) {
-    const auto &lhs = serial.passBarrierPlans[i];
-    const auto &rhs = parallel.passBarrierPlans[i];
+  for (size_t i = 0; i < serial.plan.passBarrierPlans.size(); ++i) {
+    const auto &lhs = serial.plan.passBarrierPlans[i];
+    const auto &rhs = parallel.plan.passBarrierPlans[i];
     EXPECT_EQ(lhs.orderedPassIndex, rhs.orderedPassIndex);
     EXPECT_EQ(lhs.barrierCount, rhs.barrierCount);
   }
 
-  for (size_t i = 0; i < serial.passBarrierRecords.size(); ++i) {
-    const auto &lhs = serial.passBarrierRecords[i];
-    const auto &rhs = parallel.passBarrierRecords[i];
+  for (size_t i = 0; i < serial.plan.passBarrierRecords.size(); ++i) {
+    const auto &lhs = serial.plan.passBarrierRecords[i];
+    const auto &rhs = parallel.plan.passBarrierRecords[i];
     EXPECT_EQ(lhs.resourceKind, rhs.resourceKind);
     EXPECT_EQ(lhs.resourceIndex, rhs.resourceIndex);
     EXPECT_EQ(lhs.beforeAccess, rhs.beforeAccess);
@@ -241,16 +304,15 @@ TEST(RenderGraphCompileBehaviorTest,
 
   auto compileResult = compileBuilder(builder);
   ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
-  const RenderGraphCompileResult &compiled = compileResult.value();
-  ASSERT_EQ(compiled.unresolvedMeshDispatchBufferBindings.size(), 2u);
-  EXPECT_EQ(compiled.unresolvedMeshDispatchBufferBindings[0].meshDispatchIndex,
-            0u);
+  const CompiledRenderGraph &compiled = compileResult.value();
+  ASSERT_EQ(compiled.plan.commandResourcePatches.size(), 2u);
+  EXPECT_EQ(compiled.plan.commandResourcePatches[0].commandIndex, 0u);
   EXPECT_EQ(
-      compiled.unresolvedMeshDispatchBufferBindings[0].target,
-      RenderGraphCompileResult::MeshDispatchBufferBindingTarget::Indirect);
-  EXPECT_EQ(
-      compiled.unresolvedMeshDispatchBufferBindings[1].target,
-      RenderGraphCompileResult::MeshDispatchBufferBindingTarget::IndirectCount);
+      compiled.plan.commandResourcePatches[0].target,
+      RenderGraphPlan::CommandResourcePatchTarget::MeshDispatchIndirectBuffer);
+  EXPECT_EQ(compiled.plan.commandResourcePatches[1].target,
+            RenderGraphPlan::CommandResourcePatchTarget::
+                MeshDispatchIndirectCountBuffer);
 }
 
 TEST(RenderGraphCompileBehaviorTest,
@@ -427,18 +489,19 @@ TEST(RenderGraphCompileBehaviorTest,
       recordFrame(268u, std::span<const DrawItem>(draws.data(), 1u));
   auto compileResult = compileBuilder(builder);
   ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
-  RenderGraphCompileResult compiled = std::move(compileResult.value());
-  ASSERT_EQ(compiled.orderedPasses.size(), 1u);
-  ASSERT_EQ(compiled.orderedPasses[0u].draws.size(), 1u);
+  CompiledRenderGraph compiled = std::move(compileResult.value());
+  ASSERT_EQ(compiled.commands.orderedPasses.size(), 1u);
+  ASSERT_EQ(compiled.commands.orderedPasses[0u].draws.size(), 1u);
 
   const auto fingerprintB =
       recordFrame(269u, std::span<const DrawItem>(draws.data(), draws.size()));
   ASSERT_TRUE(fingerprintA == fingerprintB);
 
-  builder.refreshHandlesInCompileResult(compiled);
-  ASSERT_EQ(compiled.orderedPasses.size(), 1u);
-  ASSERT_EQ(compiled.orderedPasses[0u].draws.size(), draws.size());
-  EXPECT_EQ(compiled.orderedPasses[0u].draws[3u].vertexBuffer.index, 163u);
+  compiled.commands = builder.buildFrameCommands(compiled.plan);
+  ASSERT_EQ(compiled.commands.orderedPasses.size(), 1u);
+  ASSERT_EQ(compiled.commands.orderedPasses[0u].draws.size(), draws.size());
+  EXPECT_EQ(compiled.commands.orderedPasses[0u].draws[3u].vertexBuffer.index,
+            163u);
 }
 
 TEST(RenderGraphCompileBehaviorTest, TextureCopyPassCompilesNativePayload) {
@@ -473,9 +536,9 @@ TEST(RenderGraphCompileBehaviorTest, TextureCopyPassCompilesNativePayload) {
 
   auto compileResult = compileBuilder(builder);
   ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
-  const RenderGraphCompileResult &compiled = compileResult.value();
-  ASSERT_EQ(compiled.orderedPasses.size(), 1u);
-  const RenderPass &pass = compiled.orderedPasses[0u];
+  const CompiledRenderGraph &compiled = compileResult.value();
+  ASSERT_EQ(compiled.commands.orderedPasses.size(), 1u);
+  const RenderPass &pass = compiled.commands.orderedPasses[0u];
   EXPECT_EQ(pass.executionMode, RenderPassExecutionMode::CopyOnly);
   EXPECT_EQ(pass.debugLabel, "copy_pass");
   ASSERT_EQ(pass.textureCopies.size(), 1u);
@@ -484,9 +547,9 @@ TEST(RenderGraphCompileBehaviorTest, TextureCopyPassCompilesNativePayload) {
                           destinationTexture));
   EXPECT_EQ(pass.textureCopies[0u].sourceX, 1u);
   EXPECT_EQ(pass.textureCopies[0u].destinationY, 4u);
-  ASSERT_EQ(compiled.textureCopyRangesByPass.size(), 1u);
-  EXPECT_EQ(compiled.textureCopyRangesByPass[0u].count, 1u);
-  EXPECT_TRUE(compiled.unresolvedTextureCopyBindings.empty());
+  ASSERT_EQ(compiled.plan.textureCopyRangesByPass.size(), 1u);
+  EXPECT_EQ(compiled.plan.textureCopyRangesByPass[0u].count, 1u);
+  EXPECT_TRUE(compiled.plan.commandResourcePatches.empty());
 }
 
 TEST(RenderGraphCompileBehaviorTest,
@@ -520,9 +583,9 @@ TEST(RenderGraphCompileBehaviorTest,
   const auto fingerprintA = recordFrame(273u, sourceA, destinationA);
   auto compileResult = compileBuilder(builder);
   ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
-  RenderGraphCompileResult compiled = std::move(compileResult.value());
-  ASSERT_EQ(compiled.orderedPasses.size(), 1u);
-  const RenderPass &pass = compiled.orderedPasses[0u];
+  CompiledRenderGraph compiled = std::move(compileResult.value());
+  ASSERT_EQ(compiled.commands.orderedPasses.size(), 1u);
+  const RenderPass &pass = compiled.commands.orderedPasses[0u];
   EXPECT_EQ(pass.executionMode, RenderPassExecutionMode::CopyOnly);
   ASSERT_EQ(pass.bufferCopies.size(), 1u);
   EXPECT_TRUE(sameBuffer(pass.bufferCopies[0u].srcBuffer, sourceA));
@@ -530,18 +593,19 @@ TEST(RenderGraphCompileBehaviorTest,
   EXPECT_EQ(pass.bufferCopies[0u].srcOffset, 4u);
   EXPECT_EQ(pass.bufferCopies[0u].dstOffset, 8u);
   EXPECT_EQ(pass.bufferCopies[0u].size, 16u);
-  EXPECT_TRUE(compiled.unresolvedBufferCopyBindings.empty());
+  EXPECT_TRUE(compiled.plan.commandResourcePatches.empty());
 
   const BufferHandle sourceB{.index = 323u, .generation = 2u};
   const BufferHandle destinationB{.index = 324u, .generation = 2u};
   const auto fingerprintB = recordFrame(274u, sourceB, destinationB);
   ASSERT_TRUE(fingerprintA == fingerprintB);
-  builder.refreshHandlesInCompileResult(compiled);
-  ASSERT_EQ(compiled.orderedPasses[0u].bufferCopies.size(), 1u);
-  EXPECT_TRUE(sameBuffer(compiled.orderedPasses[0u].bufferCopies[0u].srcBuffer,
-                         sourceB));
-  EXPECT_TRUE(sameBuffer(compiled.orderedPasses[0u].bufferCopies[0u].dstBuffer,
-                         destinationB));
+  compiled.commands = builder.buildFrameCommands(compiled.plan);
+  ASSERT_EQ(compiled.commands.orderedPasses[0u].bufferCopies.size(), 1u);
+  EXPECT_TRUE(sameBuffer(
+      compiled.commands.orderedPasses[0u].bufferCopies[0u].srcBuffer, sourceB));
+  EXPECT_TRUE(
+      sameBuffer(compiled.commands.orderedPasses[0u].bufferCopies[0u].dstBuffer,
+                 destinationB));
 }
 
 TEST(RenderGraphCompileBehaviorTest,
@@ -587,22 +651,24 @@ TEST(RenderGraphCompileBehaviorTest,
   const auto fingerprintA = recordFrame(271u, sourceA, destinationA);
   auto compileResult = compileBuilder(builder);
   ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
-  RenderGraphCompileResult compiled = std::move(compileResult.value());
-  ASSERT_EQ(compiled.orderedPasses.size(), 1u);
-  ASSERT_EQ(compiled.orderedPasses[0u].textureCopies.size(), 1u);
+  CompiledRenderGraph compiled = std::move(compileResult.value());
+  ASSERT_EQ(compiled.commands.orderedPasses.size(), 1u);
+  ASSERT_EQ(compiled.commands.orderedPasses[0u].textureCopies.size(), 1u);
   EXPECT_TRUE(sameTexture(
-      compiled.orderedPasses[0u].textureCopies[0u].sourceTexture, sourceA));
+      compiled.commands.orderedPasses[0u].textureCopies[0u].sourceTexture,
+      sourceA));
 
   const auto fingerprintB = recordFrame(272u, sourceB, destinationB);
   ASSERT_TRUE(fingerprintA == fingerprintB);
-  builder.refreshHandlesInCompileResult(compiled);
+  compiled.commands = builder.buildFrameCommands(compiled.plan);
 
-  ASSERT_EQ(compiled.orderedPasses.size(), 1u);
-  ASSERT_EQ(compiled.orderedPasses[0u].textureCopies.size(), 1u);
+  ASSERT_EQ(compiled.commands.orderedPasses.size(), 1u);
+  ASSERT_EQ(compiled.commands.orderedPasses[0u].textureCopies.size(), 1u);
   EXPECT_TRUE(sameTexture(
-      compiled.orderedPasses[0u].textureCopies[0u].sourceTexture, sourceB));
+      compiled.commands.orderedPasses[0u].textureCopies[0u].sourceTexture,
+      sourceB));
   EXPECT_TRUE(sameTexture(
-      compiled.orderedPasses[0u].textureCopies[0u].destinationTexture,
+      compiled.commands.orderedPasses[0u].textureCopies[0u].destinationTexture,
       destinationB));
 }
 
@@ -649,12 +715,13 @@ TEST(RenderGraphCompileBehaviorTest,
 
   auto compileResult = compileBuilder(builder);
   ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
-  ASSERT_EQ(compileResult.value().orderedPasses.size(), 1u);
-  EXPECT_EQ(compileResult.value().orderedPasses[0].executionMode,
+  ASSERT_EQ(compileResult.value().commands.orderedPasses.size(), 1u);
+  EXPECT_EQ(compileResult.value().commands.orderedPasses[0].executionMode,
             RenderPassExecutionMode::ComputeOnly);
-  ASSERT_EQ(compileResult.value().orderedPasses[0].preDispatches.size(), 1u);
+  ASSERT_EQ(
+      compileResult.value().commands.orderedPasses[0].preDispatches.size(), 1u);
   ASSERT_EQ(compileResult.value()
-                .orderedPasses[0]
+                .commands.orderedPasses[0]
                 .preDispatches[0]
                 .dependencyBuffers.size(),
             1u);
@@ -693,11 +760,11 @@ TEST(RenderGraphCompileBehaviorTest,
 
   auto compileResult = compileBuilder(builder);
   ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
-  const RenderGraphCompileResult &compiled = compileResult.value();
-  ASSERT_EQ(compiled.passBarrierRecords.size(), 2u);
-  EXPECT_EQ(compiled.passBarrierRecords[0].afterAccess,
+  const CompiledRenderGraph &compiled = compileResult.value();
+  ASSERT_EQ(compiled.plan.passBarrierRecords.size(), 2u);
+  EXPECT_EQ(compiled.plan.passBarrierRecords[0].afterAccess,
             RenderGraphAccessMode::Read);
-  EXPECT_EQ(compiled.passBarrierRecords[1].afterAccess,
+  EXPECT_EQ(compiled.plan.passBarrierRecords[1].afterAccess,
             RenderGraphAccessMode::Write);
 }
 
@@ -807,16 +874,16 @@ TEST(RenderGraphCompileBehaviorTest,
     }
     return;
   }
-  const RenderGraphCompileResult &compiled = compileResult.value();
+  const CompiledRenderGraph &compiled = compileResult.value();
 
-  if (!(compiled.edges.size() == 1u)) {
+  if (!(compiled.plan.edges.size() == 1u)) {
     ADD_FAILURE()
         << "overlapping explicit+hazard dependency should collapse to "
            "one edge";
     return;
   }
-  if (!(compiled.edges[0u].before == pass0Result.value().value &&
-        compiled.edges[0u].after == pass1Result.value().value)) {
+  if (!(compiled.plan.edges[0u].before == pass0Result.value().value &&
+        compiled.plan.edges[0u].after == pass1Result.value().value)) {
     ADD_FAILURE()
         << "deduped overlap edge should preserve dependency direction";
     return;
@@ -924,13 +991,13 @@ TEST(RenderGraphCompileBehaviorTest,
     }
     return;
   }
-  const RenderGraphCompileResult &compiledB = compileB.value();
-  if (!(compiledB.edges.size() == 1u)) {
+  const CompiledRenderGraph &compiledB = compileB.value();
+  if (!(compiledB.plan.edges.size() == 1u)) {
     ADD_FAILURE() << "frame B explicit dependency should be present after "
                      "beginFrame reset";
     return;
   }
-  if (!(compiledB.rootPassCount >= 1u)) {
+  if (!(compiledB.plan.rootPassCount >= 1u)) {
     ADD_FAILURE()
         << "frame B explicit frame output root should be present after "
            "beginFrame reset";
@@ -998,33 +1065,33 @@ TEST(RenderGraphCompileBehaviorTest, DeadPassCullingFromFrameOutputRoots) {
     }
     return;
   }
-  const RenderGraphCompileResult &compiled = compileResult.value();
+  const CompiledRenderGraph &compiled = compileResult.value();
 
-  if (!(compiled.declaredPassCount == 3u)) {
+  if (!(compiled.plan.declaredPassCount == 3u)) {
     ADD_FAILURE() << "culling graph should declare 3 passes";
     return;
   }
-  if (!(compiled.culledPassCount == 1u)) {
+  if (!(compiled.plan.culledPassCount == 1u)) {
     ADD_FAILURE() << "exactly one dead pass should be culled";
     return;
   }
-  if (!(compiled.rootPassCount == 1u)) {
+  if (!(compiled.plan.rootPassCount == 1u)) {
     ADD_FAILURE() << "frame-output culling graph should have one root writer";
     return;
   }
-  if (!(compiled.orderedPassIndices.size() == 2u)) {
+  if (!(compiled.plan.orderedPassIndices.size() == 2u)) {
     ADD_FAILURE() << "only root-reachable passes should remain after culling";
     return;
   }
-  if (!(compiled.orderedPassIndices[0u] == pass0Result.value().value &&
-        compiled.orderedPassIndices[1u] == pass1Result.value().value)) {
+  if (!(compiled.plan.orderedPassIndices[0u] == pass0Result.value().value &&
+        compiled.plan.orderedPassIndices[1u] == pass1Result.value().value)) {
     ADD_FAILURE() << "culling should preserve producer->output order";
     return;
   }
-  if (!(std::find(compiled.orderedPassIndices.begin(),
-                  compiled.orderedPassIndices.end(),
+  if (!(std::find(compiled.plan.orderedPassIndices.begin(),
+                  compiled.plan.orderedPassIndices.end(),
                   pass2Result.value().value) ==
-        compiled.orderedPassIndices.end())) {
+        compiled.plan.orderedPassIndices.end())) {
     ADD_FAILURE() << "culled pass index should not be scheduled";
     return;
   }
@@ -1196,36 +1263,39 @@ TEST(RenderGraphCompileBehaviorTest, TransientAliasAllocationCorrectness) {
     }
     return;
   }
-  const RenderGraphCompileResult &compiled = compileResult.value();
+  const CompiledRenderGraph &compiled = compileResult.value();
 
   if (!(bufferAResult.value().value <
-            compiled.transientBufferAllocationByResource.size() &&
+            compiled.plan.transientBufferAllocationByResource.size() &&
         bufferBResult.value().value <
-            compiled.transientBufferAllocationByResource.size() &&
+            compiled.plan.transientBufferAllocationByResource.size() &&
         bufferCResult.value().value <
-            compiled.transientBufferAllocationByResource.size())) {
+            compiled.plan.transientBufferAllocationByResource.size())) {
     ADD_FAILURE()
         << "buffer allocation map should contain all transient resources";
     return;
   }
   const uint32_t bufferAllocA =
-      compiled.transientBufferAllocationByResource[bufferAResult.value().value];
+      compiled.plan
+          .transientBufferAllocationByResource[bufferAResult.value().value];
   const uint32_t bufferAllocB =
-      compiled.transientBufferAllocationByResource[bufferBResult.value().value];
+      compiled.plan
+          .transientBufferAllocationByResource[bufferBResult.value().value];
   const uint32_t bufferAllocC =
-      compiled.transientBufferAllocationByResource[bufferCResult.value().value];
-  if (!(compiled.transientBufferPhysicalCount == 2u)) {
+      compiled.plan
+          .transientBufferAllocationByResource[bufferCResult.value().value];
+  if (!(compiled.plan.transientBufferPhysicalCount == 2u)) {
     ADD_FAILURE() << "buffer aliasing should collapse 3 logical buffers to 2 "
                      "physical allocations";
     std::cerr << "[INFO] transientBufferPhysicalCount="
-              << compiled.transientBufferPhysicalCount << "\n";
+              << compiled.plan.transientBufferPhysicalCount << "\n";
     return;
   }
-  if (!(compiled.transientTexturePhysicalCount == 2u)) {
+  if (!(compiled.plan.transientTexturePhysicalCount == 2u)) {
     ADD_FAILURE() << "texture aliasing should collapse 3 logical textures to 2 "
                      "physical allocations";
     std::cerr << "[INFO] transientTexturePhysicalCount="
-              << compiled.transientTexturePhysicalCount << "\n";
+              << compiled.plan.transientTexturePhysicalCount << "\n";
     return;
   }
   if (!(bufferAllocA != UINT32_MAX && bufferAllocB != UINT32_MAX &&
@@ -1238,16 +1308,15 @@ TEST(RenderGraphCompileBehaviorTest, TransientAliasAllocationCorrectness) {
         << "compatible non-overlapping buffers should alias the same slot";
     std::cerr << "[INFO] buffer_alloc_a=" << bufferAllocA
               << " buffer_alloc_b=" << bufferAllocB
-              << " buffer_alloc_c=" << bufferAllocC
-              << " physical_count=" << compiled.transientBufferPhysicalCount
-              << "\n";
+              << " buffer_alloc_c=" << bufferAllocC << " physical_count="
+              << compiled.plan.transientBufferPhysicalCount << "\n";
     std::cerr << "[INFO] ordered_pass_indices:";
-    for (const uint32_t passIndex : compiled.orderedPassIndices) {
+    for (const uint32_t passIndex : compiled.plan.orderedPassIndices) {
       std::cerr << " " << passIndex;
     }
     std::cerr << "\n";
     std::cerr << "[INFO] buffer_lifetimes:";
-    for (const auto &lifetime : compiled.transientBufferLifetimes) {
+    for (const auto &lifetime : compiled.plan.transientBufferLifetimes) {
       std::cerr << " [res=" << lifetime.resourceIndex
                 << " first=" << lifetime.firstExecutionIndex
                 << " last=" << lifetime.lastExecutionIndex << "]";
@@ -1262,23 +1331,23 @@ TEST(RenderGraphCompileBehaviorTest, TransientAliasAllocationCorrectness) {
   }
 
   if (!(textureAResult.value().value <
-            compiled.transientTextureAllocationByResource.size() &&
+            compiled.plan.transientTextureAllocationByResource.size() &&
         textureBResult.value().value <
-            compiled.transientTextureAllocationByResource.size() &&
+            compiled.plan.transientTextureAllocationByResource.size() &&
         textureCResult.value().value <
-            compiled.transientTextureAllocationByResource.size())) {
+            compiled.plan.transientTextureAllocationByResource.size())) {
     ADD_FAILURE()
         << "texture allocation map should contain all transient resources";
     return;
   }
   const uint32_t textureAllocA =
-      compiled
+      compiled.plan
           .transientTextureAllocationByResource[textureAResult.value().value];
   const uint32_t textureAllocB =
-      compiled
+      compiled.plan
           .transientTextureAllocationByResource[textureBResult.value().value];
   const uint32_t textureAllocC =
-      compiled
+      compiled.plan
           .transientTextureAllocationByResource[textureCResult.value().value];
   if (!(textureAllocA != UINT32_MAX && textureAllocB != UINT32_MAX &&
         textureAllocC != UINT32_MAX)) {
@@ -1353,17 +1422,17 @@ TEST(RenderGraphCompileBehaviorTest, ExplicitAccessOverridesLegacyInference) {
     }
     return;
   }
-  const RenderGraphCompileResult &compiled = compileResult.value();
+  const CompiledRenderGraph &compiled = compileResult.value();
 
-  if (!(compiled.orderedPassIndices.size() == 2u)) {
+  if (!(compiled.plan.orderedPassIndices.size() == 2u)) {
     ADD_FAILURE() << "access override graph should schedule two passes";
     return;
   }
-  if (!(compiled.edges.empty())) {
+  if (!(compiled.plan.edges.empty())) {
     ADD_FAILURE()
         << "explicit read overrides should prevent inferred RW hazard edge";
-    std::cerr << "[INFO] edge_count=" << compiled.edges.size() << "\n";
-    for (const auto &edge : compiled.edges) {
+    std::cerr << "[INFO] edge_count=" << compiled.plan.edges.size() << "\n";
+    for (const auto &edge : compiled.plan.edges) {
       std::cerr << "[INFO] edge " << edge.before << " -> " << edge.after
                 << "\n";
     }
@@ -1397,13 +1466,13 @@ TEST(RenderGraphCompileBehaviorTest,
 
   auto compileResult = compileBuilder(builder);
   ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
-  const RenderGraphCompileResult &compiled = compileResult.value();
-  ASSERT_EQ(compiled.orderedPasses.size(), 1u);
-  EXPECT_FALSE(compiled.orderedPasses.front().hasColorAttachment);
-  EXPECT_EQ(compiled.orderedPasses.front().depth.clearStencil, 0u);
-  ASSERT_EQ(compiled.transientTexturePhysicalAllocations.size(), 1u);
+  const CompiledRenderGraph &compiled = compileResult.value();
+  ASSERT_EQ(compiled.commands.orderedPasses.size(), 1u);
+  EXPECT_FALSE(compiled.commands.orderedPasses.front().hasColorAttachment);
+  EXPECT_EQ(compiled.commands.orderedPasses.front().depth.clearStencil, 0u);
+  ASSERT_EQ(compiled.plan.transientTexturePhysicalAllocations.size(), 1u);
   const TextureDesc &compiledDepthDesc =
-      compiled.transientTexturePhysicalAllocations.front().desc;
+      compiled.plan.transientTexturePhysicalAllocations.front().desc;
   EXPECT_EQ(compiledDepthDesc.format, Format::D16_UNORM);
   EXPECT_EQ(compiledDepthDesc.usage, TextureUsage::AttachmentSampled);
 }
@@ -1440,7 +1509,7 @@ TEST(RenderGraphCompileBehaviorTest,
 
   auto compileResult = compileBuilder(builder);
   ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
-  EXPECT_EQ(compileResult.value().recordedGraphicsPasses.size(), 1u);
+  EXPECT_EQ(compileResult.value().plan.recordedGraphicsPasses.size(), 1u);
 }
 
 } // namespace

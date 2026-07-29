@@ -136,38 +136,17 @@ nfontBinarySerialize(const NFontBinaryData &input) {
       .tocOffset = sizeof(NFontBinaryHeader),
       .tocCount = static_cast<uint32_t>(sections.size()),
   };
-  uint64_t cursor =
-      sizeof(header) + sections.size() * sizeof(NFontBinarySectionTocEntry);
-  std::array<NFontBinarySectionTocEntry, 6> toc{};
+  std::array<BinarySection, 6> sectionViews{};
   for (size_t i = 0; i < sections.size(); ++i) {
-    if (sections[i].payload.size() >
-        std::numeric_limits<uint64_t>::max() - cursor) {
-      return serializeError("nfontBinarySerialize: file layout overflow");
-    }
-    toc[i] = {
+    sectionViews[i] = {
         .fourcc = sections[i].fourcc,
-        .offset = cursor,
-        .sizeBytes = sections[i].payload.size(),
         .count = sections[i].count,
         .stride = sections[i].stride,
+        .payload = sections[i].payload,
     };
-    cursor += sections[i].payload.size();
   }
-  if (cursor > std::numeric_limits<size_t>::max()) {
-    return serializeError("nfontBinarySerialize: output is too large");
-  }
-  header.fileSize = cursor;
-  std::vector<std::byte> out(static_cast<size_t>(cursor));
-  std::memcpy(out.data(), &header, sizeof(header));
-  std::memcpy(out.data() + header.tocOffset, toc.data(), sizeof(toc));
-  for (size_t i = 0; i < sections.size(); ++i) {
-    if (!sections[i].payload.empty()) {
-      std::memcpy(out.data() + toc[i].offset, sections[i].payload.data(),
-                  sections[i].payload.size());
-    }
-  }
-  return Result<std::vector<std::byte>, std::string>::makeResult(
-      std::move(out));
+  return writeSectionedBinary<NFontBinaryHeader, NFontBinarySectionTocEntry>(
+      header, sectionViews, 1u, "nfontBinarySerialize");
 }
 
 Result<NFontBinaryData, std::string>
@@ -185,13 +164,12 @@ nfontBinaryDeserialize(std::span<const std::byte> fileBytes) {
       header.tocCount > 1024u) {
     return deserializeError("nfontBinaryDeserialize: invalid header");
   }
-  const uint64_t tocBytes = static_cast<uint64_t>(header.tocCount) *
-                            sizeof(NFontBinarySectionTocEntry);
-  if (!binaryRangeValid(fileBytes.size(), header.tocOffset, tocBytes)) {
-    return deserializeError("nfontBinaryDeserialize: invalid TOC range");
-  }
   std::vector<NFontBinarySectionTocEntry> toc;
-  readPodArrayAt(fileBytes, header.tocOffset, header.tocCount, toc);
+  auto tocResult = readSectionToc(fileBytes, header.tocOffset, header.tocCount,
+                                  toc, "nfontBinaryDeserialize", 1024u);
+  if (tocResult.hasError()) {
+    return deserializeError(tocResult.error());
+  }
   std::array<RequiredSection, 6> required{{
       {kNFontBinarySectionHead, sizeof(NFontBinaryHeadRecord), 1u},
       {kNFontBinarySectionMetr, sizeof(NFontBinaryMetricsRecord), 1u},
@@ -201,9 +179,6 @@ nfontBinaryDeserialize(std::span<const std::byte> fileBytes) {
       {kNFontBinarySectionImag, 1u, kAnyCount},
   }};
   for (const NFontBinarySectionTocEntry &entry : toc) {
-    if (!binaryRangeValid(fileBytes.size(), entry.offset, entry.sizeBytes)) {
-      return deserializeError("nfontBinaryDeserialize: invalid section range");
-    }
     const auto spec = std::find_if(required.begin(), required.end(),
                                    [&](const RequiredSection &value) {
                                      return value.fourcc == entry.fourcc;

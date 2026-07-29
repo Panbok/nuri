@@ -1252,10 +1252,10 @@ TEST(NuriAutotestingTest, GpuTimingMapsEachScopeToItsOwnFrame) {
   report.availableScopeMask =
       gpuTimingScopeToBit(GpuTimingScope::Shadow) |
       gpuTimingScopeToBit(GpuTimingScope::TemporalAAResolve);
-  report.shadowSourceFrameIndex = 2u;
-  report.temporalAAResolveSourceFrameIndex = 5u;
-  report.shadowTimeMs = 0.25f;
-  report.temporalAAResolveTimeMs = 0.75f;
+  report[GpuTimingScope::Shadow].sourceFrameIndex = 2u;
+  report[GpuTimingScope::TemporalAAResolve].sourceFrameIndex = 5u;
+  report[GpuTimingScope::Shadow].timeMs = 0.25f;
+  report[GpuTimingScope::TemporalAAResolve].timeMs = 0.75f;
 
   std::map<uint64_t, std::map<std::string, double>> frames;
   applyAutotestGpuTimingReport(frames, report);
@@ -1282,28 +1282,28 @@ TEST(NuriAutotestingTest, GpuTimingSumSkipsParentedChildScopes) {
       gpuTimingScopeToBit(GpuTimingScope::TemporalAACopyBack) |
       gpuTimingScopeToBit(GpuTimingScope::GTAO) |
       gpuTimingScopeToBit(GpuTimingScope::GTAOTemporal);
-  report.shadowSourceFrameIndex = 7u;
-  report.wholeFrameSourceFrameIndex = 7u;
-  report.shadowDepthSourceFrameIndex = 7u;
-  report.shadowSdsmSourceFrameIndex = 7u;
-  report.opaqueSourceFrameIndex = 7u;
-  report.velocitySourceFrameIndex = 7u;
-  report.reactiveMaskSourceFrameIndex = 7u;
-  report.temporalAAResolveSourceFrameIndex = 7u;
-  report.temporalAACopyBackSourceFrameIndex = 7u;
-  report.gtaoSourceFrameIndex = 7u;
-  report.gtaoTemporalSourceFrameIndex = 7u;
-  report.shadowTimeMs = 2.0f;
-  report.wholeFrameTimeMs = 12.0f;
-  report.shadowDepthTimeMs = 1.5f;
-  report.shadowSdsmTimeMs = 0.25f;
-  report.opaqueTimeMs = 3.0f;
-  report.velocityTimeMs = 0.4f;
-  report.reactiveMaskTimeMs = 0.2f;
-  report.temporalAAResolveTimeMs = 1.0f;
-  report.temporalAACopyBackTimeMs = 0.3f;
-  report.gtaoTimeMs = 2.0f;
-  report.gtaoTemporalTimeMs = 0.5f;
+  report[GpuTimingScope::Shadow].sourceFrameIndex = 7u;
+  report[GpuTimingScope::WholeFrame].sourceFrameIndex = 7u;
+  report[GpuTimingScope::ShadowDepth].sourceFrameIndex = 7u;
+  report[GpuTimingScope::ShadowSdsm].sourceFrameIndex = 7u;
+  report[GpuTimingScope::Opaque].sourceFrameIndex = 7u;
+  report[GpuTimingScope::Velocity].sourceFrameIndex = 7u;
+  report[GpuTimingScope::ReactiveMask].sourceFrameIndex = 7u;
+  report[GpuTimingScope::TemporalAAResolve].sourceFrameIndex = 7u;
+  report[GpuTimingScope::TemporalAACopyBack].sourceFrameIndex = 7u;
+  report[GpuTimingScope::GTAO].sourceFrameIndex = 7u;
+  report[GpuTimingScope::GTAOTemporal].sourceFrameIndex = 7u;
+  report[GpuTimingScope::Shadow].timeMs = 2.0f;
+  report[GpuTimingScope::WholeFrame].timeMs = 12.0f;
+  report[GpuTimingScope::ShadowDepth].timeMs = 1.5f;
+  report[GpuTimingScope::ShadowSdsm].timeMs = 0.25f;
+  report[GpuTimingScope::Opaque].timeMs = 3.0f;
+  report[GpuTimingScope::Velocity].timeMs = 0.4f;
+  report[GpuTimingScope::ReactiveMask].timeMs = 0.2f;
+  report[GpuTimingScope::TemporalAAResolve].timeMs = 1.0f;
+  report[GpuTimingScope::TemporalAACopyBack].timeMs = 0.3f;
+  report[GpuTimingScope::GTAO].timeMs = 2.0f;
+  report[GpuTimingScope::GTAOTemporal].timeMs = 0.5f;
 
   std::map<uint64_t, std::map<std::string, double>> frames;
   applyAutotestGpuTimingReport(frames, report);

@@ -5,11 +5,9 @@
 #include "nuri/core/profiling.h"
 #include "nuri/resources/gpu/resource_keys.h"
 #include "nuri/resources/mesh_importer.h"
+#include "nuri/resources/storage/cache_utils.h"
 #include "nuri/resources/storage/material/material_binary_serializer.h"
-#include "nuri/resources/storage/material/material_cache_utils.h"
-#include "nuri/resources/storage/mesh/mesh_cache_utils.h"
 #include "nuri/resources/storage/texture/dds_texture_pack.h"
-#include "nuri/resources/storage/texture/material_texture_artifact.h"
 #include "nuri/resources/storage/texture/texture_artifact_builder.h"
 
 #include <unordered_set>
@@ -132,16 +130,14 @@ bakeSceneTextureArtifactsToDisk(const SceneTextureArtifactBakePlan &plan) {
     record.sourceMaterialIndex = materialIndex;
     record.sourceMaterial = material;
 
-    for (size_t slotIndex = 0u;
-         slotIndex < kMaterialTextureArtifactSpecs.size(); ++slotIndex) {
-      const MaterialTextureArtifactSpec &spec =
-          kMaterialTextureArtifactSpecs[slotIndex];
+    for (const MaterialTextureSlotDesc &slotDesc : kMaterialTextureSlotDescs) {
+      const size_t slotIndex = static_cast<size_t>(slotDesc.slot);
       const MaterialTextureSlotData &slot = material.textures[slotIndex];
       if (slot.sourceKind == MaterialTextureSourceKind::None) {
         continue;
       }
       const TextureArtifactBuildOptions options =
-          makeMaterialTextureArtifactBuildOptions(material, slotIndex);
+          materialTextureArtifactBuildOptions(material, slotDesc.slot);
       const uint64_t identity = hashSceneTextureSourceIdentity(
           canonicalScenePath, slot, options.loadOptions.srgb,
           textureArtifactProcessingTag(options));

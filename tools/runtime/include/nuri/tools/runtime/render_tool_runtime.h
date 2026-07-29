@@ -21,6 +21,7 @@
 #include <glm/glm.hpp>
 
 namespace nuri {
+struct RuntimeConfig;
 class Window;
 struct AnimationSceneFrameData;
 } // namespace nuri
@@ -123,6 +124,23 @@ struct ToolAssetLoadStatus {
   }
 };
 
+class ToolTextCoverage final {
+public:
+  ~ToolTextCoverage();
+  ToolTextCoverage(const ToolTextCoverage &) = delete;
+  ToolTextCoverage &operator=(const ToolTextCoverage &) = delete;
+
+  [[nodiscard]] static Result<std::unique_ptr<ToolTextCoverage>, std::string>
+  create(GPUDevice &gpu, RenderPipeline &pipeline, const RuntimeConfig &config,
+         std::pmr::memory_resource &memory, bool enable2D, bool enable3D);
+  [[nodiscard]] Result<bool, std::string> enqueue(uint64_t frameIndex);
+
+private:
+  struct Impl;
+  explicit ToolTextCoverage(std::unique_ptr<Impl> impl);
+  std::unique_ptr<Impl> impl_;
+};
+
 class ToolRendererRuntime {
 public:
   ~ToolRendererRuntime();
@@ -144,6 +162,8 @@ public:
   [[nodiscard]] Result<AssetPublicationStats, std::string> pumpAssetLoads();
   [[nodiscard]] Result<bool, std::string> applySceneBaseModel();
   [[nodiscard]] Result<bool, std::string> commitScene();
+  [[nodiscard]] Result<bool, std::string>
+  enqueueTextCoverage(uint64_t frameIndex);
   [[nodiscard]] Result<std::array<uint32_t, 2>, std::string>
   resize(uint32_t width, uint32_t height);
   void setExternalAnimationSceneFrameData(

@@ -1,7 +1,6 @@
 #include "nuri/resources/gpu/texture.h"
 #include "nuri/core/log.h"
 #include "nuri/core/profiling.h"
-#include "nuri/pch.h"
 #include "nuri/resources/cpu/bitmap.h"
 #include "nuri/resources/storage/cache_utils.h"
 #include "nuri/resources/storage/texture/texture_artifact_builder.h"
@@ -91,23 +90,6 @@ static_assert(sizeof(DdsPixelFormatHeader) == 32u,
 static_assert(sizeof(DdsHeader) == 124u, "DDS header must match the DDS spec");
 static_assert(sizeof(DdsHeaderDx10) == 20u,
               "DDS DX10 header must match the DDS spec");
-[[nodiscard]] bool hasExtension(std::string_view path,
-                                std::string_view extension) {
-  if (path.size() < extension.size()) {
-    return false;
-  }
-  const size_t start = path.size() - extension.size();
-  for (size_t i = 0; i < extension.size(); ++i) {
-    const char lhs = static_cast<char>(
-        std::tolower(static_cast<unsigned char>(path[start + i])));
-    const char rhs = static_cast<char>(
-        std::tolower(static_cast<unsigned char>(extension[i])));
-    if (lhs != rhs) {
-      return false;
-    }
-  }
-  return true;
-}
 [[nodiscard]] bool isCubeTexture(const ktxTexture &texture) noexcept {
   return texture.numFaces == 6u;
 }
@@ -177,16 +159,6 @@ makeKtxPayloadFromTexture(const ktxTexture &texture, std::string_view filePath,
   if (formatResult.hasError()) {
     return Result<KtxLoadPayload, std::string>::makeError(formatResult.error());
   }
-  const uint8_t *srcData =
-      ktxTexture_GetData(const_cast<ktxTexture *>(&texture));
-  const size_t srcDataSize = static_cast<size_t>(
-      ktxTexture_GetDataSize(const_cast<ktxTexture *>(&texture)));
-  if (srcData == nullptr || srcDataSize == 0u) {
-    return Result<KtxLoadPayload, std::string>::makeError(
-        "Texture::makeKtxPayloadFromTexture: KTX texture has no image "
-        "payload: '" +
-        std::string(filePath) + "'");
-  }
   KtxLoadPayload payload{};
   payload.desc.type = expectedType;
   payload.desc.format = formatResult.value();
@@ -221,39 +193,24 @@ makeKtxPayloadFromTexture(const ktxTexture &texture, std::string_view filePath,
   payload.bytes.resize(tightSizeBytes);
   size_t dstOffset = 0u;
   for (uint32_t level = 0u; level < payload.desc.numMipLevels; ++level) {
-    const ktx_size_t imageSize = ktxTexture_GetImageSize(textureMutable, level);
     for (uint32_t layer = 0u; layer < numLayers; ++layer) {
       for (uint32_t face = 0u; face < numFaces; ++face) {
-        ktx_size_t srcOffset = 0u;
-        const KTX_error_code offsetError = ktxTexture_GetImageOffset(
-            textureMutable, level, layer, face, &srcOffset);
-        if (offsetError != KTX_SUCCESS) {
+        auto image = detail::viewKtxImage(*textureMutable, level, layer, face,
+                                          "Texture::makeKtxPayloadFromTexture");
+        if (image.hasError()) {
           return Result<KtxLoadPayload, std::string>::makeError(
-              "Texture::makeKtxPayloadFromTexture: failed to query KTX image "
-              "offset in '" +
-              std::string(filePath) + "'");
-        }
-        if (static_cast<size_t>(srcOffset) > srcDataSize ||
-            static_cast<size_t>(imageSize) >
-                (srcDataSize - static_cast<size_t>(srcOffset))) {
-          return Result<KtxLoadPayload, std::string>::makeError(
-              "Texture::makeKtxPayloadFromTexture: KTX image offset is out of "
-              "bounds in '" +
-              std::string(filePath) + "'");
+              image.error() + " in '" + std::string(filePath) + "'");
         }
         if (dstOffset > payload.bytes.size() ||
-            static_cast<size_t>(imageSize) >
-                (payload.bytes.size() - dstOffset)) {
+            image.value().size() > payload.bytes.size() - dstOffset) {
           return Result<KtxLoadPayload, std::string>::makeError(
               "Texture::makeKtxPayloadFromTexture: packed KTX output buffer "
               "overflow in '" +
               std::string(filePath) + "'");
         }
-        std::memcpy(payload.bytes.data() + dstOffset,
-                    reinterpret_cast<const std::byte *>(srcData) +
-                        static_cast<size_t>(srcOffset),
-                    static_cast<size_t>(imageSize));
-        dstOffset += static_cast<size_t>(imageSize);
+        std::memcpy(payload.bytes.data() + dstOffset, image.value().data(),
+                    image.value().size());
+        dstOffset += image.value().size();
       }
     }
   }
@@ -463,7 +420,7 @@ Texture::prepareTexture(std::string_view filePath,
                         const TextureLoadOptions &options,
                         std::string_view debugName) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
-  if (hasExtension(filePath, ".dds")) {
+  if (hasExtensionCaseInsensitive(filePath, ".dds")) {
     auto payloadResult = loadDdsPayload(filePath, debugName);
     if (payloadResult.hasError()) {
       return Result<PreparedTextureData, std::string>::makeError(

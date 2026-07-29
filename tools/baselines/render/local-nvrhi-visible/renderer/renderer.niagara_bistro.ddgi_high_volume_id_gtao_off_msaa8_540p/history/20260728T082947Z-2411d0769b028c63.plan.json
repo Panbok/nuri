@@ -1,0 +1,38 @@
+{
+    "schemaVersion": 1,
+    "kind": "nuri.snapshot.baseline_plan",
+    "caseId": "renderer.niagara_bistro.ddgi_high_volume_id_gtao_off_msaa8_540p",
+    "suite": "renderer",
+    "profileId": "local-nvrhi-visible",
+    "reason": "User-authorized stable DDGI visual baseline; Hybrid coverage excluded in favor of SceneFit",
+    "actor": "Codex",
+    "sourceCommit": "698d4e86f6923f1ca26185f3b1a5c1045273740d",
+    "sourceReportDigest": "sha256:7669d8cb4f53442702a53e0197d79627e3d484439335145ded8b2b365d419785",
+    "planDigest": "sha256:2411d0769b028c63b85e35fd44c33560b108376086fe1037850a447ba60befb3",
+    "entries": [
+        {
+            "path": "approval.json",
+            "operation": "add",
+            "previousDigest": "",
+            "sourceDigest": "sha256:7669d8cb4f53442702a53e0197d79627e3d484439335145ded8b2b365d419785"
+        },
+        {
+            "path": "final_color.json",
+            "operation": "add",
+            "previousDigest": "",
+            "sourceDigest": "sha256:bd18b32acfb12e36a0a6f70928404c15c7f778a0b3fac39a8ed2bbe95430fec2"
+        },
+        {
+            "path": "final_color.png",
+            "operation": "add",
+            "previousDigest": "",
+            "sourceDigest": "sha256:49bd068fe9b2c4ae807ba31816b2822d6e7721d362095ae834cbf0c33a172fab"
+        },
+        {
+            "path": "final_color_preview.png",
+            "operation": "add",
+            "previousDigest": "",
+            "sourceDigest": "sha256:43cb9f5b47019e02c044c954a672e70ade8f18d857ace5be6d8d569ad5d3f8e3"
+        }
+    ]
+}

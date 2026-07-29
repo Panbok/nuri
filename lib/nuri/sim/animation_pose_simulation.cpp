@@ -1,5 +1,4 @@
 #include "nuri/sim/animation_pose_simulation.h"
-#include "nuri/pch.h"
 #include <type_traits>
 namespace nuri {
 namespace {

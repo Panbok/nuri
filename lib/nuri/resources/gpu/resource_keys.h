@@ -3,7 +3,7 @@
 #include "nuri/resources/gpu/model.h"
 #include "nuri/resources/gpu/resource_handles.h"
 #include "nuri/resources/gpu/texture.h"
-#include "nuri/resources/storage/mesh/mesh_cache_utils.h"
+#include "nuri/resources/storage/cache_utils.h"
 #include <algorithm>
 #include <bit>
 #include <cctype>

@@ -4,11 +4,88 @@
 #include "nuri/gfx/fullscreen.h"
 #include "nuri/gfx/pipeline/render_pipeline.h"
 #include "nuri/gfx/shader.h"
-#include "nuri/pch.h"
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <filesystem>
 namespace nuri {
+
+enum class TemporalInputPlacement : uint8_t {
+  EarlyGtao = 0u,
+  ColorReconstruction = 1u,
+};
+enum class TemporalInput : uint8_t { MotionVectors, ReactiveMask };
+struct TemporalAAPipelineState {
+  std::array<ShaderHandle, 2> shaders{};
+  RenderPipelineHandle pipeline{};
+};
+class TemporalAAClearPass final {
+public:
+  TemporalAAClearPass(TemporalInput input, TemporalInputPlacement placement)
+      : input_(input), placement_(placement) {}
+  [[nodiscard]] bool isEnabled(const FrameBuildContext &ctx) const;
+  Result<bool, std::string> publishFrameData(FrameBuildContext &ctx);
+  Result<bool, std::string> prepare(FrameBuildContext &ctx);
+  Result<bool, std::string> build(FrameBuildContext &ctx);
+
+private:
+  TemporalInput input_ = TemporalInput::MotionVectors;
+  TemporalInputPlacement placement_ =
+      TemporalInputPlacement::ColorReconstruction;
+};
+class TemporalAABackgroundMotionPass final {
+public:
+  TemporalAABackgroundMotionPass(GPUDevice &gpu, RuntimeCompositeConfig config,
+                                 TemporalInputPlacement placement);
+  ~TemporalAABackgroundMotionPass();
+  [[nodiscard]] bool isEnabled(const FrameBuildContext &ctx) const;
+  Result<bool, std::string> prepare(FrameBuildContext &ctx);
+  Result<bool, std::string> build(FrameBuildContext &ctx);
+
+private:
+  GPUDevice &gpu_;
+  TemporalAAPipelineState pipeline_{};
+  std::filesystem::path vertexPath_{};
+  std::filesystem::path fragmentPath_{};
+  bool initialized_ = false;
+  TemporalInputPlacement placement_ =
+      TemporalInputPlacement::ColorReconstruction;
+};
+class TemporalAAMotionClassPass final {
+public:
+  TemporalAAMotionClassPass(GPUDevice &gpu, RuntimeCompositeConfig config,
+                            TemporalInputPlacement placement);
+  ~TemporalAAMotionClassPass();
+  [[nodiscard]] bool isEnabled(const FrameBuildContext &ctx) const;
+  Result<bool, std::string> prepare(FrameBuildContext &ctx);
+  Result<bool, std::string> build(FrameBuildContext &ctx);
+
+private:
+  GPUDevice &gpu_;
+  TemporalAAPipelineState pipeline_{};
+  std::filesystem::path vertexPath_{};
+  std::filesystem::path fragmentPath_{};
+  bool initialized_ = false;
+  TemporalInputPlacement placement_ =
+      TemporalInputPlacement::ColorReconstruction;
+};
+class TemporalAAResolvePass final {
+public:
+  TemporalAAResolvePass(GPUDevice &gpu, RuntimeCompositeConfig config);
+  ~TemporalAAResolvePass();
+  [[nodiscard]] bool isEnabled(const FrameBuildContext &ctx) const;
+  Result<bool, std::string> prepare(FrameBuildContext &ctx);
+  Result<bool, std::string> build(FrameBuildContext &ctx);
+
+private:
+  GPUDevice &gpu_;
+  TemporalAAPipelineState pipeline_{};
+  SamplerHandle linearClampSampler_{};
+  std::filesystem::path vertexPath_{};
+  std::filesystem::path fragmentPath_{};
+  bool initialized_ = false;
+};
+
 namespace {
 constexpr uint32_t kTaaResolveFlagHistoryValid = 1u << 0u;
 constexpr uint32_t kTaaResolveFlagPreviousVelocityValid = 1u << 1u;
@@ -105,9 +182,7 @@ isLegacyTAAEnabled(const RenderFrameContext &frame) noexcept {
   return frame.presentationAA.valid
              ? frame.presentationAA.reconstruction ==
                    ColorReconstruction::LegacyTAA
-             : sanitizeAntiAliasingMode(
-                   renderSettingsOrDefault(frame).antiAliasing.mode) ==
-                   AntiAliasingMode::TAA;
+             : frame.settings.antiAliasing.mode == AntiAliasingMode::TAA;
 }
 [[nodiscard]] inline bool
 isVelocityDebugView(AntiAliasingDebugView view) noexcept {
@@ -207,28 +282,6 @@ taaEvaluationDebugDesc(AntiAliasingDebugView view) noexcept {
     return {};
   }
 }
-struct TAAResolveTuning {
-  float currentWeight;
-  float sharpenStrength;
-  float sharpenConfidenceThreshold;
-  float depthDiscontinuityThreshold;
-  float velocityRejectionThreshold;
-  float velocityBlendScale;
-  float motionCurrentWeight;
-  float disocclusionCurrentWeight;
-  float clampCurrentWeight;
-  float clampBlendAttenuation;
-  float varianceGamma;
-  float hdrWeightStrength;
-  float reactiveCurrentWeight;
-  float reactiveStrength;
-  float velocityDilationDepthThreshold;
-  TemporalAAClampMode clampMode;
-  TemporalAAHdrWeightingMode hdrWeightingMode;
-  TemporalAAVelocityDilationMode velocityDilationMode;
-  TemporalAAHistoryFilterMode historyFilterMode;
-  bool sharpenEnabled;
-};
 [[nodiscard]] inline std::filesystem::path
 resolveShaderBasePath(const RuntimeCompositeConfig &config) {
   if (!config.shaderBasePath.empty()) {
@@ -260,15 +313,14 @@ createTemporalPipeline(GPUDevice &gpu, TemporalAAPipelineState &state,
                        const std::filesystem::path &vertexPath,
                        const std::filesystem::path &fragmentPath,
                        RenderPipelineDesc desc, std::string_view name) {
-  Shader shader{name, gpu};
   auto vertex =
-      shader.compileFromFile(vertexPath.string(), ShaderStage::Vertex);
+      compileShaderFile(gpu, name, vertexPath.string(), ShaderStage::Vertex);
   if (vertex.hasError()) {
     return Result<bool, std::string>::makeError(vertex.error());
   }
   state.shaders[0] = vertex.value();
-  auto fragment =
-      shader.compileFromFile(fragmentPath.string(), ShaderStage::Fragment);
+  auto fragment = compileShaderFile(gpu, name, fragmentPath.string(),
+                                    ShaderStage::Fragment);
   if (fragment.hasError()) {
     return Result<bool, std::string>::makeError(fragment.error());
   }
@@ -292,41 +344,13 @@ createTemporalPipeline(GPUDevice &gpu, TemporalAAPipelineState &state,
          static_cast<uint64_t>(std::max(dimensions.height, 1u)) *
          formatTexelBytes(gpu.getTextureFormat(texture));
 }
-[[nodiscard]] TAAResolveTuning sanitizedResolveTuning(
-    const RenderSettings::AntiAliasingSettings &settings) noexcept {
-  const auto debug = effectiveTemporalAADebugSettings(settings);
-  return {
-      .currentWeight = debug.taaCurrentFrameWeight,
-      .sharpenStrength = debug.taaSharpenStrength,
-      .sharpenConfidenceThreshold = debug.taaSharpenConfidenceThreshold,
-      .depthDiscontinuityThreshold = debug.taaDepthDiscontinuityThreshold,
-      .velocityRejectionThreshold = debug.taaVelocityRejectionThreshold,
-      .velocityBlendScale = debug.taaVelocityBlendScale,
-      .motionCurrentWeight =
-          std::max(debug.taaMotionCurrentWeight, debug.taaCurrentFrameWeight),
-      .disocclusionCurrentWeight = std::max(debug.taaDisocclusionCurrentWeight,
-                                            debug.taaCurrentFrameWeight),
-      .clampCurrentWeight =
-          std::max(debug.taaClampCurrentWeight, debug.taaCurrentFrameWeight),
-      .clampBlendAttenuation = debug.taaClampBlendAttenuation,
-      .varianceGamma = debug.taaVarianceGamma,
-      .hdrWeightStrength = debug.taaHdrWeightStrength,
-      .reactiveCurrentWeight = debug.taaReactiveCurrentWeight,
-      .reactiveStrength = debug.taaReactiveStrength,
-      .velocityDilationDepthThreshold = debug.taaVelocityDilationDepthThreshold,
-      .clampMode = debug.taaClampMode,
-      .hdrWeightingMode = debug.taaHdrWeightingMode,
-      .velocityDilationMode = debug.taaVelocityDilationMode,
-      .historyFilterMode = debug.taaHistoryFilterMode,
-      .sharpenEnabled = debug.taaSharpenEnabled};
-}
 } // namespace
 
 namespace {
 [[nodiscard]] bool
 temporalInputPlacementEnabled(const FrameBuildContext &ctx,
                               TemporalInputPlacement placement) {
-  const PresentationAAPlan plan = presentationAAPlanForFrame(ctx.frame);
+  const PresentationAAPlan &plan = ctx.frame.presentationAA;
   return placement == TemporalInputPlacement::EarlyGtao
              ? plan.gtaoTemporal
              : usesTemporalColorReconstruction(plan);
@@ -345,9 +369,11 @@ Result<bool, std::string> TemporalAAClearPass::prepare(FrameBuildContext &ctx) {
 Result<bool, std::string> TemporalAAClearPass::build(FrameBuildContext &ctx) {
   const bool motion = input_ == TemporalInput::MotionVectors;
   TextureHandle texture =
-      motion ? ctx.shared.motionVectorTexture : ctx.shared.reactiveMaskTexture;
-  auto &graphTexture = motion ? ctx.shared.motionVectorGraphTexture
-                              : ctx.shared.reactiveMaskGraphTexture;
+      motion ? ctx.shared[FrameTextureSlot::MotionVector].texture
+             : ctx.shared[FrameTextureSlot::ReactiveMask].texture;
+  auto &graphTexture = motion
+                           ? ctx.shared[FrameTextureSlot::MotionVector].graph
+                           : ctx.shared[FrameTextureSlot::ReactiveMask].graph;
   if (nuri::isValid(graphTexture) || !nuri::isValid(texture)) {
     return Result<bool, std::string>::makeResult(false);
   }
@@ -410,14 +436,14 @@ TemporalAABackgroundMotionPass::~TemporalAABackgroundMotionPass() {
 
 bool TemporalAABackgroundMotionPass::isEnabled(
     const FrameBuildContext &ctx) const {
-  const PresentationAAPlan plan = presentationAAPlanForFrame(ctx.frame);
+  const PresentationAAPlan &plan = ctx.frame.presentationAA;
   return temporalInputPlacementEnabled(ctx, placement_) &&
          plan.reconstruction == ColorReconstruction::ReferenceTAA &&
          plan.needsMotion;
 }
 
 Result<bool, std::string>
-TemporalAABackgroundMotionPass::prepare(FrameBuildContext &ctx) {
+TemporalAABackgroundMotionPass::prepare(FrameBuildContext &) {
   if (initialized_) {
     return Result<bool, std::string>::makeResult(true);
   }
@@ -440,16 +466,18 @@ TemporalAABackgroundMotionPass::prepare(FrameBuildContext &ctx) {
 
 Result<bool, std::string>
 TemporalAABackgroundMotionPass::build(FrameBuildContext &ctx) {
-  if (nuri::isValid(ctx.shared.motionClassGraphTexture)) {
+  if (nuri::isValid(ctx.shared[FrameTextureSlot::MotionClass].graph)) {
     return Result<bool, std::string>::makeResult(false);
   }
-  if (!nuri::isValid(ctx.shared.sceneDepthGraphTexture)) {
-    ctx.shared.sceneDepthGraphTexture =
-        ctx.graph.importTexture(ctx.shared.sceneDepthTexture, "scene_depth")
+  if (!nuri::isValid(ctx.shared[FrameTextureSlot::SceneDepth].graph)) {
+    ctx.shared[FrameTextureSlot::SceneDepth].graph =
+        ctx.graph
+            .importTexture(ctx.shared[FrameTextureSlot::SceneDepth].texture,
+                           "scene_depth")
             .value();
   }
-  const TextureDimensions dimensions =
-      gpu_.getTextureDimensions(ctx.shared.motionVectorTexture);
+  const TextureDimensions dimensions = gpu_.getTextureDimensions(
+      ctx.shared[FrameTextureSlot::MotionVector].texture);
   const float inverseWidth =
       1.0f / static_cast<float>(std::max(dimensions.width, 1u));
   const float inverseHeight =
@@ -477,12 +505,12 @@ TemporalAABackgroundMotionPass::build(FrameBuildContext &ctx) {
   };
   RenderGraphGraphicsPassDesc pass{};
   pass.color = {.loadOp = LoadOp::Load, .storeOp = StoreOp::Store};
-  pass.colorTexture = ctx.shared.motionVectorGraphTexture;
+  pass.colorTexture = ctx.shared[FrameTextureSlot::MotionVector].graph;
   pass.depth = {.loadOp = LoadOp::Load,
                 .storeOp = StoreOp::Store,
                 .clearDepth = 1.0f,
                 .clearStencil = 0u};
-  pass.depthTexture = ctx.shared.sceneDepthGraphTexture;
+  pass.depthTexture = ctx.shared[FrameTextureSlot::SceneDepth].graph;
   pass.draws = std::span<const DrawItem>(&draw, 1u);
   pass.debugLabel = "TAA Background Motion Pass";
   pass.debugColor = 0xff4488ff;
@@ -521,11 +549,11 @@ TemporalAAMotionClassPass::~TemporalAAMotionClassPass() {
 
 bool TemporalAAMotionClassPass::isEnabled(const FrameBuildContext &ctx) const {
   return temporalInputPlacementEnabled(ctx, placement_) &&
-         presentationAAPlanForFrame(ctx.frame).needsMotionClass;
+         ctx.frame.presentationAA.needsMotionClass;
 }
 
 Result<bool, std::string>
-TemporalAAMotionClassPass::prepare(FrameBuildContext &ctx) {
+TemporalAAMotionClassPass::prepare(FrameBuildContext &) {
   if (initialized_) {
     return Result<bool, std::string>::makeResult(true);
   }
@@ -542,18 +570,20 @@ TemporalAAMotionClassPass::prepare(FrameBuildContext &ctx) {
 
 Result<bool, std::string>
 TemporalAAMotionClassPass::build(FrameBuildContext &ctx) {
-  if (nuri::isValid(ctx.shared.motionClassGraphTexture)) {
+  if (nuri::isValid(ctx.shared[FrameTextureSlot::MotionClass].graph)) {
     return Result<bool, std::string>::makeResult(false);
   }
-  const uint32_t depthTexId =
-      gpu_.getTextureBindlessIndex(ctx.shared.sceneDepthTexture);
-  const uint32_t motionTexId =
-      gpu_.getTextureBindlessIndex(ctx.shared.motionVectorTexture);
-  const uint32_t reactiveTexId =
-      gpu_.getTextureBindlessIndex(ctx.shared.reactiveMaskTexture);
+  const uint32_t depthTexId = gpu_.getTextureBindlessIndex(
+      ctx.shared[FrameTextureSlot::SceneDepth].texture);
+  const uint32_t motionTexId = gpu_.getTextureBindlessIndex(
+      ctx.shared[FrameTextureSlot::MotionVector].texture);
+  const uint32_t reactiveTexId = gpu_.getTextureBindlessIndex(
+      ctx.shared[FrameTextureSlot::ReactiveMask].texture);
   const uint32_t pointSamplerId = gpu_.getDefaultSamplerBindlessIndex();
-  ctx.shared.motionClassGraphTexture =
-      ctx.graph.importTexture(ctx.shared.motionClassTexture, "taa_motion_class")
+  ctx.shared[FrameTextureSlot::MotionClass].graph =
+      ctx.graph
+          .importTexture(ctx.shared[FrameTextureSlot::MotionClass].texture,
+                         "taa_motion_class")
           .value();
   const bool forceInvalidGeometry =
       !ctx.frame.metrics.antiAliasing.opaqueVelocityGenerated ||
@@ -575,30 +605,31 @@ TemporalAAMotionClassPass::build(FrameBuildContext &ctx) {
           reinterpret_cast<const std::byte *>(&constants), sizeof(constants)),
       "TaaMotionClass", kDrawDebugColor);
   const std::array<TextureHandle, 3> reads{
-      ctx.shared.sceneDepthTexture,
-      ctx.shared.motionVectorTexture,
-      ctx.shared.reactiveMaskTexture,
+      ctx.shared[FrameTextureSlot::SceneDepth].texture,
+      ctx.shared[FrameTextureSlot::MotionVector].texture,
+      ctx.shared[FrameTextureSlot::ReactiveMask].texture,
   };
   RenderGraphGraphicsPassDesc pass{};
   pass.color = {.loadOp = LoadOp::Clear,
                 .storeOp = StoreOp::Store,
                 .clearColor = kFrameCompositionMotionClassClearValue};
-  pass.colorTexture = ctx.shared.motionClassGraphTexture;
+  pass.colorTexture = ctx.shared[FrameTextureSlot::MotionClass].graph;
   pass.dependencyTextures = reads;
   pass.draws = std::span<const DrawItem>(&draw, 1u);
   pass.debugLabel = "TAA Motion Class Pass";
   pass.debugColor = 0xff55aaff;
   (void)ctx.graph.addGraphicsPass(pass).value();
-  AntiAliasingFrameMetrics &metrics = ctx.frame.metrics.antiAliasing;
   ctx.shared.historyWriteRequirements |=
       FrameTextureRequirementFlags::MotionClass;
   if (isRenderCaptureRequested(ctx.frame, "motion_class")) {
     ctx.frame.captureRegistry.publish(RenderCapturePoint{
         .name = "motion_class",
         .version = 1u,
-        .texture = ctx.shared.motionClassTexture,
-        .format = gpu_.getTextureFormat(ctx.shared.motionClassTexture),
-        .dimensions = gpu_.getTextureDimensions(ctx.shared.motionClassTexture),
+        .texture = ctx.shared[FrameTextureSlot::MotionClass].texture,
+        .format = gpu_.getTextureFormat(
+            ctx.shared[FrameTextureSlot::MotionClass].texture),
+        .dimensions = gpu_.getTextureDimensions(
+            ctx.shared[FrameTextureSlot::MotionClass].texture),
         .frameIndex = ctx.frame.frameIndex,
         .mip = 0u,
         .layer = 0u,
@@ -634,8 +665,7 @@ bool TemporalAAResolvePass::isEnabled(const FrameBuildContext &ctx) const {
   return isLegacyTAAEnabled(ctx.frame);
 }
 
-Result<bool, std::string>
-TemporalAAResolvePass::prepare(FrameBuildContext &ctx) {
+Result<bool, std::string> TemporalAAResolvePass::prepare(FrameBuildContext &) {
   if (initialized_) {
     return Result<bool, std::string>::makeResult(true);
   }
@@ -665,41 +695,45 @@ TemporalAAResolvePass::prepare(FrameBuildContext &ctx) {
 }
 
 Result<bool, std::string> TemporalAAResolvePass::build(FrameBuildContext &ctx) {
-  const RenderSettings &settings = renderSettingsOrDefault(ctx.frame);
-  const RenderSettings::AntiAliasingDebugSettings aaDebug =
-      effectiveTemporalAADebugSettings(settings.antiAliasing);
-  const AntiAliasingDebugView debugView =
-      sanitizeAntiAliasingDebugView(aaDebug.view);
+  const RenderSettings &settings = ctx.frame.settings;
+  const RenderSettings::AntiAliasingDebugSettings &aaDebug =
+      settings.antiAliasing.debug;
+  const AntiAliasingDebugView debugView = aaDebug.view;
   const TAAEvaluationDebugDesc evaluationDebug =
       taaEvaluationDebugDesc(debugView);
-  const uint32_t sceneTexId =
-      gpu_.getTextureBindlessIndex(ctx.shared.sceneColorTexture);
-  const uint32_t historyReadTexId =
-      gpu_.getTextureBindlessIndex(ctx.shared.historyColorReadTexture);
-  const uint32_t historyWriteTexId =
-      gpu_.getTextureBindlessIndex(ctx.shared.historyColorWriteTexture);
-  const uint32_t depthTexId =
-      gpu_.getTextureBindlessIndex(ctx.shared.sceneDepthTexture);
-  const uint32_t velocityTexId =
-      gpu_.getTextureBindlessIndex(ctx.shared.motionVectorTexture);
-  const uint32_t reactiveMaskTexId =
-      gpu_.getTextureBindlessIndex(ctx.shared.reactiveMaskTexture);
-  const TAAResolveTuning tuning = sanitizedResolveTuning(settings.antiAliasing);
+  const uint32_t sceneTexId = gpu_.getTextureBindlessIndex(
+      ctx.shared[FrameTextureSlot::SceneColor].texture);
+  const uint32_t historyReadTexId = gpu_.getTextureBindlessIndex(
+      ctx.shared[FrameHistoryTextureSlot::ColorRead].texture);
+  const uint32_t historyWriteTexId = gpu_.getTextureBindlessIndex(
+      ctx.shared[FrameHistoryTextureSlot::ColorWrite].texture);
+  const uint32_t depthTexId = gpu_.getTextureBindlessIndex(
+      ctx.shared[FrameTextureSlot::SceneDepth].texture);
+  const uint32_t velocityTexId = gpu_.getTextureBindlessIndex(
+      ctx.shared[FrameTextureSlot::MotionVector].texture);
+  const uint32_t reactiveMaskTexId = gpu_.getTextureBindlessIndex(
+      ctx.shared[FrameTextureSlot::ReactiveMask].texture);
+  const TemporalAATuning &tuning = settings.antiAliasing.temporalTuning;
   const bool temporalHistoryValid =
       ctx.frame.camera.historyValid && ctx.shared.historyColorReadValid;
   const bool usePreviousDepth =
       temporalHistoryValid &&
-      nuri::isValid(ctx.shared.previousSceneDepthTexture);
+      nuri::isValid(
+          ctx.shared[FrameHistoryTextureSlot::PreviousSceneDepth].texture);
   const uint32_t previousDepthTexId =
       usePreviousDepth
-          ? gpu_.getTextureBindlessIndex(ctx.shared.previousSceneDepthTexture)
+          ? gpu_.getTextureBindlessIndex(
+                ctx.shared[FrameHistoryTextureSlot::PreviousSceneDepth].texture)
           : depthTexId;
   const bool usePreviousVelocity =
       temporalHistoryValid &&
-      nuri::isValid(ctx.shared.previousMotionVectorTexture);
+      nuri::isValid(
+          ctx.shared[FrameHistoryTextureSlot::PreviousMotionVector].texture);
   const uint32_t previousVelocityTexId =
       usePreviousVelocity
-          ? gpu_.getTextureBindlessIndex(ctx.shared.previousMotionVectorTexture)
+          ? gpu_.getTextureBindlessIndex(
+                ctx.shared[FrameHistoryTextureSlot::PreviousMotionVector]
+                    .texture)
           : velocityTexId;
   const uint32_t linearSamplerId =
       gpu_.getSamplerBindlessIndex(linearClampSampler_);
@@ -722,9 +756,10 @@ Result<bool, std::string> TemporalAAResolvePass::build(FrameBuildContext &ctx) {
     resolveFlags |= kTaaResolveFlagStaticFrame;
   }
   const bool useReactiveMask =
-      temporalHistoryValid && nuri::isValid(ctx.shared.reactiveMaskTexture) &&
+      temporalHistoryValid &&
+      nuri::isValid(ctx.shared[FrameTextureSlot::ReactiveMask].texture) &&
       tuning.reactiveStrength > 0.0f &&
-      tuning.reactiveCurrentWeight > tuning.currentWeight;
+      tuning.reactiveCurrentWeight > tuning.currentFrameWeight;
   if (useReactiveMask) {
     resolveFlags |= kTaaResolveFlagReactiveMask;
   }
@@ -734,8 +769,8 @@ Result<bool, std::string> TemporalAAResolvePass::build(FrameBuildContext &ctx) {
   if (useVelocityDilation) {
     resolveFlags |= kTaaResolveFlagVelocityDilation;
   }
-  const TextureDimensions sceneDimensions =
-      gpu_.getTextureDimensions(ctx.shared.sceneColorTexture);
+  const TextureDimensions sceneDimensions = gpu_.getTextureDimensions(
+      ctx.shared[FrameTextureSlot::SceneColor].texture);
   const float inverseWidth =
       1.0f / static_cast<float>(std::max(sceneDimensions.width, 1u));
   const float inverseHeight =
@@ -751,67 +786,79 @@ Result<bool, std::string> TemporalAAResolvePass::build(FrameBuildContext &ctx) {
   const glm::vec2 previousRawJitterDeltaUv = previousJitterUv - currentJitterUv;
   const auto sceneGraphTexture =
       ctx.graph
-          .importTexture(ctx.shared.sceneColorTexture,
+          .importTexture(ctx.shared[FrameTextureSlot::SceneColor].texture,
                          "taa_scene_color_current")
           .value();
   const auto historyWriteGraphTexture =
       ctx.graph
-          .importTexture(ctx.shared.historyColorWriteTexture,
-                         "taa_history_color_write")
+          .importTexture(
+              ctx.shared[FrameHistoryTextureSlot::ColorWrite].texture,
+              "taa_history_color_write")
           .value();
   if (usePreviousDepth) {
-    ctx.shared.previousSceneDepthGraphTexture =
+    ctx.shared[FrameHistoryTextureSlot::PreviousSceneDepth].graph =
         ctx.graph
-            .importTexture(ctx.shared.previousSceneDepthTexture,
-                           "taa_previous_scene_depth")
+            .importTexture(
+                ctx.shared[FrameHistoryTextureSlot::PreviousSceneDepth].texture,
+                "taa_previous_scene_depth")
             .value();
   }
   if (usePreviousVelocity) {
-    ctx.shared.previousMotionVectorGraphTexture =
+    ctx.shared[FrameHistoryTextureSlot::PreviousMotionVector].graph =
         ctx.graph
-            .importTexture(ctx.shared.previousMotionVectorTexture,
-                           "taa_previous_motion_vectors")
+            .importTexture(
+                ctx.shared[FrameHistoryTextureSlot::PreviousMotionVector]
+                    .texture,
+                "taa_previous_motion_vectors")
             .value();
   }
   std::array<TextureHandle, 7> resolveReads{};
   size_t resolveReadCount = 0u;
-  resolveReads[resolveReadCount++] = ctx.shared.sceneColorTexture;
-  resolveReads[resolveReadCount++] = ctx.shared.sceneDepthTexture;
+  resolveReads[resolveReadCount++] =
+      ctx.shared[FrameTextureSlot::SceneColor].texture;
+  resolveReads[resolveReadCount++] =
+      ctx.shared[FrameTextureSlot::SceneDepth].texture;
   if (temporalHistoryValid) {
-    resolveReads[resolveReadCount++] = ctx.shared.historyColorReadTexture;
-    resolveReads[resolveReadCount++] = ctx.shared.motionVectorTexture;
+    resolveReads[resolveReadCount++] =
+        ctx.shared[FrameHistoryTextureSlot::ColorRead].texture;
+    resolveReads[resolveReadCount++] =
+        ctx.shared[FrameTextureSlot::MotionVector].texture;
     if (usePreviousDepth) {
-      resolveReads[resolveReadCount++] = ctx.shared.previousSceneDepthTexture;
+      resolveReads[resolveReadCount++] =
+          ctx.shared[FrameHistoryTextureSlot::PreviousSceneDepth].texture;
     }
     if (useReactiveMask) {
-      resolveReads[resolveReadCount++] = ctx.shared.reactiveMaskTexture;
+      resolveReads[resolveReadCount++] =
+          ctx.shared[FrameTextureSlot::ReactiveMask].texture;
     }
     if (usePreviousVelocity) {
-      resolveReads[resolveReadCount++] = ctx.shared.previousMotionVectorTexture;
+      resolveReads[resolveReadCount++] =
+          ctx.shared[FrameHistoryTextureSlot::PreviousMotionVector].texture;
     }
   }
   AntiAliasingFrameMetrics &aaMetrics = ctx.frame.metrics.antiAliasing;
   const GpuTimingReport &timingReport = ctx.frame.gpuTiming;
   if (hasGpuTimingScope(timingReport, GpuTimingScope::TemporalAAResolve)) {
-    aaMetrics.taaResolveGpuTimeMs = timingReport.temporalAAResolveTimeMs;
+    aaMetrics.taaResolveGpuTimeMs =
+        timingReport[GpuTimingScope::TemporalAAResolve].timeMs;
     aaMetrics.taaResolveGpuTimingSourceFrameIndex =
-        timingReport.temporalAAResolveSourceFrameIndex;
+        timingReport[GpuTimingScope::TemporalAAResolve].sourceFrameIndex;
     aaMetrics.taaResolveGpuTimingAvailable = 1u;
   }
   if (hasGpuTimingScope(timingReport, GpuTimingScope::TemporalAADebug)) {
-    aaMetrics.taaDebugGpuTimeMs = timingReport.temporalAADebugTimeMs;
+    aaMetrics.taaDebugGpuTimeMs =
+        timingReport[GpuTimingScope::TemporalAADebug].timeMs;
     aaMetrics.taaDebugGpuTimingSourceFrameIndex =
-        timingReport.temporalAADebugSourceFrameIndex;
+        timingReport[GpuTimingScope::TemporalAADebug].sourceFrameIndex;
     aaMetrics.taaDebugGpuTimingAvailable = 1u;
   }
   aaMetrics.taaResolveWidth = sceneDimensions.width;
   aaMetrics.taaResolveHeight = sceneDimensions.height;
-  const float jitterScale = aaDebug.taaJitterScale;
+  const float jitterScale = settings.antiAliasing.temporalTuning.jitterScale;
   aaMetrics.taaJitterScale = jitterScale;
-  aaMetrics.taaQualityPreset =
-      sanitizeTemporalAAQualityPreset(settings.antiAliasing.qualityPreset);
-  aaMetrics.taaCurrentFrameWeight = tuning.currentWeight;
-  aaMetrics.taaHistoryFrameWeight = 1.0f - tuning.currentWeight;
+  aaMetrics.taaQualityPreset = settings.antiAliasing.qualityPreset;
+  aaMetrics.taaCurrentFrameWeight = tuning.currentFrameWeight;
+  aaMetrics.taaHistoryFrameWeight = 1.0f - tuning.currentFrameWeight;
   aaMetrics.taaSharpenEnabled = tuning.sharpenEnabled;
   aaMetrics.taaSharpenStrength = tuning.sharpenStrength;
   aaMetrics.taaSharpenConfidenceThreshold = tuning.sharpenConfidenceThreshold;
@@ -870,7 +917,7 @@ Result<bool, std::string> TemporalAAResolvePass::build(FrameBuildContext &ctx) {
       .pointSamplerId = pointSamplerId,
       .flags = resolveFlags,
       .mode = kTaaResolveModeResolve,
-      .currentWeightBits = floatBits(tuning.currentWeight),
+      .currentWeightBits = floatBits(tuning.currentFrameWeight),
       .inverseWidthBits = floatBits(inverseWidth),
       .inverseHeightBits = floatBits(inverseHeight),
       .depthThresholdBits = floatBits(tuning.depthDiscontinuityThreshold),
@@ -922,45 +969,59 @@ Result<bool, std::string> TemporalAAResolvePass::build(FrameBuildContext &ctx) {
     ++aaMetrics.taaCurrentFallbackFrameCount;
   }
   aaMetrics.taaHistoryBandwidthEstimateBytes +=
-      textureStorageBytes(gpu_, ctx.shared.sceneColorTexture) +
-      textureStorageBytes(gpu_, ctx.shared.historyColorWriteTexture) +
-      textureStorageBytes(gpu_, ctx.shared.sceneDepthTexture) +
+      textureStorageBytes(gpu_,
+                          ctx.shared[FrameTextureSlot::SceneColor].texture) +
+      textureStorageBytes(
+          gpu_, ctx.shared[FrameHistoryTextureSlot::ColorWrite].texture) +
+      textureStorageBytes(gpu_,
+                          ctx.shared[FrameTextureSlot::SceneDepth].texture) +
       (temporalHistoryValid
-           ? textureStorageBytes(gpu_, ctx.shared.historyColorReadTexture) +
-                 textureStorageBytes(gpu_, ctx.shared.motionVectorTexture) +
+           ? textureStorageBytes(
+                 gpu_, ctx.shared[FrameHistoryTextureSlot::ColorRead].texture) +
+                 textureStorageBytes(
+                     gpu_, ctx.shared[FrameTextureSlot::MotionVector].texture) +
                  (usePreviousDepth
                       ? textureStorageBytes(
-                            gpu_, ctx.shared.previousSceneDepthTexture)
+                            gpu_,
+                            ctx.shared
+                                [FrameHistoryTextureSlot::PreviousSceneDepth]
+                                    .texture)
                       : 0u) +
-                 (useReactiveMask ? textureStorageBytes(
-                                        gpu_, ctx.shared.reactiveMaskTexture)
-                                  : 0u) +
+                 (useReactiveMask
+                      ? textureStorageBytes(
+                            gpu_,
+                            ctx.shared[FrameTextureSlot::ReactiveMask].texture)
+                      : 0u) +
                  (usePreviousVelocity
                       ? textureStorageBytes(
-                            gpu_, ctx.shared.previousMotionVectorTexture)
+                            gpu_,
+                            ctx.shared
+                                [FrameHistoryTextureSlot::PreviousMotionVector]
+                                    .texture)
                       : 0u)
            : 0u);
-  TextureHandle displaySource = ctx.shared.historyColorWriteTexture;
+  TextureHandle displaySource =
+      ctx.shared[FrameHistoryTextureSlot::ColorWrite].texture;
   uint32_t displaySourceTexId = historyWriteTexId;
   uint32_t displayMode = kTaaResolveModeCopyHistoryToScene;
   std::string_view displayLabel = "TAA Copy Back Pass";
   uint32_t displayColor = kTaaCopyBackPassDebugColor;
   bool debugDisplay = false;
   if (debugView == AntiAliasingDebugView::TAACurrentColor) {
-    ctx.shared.sceneColorGraphTexture = sceneGraphTexture;
+    ctx.shared[FrameTextureSlot::SceneColor].graph = sceneGraphTexture;
     aaMetrics.taaResolvedSceneColorPublished = false;
     aaMetrics.taaDebugViewRendered = true;
     return Result<bool, std::string>::makeResult(true);
   }
   if (debugView == AntiAliasingDebugView::TAAPreviousHistory) {
-    displaySource = ctx.shared.historyColorReadTexture;
+    displaySource = ctx.shared[FrameHistoryTextureSlot::ColorRead].texture;
     displaySourceTexId = historyReadTexId;
     displayMode = kTaaResolveModePreviousHistory;
     displayLabel = "TAA Previous History Debug Pass";
     displayColor = kTaaDebugPassDebugColor;
     debugDisplay = true;
   } else if (isVelocityDebugView(debugView)) {
-    displaySource = ctx.shared.motionVectorTexture;
+    displaySource = ctx.shared[FrameTextureSlot::MotionVector].texture;
     displaySourceTexId = velocityTexId;
     displayMode = debugView == AntiAliasingDebugView::MotionVectors
                       ? kTaaResolveModeVelocityMotionVectors
@@ -971,22 +1032,24 @@ Result<bool, std::string> TemporalAAResolvePass::build(FrameBuildContext &ctx) {
     displayColor = kTaaDebugPassDebugColor;
     debugDisplay = true;
   } else if (debugView == AntiAliasingDebugView::TAAPreviousVelocity) {
-    displaySource = usePreviousVelocity ? ctx.shared.previousMotionVectorTexture
-                                        : ctx.shared.motionVectorTexture;
+    displaySource =
+        usePreviousVelocity
+            ? ctx.shared[FrameHistoryTextureSlot::PreviousMotionVector].texture
+            : ctx.shared[FrameTextureSlot::MotionVector].texture;
     displaySourceTexId = previousVelocityTexId;
     displayMode = kTaaResolveModePreviousVelocity;
     displayLabel = "TAA Previous Velocity Debug Pass";
     displayColor = kTaaDebugPassDebugColor;
     debugDisplay = true;
   } else if (evaluationDebug) {
-    displaySource = ctx.shared.sceneColorTexture;
+    displaySource = ctx.shared[FrameTextureSlot::SceneColor].texture;
     displaySourceTexId = sceneTexId;
     displayMode = evaluationDebug.mode;
     displayLabel = evaluationDebug.label;
     displayColor = kTaaDebugPassDebugColor;
     debugDisplay = true;
   } else if (debugView == AntiAliasingDebugView::TAAReactiveMask) {
-    displaySource = ctx.shared.reactiveMaskTexture;
+    displaySource = ctx.shared[FrameTextureSlot::ReactiveMask].texture;
     displaySourceTexId = reactiveMaskTexId;
     displayMode = kTaaResolveModeReactiveMask;
     displayLabel = "TAA Reactive Mask Debug Pass";
@@ -1020,35 +1083,45 @@ Result<bool, std::string> TemporalAAResolvePass::build(FrameBuildContext &ctx) {
   std::array<TextureHandle, 8> copyReads{};
   size_t copyReadCount = 0u;
   if (displaySamplesReactiveMask) {
-    copyReads[copyReadCount++] = ctx.shared.reactiveMaskTexture;
+    copyReads[copyReadCount++] =
+        ctx.shared[FrameTextureSlot::ReactiveMask].texture;
   } else if (displaySamplesTemporalEvaluation) {
-    copyReads[copyReadCount++] = ctx.shared.sceneColorTexture;
-    copyReads[copyReadCount++] = ctx.shared.sceneDepthTexture;
+    copyReads[copyReadCount++] =
+        ctx.shared[FrameTextureSlot::SceneColor].texture;
+    copyReads[copyReadCount++] =
+        ctx.shared[FrameTextureSlot::SceneDepth].texture;
     if (temporalHistoryValid) {
-      copyReads[copyReadCount++] = ctx.shared.historyColorReadTexture;
-      copyReads[copyReadCount++] = ctx.shared.motionVectorTexture;
+      copyReads[copyReadCount++] =
+          ctx.shared[FrameHistoryTextureSlot::ColorRead].texture;
+      copyReads[copyReadCount++] =
+          ctx.shared[FrameTextureSlot::MotionVector].texture;
       if (usePreviousDepth) {
-        copyReads[copyReadCount++] = ctx.shared.previousSceneDepthTexture;
+        copyReads[copyReadCount++] =
+            ctx.shared[FrameHistoryTextureSlot::PreviousSceneDepth].texture;
       }
       if (useReactiveMask) {
-        copyReads[copyReadCount++] = ctx.shared.reactiveMaskTexture;
+        copyReads[copyReadCount++] =
+            ctx.shared[FrameTextureSlot::ReactiveMask].texture;
       }
       if (usePreviousVelocity) {
-        copyReads[copyReadCount++] = ctx.shared.previousMotionVectorTexture;
+        copyReads[copyReadCount++] =
+            ctx.shared[FrameHistoryTextureSlot::PreviousMotionVector].texture;
       }
     }
   } else {
     copyReads[copyReadCount++] = displaySource;
   }
   if (debugDisplay) {
-    copyReads[copyReadCount++] = ctx.shared.historyColorWriteTexture;
+    copyReads[copyReadCount++] =
+        ctx.shared[FrameHistoryTextureSlot::ColorWrite].texture;
   }
   if (displaySamplesTemporalEvaluation) {
-    const uint32_t debugOutputTexId =
-        gpu_.getTextureBindlessIndex(ctx.shared.frameColorTexture);
+    const uint32_t debugOutputTexId = gpu_.getTextureBindlessIndex(
+        ctx.shared[FrameTextureSlot::FrameColor].texture);
     const auto debugOutput =
         ctx.graph
-            .importTexture(ctx.shared.frameColorTexture, "taa_debug_output")
+            .importTexture(ctx.shared[FrameTextureSlot::FrameColor].texture,
+                           "taa_debug_output")
             .value();
     RenderGraphGraphicsPassDesc debugPass{};
     debugPass.color = {.loadOp = LoadOp::Clear,
@@ -1072,7 +1145,7 @@ Result<bool, std::string> TemporalAAResolvePass::build(FrameBuildContext &ctx) {
             sizeof(debugCopyConstants)),
         "TaaDebugCopyBack", kDrawDebugColor);
     const std::array<TextureHandle, 1> debugCopyReads{
-        ctx.shared.frameColorTexture};
+        ctx.shared[FrameTextureSlot::FrameColor].texture};
     RenderGraphGraphicsPassDesc debugCopyPass{};
     debugCopyPass.color = {.loadOp = LoadOp::Clear,
                            .storeOp = StoreOp::Store,
@@ -1100,7 +1173,7 @@ Result<bool, std::string> TemporalAAResolvePass::build(FrameBuildContext &ctx) {
     copyPass.debugColor = displayColor;
     (void)ctx.graph.addGraphicsPass(copyPass).value();
   }
-  ctx.shared.sceneColorGraphTexture = sceneGraphTexture;
+  ctx.shared[FrameTextureSlot::SceneColor].graph = sceneGraphTexture;
   aaMetrics.taaCopyBackPassCount += displaySamplesTemporalEvaluation ? 2u : 1u;
   aaMetrics.taaResolvedSceneColorPublished = !debugDisplay;
   aaMetrics.taaDebugViewRendered = debugDisplay;
@@ -1116,29 +1189,45 @@ Result<bool, std::string> TemporalAAResolvePass::build(FrameBuildContext &ctx) {
     aaMetrics.velocityDebugPassCount = 1u;
     aaMetrics.velocityDebugViewRendered = true;
     aaMetrics.velocityDebugBandwidthEstimateBytes =
-        textureStorageBytes(gpu_, ctx.shared.motionVectorTexture) +
-        textureStorageBytes(gpu_, ctx.shared.sceneColorTexture);
+        textureStorageBytes(
+            gpu_, ctx.shared[FrameTextureSlot::MotionVector].texture) +
+        textureStorageBytes(gpu_,
+                            ctx.shared[FrameTextureSlot::SceneColor].texture);
   }
   aaMetrics.taaHistoryBandwidthEstimateBytes +=
       textureStorageBytes(gpu_, displaySource) +
-      textureStorageBytes(gpu_, ctx.shared.sceneColorTexture) +
+      textureStorageBytes(gpu_,
+                          ctx.shared[FrameTextureSlot::SceneColor].texture) +
       (displaySamplesTemporalEvaluation
-           ? textureStorageBytes(gpu_, ctx.shared.frameColorTexture) * 2u +
-                 textureStorageBytes(gpu_, ctx.shared.sceneDepthTexture)
+           ? textureStorageBytes(
+                 gpu_, ctx.shared[FrameTextureSlot::FrameColor].texture) *
+                     2u +
+                 textureStorageBytes(
+                     gpu_, ctx.shared[FrameTextureSlot::SceneDepth].texture)
            : 0u) +
       (displaySamplesTemporalEvaluation && temporalHistoryValid
-           ? textureStorageBytes(gpu_, ctx.shared.historyColorReadTexture) +
-                 textureStorageBytes(gpu_, ctx.shared.motionVectorTexture) +
+           ? textureStorageBytes(
+                 gpu_, ctx.shared[FrameHistoryTextureSlot::ColorRead].texture) +
+                 textureStorageBytes(
+                     gpu_, ctx.shared[FrameTextureSlot::MotionVector].texture) +
                  (usePreviousDepth
                       ? textureStorageBytes(
-                            gpu_, ctx.shared.previousSceneDepthTexture)
+                            gpu_,
+                            ctx.shared
+                                [FrameHistoryTextureSlot::PreviousSceneDepth]
+                                    .texture)
                       : 0u) +
-                 (useReactiveMask ? textureStorageBytes(
-                                        gpu_, ctx.shared.reactiveMaskTexture)
-                                  : 0u) +
+                 (useReactiveMask
+                      ? textureStorageBytes(
+                            gpu_,
+                            ctx.shared[FrameTextureSlot::ReactiveMask].texture)
+                      : 0u) +
                  (usePreviousVelocity
                       ? textureStorageBytes(
-                            gpu_, ctx.shared.previousMotionVectorTexture)
+                            gpu_,
+                            ctx.shared
+                                [FrameHistoryTextureSlot::PreviousMotionVector]
+                                    .texture)
                       : 0u)
            : 0u);
   return Result<bool, std::string>::makeResult(true);
@@ -1146,7 +1235,7 @@ Result<bool, std::string> TemporalAAResolvePass::build(FrameBuildContext &ctx) {
 
 Result<bool, std::string>
 TemporalAAClearPass::publishFrameData(FrameBuildContext &ctx) {
-  const PresentationAAPlan plan = presentationAAPlanForFrame(ctx.frame);
+  const PresentationAAPlan &plan = ctx.frame.presentationAA;
   if (placement_ == TemporalInputPlacement::EarlyGtao) {
     if (!plan.gtaoTemporal) {
       return Result<bool, std::string>::makeResult(false);

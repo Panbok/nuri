@@ -36,7 +36,6 @@ set(NURI_RENDERER_SOURCES
   nuri/gfx/pipeline/providers/frame_composition_provider.cpp
   nuri/gfx/pipeline/providers/material_table_gpu_provider.cpp
   nuri/gfx/pipeline/providers/scene_lighting_provider.cpp
-  nuri/gfx/ray_tracing/ray_tracing_types.cpp
   nuri/gfx/ray_tracing/ray_tracing_scene.cpp
   nuri/gfx/renderers/transmission_renderer.cpp
   nuri/gfx/renderers/transparent_renderer.cpp
@@ -45,12 +44,10 @@ set(NURI_RENDERER_SOURCES
   nuri/gfx/render_graph/render_graph_telemetry.cpp
   nuri/gfx/sim/animation_gpu_services.cpp
   nuri/gfx/sim/animation_scene_frame_provider.cpp
-  nuri/gfx/sim/simulation_gpu_context.cpp
   nuri/gfx/visibility/visibility.cpp
   nuri/gfx/renderer.cpp
   nuri/gfx/shader.cpp
   nuri/platform/glfw_window.cpp
-  nuri/platform/stdio_log.cpp
   nuri/resources/gpu/geometry_pool.cpp
   nuri/resources/gpu/material.cpp
   nuri/resources/gpu/model.cpp
@@ -65,10 +62,7 @@ set(NURI_RENDERER_SOURCES
   nuri/resources/scene_importer.cpp
     nuri/resources/storage/cache_utils.cpp
   nuri/resources/storage/material/material_binary_serializer.cpp
-  nuri/resources/storage/material/material_cache_utils.cpp
   nuri/resources/storage/mesh/mesh_binary_serializer.cpp
-  nuri/resources/storage/mesh/mesh_cache_utils.cpp
-  nuri/resources/storage/mesh/mesh_cache_writer.cpp
   nuri/resources/storage/texture/dds_texture_pack.cpp
     nuri/resources/storage/texture/texture_artifact_builder.cpp
     nuri/resources/storage/texture/texture_cache_utils.cpp

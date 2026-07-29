@@ -1,7 +1,6 @@
 #include "nuri/gfx/pipeline/providers/scene_lighting_provider.h"
 #include "nuri/core/profiling.h"
 #include "nuri/math/utils.h"
-#include "nuri/pch.h"
 #include "nuri/resources/gpu/resource_manager.h"
 #include "nuri/scene/render_scene.h"
 #include <algorithm>
@@ -49,23 +48,23 @@ makeSceneDataBufferLayout(size_t directionalLightBytes,
 }
 [[nodiscard]] uint32_t resolveDefaultMaterialSamplerId(
     GPUDevice &gpu, const RenderSettings::TextureFilteringSettings &settings) {
-  switch (sanitizeTextureFilterMode(settings.mode)) {
+  switch (settings.mode) {
   case TextureFilterMode::Bilinear:
     return gpu.getLinearRepeatSamplerBindlessIndex(false, 1u);
   case TextureFilterMode::Anisotropic:
-    return gpu.getLinearRepeatSamplerBindlessIndex(
-        true, sanitizeTextureFilterAnisotropy(settings.anisotropy));
+    return gpu.getLinearRepeatSamplerBindlessIndex(true, settings.anisotropy);
   case TextureFilterMode::Trilinear:
   default:
     return gpu.getLinearRepeatSamplerBindlessIndex(true, 1u);
   }
 }
-[[nodiscard]] float sanitizeTaaMaterialMipBias(float value) noexcept {
-  return std::isfinite(value) ? std::clamp(value, -1.0f, 0.0f) : 0.0f;
-}
 } // namespace
 
-SceneLightingProvider::SceneLightingProvider(GPUDevice &gpu) : gpu_(gpu) {}
+SceneLightingProvider::SceneLightingProvider(GPUDevice &gpu)
+    : gpu_(gpu), sceneDataBuffers_(gpu,
+                                   BufferDesc{.usage = BufferUsage::Storage,
+                                              .storage = Storage::HostVisible},
+                                   "forward_scene_data") {}
 
 SceneLightingProvider::~SceneLightingProvider() {
   if (nuri::isValid(taaMaterialMipBiasSampler_)) {
@@ -75,22 +74,19 @@ SceneLightingProvider::~SceneLightingProvider() {
 
 Result<uint32_t, std::string>
 SceneLightingProvider::resolveMaterialSamplerId(RenderFrameContext &frame) {
-  const RenderSettings &settings = renderSettingsOrDefault(frame);
+  const RenderSettings &settings = frame.settings;
   const RenderSettings::TextureFilteringSettings &filtering =
       settings.textureFiltering;
-  const TextureFilterMode filterMode =
-      sanitizeTextureFilterMode(filtering.mode);
+  const TextureFilterMode filterMode = filtering.mode;
   const bool mipFilteringActive = filterMode != TextureFilterMode::Bilinear;
-  const bool taaMode = sanitizeAntiAliasingMode(settings.antiAliasing.mode) ==
-                       AntiAliasingMode::TAA;
-  const RenderSettings::AntiAliasingDebugSettings aaDebug =
-      effectiveTemporalAADebugSettings(settings.antiAliasing);
-  const float mipBias = sanitizeTaaMaterialMipBias(aaDebug.taaMaterialMipBias);
+  const bool taaMode = settings.antiAliasing.mode == AntiAliasingMode::TAA;
+  const TemporalAATuning &tuning = settings.antiAliasing.temporalTuning;
+  const float mipBias = tuning.materialMipBias;
   AntiAliasingFrameMetrics &aaMetrics = frame.metrics.antiAliasing;
-  aaMetrics.taaMaterialMipBiasEnabled = aaDebug.taaMaterialMipBiasEnabled;
+  aaMetrics.taaMaterialMipBiasEnabled = tuning.materialMipBiasEnabled;
   aaMetrics.taaMaterialMipBias = mipBias;
   aaMetrics.taaMaterialMipBiasApplied = false;
-  if (!taaMode || !aaDebug.taaMaterialMipBiasEnabled || !mipFilteringActive ||
+  if (!taaMode || !tuning.materialMipBiasEnabled || !mipFilteringActive ||
       mipBias >= 0.0f) {
     return Result<uint32_t, std::string>::makeResult(
         resolveDefaultMaterialSamplerId(gpu_, filtering));
@@ -106,8 +102,7 @@ SceneLightingProvider::resolveMaterialSamplerId(RenderFrameContext &frame) {
       .maxAnisotropy = 1u,
   };
   if (filterMode == TextureFilterMode::Anisotropic) {
-    samplerDesc.maxAnisotropy =
-        sanitizeTextureFilterAnisotropy(filtering.anisotropy);
+    samplerDesc.maxAnisotropy = filtering.anisotropy;
   }
   if (!nuri::isValid(taaMaterialMipBiasSampler_) ||
       taaMaterialMipBiasSamplerDesc_ != samplerDesc) {
@@ -143,13 +138,18 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
   const SceneDataBufferLayout layout = makeSceneDataBufferLayout(
       directionalLights.size() * sizeof(DirectionalLightGpuData),
       localLights.size() * sizeof(LocalLightGpuData));
-  auto bufferResult = ensureBufferRingCapacity(
-      layout.totalBytes, std::max(1u, gpu_.getSwapchainImageCount()));
-  if (bufferResult.hasError()) {
-    return bufferResult;
+  auto acquired =
+      sceneDataBuffers_.acquire(frame.frameIndex, layout.totalBytes,
+                                std::max(1u, gpu_.getSwapchainImageCount()));
+  if (acquired.hasError()) {
+    return Result<bool, std::string>::makeError(acquired.error());
   }
-  Slot &slot = slots_[static_cast<size_t>(frame.frameIndex % slots_.size())];
-  Buffer &sceneDataBuffer = *slot.buffer.buffer;
+  slots_.resize(std::max(slots_.size(), acquired.value().lane + 1u));
+  Slot &slot = slots_[acquired.value().lane];
+  if (acquired.value().replaced) {
+    slot.hasFrameData = false;
+  }
+  const BufferHandle sceneDataBuffer = acquired.value().buffer;
   uint32_t cubemapTexId = kInvalidTextureBindlessIndex;
   uint32_t hasCubemap = 0u;
   uint32_t irradianceTexId = kInvalidTextureBindlessIndex;
@@ -158,7 +158,7 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
   uint32_t brdfLutTexId = kInvalidTextureBindlessIndex;
   uint32_t flags = 0u;
   const uint32_t cubemapSamplerId = gpu_.getCubemapSamplerBindlessIndex();
-  const RenderSettings &renderSettings = renderSettingsOrDefault(frame);
+  const RenderSettings &renderSettings = frame.settings;
   const uint32_t materialCoverageSamplerId =
       resolveDefaultMaterialSamplerId(gpu_, renderSettings.textureFiltering);
   const uint32_t materialDataSamplerId = materialCoverageSamplerId;
@@ -169,7 +169,7 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
   }
   const uint32_t materialSamplerId = materialSamplerIdResult.value();
   const EnvironmentHandles environment = frame.scene->environment();
-  if (sanitizeAntiAliasingDebugView(renderSettings.antiAliasing.debug.view) ==
+  if (renderSettings.antiAliasing.debug.view ==
       AntiAliasingDebugView::TAATransmissionMipSource) {
     flags |= kForwardSceneTransmissionMipDebug;
   }
@@ -212,11 +212,13 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
     return nuri::isValid(texture) ? gpu_.getTextureBindlessIndex(texture)
                                   : kInvalidTextureBindlessIndex;
   };
-  sceneColorTexId = textureIndex(ctx.shared.sceneColorTexture);
+  sceneColorTexId =
+      textureIndex(ctx.shared[FrameTextureSlot::SceneColor].texture);
   sceneColorHalfResTexId = textureIndex(ctx.shared.sceneColorHalfResTexture);
   sceneColorQuarterResTexId =
       textureIndex(ctx.shared.sceneColorQuarterResTexture);
-  sceneDepthTexId = textureIndex(ctx.shared.sceneDepthTexture);
+  sceneDepthTexId =
+      textureIndex(ctx.shared[FrameTextureSlot::SceneDepth].texture);
   if (sceneColorTexId != kInvalidTextureBindlessIndex) {
     sceneColorSamplerId = gpu_.getLinearRepeatSamplerBindlessIndex(true, 1u);
     flags |= kForwardSceneHasSceneColor;
@@ -256,13 +258,11 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
           sceneDepthPyramidLevelCount, depthPyramidFlags);
     }
   }
-  RenderSettings::AmbientOcclusionSettings ambientOcclusionSettings =
+  const RenderSettings::AmbientOcclusionSettings &ambientOcclusionSettings =
       renderSettings.ambientOcclusion;
-  sanitizeAmbientOcclusionSettings(ambientOcclusionSettings,
-                                   renderSettings.opaque,
-                                   renderSettings.antiAliasing);
   if (ambientOcclusionSettings.active) {
-    ambientOcclusionTexId = textureIndex(ctx.shared.ambientOcclusionTexture);
+    ambientOcclusionTexId =
+        textureIndex(ctx.shared[FrameTextureSlot::AmbientOcclusion].texture);
     if (ambientOcclusionTexId != kInvalidTextureBindlessIndex) {
       ambientOcclusionSamplerId = gpu_.getDefaultSamplerBindlessIndex();
       flags |= kForwardSceneHasAmbientOcclusion;
@@ -274,7 +274,7 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
     }
   }
   const uint64_t sceneDataBaseAddress =
-      gpu_.getBufferDeviceAddress(sceneDataBuffer.handle());
+      gpu_.getBufferDeviceAddress(sceneDataBuffer);
   const uint64_t directionalLightBufferAddress =
       directionalLights.empty()
           ? 0u
@@ -298,9 +298,7 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
     shadowFrameBufferAddress = disabledShadowResult.value();
   }
   uint32_t shadowFlags = 0u;
-  RenderSettings::ShadowSettings shadowSettings =
-      renderSettingsOrDefault(frame).shadow;
-  sanitizeShadowSettings(shadowSettings);
+  const RenderSettings::ShadowSettings &shadowSettings = frame.settings.shadow;
   if (shadowSettings.enabled && directionalLightCount > 0u) {
     shadowFlags =
         kShadowFrameFlagEnabled | shadowDebugFrameFlags(shadowSettings.debug);
@@ -313,11 +311,12 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
       renderSettings.ddgi.opaqueGatherVariant ==
           DDGISurfaceGatherVariant::Product &&
       ctx.frame.presentationAA.coverage != CoverageMode::Sample1 &&
-      nuri::isValid(ctx.shared.ddgiOpaqueSurfaceCacheTexture);
+      nuri::isValid(
+          ctx.shared[FrameTextureSlot::DdgiOpaqueSurfaceCache].texture);
   const uint32_t ddgiOpaqueSurfaceCacheTexId =
       ddgiOpaqueSurfaceCacheValid
           ? gpu_.getTextureBindlessIndex(
-                ctx.shared.ddgiOpaqueSurfaceCacheTexture)
+                ctx.shared[FrameTextureSlot::DdgiOpaqueSurfaceCache].texture)
           : kInvalidTextureBindlessIndex;
   const PostAAPlan &postAA = frame.presentationAA.postAA;
   const uint32_t specularAAStatePacked =
@@ -350,12 +349,16 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
       .ambientOcclusionReserved0 = 0u,
       .directionalLightBufferAddress = directionalLightBufferAddress,
       .localLightBufferAddress = localLightBufferAddress,
-      .materialHeaderBufferAddress = materialTable.headerBufferAddress,
-      .materialClearcoatBufferAddress = materialTable.clearcoatBufferAddress,
-      .materialSheenBufferAddress = materialTable.sheenBufferAddress,
+      .materialHeaderBufferAddress =
+          materialTable[MaterialTableRegion::Header].address,
+      .materialClearcoatBufferAddress =
+          materialTable[MaterialTableRegion::Clearcoat].address,
+      .materialSheenBufferAddress =
+          materialTable[MaterialTableRegion::Sheen].address,
       .materialTransmissionBufferAddress =
-          materialTable.transmissionBufferAddress,
-      .materialSpecularBufferAddress = materialTable.specularBufferAddress,
+          materialTable[MaterialTableRegion::Transmission].address,
+      .materialSpecularBufferAddress =
+          materialTable[MaterialTableRegion::Specular].address,
       .directionalLightCount = directionalLightCount,
       .localLightCount = localLightCount,
       .shadowFrameBufferAddress = shadowFrameBufferAddress,
@@ -389,8 +392,8 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
   for (size_t i = 0; i < frameValues.size(); ++i) {
     if (!slot.hasFrameData || *frameCache[i] != *frameValues[i]) {
       auto result = gpu_.updateBuffer(
-          sceneDataBuffer.handle(),
-          std::as_bytes(std::span{frameValues[i], 1u}), frameOffsets[i]);
+          sceneDataBuffer, std::as_bytes(std::span{frameValues[i], 1u}),
+          frameOffsets[i]);
       if (result.hasError()) {
         return result;
       }
@@ -412,8 +415,8 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
       if (lightBytes[i].empty()) {
         continue;
       }
-      auto result = gpu_.updateBuffer(sceneDataBuffer.handle(), lightBytes[i],
-                                      lightOffsets[i]);
+      auto result =
+          gpu_.updateBuffer(sceneDataBuffer, lightBytes[i], lightOffsets[i]);
       if (result.hasError()) {
         return result;
       }
@@ -429,18 +432,12 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
   slot.frameData = frameData;
   slot.postTaaFrameData = postTaaFrameData;
   ctx.shared.forwardSceneGpuData = ForwardSceneGpuData{
-      .buffer = sceneDataBuffer.handle(),
+      .buffer = sceneDataBuffer,
       .frameData = frameData,
       .postTaaFrameData = postTaaFrameData,
       .frameDataAddress = sceneDataBaseAddress,
       .postTaaFrameDataAddress =
           sceneDataBaseAddress + layout.postTaaFrameDataOffset,
-      .directionalLightBufferAddress = directionalLightBufferAddress,
-      .localLightBufferAddress = localLightBufferAddress,
-      .shadowFrameBufferAddress = shadowFrameBufferAddress,
-      .directionalLightCount = directionalLightCount,
-      .localLightCount = localLightCount,
-      .shadowFlags = shadowFlags,
       .indirectDependencyBuffers = ddgiFrame != nullptr
                                        ? ddgiFrame->dependencyBuffers
                                        : std::span<const BufferHandle>{},
@@ -451,25 +448,14 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
   return Result<bool, std::string>::makeResult(true);
 }
 
-Result<bool, std::string>
-SceneLightingProvider::ensureBufferRingCapacity(size_t requiredBytes,
-                                                uint32_t requiredCount) {
-  slots_.resize(requiredCount);
-  for (Slot &slot : slots_) {
-    auto result =
-        ensureDynamicBufferCapacity(gpu_, slot.buffer,
-                                    BufferDesc{.usage = BufferUsage::Storage,
-                                               .storage = Storage::HostVisible,
-                                               .size = requiredBytes},
-                                    "forward_scene_data");
-    if (result.hasError()) {
-      return Result<bool, std::string>::makeError(result.error());
-    }
-    if (result.value()) {
-      slot.hasFrameData = false;
-    }
-  }
-  return Result<bool, std::string>::makeResult(true);
+void SceneLightingProvider::onFrameSubmitted(
+    const RenderFrameContext &frame) noexcept {
+  sceneDataBuffers_.submitPrepared(frame.submission);
+}
+
+void SceneLightingProvider::onFrameAbandoned(
+    const RenderFrameContext &) noexcept {
+  sceneDataBuffers_.abandonPrepared();
 }
 
 Result<uint64_t, std::string>

@@ -1,0 +1,33 @@
+{
+  "target": "final_color",
+  "capturePointVersion": 1,
+  "kind": "color",
+  "format": 1,
+  "width": 640,
+  "height": 360,
+  "mip": 0,
+  "layer": 0,
+  "rowStride": 2560,
+  "origin": "top_left",
+  "colorSpace": "display_sdr",
+  "profile": "ldr_color",
+  "payload": "final_color.png",
+  "hash": "sha256:407b2a64fe4e86df6d83f2482910ca5fb23f81756943ad1d3c97a4d5bc1c217f",
+  "ddgi": {
+    "valid": 0,
+    "effectiveKind": 0,
+    "effectiveKeyHash": 0,
+    "cascadeIndex": 4294967295,
+    "coverageGeneration": 0,
+    "layoutGeneration": 0,
+    "resourceGeneration": 0,
+    "sceneBoundsGeneration": 0,
+    "ringOrigin": [0, 0, 0],
+    "cameraCell": [0, 0, 0],
+    "requestedHalfExtents": [0, 0, 0],
+    "achievedHalfExtents": [0, 0, 0],
+    "fadeStartHalfExtents": [0, 0, 0],
+    "fadeEndHalfExtents": [0, 0, 0],
+    "transitionCells": 0
+  }
+}

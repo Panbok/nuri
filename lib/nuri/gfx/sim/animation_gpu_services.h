@@ -4,8 +4,8 @@
 #include "nuri/defines.h"
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/gfx/owned_gpu_resource.h"
-#include "nuri/gfx/shader.h"
 #include "nuri/resources/gpu/buffer.h"
+#include <array>
 #include <filesystem>
 #include <memory>
 #include <memory_resource>
@@ -13,6 +13,17 @@
 namespace nuri {
 
 class NURI_API AnimationGpuServices {
+  enum class Program : uint8_t {
+    Sample,
+    Blend,
+    World,
+    Scatter,
+    Morph,
+    SkinPalette,
+    Skin,
+    Count,
+  };
+
 public:
   explicit AnimationGpuServices(
       GPUDevice &gpu, std::filesystem::path shaderRoot,
@@ -28,33 +39,25 @@ public:
     return shaderRoot_;
   }
   [[nodiscard]] ComputePipelineHandle samplePipeline() const noexcept {
-    assertPipelineHandle(samplePipelineHandle_.get(), "samplePipeline");
-    return samplePipelineHandle_.get();
+    return pipeline(Program::Sample);
   }
   [[nodiscard]] ComputePipelineHandle blendPipeline() const noexcept {
-    assertPipelineHandle(blendPipelineHandle_.get(), "blendPipeline");
-    return blendPipelineHandle_.get();
+    return pipeline(Program::Blend);
   }
   [[nodiscard]] ComputePipelineHandle worldPipeline() const noexcept {
-    assertPipelineHandle(worldPipelineHandle_.get(), "worldPipeline");
-    return worldPipelineHandle_.get();
+    return pipeline(Program::World);
   }
   [[nodiscard]] ComputePipelineHandle scatterPipeline() const noexcept {
-    assertPipelineHandle(scatterPipelineHandle_.get(), "scatterPipeline");
-    return scatterPipelineHandle_.get();
+    return pipeline(Program::Scatter);
   }
   [[nodiscard]] ComputePipelineHandle morphPipeline() const noexcept {
-    assertPipelineHandle(morphPipelineHandle_.get(), "morphPipeline");
-    return morphPipelineHandle_.get();
+    return pipeline(Program::Morph);
   }
   [[nodiscard]] ComputePipelineHandle skinPalettePipeline() const noexcept {
-    assertPipelineHandle(skinPalettePipelineHandle_.get(),
-                         "skinPalettePipeline");
-    return skinPalettePipelineHandle_.get();
+    return pipeline(Program::SkinPalette);
   }
   [[nodiscard]] ComputePipelineHandle skinPipeline() const noexcept {
-    assertPipelineHandle(skinPipelineHandle_.get(), "skinPipeline");
-    return skinPipelineHandle_.get();
+    return pipeline(Program::Skin);
   }
   [[nodiscard]] Result<std::unique_ptr<Buffer>, std::string>
   createStorageBuffer(size_t sizeBytes, std::string_view debugName);
@@ -62,8 +65,7 @@ public:
   createStorageVertexBuffer(size_t sizeBytes, std::string_view debugName);
 
 private:
-  void assertPipelineHandle(ComputePipelineHandle handle,
-                            std::string_view accessorName) const noexcept {}
+  [[nodiscard]] ComputePipelineHandle pipeline(Program program) const noexcept;
   [[nodiscard]] Result<bool, std::string> createShaders();
   [[nodiscard]] Result<bool, std::string> createPipelines();
   void destroyPipelines() noexcept;
@@ -71,21 +73,9 @@ private:
   GPUDevice &gpu_;
   std::filesystem::path shaderRoot_;
   std::pmr::memory_resource *memory_ = std::pmr::get_default_resource();
-  std::unique_ptr<Shader> shader_;
-  OwnedShaderHandle sampleShaderHandle_{};
-  OwnedShaderHandle blendShaderHandle_{};
-  OwnedShaderHandle worldShaderHandle_{};
-  OwnedShaderHandle scatterShaderHandle_{};
-  OwnedShaderHandle morphShaderHandle_{};
-  OwnedShaderHandle skinPaletteShaderHandle_{};
-  OwnedShaderHandle skinShaderHandle_{};
-  OwnedComputePipelineHandle samplePipelineHandle_{};
-  OwnedComputePipelineHandle blendPipelineHandle_{};
-  OwnedComputePipelineHandle worldPipelineHandle_{};
-  OwnedComputePipelineHandle scatterPipelineHandle_{};
-  OwnedComputePipelineHandle morphPipelineHandle_{};
-  OwnedComputePipelineHandle skinPalettePipelineHandle_{};
-  OwnedComputePipelineHandle skinPipelineHandle_{};
+  static constexpr size_t kProgramCount = static_cast<size_t>(Program::Count);
+  std::array<OwnedShaderHandle, kProgramCount> shaders_{};
+  std::array<OwnedComputePipelineHandle, kProgramCount> pipelines_{};
   bool initialized_ = false;
 };
 

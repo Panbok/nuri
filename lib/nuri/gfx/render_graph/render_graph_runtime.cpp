@@ -1,5 +1,4 @@
 #include "nuri/gfx/render_graph/render_graph_runtime.h"
-#include "nuri/pch.h"
 #include "nuri/utils/env_utils.h"
 namespace nuri {
 namespace {

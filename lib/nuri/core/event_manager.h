@@ -195,6 +195,11 @@ private:
     }
     return true;
   }
+  void releaseArenaIfIdle() {
+    if (allQueuesEmpty()) {
+      arena_.release();
+    }
+  }
   std::pmr::memory_resource &upstream_;
   std::pmr::monotonic_buffer_resource arena_;
   std::array<ChannelState, kChannelCount> channels_;

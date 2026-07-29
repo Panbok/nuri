@@ -26,53 +26,53 @@ std::filesystem::path makeTempPath(std::string_view stem) {
          ("nuri_" + std::string(stem) + "_" + std::to_string(tick));
 }
 
-void populateTelemetryCompileResult(RenderGraphCompileResult &compiled,
+void populateTelemetryCompileResult(CompiledRenderGraph &compiled,
                                     std::pmr::memory_resource *memory) {
-  compiled.frameIndex = 42u;
-  compiled.declaredPassCount = 3u;
-  compiled.culledPassCount = 1u;
-  compiled.rootPassCount = 2u;
-  compiled.usedParallelCompile = true;
-  compiled.usedParallelPayloadResolution = true;
-  compiled.usedParallelHazardAnalysis = true;
-  compiled.usedParallelLifetimeAnalysis = false;
-  compiled.resourceStats.importedTextures = 4u;
-  compiled.resourceStats.transientTextures = 5u;
-  compiled.resourceStats.importedBuffers = 6u;
-  compiled.resourceStats.transientBuffers = 7u;
-  compiled.transientTexturePhysicalCount = 8u;
-  compiled.transientBufferPhysicalCount = 9u;
+  compiled.commands.frameIndex = 42u;
+  compiled.plan.declaredPassCount = 3u;
+  compiled.plan.culledPassCount = 1u;
+  compiled.plan.rootPassCount = 2u;
+  compiled.plan.usedParallelCompile = true;
+  compiled.commands.usedParallelPayloadResolution = true;
+  compiled.plan.usedParallelHazardAnalysis = true;
+  compiled.plan.usedParallelLifetimeAnalysis = false;
+  compiled.plan.resourceStats.importedTextures = 4u;
+  compiled.plan.resourceStats.transientTextures = 5u;
+  compiled.plan.resourceStats.importedBuffers = 6u;
+  compiled.plan.resourceStats.transientBuffers = 7u;
+  compiled.plan.transientTexturePhysicalCount = 8u;
+  compiled.plan.transientBufferPhysicalCount = 9u;
 
   std::pmr::string firstPassName(memory);
   firstPassName = "first_pass";
-  compiled.passDebugNames.push_back(std::move(firstPassName));
+  compiled.commands.passDebugNames.push_back(std::move(firstPassName));
 
   std::pmr::string secondPassName(memory);
   secondPassName = "second_pass";
-  compiled.passDebugNames.push_back(std::move(secondPassName));
-  compiled.orderedPassIndices.push_back(1u);
-  compiled.orderedPassIndices.push_back(0u);
-  compiled.edges.push_back({.before = 0u, .after = 1u});
-  compiled.passBarrierPlans.push_back(
+  compiled.commands.passDebugNames.push_back(std::move(secondPassName));
+  compiled.plan.orderedPassIndices.push_back(1u);
+  compiled.plan.orderedPassIndices.push_back(0u);
+  compiled.plan.edges.push_back({.before = 0u, .after = 1u});
+  compiled.plan.passBarrierPlans.push_back(
       {.orderedPassIndex = 0u, .barrierOffset = 0u, .barrierCount = 1u});
-  compiled.passBarrierPlans.push_back(
+  compiled.plan.passBarrierPlans.push_back(
       {.orderedPassIndex = 1u, .barrierOffset = 1u, .barrierCount = 1u});
-  compiled.finalBarrierPlan = {.barrierOffset = 2u, .barrierCount = 1u};
-  compiled.passBarrierRecords.push_back(
+  compiled.plan.finalBarrierPlan = {.barrierOffset = 2u, .barrierCount = 1u};
+  compiled.plan.passBarrierRecords.push_back(
       {.resourceKind = RenderGraphBarrierResourceKind::Texture,
        .resourceIndex = 0u,
        .beforeAccess = RenderGraphAccessMode::None,
        .afterAccess = RenderGraphAccessMode::Write,
        .beforeState = RenderGraphResourceState::Unknown,
        .afterState = RenderGraphResourceState::Attachment});
-  compiled.passBarrierRecords.push_back(
+  compiled.plan.passBarrierRecords.push_back(
       {.resourceKind = RenderGraphBarrierResourceKind::Buffer,
        .resourceIndex = 4u,
        .beforeAccess = RenderGraphAccessMode::Write,
        .afterAccess = RenderGraphAccessMode::Read,
        .beforeState = RenderGraphResourceState::Write,
        .afterState = RenderGraphResourceState::Read});
-  compiled.passBarrierRecords.push_back(
+  compiled.plan.passBarrierRecords.push_back(
       {.resourceKind = RenderGraphBarrierResourceKind::Texture,
        .resourceIndex = 0u,
        .beforeAccess = RenderGraphAccessMode::Write,
@@ -80,69 +80,80 @@ void populateTelemetryCompileResult(RenderGraphCompileResult &compiled,
        .beforeState = RenderGraphResourceState::Attachment,
        .afterState = RenderGraphResourceState::Present});
 
-  compiled.transientTextureLifetimes.push_back({.resourceIndex = 3u,
-                                                .firstExecutionIndex = 0u,
-                                                .lastExecutionIndex = 2u});
-  compiled.transientBufferLifetimes.push_back({.resourceIndex = 4u,
-                                               .firstExecutionIndex = 1u,
-                                               .lastExecutionIndex = 3u});
-  compiled.transientTextureAllocations.push_back(
+  compiled.plan.transientTextureLifetimes.push_back({.resourceIndex = 3u,
+                                                     .firstExecutionIndex = 0u,
+                                                     .lastExecutionIndex = 2u});
+  compiled.plan.transientBufferLifetimes.push_back({.resourceIndex = 4u,
+                                                    .firstExecutionIndex = 1u,
+                                                    .lastExecutionIndex = 3u});
+  compiled.plan.transientTextureAllocations.push_back(
       {.resourceIndex = 3u, .allocationIndex = 1u});
-  compiled.transientBufferAllocations.push_back(
+  compiled.plan.transientBufferAllocations.push_back(
       {.resourceIndex = 4u, .allocationIndex = 2u});
-  compiled.transientTextureAllocationByResource = {UINT32_MAX, 1u, UINT32_MAX,
-                                                   1u};
-  compiled.transientBufferAllocationByResource = {2u, UINT32_MAX, UINT32_MAX};
+  compiled.plan.transientTextureAllocationByResource = {UINT32_MAX, 1u,
+                                                        UINT32_MAX, 1u};
+  compiled.plan.transientBufferAllocationByResource = {2u, UINT32_MAX,
+                                                       UINT32_MAX};
 
-  RenderGraphCompileResult::TransientTexturePhysicalAllocation
-      texturePhysical{};
+  RenderGraphPlan::TransientTexturePhysicalAllocation texturePhysical{};
   texturePhysical.allocationIndex = 1u;
   texturePhysical.representativeResourceIndex = 3u;
   texturePhysical.desc =
       makeTransientTextureDesc(Format::RGBA8_UNORM, 64u, 32u);
-  compiled.transientTexturePhysicalAllocations.push_back(texturePhysical);
+  compiled.plan.transientTexturePhysicalAllocations.push_back(texturePhysical);
 
-  RenderGraphCompileResult::TransientBufferPhysicalAllocation bufferPhysical{};
+  RenderGraphPlan::TransientBufferPhysicalAllocation bufferPhysical{};
   bufferPhysical.allocationIndex = 2u;
   bufferPhysical.representativeResourceIndex = 4u;
   bufferPhysical.desc = makeTransientBufferDesc(128u);
-  compiled.transientBufferPhysicalAllocations.push_back(bufferPhysical);
+  compiled.plan.transientBufferPhysicalAllocations.push_back(bufferPhysical);
 
-  compiled.unresolvedTextureBindings.push_back(
+  compiled.plan.commandResourcePatches.push_back(
       {.orderedPassIndex = 0u,
-       .textureResourceIndex = 3u,
-       .target = RenderGraphCompileResult::PassTextureBindingTarget::Color});
-  compiled.resolvedDependencyBuffers.push_back(
+       .resourceIndex = 3u,
+       .target = RenderGraphPlan::CommandResourcePatchTarget::PassColor});
+  compiled.commands.resolvedDependencyBuffers.push_back(
       BufferHandle{.index = 11u, .generation = 2u});
-  compiled.dependencyBufferRangesByPass.push_back({.offset = 0u, .count = 1u});
-  compiled.unresolvedDependencyBufferBindings.push_back(
+  compiled.plan.dependencyBufferRangesByPass.push_back(
+      {.offset = 0u, .count = 1u});
+  compiled.plan.commandResourcePatches.push_back(
       {.orderedPassIndex = 0u,
-       .dependencyBufferIndex = 0u,
-       .bufferResourceIndex = 4u});
-  compiled.preDispatchRangesByPass.push_back({.offset = 0u, .count = 1u});
-  compiled.preDispatchDependencyRanges.push_back({.offset = 0u, .count = 1u});
-  compiled.unresolvedPreDispatchDependencyBufferBindings.push_back(
+       .dependencyIndex = 0u,
+       .resourceIndex = 4u,
+       .resourceKind = RenderGraphResourceKind::Buffer,
+       .target =
+           RenderGraphPlan::CommandResourcePatchTarget::PassDependencyBuffer});
+  compiled.plan.preDispatchRangesByPass.push_back({.offset = 0u, .count = 1u});
+  compiled.plan.preDispatchDependencyRanges.push_back(
+      {.offset = 0u, .count = 1u});
+  compiled.plan.commandResourcePatches.push_back(
       {.orderedPassIndex = 0u,
-       .preDispatchIndex = 0u,
-       .dependencyBufferIndex = 0u,
-       .bufferResourceIndex = 4u});
-  compiled.drawRangesByPass.push_back({.offset = 0u, .count = 2u});
-  compiled.unresolvedDrawBufferBindings.push_back(
+       .commandIndex = 0u,
+       .dependencyIndex = 0u,
+       .resourceIndex = 4u,
+       .resourceKind = RenderGraphResourceKind::Buffer,
+       .target = RenderGraphPlan::CommandResourcePatchTarget::
+           PreDispatchDependencyBuffer});
+  compiled.plan.drawRangesByPass.push_back({.offset = 0u, .count = 2u});
+  compiled.plan.commandResourcePatches.push_back(
       {.orderedPassIndex = 0u,
-       .drawIndex = 0u,
-       .target = RenderGraphCompileResult::DrawBufferBindingTarget::Vertex,
-       .bufferResourceIndex = 4u});
-  compiled.resolvedPreDispatchDependencyBuffers.push_back(
+       .commandIndex = 0u,
+       .resourceIndex = 4u,
+       .resourceKind = RenderGraphResourceKind::Buffer,
+       .target =
+           RenderGraphPlan::CommandResourcePatchTarget::DrawVertexBuffer});
+  compiled.commands.resolvedPreDispatchDependencyBuffers.push_back(
       BufferHandle{.index = 12u, .generation = 3u});
-  compiled.ownedPreDispatches.push_back(ComputeDispatchItem{});
-  compiled.ownedDrawItems.push_back(DrawItem{});
+  compiled.commands.ownedPreDispatches.push_back(ComputeDispatchItem{});
+  compiled.commands.ownedDrawItems.push_back(DrawItem{});
   DrawItem indirectDraw{};
   indirectDraw.indirectDrawCount = 7u;
-  compiled.ownedDrawItems.push_back(indirectDraw);
+  compiled.commands.ownedDrawItems.push_back(indirectDraw);
   RenderPass orderedPass{};
-  orderedPass.draws = std::span<const DrawItem>(compiled.ownedDrawItems.data(),
-                                                compiled.ownedDrawItems.size());
-  compiled.orderedPasses.push_back(orderedPass);
+  orderedPass.draws =
+      std::span<const DrawItem>(compiled.commands.ownedDrawItems.data(),
+                                compiled.commands.ownedDrawItems.size());
+  compiled.commands.orderedPasses.push_back(orderedPass);
 }
 
 void populateTelemetryExecutionMetadata(
@@ -181,8 +192,8 @@ TEST(RenderGraphTelemetryTest, CaptureRequestIsExplicitAndConsumed) {
   EXPECT_EQ(telemetry.requestedCaptureLevel(),
             RenderGraphTelemetryLevel::PassTimings);
 
-  RenderGraphCompileResult compiled;
-  telemetry.capture(compiled);
+  CompiledRenderGraph compiled;
+  telemetry.capture({compiled.plan, compiled.commands});
   EXPECT_FALSE(telemetry.captureRequested());
   EXPECT_TRUE(telemetry.hasSnapshot());
 }
@@ -197,11 +208,11 @@ TEST(RenderGraphTelemetryTest, CaptureDeepCopiesStructuredData) {
     std::array<std::byte, 32 * 1024> compileBytes{};
     std::pmr::monotonic_buffer_resource compileMemory(compileBytes.data(),
                                                       compileBytes.size());
-    RenderGraphCompileResult compiled(&compileMemory);
+    CompiledRenderGraph compiled(&compileMemory);
     RenderGraphExecutionMetadata execution(&compileMemory);
     populateTelemetryCompileResult(compiled, &compileMemory);
     populateTelemetryExecutionMetadata(execution, &compileMemory);
-    telemetry.capture(compiled, execution);
+    telemetry.capture({compiled.plan, compiled.commands}, execution);
   }
 
   const RenderGraphTelemetrySnapshot *snapshot = telemetry.latestSnapshot();
@@ -209,12 +220,12 @@ TEST(RenderGraphTelemetryTest, CaptureDeepCopiesStructuredData) {
   EXPECT_EQ(snapshot->summary.frameIndex, 42u);
   EXPECT_EQ(snapshot->summary.declaredPassCount, 3u);
   EXPECT_EQ(snapshot->summary.importedTextures, 4u);
-  ASSERT_EQ(snapshot->compile.passDebugNames.size(), 2u);
-  EXPECT_EQ(snapshot->compile.passDebugNames[0], "first_pass");
-  EXPECT_EQ(snapshot->compile.passDebugNames[1], "second_pass");
-  ASSERT_EQ(snapshot->compile.orderedPassIndices.size(), 2u);
-  EXPECT_EQ(snapshot->compile.orderedPassIndices[0], 1u);
-  EXPECT_EQ(snapshot->compile.orderedPassIndices[1], 0u);
+  ASSERT_EQ(snapshot->passDebugNames.size(), 2u);
+  EXPECT_EQ(snapshot->passDebugNames[0], "first_pass");
+  EXPECT_EQ(snapshot->passDebugNames[1], "second_pass");
+  ASSERT_EQ(snapshot->plan.orderedPassIndices.size(), 2u);
+  EXPECT_EQ(snapshot->plan.orderedPassIndices[0], 1u);
+  EXPECT_EQ(snapshot->plan.orderedPassIndices[1], 0u);
   ASSERT_EQ(snapshot->execution.recordedCommandBuffers.size(), 2u);
   EXPECT_EQ(snapshot->execution.recordedCommandBuffers[0].firstOrderedPassIndex,
             0u);
@@ -237,14 +248,12 @@ TEST(RenderGraphTelemetryTest, CaptureDeepCopiesStructuredData) {
   EXPECT_NE(snapshot->summary.barrierFingerprint, 0ull);
   EXPECT_NE(snapshot->summary.executionFingerprint, 0ull);
   EXPECT_EQ(snapshot->summary.finalBarrierRecordCount, 1u);
-  EXPECT_EQ(snapshot->compile.finalBarrierPlan.barrierCount, 1u);
-  ASSERT_EQ(snapshot->compile.edges.size(), 1u);
-  EXPECT_EQ(snapshot->compile.edges[0].before, 0u);
-  EXPECT_EQ(snapshot->compile.edges[0].after, 1u);
-  ASSERT_EQ(snapshot->compile.unresolvedDrawBufferBindings.size(), 1u);
-  EXPECT_EQ(
-      snapshot->compile.unresolvedDrawBufferBindings[0].bufferResourceIndex,
-      4u);
+  EXPECT_EQ(snapshot->plan.finalBarrierPlan.barrierCount, 1u);
+  ASSERT_EQ(snapshot->plan.edges.size(), 1u);
+  EXPECT_EQ(snapshot->plan.edges[0].before, 0u);
+  EXPECT_EQ(snapshot->plan.edges[0].after, 1u);
+  ASSERT_EQ(snapshot->plan.commandResourcePatches.size(), 4u);
+  EXPECT_EQ(snapshot->plan.commandResourcePatches.back().resourceIndex, 4u);
 }
 
 TEST(RenderGraphTelemetryTest, WriteDumpSerializesSnapshotAndValidatesInputs) {
@@ -258,11 +267,11 @@ TEST(RenderGraphTelemetryTest, WriteDumpSerializesSnapshotAndValidatesInputs) {
   std::array<std::byte, 32 * 1024> compileBytes{};
   std::pmr::monotonic_buffer_resource compileMemory(compileBytes.data(),
                                                     compileBytes.size());
-  RenderGraphCompileResult compiled(&compileMemory);
+  CompiledRenderGraph compiled(&compileMemory);
   RenderGraphExecutionMetadata execution(&compileMemory);
   populateTelemetryCompileResult(compiled, &compileMemory);
   populateTelemetryExecutionMetadata(execution, &compileMemory);
-  telemetry.capture(compiled, execution);
+  telemetry.capture({compiled.plan, compiled.commands}, execution);
 
   EXPECT_TRUE(telemetry.writeLatestTextDump("").hasError());
 
@@ -304,11 +313,11 @@ TEST(RenderGraphTelemetryTest, SuggestDumpPathUsesEnvDirectorySeed) {
   std::array<std::byte, 16 * 1024> compileBytes{};
   std::pmr::monotonic_buffer_resource compileMemory(compileBytes.data(),
                                                     compileBytes.size());
-  RenderGraphCompileResult compiled(&compileMemory);
+  CompiledRenderGraph compiled(&compileMemory);
   RenderGraphExecutionMetadata execution(&compileMemory);
   populateTelemetryCompileResult(compiled, &compileMemory);
   populateTelemetryExecutionMetadata(execution, &compileMemory);
-  telemetry.capture(compiled, execution);
+  telemetry.capture({compiled.plan, compiled.commands}, execution);
 
   const std::filesystem::path suggested = telemetry.suggestDumpPath();
   EXPECT_EQ(suggested.parent_path(), dumpDirectory);

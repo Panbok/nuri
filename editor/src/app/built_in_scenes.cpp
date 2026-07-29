@@ -88,7 +88,7 @@ struct AlphaMaskValidationSceneAssets {
   MaterialRef cardMaterial = kInvalidMaterialRef;
   MaterialRef groundMaterial = kInvalidMaterialRef;
   std::filesystem::path alphaTexturePath{};
-  std::vector<ImportedSceneLight> fallbackLights{};
+  std::vector<ScenePrefabLight> fallbackLights{};
   bool ready = false;
 
   ~AlphaMaskValidationSceneAssets() { release(); }
@@ -574,7 +574,7 @@ Result<void, std::string> registerBuiltInScenes(EditorSceneCatalog &catalog,
               alphaMaskAssets->groundModel, alphaMaskAssets->groundMaterial);
 
           alphaMaskAssets->fallbackLights.clear();
-          ImportedSceneLight light{};
+          ScenePrefabLight light{};
           light.light.type = LightType::Directional;
           light.light.name = "AlphaMaskValidationSun";
           light.light.rotation =
@@ -769,7 +769,7 @@ Result<void, std::string> registerBuiltInScenes(EditorSceneCatalog &catalog,
                        ImportedPrefabSceneResources &sceneResources)
               -> Result<void, std::string> {
             sceneResources.fallbackLights.clear();
-            ImportedSceneLight shadowLight{};
+            ScenePrefabLight shadowLight{};
             shadowLight.light.type = LightType::Directional;
             shadowLight.light.name = "DamagedHelmetSun";
             // Directional light rotation encodes the light ray direction.

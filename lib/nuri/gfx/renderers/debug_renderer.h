@@ -30,6 +30,8 @@ public:
   Result<bool, std::string>
   buildTransparentStageContribution(RenderFrameContext &frame,
                                     TransparentStageContribution &out);
+  void onFrameSubmitted(SubmissionHandle submission) noexcept;
+  void onFrameAbandoned() noexcept;
 
 private:
   struct GridPushConstants {

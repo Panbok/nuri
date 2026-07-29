@@ -175,54 +175,37 @@ expandShaderIncludesRecursive(const std::filesystem::path &filePath,
 }
 } // namespace
 
-Shader::Shader(std::string_view moduleName, GPUDevice &gpu)
-    : moduleName_(moduleName), gpu_(gpu), shaderHandles_{} {}
-
-Shader::~Shader() = default;
-
-Result<std::string, std::string> Shader::load(std::string_view path) {
-  NURI_PROFILER_FUNCTION();
-  std::string errorMsg;
-  std::string content = readFileToString(std::filesystem::path(path), errorMsg);
-  if (!errorMsg.empty()) {
-    return Result<std::string, std::string>::makeError(std::move(errorMsg));
-  }
-  return Result<std::string, std::string>::makeResult(std::move(content));
-}
-
-Result<ShaderHandle, std::string> Shader::compile(const std::string &code,
-                                                  ShaderStage stage) {
+Result<ShaderHandle, std::string> compileShader(GPUDevice &gpu,
+                                                std::string_view moduleName,
+                                                std::string_view code,
+                                                ShaderStage stage) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
   if (code.empty()) {
     return Result<ShaderHandle, std::string>::makeError(
         "Shader code is empty for stage " +
         std::to_string(static_cast<int>(stage)));
   }
-  const auto stageIndex = static_cast<size_t>(stage);
-  if (stageIndex >= static_cast<size_t>(ShaderStage::Count)) {
+  if (stage >= ShaderStage::Count) {
     return Result<ShaderHandle, std::string>::makeError(
-        "Invalid shader stage: " + std::to_string(stageIndex));
+        "Invalid shader stage: " + std::to_string(static_cast<size_t>(stage)));
   }
   ShaderDesc desc{
-      .moduleName = moduleName_,
+      .moduleName = moduleName,
       .source = code,
       .stage = stage,
   };
-  auto result = gpu_.createShaderModule(desc);
+  auto result = gpu.createShaderModule(desc);
   if (result.hasError()) {
     return Result<ShaderHandle, std::string>::makeError(result.error());
   }
-  shaderHandles_[stageIndex] = result.value();
-  if (nuri::isValid(shaderHandles_[stageIndex])) {
-    debug_glsl_source_code_[stage] = code;
-  }
-  return Result<ShaderHandle, std::string>::makeResult(
-      shaderHandles_[stageIndex]);
+  return result;
 }
 
-Result<ShaderHandle, std::string>
-Shader::compileFromFile(std::string_view path, ShaderStage stage,
-                        std::string_view preamble) {
+Result<ShaderHandle, std::string> compileShaderFile(GPUDevice &gpu,
+                                                    std::string_view moduleName,
+                                                    std::string_view path,
+                                                    ShaderStage stage,
+                                                    std::string_view preamble) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
   std::vector<std::filesystem::path> includeStack;
   std::string expandedCode;
@@ -248,7 +231,7 @@ Shader::compileFromFile(std::string_view path, ShaderStage stage,
       expandedCode.insert(insertion + preamble.size(), 1u, '\n');
     }
   }
-  auto compileResult = compile(expandedCode, stage);
+  auto compileResult = compileShader(gpu, moduleName, expandedCode, stage);
   if (compileResult.hasError()) {
     const std::string pathStr{path};
     NURI_LOG_WARNING(
@@ -262,14 +245,6 @@ Shader::compileFromFile(std::string_view path, ShaderStage stage,
       "Shader::compileFromFile: Compiled shader file '%.*s' for stage %s",
       static_cast<int>(path.size()), path.data(), ShaderStageToString(stage));
   return compileResult;
-}
-
-ShaderHandle Shader::getHandle(ShaderStage stage) const {
-  const auto stageIndex = static_cast<size_t>(stage);
-  if (stageIndex >= static_cast<size_t>(ShaderStage::Count)) {
-    return {};
-  }
-  return shaderHandles_[stageIndex];
 }
 
 } // namespace nuri

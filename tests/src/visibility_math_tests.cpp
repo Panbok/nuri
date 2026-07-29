@@ -120,8 +120,8 @@ TEST(VisibilityMathTests, CpuEvaluationKeepsSubmeshCandidatesIndependent) {
                                           glm::vec3(0.25f, 0.25f, -1.75f));
   candidates[1].worldFromLocal = glm::mat4(1.0f);
 
-  VisibilityFrameState state;
-  const VisibilityPassResult result = state.evaluateCpu(request, candidates);
+  const VisibilityPassResult result =
+      evaluateCpuVisibility(request, candidates);
 
   ASSERT_EQ(result.visibleCandidateIndices.size(), 1u);
   const uint32_t visibleCandidateIndex = result.visibleCandidateIndices[0];

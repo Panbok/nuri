@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <glm/glm.hpp>
+#include <string_view>
 
 namespace nuri {
 
@@ -237,6 +238,18 @@ struct DDGIVolumeFrameMetrics {
   uint32_t redundantCoverage = 0u;
 };
 
+inline constexpr uint32_t kDDGIVolumeMetricSchemaVersion = 1u;
+struct DDGIVolumeMetricValue {
+  template <typename T>
+  constexpr DDGIVolumeMetricValue(std::string_view metricSuffix,
+                                  T metricValue) noexcept
+      : suffix(metricSuffix), value(static_cast<double>(metricValue)) {}
+  std::string_view suffix;
+  double value;
+};
+[[nodiscard]] NURI_API std::array<DDGIVolumeMetricValue, 26>
+ddgiVolumeMetricValues(const DDGIVolumeFrameMetrics &volume) noexcept;
+
 struct DDGICaptureMetadata {
   uint64_t effectiveKeyHash = 0u;
   uint64_t coverageGeneration = 0u;
@@ -316,9 +329,6 @@ struct DDGIFrameMetrics {
   uint32_t traceMultiBounceGatherArchitecture = 0u;
   uint32_t traceMultiBounceGatherVariant = 0u;
   uint32_t gatherIdentitySchema = kDDGIGatherIdentitySchemaVersion;
-  // Compatibility alias. It is valid only while every consumer is forward.
-  DDGISurfaceGatherArchitecture surfaceGatherArchitecture =
-      DDGISurfaceGatherArchitecture::ForwardFragment;
   uint32_t surfaceGatherWidth = 0u;
   uint32_t surfaceGatherHeight = 0u;
   uint32_t surfaceGatherMaxCandidateVolumes = 0u;

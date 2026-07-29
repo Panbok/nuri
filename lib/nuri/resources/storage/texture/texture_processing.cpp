@@ -1,5 +1,4 @@
 #include "nuri/resources/storage/texture/texture_processing.h"
-#include "nuri/pch.h"
 #include <stb_image_resize2.h>
 namespace nuri {
 namespace {

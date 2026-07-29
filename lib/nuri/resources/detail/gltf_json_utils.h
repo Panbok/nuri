@@ -25,9 +25,6 @@ struct GltfPrimitiveMaterialMapping {
   std::vector<uint32_t> primitiveMaterialIndices{};
 };
 
-[[nodiscard]] bool
-hasExtensionCaseInsensitive(const std::filesystem::path &path,
-                            std::string_view extension);
 [[nodiscard]] bool isGltfJsonAssetPath(const std::filesystem::path &path);
 [[nodiscard]] bool isGltfJsonAssetPath(std::string_view path);
 

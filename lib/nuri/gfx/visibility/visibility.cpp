@@ -1,12 +1,11 @@
 #include "nuri/gfx/visibility/visibility.h"
 #include "nuri/gfx/frame/presentation_aa_plan.h"
-#include "nuri/pch.h"
 #include <limits>
 namespace nuri {
 namespace {
 VisibilityExecutionMode
 resolveMainVisibilityMode(const RenderSettings &settings) noexcept {
-  switch (sanitizeVisibilityCullingMode(settings.visibility.mainViewMode)) {
+  switch (settings.visibility.mainViewMode) {
   case VisibilityCullingMode::Disabled:
     return VisibilityExecutionMode::Disabled;
   case VisibilityCullingMode::CpuCoarse:
@@ -37,15 +36,12 @@ void VisibilityPassResult::clear() {
   uncertainVisible = 0;
 }
 
-VisibilityFrameState::VisibilityFrameState(std::pmr::memory_resource *memory)
-    : memory_(memory != nullptr ? memory : std::pmr::get_default_resource()) {}
-
-void VisibilityFrameState::clear() {}
-
-VisibilityPassResult VisibilityFrameState::evaluateCpu(
-    const VisibilityPassRequest &request,
-    std::span<const VisibilityCandidate> candidates) {
-  VisibilityPassResult result(memory_);
+VisibilityPassResult
+evaluateCpuVisibility(const VisibilityPassRequest &request,
+                      std::span<const VisibilityCandidate> candidates,
+                      std::span<const VisibilityCandidateGpu> cachedBounds,
+                      std::pmr::memory_resource *memory) {
+  VisibilityPassResult result(memory);
   result.signature = request.signature;
   result.cpuCandidates = static_cast<uint32_t>(
       std::min(candidates.size(),
@@ -58,10 +54,21 @@ VisibilityPassResult VisibilityFrameState::evaluateCpu(
       if ((candidate.flags & kVisibilityCandidateConservativeVisible) != 0u) {
         ++result.uncertainVisible;
       } else {
-        const visibility_detail::VisibilityClassification classification =
-            visibility_detail::classifyTransformedBounds(
-                request.frustum, candidate.localBounds,
-                candidate.worldFromLocal);
+        visibility_detail::VisibilityClassification classification;
+        if (cachedBounds.size() == candidates.size()) {
+          const VisibilityCandidateGpu &bounds = cachedBounds[i];
+          classification = visibility_detail::classifySphere(
+              request.frustum, glm::vec3(bounds.bounds), bounds.bounds.w);
+          if (classification ==
+              visibility_detail::VisibilityClassification::Intersects) {
+            classification = visibility_detail::classifyAabb(
+                request.frustum, BoundingBox(glm::vec3(bounds.boundsMin),
+                                             glm::vec3(bounds.boundsMax)));
+          }
+        } else {
+          classification = visibility_detail::classifyTransformedBounds(
+              request.frustum, candidate.localBounds, candidate.worldFromLocal);
+        }
         visible = visibility_detail::isVisible(classification);
       }
     }
@@ -85,10 +92,9 @@ VisibilityResolvedSettings
 visibilitySettingsFromRenderSettings(const RenderSettings &settings) noexcept {
   const VisibilityExecutionMode mainViewMode =
       resolveMainVisibilityMode(settings);
-  const VisibilityCullingMode shadowMode =
-      sanitizeVisibilityCullingMode(settings.visibility.shadowMode);
+  const VisibilityCullingMode shadowMode = settings.visibility.shadowMode;
   const VisibilityOcclusionMode occlusionMode =
-      sanitizeVisibilityOcclusionMode(settings.visibility.occlusionMode);
+      settings.visibility.occlusionMode;
   return VisibilityResolvedSettings{
       .mainViewMode = mainViewMode,
       .shadowMode = shadowMode,

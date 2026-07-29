@@ -112,11 +112,11 @@ public:
       return;
     }
     const uint32_t nodeIndex = indexOf(node);
-    for (uint32_t index = nodes_.renderableHead[nodeIndex];
+    for (uint32_t index = nodes_.renderableLinks[nodeIndex].head;
          index != kInvalidIndex;
          index = renderableComponents_.nextOnNode[index]) {
-      fn(makeRenderableId(index,
-                          renderableComponents_.slots.generation(index)));
+      fn(RenderableId::fromParts(
+          index, renderableComponents_.slots.generation(index)));
     }
   }
   [[nodiscard]] Result<LightId, std::string> addLight(NodeId node,
@@ -136,7 +136,7 @@ public:
     const uint32_t nodeIndex = indexOf(node);
     for (size_t typeIndex = 0; typeIndex < kLightTypeCount; ++typeIndex) {
       const auto &store = lights_[typeIndex];
-      for (uint32_t index = nodes_.lightHead[typeIndex][nodeIndex];
+      for (uint32_t index = nodes_.lightLinks[typeIndex][nodeIndex].head;
            index != kInvalidIndex; index = store.records[index].nextOnNode) {
         fn(makeLightId(static_cast<LightType>(typeIndex), index,
                        store.slots.generation(index)));
@@ -155,10 +155,10 @@ public:
     if (!nodeSlotValid(node)) {
       return;
     }
-    for (uint32_t index = nodes_.ddgiVolumeHead[indexOf(node)];
+    for (uint32_t index = nodes_.ddgiVolumeLinks[indexOf(node)].head;
          index != kInvalidIndex;
          index = ddgiVolumes_.records[index].nextOnNode) {
-      fn(makeDDGIVolumeId(index, ddgiVolumes_.slots.generation(index)));
+      fn(DDGIVolumeId::fromParts(index, ddgiVolumes_.slots.generation(index)));
     }
   }
   [[nodiscard]] Result<NodeId, std::string>
@@ -190,7 +190,8 @@ public:
   template <typename Fn> void forEachDDGIVolumeId(Fn &&fn) const {
     for (uint32_t index = 0u; index < ddgiVolumes_.slots.slotCount(); ++index) {
       if (ddgiVolumes_.slots.isLive(index)) {
-        fn(makeDDGIVolumeId(index, ddgiVolumes_.slots.generation(index)));
+        fn(DDGIVolumeId::fromParts(index,
+                                   ddgiVolumes_.slots.generation(index)));
       }
     }
   }
@@ -206,20 +207,21 @@ private:
   using GenerationPool =
       SlotPool<MaskedNonZeroGenerationPolicy<kResourceHandleGenerationMask>>;
   using IndexArray = std::pmr::vector<uint32_t>;
-  using LightIndexArrays = std::array<IndexArray, kLightTypeCount>;
+  struct NodeComponentLink {
+    uint32_t head = kInvalidIndex;
+    uint32_t tail = kInvalidIndex;
+  };
+  using ComponentLinks = std::pmr::vector<NodeComponentLink>;
+  using LightComponentLinks = std::array<ComponentLinks, kLightTypeCount>;
   struct NodeStore {
     explicit NodeStore(std::pmr::memory_resource *memory)
         : slots(memory), parent(memory), firstChild(memory),
           nextSibling(memory), prevSibling(memory), depth(memory),
           localFromParent(memory), worldFromRoot(memory), dirty(memory),
-          dirtyRootQueued(memory), names(memory), renderableHead(memory),
-          renderableTail(memory), lightHead{std::pmr::vector<uint32_t>{memory},
-                                            std::pmr::vector<uint32_t>{memory},
-                                            std::pmr::vector<uint32_t>{memory}},
-          lightTail{std::pmr::vector<uint32_t>{memory},
-                    std::pmr::vector<uint32_t>{memory},
-                    std::pmr::vector<uint32_t>{memory}},
-          ddgiVolumeHead(memory), ddgiVolumeTail(memory) {}
+          dirtyRootQueued(memory), names(memory), renderableLinks(memory),
+          lightLinks{ComponentLinks{memory}, ComponentLinks{memory},
+                     ComponentLinks{memory}},
+          ddgiVolumeLinks(memory) {}
     GenerationPool slots;
     IndexArray parent;
     IndexArray firstChild;
@@ -231,12 +233,9 @@ private:
     std::pmr::vector<uint8_t> dirty;
     std::pmr::vector<uint8_t> dirtyRootQueued;
     std::pmr::vector<std::pmr::string> names;
-    IndexArray renderableHead;
-    IndexArray renderableTail;
-    LightIndexArrays lightHead;
-    LightIndexArrays lightTail;
-    IndexArray ddgiVolumeHead;
-    IndexArray ddgiVolumeTail;
+    ComponentLinks renderableLinks;
+    LightComponentLinks lightLinks;
+    ComponentLinks ddgiVolumeLinks;
   };
   struct RenderableStore {
     explicit RenderableStore(std::pmr::memory_resource *memory)

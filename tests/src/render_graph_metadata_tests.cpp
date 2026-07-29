@@ -18,7 +18,7 @@ bool sameTextureHandle(TextureHandle lhs, TextureHandle rhs) {
   return sameHandle(lhs, rhs);
 }
 
-Result<RenderGraphCompileResult, std::string>
+Result<CompiledRenderGraph, std::string>
 compileBuilder(RenderGraphBuilder &builder) {
   RenderGraphRuntime runtime;
   return builder.compile(runtime);
@@ -136,19 +136,19 @@ TEST(RenderGraphMetadataTest, BarrierPlansTrackStablePerPassTransitions) {
     std::cerr << compileResult.error() << "\n";
     return;
   }
-  const RenderGraphCompileResult &compiled = compileResult.value();
+  const CompiledRenderGraph &compiled = compileResult.value();
 
-  if (!(compiled.passBarrierPlans.size() == 2u)) {
+  if (!(compiled.plan.passBarrierPlans.size() == 2u)) {
     ADD_FAILURE() << "expected two pass barrier plans";
     return;
   }
-  if (!(compiled.passBarrierRecords.size() == 2u)) {
+  if (!(compiled.plan.passBarrierRecords.size() == 2u)) {
     ADD_FAILURE() << "expected two pass barrier records";
     return;
   }
 
-  const PassBarrierPlan &planA = compiled.passBarrierPlans[0u];
-  const PassBarrierPlan &planB = compiled.passBarrierPlans[1u];
+  const PassBarrierPlan &planA = compiled.plan.passBarrierPlans[0u];
+  const PassBarrierPlan &planB = compiled.plan.passBarrierPlans[1u];
   if (!(planA.orderedPassIndex == 0u)) {
     ADD_FAILURE() << "expected plan A ordered pass index = 0";
     return;
@@ -167,7 +167,7 @@ TEST(RenderGraphMetadataTest, BarrierPlansTrackStablePerPassTransitions) {
   }
 
   const RenderGraphBarrierRecord &recordA =
-      compiled.passBarrierRecords[planA.barrierOffset];
+      compiled.plan.passBarrierRecords[planA.barrierOffset];
   if (!(recordA.resourceKind == RenderGraphBarrierResourceKind::Buffer)) {
     ADD_FAILURE() << "expected plan A to target a buffer barrier";
     return;
@@ -186,7 +186,7 @@ TEST(RenderGraphMetadataTest, BarrierPlansTrackStablePerPassTransitions) {
   }
 
   const RenderGraphBarrierRecord &recordB =
-      compiled.passBarrierRecords[planB.barrierOffset];
+      compiled.plan.passBarrierRecords[planB.barrierOffset];
   if (!(recordB.resourceKind == RenderGraphBarrierResourceKind::Buffer)) {
     ADD_FAILURE() << "expected plan B to target a buffer barrier";
     return;
@@ -235,15 +235,16 @@ TEST(RenderGraphMetadataTest, FrameOutputTexturesEmitFinalPresentBarrierPlan) {
 
   auto compileResult = compileBuilder(builder);
   ASSERT_FALSE(compileResult.hasError());
-  const RenderGraphCompileResult &compiled = compileResult.value();
+  const CompiledRenderGraph &compiled = compileResult.value();
 
-  ASSERT_EQ(compiled.passBarrierPlans.size(), 1u);
-  ASSERT_EQ(compiled.finalBarrierPlan.barrierCount, 1u);
-  ASSERT_LT(compiled.finalBarrierPlan.barrierOffset,
-            compiled.passBarrierRecords.size());
+  ASSERT_EQ(compiled.plan.passBarrierPlans.size(), 1u);
+  ASSERT_EQ(compiled.plan.finalBarrierPlan.barrierCount, 1u);
+  ASSERT_LT(compiled.plan.finalBarrierPlan.barrierOffset,
+            compiled.plan.passBarrierRecords.size());
 
   const RenderGraphBarrierRecord &record =
-      compiled.passBarrierRecords[compiled.finalBarrierPlan.barrierOffset];
+      compiled.plan
+          .passBarrierRecords[compiled.plan.finalBarrierPlan.barrierOffset];
   EXPECT_EQ(record.resourceKind, RenderGraphBarrierResourceKind::Texture);
   EXPECT_EQ(record.resourceIndex, importResult.value().value);
   EXPECT_EQ(record.beforeState, RenderGraphResourceState::Attachment);
@@ -340,15 +341,15 @@ TEST(RenderGraphMetadataTest, MultiPassRangeMetadataIntegrity) {
   }
 
   auto bindDrawResult = builder.bindDrawBuffer(
-      pass0Id, 0u, RenderGraphCompileResult::DrawBufferBindingTarget::Vertex,
-      transientA, RenderGraphAccessMode::Read);
+      pass0Id, 0u, RenderGraphDrawBufferBindingTarget::Vertex, transientA,
+      RenderGraphAccessMode::Read);
   if (bindDrawResult.hasError()) {
     ADD_FAILURE() << "bindDrawBuffer pass0 draw0 should succeed";
     return;
   }
   bindDrawResult = builder.bindDrawBuffer(
-      pass0Id, 1u, RenderGraphCompileResult::DrawBufferBindingTarget::Index,
-      transientB, RenderGraphAccessMode::Read);
+      pass0Id, 1u, RenderGraphDrawBufferBindingTarget::Index, transientB,
+      RenderGraphAccessMode::Read);
   if (bindDrawResult.hasError()) {
     ADD_FAILURE() << "bindDrawBuffer pass0 draw1 should succeed";
     return;
@@ -360,27 +361,27 @@ TEST(RenderGraphMetadataTest, MultiPassRangeMetadataIntegrity) {
     std::cerr << compileResult.error() << "\n";
     return;
   }
-  const RenderGraphCompileResult &compiled = compileResult.value();
+  const CompiledRenderGraph &compiled = compileResult.value();
 
-  if (!(compiled.orderedPasses.size() == 2u)) {
+  if (!(compiled.commands.orderedPasses.size() == 2u)) {
     ADD_FAILURE() << "expected two ordered passes";
     return;
   }
-  if (!(compiled.dependencyBufferRangesByPass.size() == 2u)) {
+  if (!(compiled.plan.dependencyBufferRangesByPass.size() == 2u)) {
     ADD_FAILURE() << "dependency range table should have two entries";
     return;
   }
-  if (!(compiled.preDispatchRangesByPass.size() == 2u)) {
+  if (!(compiled.plan.preDispatchRangesByPass.size() == 2u)) {
     ADD_FAILURE() << "pre-dispatch range table should have two entries";
     return;
   }
-  if (!(compiled.drawRangesByPass.size() == 2u)) {
+  if (!(compiled.plan.drawRangesByPass.size() == 2u)) {
     ADD_FAILURE() << "draw range table should have two entries";
     return;
   }
 
-  const auto pass0DepRange = compiled.dependencyBufferRangesByPass[0u];
-  const auto pass1DepRange = compiled.dependencyBufferRangesByPass[1u];
+  const auto pass0DepRange = compiled.plan.dependencyBufferRangesByPass[0u];
+  const auto pass1DepRange = compiled.plan.dependencyBufferRangesByPass[1u];
   if (!(pass0DepRange.count == 2u)) {
     ADD_FAILURE() << "pass0 dependency range should have two slots";
     return;
@@ -390,8 +391,8 @@ TEST(RenderGraphMetadataTest, MultiPassRangeMetadataIntegrity) {
     return;
   }
 
-  const auto pass0PreRange = compiled.preDispatchRangesByPass[0u];
-  const auto pass1PreRange = compiled.preDispatchRangesByPass[1u];
+  const auto pass0PreRange = compiled.plan.preDispatchRangesByPass[0u];
+  const auto pass1PreRange = compiled.plan.preDispatchRangesByPass[1u];
   if (!(pass0PreRange.count == 2u)) {
     ADD_FAILURE() << "pass0 pre-dispatch range should have two items";
     return;
@@ -401,8 +402,8 @@ TEST(RenderGraphMetadataTest, MultiPassRangeMetadataIntegrity) {
     return;
   }
 
-  const auto pass0DrawRange = compiled.drawRangesByPass[0u];
-  const auto pass1DrawRange = compiled.drawRangesByPass[1u];
+  const auto pass0DrawRange = compiled.plan.drawRangesByPass[0u];
+  const auto pass1DrawRange = compiled.plan.drawRangesByPass[1u];
   if (!(pass0DrawRange.count == 2u)) {
     ADD_FAILURE() << "pass0 draw range should have two draws";
     return;
@@ -412,47 +413,35 @@ TEST(RenderGraphMetadataTest, MultiPassRangeMetadataIntegrity) {
     return;
   }
 
-  if (!(compiled.unresolvedDependencyBufferBindings.size() == 2u)) {
-    ADD_FAILURE() << "expected two unresolved pass dependency bindings";
-    return;
-  }
-  if (!(compiled.unresolvedPreDispatchDependencyBufferBindings.size() == 2u)) {
-    ADD_FAILURE() << "expected two unresolved pre-dispatch dependency bindings";
-    return;
-  }
-  if (!(compiled.unresolvedDrawBufferBindings.size() == 2u)) {
-    ADD_FAILURE() << "expected two unresolved draw bindings";
+  if (!(compiled.plan.commandResourcePatches.size() == 6u)) {
+    ADD_FAILURE() << "expected six command resource patches";
     return;
   }
 
-  for (const auto &binding : compiled.unresolvedDependencyBufferBindings) {
+  for (const auto &binding : compiled.plan.commandResourcePatches) {
     if (!(binding.orderedPassIndex == 0u)) {
-      ADD_FAILURE() << "unresolved dependency should reference pass0";
+      ADD_FAILURE() << "resource patch should reference pass0";
       return;
     }
-    if (!(binding.dependencyBufferIndex < pass0DepRange.count)) {
-      ADD_FAILURE() << "unresolved dependency slot should be in pass0 range";
+    if (binding.target ==
+            RenderGraphPlan::CommandResourcePatchTarget::PassDependencyBuffer &&
+        !(binding.dependencyIndex < pass0DepRange.count)) {
+      ADD_FAILURE() << "dependency patch slot should be in pass0 range";
       return;
     }
-  }
-  for (const auto &binding :
-       compiled.unresolvedPreDispatchDependencyBufferBindings) {
-    if (!(binding.orderedPassIndex == 0u)) {
-      ADD_FAILURE() << "unresolved pre-dispatch should reference pass0";
+    if (binding.target == RenderGraphPlan::CommandResourcePatchTarget::
+                              PreDispatchDependencyBuffer &&
+        !(binding.commandIndex < pass0PreRange.count)) {
+      ADD_FAILURE() << "pre-dispatch patch should be in pass0 range";
       return;
     }
-    if (!(binding.preDispatchIndex < pass0PreRange.count)) {
-      ADD_FAILURE() << "unresolved pre-dispatch index should be in pass0 range";
-      return;
-    }
-  }
-  for (const auto &binding : compiled.unresolvedDrawBufferBindings) {
-    if (!(binding.orderedPassIndex == 0u)) {
-      ADD_FAILURE() << "unresolved draw should reference pass0";
-      return;
-    }
-    if (!(binding.drawIndex < pass0DrawRange.count)) {
-      ADD_FAILURE() << "unresolved draw index should be in pass0 range";
+    const auto target = binding.target;
+    const bool drawPatch =
+        target ==
+            RenderGraphPlan::CommandResourcePatchTarget::DrawVertexBuffer ||
+        target == RenderGraphPlan::CommandResourcePatchTarget::DrawIndexBuffer;
+    if (drawPatch && !(binding.commandIndex < pass0DrawRange.count)) {
+      ADD_FAILURE() << "draw patch should be in pass0 range";
       return;
     }
   }
@@ -520,34 +509,37 @@ TEST(RenderGraphMetadataTest, StructuralCompileMetadataIntegrity) {
     std::cerr << compileResult.error() << "\n";
     return;
   }
-  const RenderGraphCompileResult &compiled = compileResult.value();
+  const CompiledRenderGraph &compiled = compileResult.value();
 
-  if (!(compiled.declaredPassCount == 3u)) {
+  if (!(compiled.plan.declaredPassCount == 3u)) {
     ADD_FAILURE() << "structural test should declare three passes";
     return;
   }
-  if (!(compiled.culledPassCount == 1u)) {
+  if (!(compiled.plan.culledPassCount == 1u)) {
     ADD_FAILURE() << "structural test should cull one implicit pass";
     return;
   }
-  if (!(compiled.orderedPasses.size() == compiled.orderedPassIndices.size())) {
+  if (!(compiled.commands.orderedPasses.size() ==
+        compiled.plan.orderedPassIndices.size())) {
     ADD_FAILURE() << "ordered pass tables should have matching sizes";
     return;
   }
-  if (!(compiled.passDebugNames.size() == compiled.declaredPassCount)) {
+  if (!(compiled.commands.passDebugNames.size() ==
+        compiled.plan.declaredPassCount)) {
     ADD_FAILURE() << "pass debug-name table should match declared pass count";
     return;
   }
-  if (!(compiled.orderedPasses.size() + compiled.culledPassCount ==
-        compiled.declaredPassCount)) {
+  if (!(compiled.commands.orderedPasses.size() +
+            compiled.plan.culledPassCount ==
+        compiled.plan.declaredPassCount)) {
     ADD_FAILURE() << "ordered + culled pass counts should match declared pass "
                      "count";
     return;
   }
 
   std::array<bool, 3> seenPass{false, false, false};
-  for (const uint32_t passIndex : compiled.orderedPassIndices) {
-    if (!(passIndex < compiled.declaredPassCount)) {
+  for (const uint32_t passIndex : compiled.plan.orderedPassIndices) {
+    if (!(passIndex < compiled.plan.declaredPassCount)) {
       ADD_FAILURE() << "ordered pass index should be in declared-pass range";
       return;
     }
@@ -632,42 +624,43 @@ TEST(RenderGraphMetadataTest, TransientAllocationMetadataIntegrity) {
     std::cerr << compileResult.error() << "\n";
     return;
   }
-  const RenderGraphCompileResult &compiled = compileResult.value();
+  const CompiledRenderGraph &compiled = compileResult.value();
 
-  if (!(compiled.transientTextureAllocations.size() ==
-        compiled.transientTextureLifetimes.size())) {
+  if (!(compiled.plan.transientTextureAllocations.size() ==
+        compiled.plan.transientTextureLifetimes.size())) {
     ADD_FAILURE()
         << "transient texture allocation/lifetime counts should match";
     return;
   }
-  if (!(compiled.transientBufferAllocations.size() ==
-        compiled.transientBufferLifetimes.size())) {
+  if (!(compiled.plan.transientBufferAllocations.size() ==
+        compiled.plan.transientBufferLifetimes.size())) {
     ADD_FAILURE() << "transient buffer allocation/lifetime counts should match";
     return;
   }
-  if (!(compiled.transientTexturePhysicalAllocations.size() ==
-        compiled.transientTexturePhysicalCount)) {
+  if (!(compiled.plan.transientTexturePhysicalAllocations.size() ==
+        compiled.plan.transientTexturePhysicalCount)) {
     ADD_FAILURE() << "transient texture physical allocation count should match";
     return;
   }
-  if (!(compiled.transientBufferPhysicalAllocations.size() ==
-        compiled.transientBufferPhysicalCount)) {
+  if (!(compiled.plan.transientBufferPhysicalAllocations.size() ==
+        compiled.plan.transientBufferPhysicalCount)) {
     ADD_FAILURE() << "transient buffer physical allocation count should match";
     return;
   }
 
   uint32_t previousTextureResourceIndex = UINT32_MAX;
-  for (size_t i = 0; i < compiled.transientTextureAllocations.size(); ++i) {
-    const auto &allocation = compiled.transientTextureAllocations[i];
+  for (size_t i = 0; i < compiled.plan.transientTextureAllocations.size();
+       ++i) {
+    const auto &allocation = compiled.plan.transientTextureAllocations[i];
     if (!(allocation.resourceIndex <
-          compiled.transientTextureAllocationByResource.size())) {
+          compiled.plan.transientTextureAllocationByResource.size())) {
       ADD_FAILURE()
           << "transient texture allocation resource index should be in "
              "range";
       return;
     }
     if (!(allocation.allocationIndex <
-          compiled.transientTexturePhysicalCount)) {
+          compiled.plan.transientTexturePhysicalCount)) {
       ADD_FAILURE() << "transient texture allocation slot index should be in "
                        "range";
       return;
@@ -680,7 +673,7 @@ TEST(RenderGraphMetadataTest, TransientAllocationMetadataIntegrity) {
       }
     }
     previousTextureResourceIndex = allocation.resourceIndex;
-    if (!(compiled
+    if (!(compiled.plan
               .transientTextureAllocationByResource[allocation.resourceIndex] ==
           allocation.allocationIndex)) {
       ADD_FAILURE() << "transient texture allocation should match resource "
@@ -690,16 +683,17 @@ TEST(RenderGraphMetadataTest, TransientAllocationMetadataIntegrity) {
   }
 
   uint32_t previousBufferResourceIndex = UINT32_MAX;
-  for (size_t i = 0; i < compiled.transientBufferAllocations.size(); ++i) {
-    const auto &allocation = compiled.transientBufferAllocations[i];
+  for (size_t i = 0; i < compiled.plan.transientBufferAllocations.size(); ++i) {
+    const auto &allocation = compiled.plan.transientBufferAllocations[i];
     if (!(allocation.resourceIndex <
-          compiled.transientBufferAllocationByResource.size())) {
+          compiled.plan.transientBufferAllocationByResource.size())) {
       ADD_FAILURE()
           << "transient buffer allocation resource index should be in "
              "range";
       return;
     }
-    if (!(allocation.allocationIndex < compiled.transientBufferPhysicalCount)) {
+    if (!(allocation.allocationIndex <
+          compiled.plan.transientBufferPhysicalCount)) {
       ADD_FAILURE() << "transient buffer allocation slot index should be in "
                        "range";
       return;
@@ -712,7 +706,7 @@ TEST(RenderGraphMetadataTest, TransientAllocationMetadataIntegrity) {
       }
     }
     previousBufferResourceIndex = allocation.resourceIndex;
-    if (!(compiled
+    if (!(compiled.plan
               .transientBufferAllocationByResource[allocation.resourceIndex] ==
           allocation.allocationIndex)) {
       ADD_FAILURE()
@@ -721,9 +715,10 @@ TEST(RenderGraphMetadataTest, TransientAllocationMetadataIntegrity) {
     }
   }
 
-  std::vector<uint8_t> seenTextureSlots(compiled.transientTexturePhysicalCount,
-                                        0u);
-  for (const auto &allocation : compiled.transientTexturePhysicalAllocations) {
+  std::vector<uint8_t> seenTextureSlots(
+      compiled.plan.transientTexturePhysicalCount, 0u);
+  for (const auto &allocation :
+       compiled.plan.transientTexturePhysicalAllocations) {
     if (!(allocation.allocationIndex < seenTextureSlots.size())) {
       ADD_FAILURE()
           << "transient texture physical allocation slot should be in "
@@ -738,12 +733,12 @@ TEST(RenderGraphMetadataTest, TransientAllocationMetadataIntegrity) {
     seenTextureSlots[allocation.allocationIndex] = 1u;
 
     if (!(allocation.representativeResourceIndex <
-          compiled.transientTextureAllocationByResource.size())) {
+          compiled.plan.transientTextureAllocationByResource.size())) {
       ADD_FAILURE() << "transient texture representative resource should be in "
                        "range";
       return;
     }
-    if (!(compiled.transientTextureAllocationByResource
+    if (!(compiled.plan.transientTextureAllocationByResource
               [allocation.representativeResourceIndex] ==
           allocation.allocationIndex)) {
       ADD_FAILURE()
@@ -761,9 +756,10 @@ TEST(RenderGraphMetadataTest, TransientAllocationMetadataIntegrity) {
     }
   }
 
-  std::vector<uint8_t> seenBufferSlots(compiled.transientBufferPhysicalCount,
-                                       0u);
-  for (const auto &allocation : compiled.transientBufferPhysicalAllocations) {
+  std::vector<uint8_t> seenBufferSlots(
+      compiled.plan.transientBufferPhysicalCount, 0u);
+  for (const auto &allocation :
+       compiled.plan.transientBufferPhysicalAllocations) {
     if (!(allocation.allocationIndex < seenBufferSlots.size())) {
       ADD_FAILURE() << "transient buffer physical allocation slot should be in "
                        "range";
@@ -777,12 +773,12 @@ TEST(RenderGraphMetadataTest, TransientAllocationMetadataIntegrity) {
     seenBufferSlots[allocation.allocationIndex] = 1u;
 
     if (!(allocation.representativeResourceIndex <
-          compiled.transientBufferAllocationByResource.size())) {
+          compiled.plan.transientBufferAllocationByResource.size())) {
       ADD_FAILURE() << "transient buffer representative resource should be in "
                        "range";
       return;
     }
-    if (!(compiled.transientBufferAllocationByResource
+    if (!(compiled.plan.transientBufferAllocationByResource
               [allocation.representativeResourceIndex] ==
           allocation.allocationIndex)) {
       ADD_FAILURE() << "transient buffer representative map entry should match "

@@ -5,7 +5,26 @@
 Optimize lifetime maintenance cost: concepts, relationships, states, codepaths,
 files, branches, checks, comments, allocations, and total maintained LOC. Prefer
 readable procedural locality over terse syntax. Count the full scope after every
-slice.
+slice. Treat formatting-only LOC changes as neutral: semantic compression must
+come from removing maintained behavior or representation, never from packing the
+same code onto fewer lines.
+
+## Human-readable code
+
+- Follow the repository's formatter and established layout.
+- Keep one logical statement per line. Do not join declarations, assignments,
+  calls, branches, or loop bodies merely to reduce physical LOC.
+- Preserve indentation and braces that expose control-flow structure.
+- Use blank lines to separate coherent phases such as validation, setup, core
+  work, submission, and cleanup; do not fragment a single phase with arbitrary
+  spacing.
+- Keep closely related operations together and extract a well-named helper only
+  when it reduces relationships or makes a genuinely distinct block clearer.
+- Prefer readable multi-line initializers, argument lists, expressions, and
+  fluent chains when a single line is difficult to scan.
+- Review the final formatted diff manually. If a human must mentally unpack a
+  dense expression or collapsed block, expand it without treating the added
+  formatting lines as a regression.
 
 ## Compression order
 
@@ -77,7 +96,8 @@ directives. Bulk comment deletion without structural repair is not compression.
 
 ## Reject
 
-- minification, compressed formatting, chained expressions, or cryptic names;
+- minification, compressed formatting, gratuitously chained expressions, packed
+  statements, collapsed blocks, or cryptic names;
 - macros/templates that hide ordinary control flow only to reduce physical LOC;
 - flag-driven mega-functions combining unrelated policy;
 - speculative interfaces with one implementation;

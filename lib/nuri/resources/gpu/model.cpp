@@ -3,12 +3,11 @@
 #include "nuri/core/pmr_scratch.h"
 #include "nuri/core/profiling.h"
 #include "nuri/gfx/gpu_device.h"
-#include "nuri/pch.h"
+#include "nuri/resources/async/asset_cpu_scheduler.h"
 #include "nuri/resources/mesh_importer.h"
+#include "nuri/resources/storage/cache_utils.h"
 #include "nuri/resources/storage/mesh/mesh_binary_format.h"
 #include "nuri/resources/storage/mesh/mesh_binary_serializer.h"
-#include "nuri/resources/storage/mesh/mesh_cache_utils.h"
-#include "nuri/resources/storage/mesh/mesh_cache_writer.h"
 #include "nuri/utils/env_utils.h"
 namespace nuri {
 
@@ -790,6 +789,51 @@ createAnimationGpuBuffers(GPUDevice &gpu,
   return Result<ModelAnimationGpuBuffers, std::string>::makeResult(
       std::move(buffers));
 }
+
+Result<ModelMeshletGpuBuffers, std::string>
+createMeshletGpuBuffers(GPUDevice &gpu, const ModelUploadPlan &plan,
+                        std::string_view debugName) {
+  ModelMeshletGpuBuffers buffers{};
+  using Entry =
+      std::tuple<ModelBufferRole, std::unique_ptr<Buffer> *, std::string_view>;
+  const std::array entries{
+      Entry{ModelBufferRole::MeshletDescriptors, &buffers.meshletBuffer,
+            "_meshlets"},
+      Entry{ModelBufferRole::MeshletVertexIndices,
+            &buffers.meshletVertexIndexBuffer, "_meshlet_vertices"},
+      Entry{ModelBufferRole::MeshletPrimitiveIndices,
+            &buffers.meshletPrimitiveIndexBuffer, "_meshlet_primitives"},
+      Entry{ModelBufferRole::MeshletLodRanges, &buffers.meshletLodRangeBuffer,
+            "_meshlet_lod_ranges"},
+  };
+  for (const auto &[role, destination, suffix] : entries) {
+    auto created = createStorageBuffer(gpu, plan[role].bytes,
+                                       std::string(debugName) + suffix.data());
+    if (created.hasError()) {
+      releaseMeshletGpuBuffers(gpu, buffers);
+      return Result<ModelMeshletGpuBuffers, std::string>::makeError(
+          created.error());
+    }
+    *destination = std::move(created.value());
+  }
+  if (buffers.meshletBuffer) {
+    buffers.view = Model::ModelMeshletGpuView{
+        .meshletBuffer = buffers.meshletBuffer->handle(),
+        .meshletVertexIndexBuffer = buffers.meshletVertexIndexBuffer->handle(),
+        .meshletPrimitiveIndexBuffer =
+            buffers.meshletPrimitiveIndexBuffer->handle(),
+        .lodRangeBuffer = buffers.meshletLodRangeBuffer->handle(),
+        .meshletCount = plan[ModelBufferRole::MeshletDescriptors].count,
+        .meshletVertexIndexCount =
+            plan[ModelBufferRole::MeshletVertexIndices].count,
+        .meshletPrimitiveIndexCount =
+            plan[ModelBufferRole::MeshletPrimitiveIndices].count,
+        .lodRangeCount = plan[ModelBufferRole::MeshletLodRanges].count,
+    };
+  }
+  return Result<ModelMeshletGpuBuffers, std::string>::makeResult(
+      std::move(buffers));
+}
 BoundingBox computeModelBounds(std::span<const Vertex> vertices) {
   if (vertices.empty()) {
     return BoundingBox(glm::vec3(0.0f), glm::vec3(0.0f));
@@ -945,8 +989,34 @@ void maybeQueueMeshCacheWrite(const MeshCacheKey &cacheKey,
         cacheKey.cachePath.string().c_str(), serialized.error().c_str());
     return;
   }
-  MeshCacheWriterService::instance().enqueue(cacheKey.cachePath,
-                                             std::move(serialized.value()));
+  const uint64_t estimatedBytes = serialized.value().size();
+  auto enqueueResult = backgroundAssetCpuScheduler().enqueue(AssetCpuJob{
+      .priority = AssetPriority::Background,
+      .workClass = AssetWorkClass::Io,
+      .estimatedBytes = estimatedBytes,
+      .debugName = "write mesh cache",
+      .execute =
+          [destinationPath = cacheKey.cachePath,
+           fileBytes =
+               std::move(serialized.value())](std::stop_token stopToken) {
+            if (stopToken.stop_requested()) {
+              return;
+            }
+            auto writeResult =
+                writeBinaryFileAtomic(destinationPath, fileBytes);
+            if (writeResult.hasError()) {
+              NURI_LOG_WARNING("Failed to write mesh cache '%s': %s",
+                               destinationPath.string().c_str(),
+                               writeResult.error().c_str());
+            }
+          },
+  });
+  if (enqueueResult.hasError()) {
+    NURI_LOG_WARNING(
+        "Model::createFromFile: Failed to queue mesh cache '%s': %s",
+        cacheKey.cachePath.string().c_str(), enqueueResult.error().c_str());
+    return;
+  }
   NURI_LOG_DEBUG("Model::createFromFile: Queued mesh cache write '%s'",
                  cacheKey.cachePath.string().c_str());
 }
@@ -1028,6 +1098,7 @@ struct Model::PackedSource {
   PackedVertexFormat vertexFormat = PackedVertexFormat::StaticQuantized20;
   std::span<const std::byte> staticDecode{};
   const ModelAnimationPackedData *animation = nullptr;
+  const ModelUploadPlan *uploadPlan = nullptr;
 };
 
 struct PreparedGpuModelData::Impl {
@@ -1050,9 +1121,8 @@ struct PreparedGpuModelData::Impl {
     BufferUsage usage = BufferUsage::None;
     std::string debugName{};
   };
-  explicit Impl(PreparedModelData sourceData) : source(std::move(sourceData)) {}
-  PreparedModelData source;
-  PreparedMeshletBufferData meshlets{};
+  explicit Impl(ModelUploadPlan sourceData) : source(std::move(sourceData)) {}
+  ModelUploadPlan source;
   std::array<BufferSlot, SlotCount> buffers{};
   BoundingBox bounds{};
   uint32_t sourceMaterialCount = 0u;
@@ -1139,93 +1209,118 @@ Model::create(GPUDevice &gpu, const MeshData &data,
       debugName);
 }
 
-Result<PreparedModelData, std::string> Model::prepare(MeshData data) {
+Result<ModelUploadPlan, std::string> Model::prepare(MeshData data) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
   if (data.vertices.empty() || data.indices.empty()) {
-    return Result<PreparedModelData, std::string>::makeError(
+    return Result<ModelUploadPlan, std::string>::makeError(
         "Model::prepare: mesh has no vertices or indices");
   }
   ModelPackedVertexData packedVertices = packVerticesForModel(data);
   if (packedVertices.vertexBytes.empty()) {
-    return Result<PreparedModelData, std::string>::makeError(
+    return Result<ModelUploadPlan, std::string>::makeError(
         "Model::prepare: packed vertex payload is empty");
   }
   auto animationResult = packAnimationData(data);
   if (animationResult.hasError()) {
-    return Result<PreparedModelData, std::string>::makeError(
+    return Result<ModelUploadPlan, std::string>::makeError(
         animationResult.error());
   }
+  auto meshletResult =
+      prepareMeshletBufferData(data.meshlets, data.meshletVertexIndices,
+                               data.meshletPrimitiveIndices, data.submeshes);
+  if (meshletResult.hasError()) {
+    return Result<ModelUploadPlan, std::string>::makeError(
+        meshletResult.error());
+  }
   ModelAnimationPackedData animation = std::move(animationResult.value());
-  PreparedModelData prepared{};
+  PreparedMeshletBufferData meshlets = std::move(meshletResult.value());
+  ModelUploadPlan prepared{};
   prepared.mesh = std::move(data);
   prepared.packedVertexBytes = std::move(packedVertices.vertexBytes);
   prepared.packedVertexFormat = packedVertices.format;
-  prepared.staticDecode = PreparedModelBufferData{
+  prepared[ModelBufferRole::StaticDecode] = ModelUploadBuffer{
       .bytes = std::move(packedVertices.staticDecode.data),
       .count = packedVertices.staticDecode.count,
       .stride = packedVertices.staticDecode.strideBytes,
   };
-  prepared.skinInfluences = PreparedModelBufferData{
+  prepared[ModelBufferRole::SkinInfluences] = ModelUploadBuffer{
       .bytes = std::move(animation.skinInfluences.data),
       .count = animation.skinInfluences.count,
       .stride = animation.skinInfluences.strideBytes,
   };
-  prepared.morphMeta = PreparedModelBufferData{
+  prepared[ModelBufferRole::MorphMeta] = ModelUploadBuffer{
       .bytes = std::move(animation.morphMeta.data),
       .count = animation.morphMeta.count,
       .stride = animation.morphMeta.strideBytes,
   };
-  prepared.morphDeltas = PreparedModelBufferData{
+  prepared[ModelBufferRole::MorphDeltas] = ModelUploadBuffer{
       .bytes = std::move(animation.morphDeltas.data),
       .count = animation.morphDeltas.count,
       .stride = animation.morphDeltas.strideBytes,
   };
-  return Result<PreparedModelData, std::string>::makeResult(
-      std::move(prepared));
+  prepared[ModelBufferRole::MeshletDescriptors] = ModelUploadBuffer{
+      .bytes = std::move(meshlets.meshletDescriptors),
+      .count = meshlets.meshletCount,
+      .stride = sizeof(MeshletDescriptorGpu),
+  };
+  prepared[ModelBufferRole::MeshletVertexIndices] = ModelUploadBuffer{
+      .bytes = std::move(meshlets.vertexIndices),
+      .count = meshlets.vertexIndexCount,
+      .stride = sizeof(uint32_t),
+  };
+  prepared[ModelBufferRole::MeshletPrimitiveIndices] = ModelUploadBuffer{
+      .bytes = std::move(meshlets.primitiveIndices),
+      .count = meshlets.primitiveIndexCount,
+      .stride = sizeof(uint32_t),
+  };
+  prepared[ModelBufferRole::MeshletLodRanges] = ModelUploadBuffer{
+      .bytes = std::move(meshlets.lodRanges),
+      .count = meshlets.lodRangeCount,
+      .stride = sizeof(Model::SubmeshMeshletLodRangeGpu),
+  };
+  return Result<ModelUploadPlan, std::string>::makeResult(std::move(prepared));
 }
 
-Result<PreparedModelData, std::string>
+Result<ModelUploadPlan, std::string>
 Model::prepareFromFile(std::string_view path, const MeshImportOptions &options,
                        std::pmr::memory_resource *memory) {
   auto meshResult = MeshImporter::loadFromFile(path, options, memory);
   if (meshResult.hasError()) {
-    return Result<PreparedModelData, std::string>::makeError(
-        meshResult.error());
+    return Result<ModelUploadPlan, std::string>::makeError(meshResult.error());
   }
   return prepare(std::move(meshResult.value()));
 }
 
-Result<PreparedModelData, std::string>
+Result<ModelUploadPlan, std::string>
 Model::prepareSceneMeshFromFile(std::string_view path, uint32_t sceneMeshIndex,
                                 const MeshImportOptions &options,
                                 std::pmr::memory_resource *memory) {
   auto meshResult = MeshImporter::loadSceneMeshFromFile(path, sceneMeshIndex,
                                                         options, memory);
   if (meshResult.hasError()) {
-    return Result<PreparedModelData, std::string>::makeError(
-        meshResult.error());
+    return Result<ModelUploadPlan, std::string>::makeError(meshResult.error());
   }
   return prepare(std::move(meshResult.value()));
 }
 
 Result<std::unique_ptr<Model>, std::string>
-Model::createPrepared(GPUDevice &gpu, PreparedModelData data,
+Model::createPrepared(GPUDevice &gpu, ModelUploadPlan data,
                       std::string_view debugName) {
   ModelAnimationPackedData animation{};
   animation.skinInfluences = BufferLayout<std::vector<std::byte>>{
-      .data = std::move(data.skinInfluences.bytes),
-      .count = data.skinInfluences.count,
-      .strideBytes = data.skinInfluences.stride,
+      .data = std::move(data[ModelBufferRole::SkinInfluences].bytes),
+      .count = data[ModelBufferRole::SkinInfluences].count,
+      .strideBytes = data[ModelBufferRole::SkinInfluences].stride,
   };
   animation.morphMeta = BufferLayout<std::vector<std::byte>>{
-      .data = std::move(data.morphMeta.bytes),
-      .count = data.morphMeta.count,
-      .strideBytes = data.morphMeta.stride,
+      .data = std::move(data[ModelBufferRole::MorphMeta].bytes),
+      .count = data[ModelBufferRole::MorphMeta].count,
+      .strideBytes = data[ModelBufferRole::MorphMeta].stride,
   };
   animation.morphDeltas = BufferLayout<std::vector<std::byte>>{
-      .data = std::move(data.morphDeltas.bytes),
-      .count = data.morphDeltas.count,
-      .strideBytes = data.morphDeltas.stride,
+      .data = std::move(data[ModelBufferRole::MorphDeltas].bytes),
+      .count = data[ModelBufferRole::MorphDeltas].count,
+      .strideBytes = data[ModelBufferRole::MorphDeltas].stride,
   };
   return createPacked(
       gpu,
@@ -1239,14 +1334,15 @@ Model::createPrepared(GPUDevice &gpu, PreparedModelData data,
           .meshletPrimitiveIndices = data.mesh.meshletPrimitiveIndices,
           .bounds = computeModelBounds(data.mesh.vertices),
           .vertexFormat = data.packedVertexFormat,
-          .staticDecode = data.staticDecode.bytes,
+          .staticDecode = data[ModelBufferRole::StaticDecode].bytes,
           .animation = &animation,
+          .uploadPlan = &data,
       },
       debugName);
 }
 
 Result<std::unique_ptr<PreparedGpuModelData>, std::string>
-Model::prepareGpu(GPUDevice &gpu, PreparedModelData data,
+Model::prepareGpu(GPUDevice &gpu, ModelUploadPlan data,
                   std::string_view debugName) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
   if (!gpu.supportsBackgroundBufferPreparation() ||
@@ -1263,24 +1359,11 @@ Model::prepareGpu(GPUDevice &gpu, PreparedModelData data,
                   std::string>::makeError(sourceMaterialCountResult.error());
   }
   MeshBinaryMorphMetaRecord morphMeta{};
-  if (!data.morphMeta.bytes.empty()) {
-    std::memcpy(&morphMeta, data.morphMeta.bytes.data(), sizeof(morphMeta));
-  }
-  auto meshletResult = prepareMeshletBufferData(
-      std::span<const MeshletDescriptor>(data.mesh.meshlets.data(),
-                                         data.mesh.meshlets.size()),
-      std::span<const uint32_t>(data.mesh.meshletVertexIndices.data(),
-                                data.mesh.meshletVertexIndices.size()),
-      std::span<const uint8_t>(data.mesh.meshletPrimitiveIndices.data(),
-                               data.mesh.meshletPrimitiveIndices.size()),
-      std::span<const Submesh>(data.mesh.submeshes.data(),
-                               data.mesh.submeshes.size()));
-  if (meshletResult.hasError()) {
-    return Result<std::unique_ptr<PreparedGpuModelData>,
-                  std::string>::makeError(meshletResult.error());
+  if (!data[ModelBufferRole::MorphMeta].bytes.empty()) {
+    std::memcpy(&morphMeta, data[ModelBufferRole::MorphMeta].bytes.data(),
+                sizeof(morphMeta));
   }
   auto impl = std::make_unique<PreparedGpuModelData::Impl>(std::move(data));
-  impl->meshlets = std::move(meshletResult.value());
   impl->bounds = computeModelBounds(std::span<const Vertex>(
       impl->source.mesh.vertices.data(), impl->source.mesh.vertices.size()));
   impl->sourceMaterialCount = sourceMaterialCountResult.value();
@@ -1330,28 +1413,29 @@ Model::prepareGpu(GPUDevice &gpu, PreparedModelData data,
   appendSlot(impl->buffers[PreparedGpuModelData::Impl::Index], indexBytes,
              BufferUsage::Index | accelerationStructureInput, "_indices");
   appendSlot(impl->buffers[PreparedGpuModelData::Impl::VertexDecode],
-             impl->source.staticDecode.bytes, BufferUsage::Storage,
-             "_vertex_decode");
+             impl->source[ModelBufferRole::StaticDecode].bytes,
+             BufferUsage::Storage, "_vertex_decode");
   appendSlot(impl->buffers[PreparedGpuModelData::Impl::SkinInfluences],
-             impl->source.skinInfluences.bytes, BufferUsage::Storage,
-             "_skin_influences");
+             impl->source[ModelBufferRole::SkinInfluences].bytes,
+             BufferUsage::Storage, "_skin_influences");
   appendSlot(impl->buffers[PreparedGpuModelData::Impl::MorphMeta],
-             impl->source.morphMeta.bytes, BufferUsage::Storage, "_morph_meta");
+             impl->source[ModelBufferRole::MorphMeta].bytes,
+             BufferUsage::Storage, "_morph_meta");
   appendSlot(impl->buffers[PreparedGpuModelData::Impl::MorphDeltas],
-             impl->source.morphDeltas.bytes, BufferUsage::Storage,
-             "_morph_deltas");
+             impl->source[ModelBufferRole::MorphDeltas].bytes,
+             BufferUsage::Storage, "_morph_deltas");
   appendSlot(impl->buffers[PreparedGpuModelData::Impl::MeshletDescriptors],
-             impl->meshlets.meshletDescriptors, BufferUsage::Storage,
-             "_meshlets");
+             impl->source[ModelBufferRole::MeshletDescriptors].bytes,
+             BufferUsage::Storage, "_meshlets");
   appendSlot(impl->buffers[PreparedGpuModelData::Impl::MeshletVertexIndices],
-             impl->meshlets.vertexIndices, BufferUsage::Storage,
-             "_meshlet_vertices");
+             impl->source[ModelBufferRole::MeshletVertexIndices].bytes,
+             BufferUsage::Storage, "_meshlet_vertices");
   appendSlot(impl->buffers[PreparedGpuModelData::Impl::MeshletPrimitiveIndices],
-             impl->meshlets.primitiveIndices, BufferUsage::Storage,
-             "_meshlet_primitives");
+             impl->source[ModelBufferRole::MeshletPrimitiveIndices].bytes,
+             BufferUsage::Storage, "_meshlet_primitives");
   appendSlot(impl->buffers[PreparedGpuModelData::Impl::MeshletLodRanges],
-             impl->meshlets.lodRanges, BufferUsage::Storage,
-             "_meshlet_lod_ranges");
+             impl->source[ModelBufferRole::MeshletLodRanges].bytes,
+             BufferUsage::Storage, "_meshlet_lod_ranges");
   auto batch = gpu.prepareBufferBatch(requests);
   if (batch.hasError()) {
     return Result<std::unique_ptr<PreparedGpuModelData>,
@@ -1437,7 +1521,8 @@ Model::publishPreparedGpu(GPUDevice &gpu,
   ModelAnimationGpuView animationView{};
   if (const auto &skin = buffers[PreparedGpuModelData::Impl::SkinInfluences]) {
     animationView.skinInfluenceBuffer = skin->handle();
-    animationView.skinInfluenceCount = impl.source.skinInfluences.count;
+    animationView.skinInfluenceCount =
+        impl.source[ModelBufferRole::SkinInfluences].count;
   }
   if (const auto &meta = buffers[PreparedGpuModelData::Impl::MorphMeta]) {
     animationView.morphMetaBuffer = meta->handle();
@@ -1451,16 +1536,20 @@ Model::publishPreparedGpu(GPUDevice &gpu,
   if (const auto &meshlets =
           buffers[PreparedGpuModelData::Impl::MeshletDescriptors]) {
     meshletView.meshletBuffer = meshlets->handle();
-    meshletView.meshletCount = impl.meshlets.meshletCount;
+    meshletView.meshletCount =
+        impl.source[ModelBufferRole::MeshletDescriptors].count;
     meshletView.meshletVertexIndexBuffer =
         buffers[PreparedGpuModelData::Impl::MeshletVertexIndices]->handle();
-    meshletView.meshletVertexIndexCount = impl.meshlets.vertexIndexCount;
+    meshletView.meshletVertexIndexCount =
+        impl.source[ModelBufferRole::MeshletVertexIndices].count;
     meshletView.meshletPrimitiveIndexBuffer =
         buffers[PreparedGpuModelData::Impl::MeshletPrimitiveIndices]->handle();
-    meshletView.meshletPrimitiveIndexCount = impl.meshlets.primitiveIndexCount;
+    meshletView.meshletPrimitiveIndexCount =
+        impl.source[ModelBufferRole::MeshletPrimitiveIndices].count;
     meshletView.lodRangeBuffer =
         buffers[PreparedGpuModelData::Impl::MeshletLodRanges]->handle();
-    meshletView.lodRangeCount = impl.meshlets.lodRangeCount;
+    meshletView.lodRangeCount =
+        impl.source[ModelBufferRole::MeshletLodRanges].count;
   }
   std::pmr::memory_resource *const storageMemory =
       std::pmr::get_default_resource();
@@ -1531,9 +1620,12 @@ Model::createPacked(GPUDevice &gpu, const PackedSource &source,
     }
     animationBuffers.vertexDecodeBuffer = std::move(decode.value());
   }
-  auto meshlets = createMeshletGpuBuffers(
-      gpu, source.meshlets, source.meshletVertexIndices,
-      source.meshletPrimitiveIndices, source.submeshes, debugName);
+  auto meshlets =
+      source.uploadPlan != nullptr
+          ? createMeshletGpuBuffers(gpu, *source.uploadPlan, debugName)
+          : createMeshletGpuBuffers(
+                gpu, source.meshlets, source.meshletVertexIndices,
+                source.meshletPrimitiveIndices, source.submeshes, debugName);
   if (meshlets.hasError()) {
     releaseAnimationGpuBuffers(gpu, animationBuffers);
     gpu.releaseGeometry(geometry.value());

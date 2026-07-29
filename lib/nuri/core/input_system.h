@@ -27,30 +27,12 @@ public:
   glm::dvec2 scrollDelta() const;
 
 private:
-  template <typename T, bool (InputSystem::*Fn)(const T &)>
-  static bool onRaw(const T &event, void *user) {
-    if (!user) {
-      return false;
-    }
-    return (static_cast<InputSystem *>(user)->*Fn)(event);
-  }
-  bool handleRawKey(const RawKeyEvent &event);
-  bool handleRawChar(const RawCharEvent &event);
-  bool handleRawMouseButton(const RawMouseButtonEvent &event);
-  bool handleRawMouseMove(const RawMouseMoveEvent &event);
-  bool handleRawMouseScroll(const RawMouseScrollEvent &event);
-  bool handleRawFocus(const RawFocusEvent &event);
-  bool handleRawCursorEnter(const RawCursorEnterEvent &event);
+  static bool dispatchInput(const InputEvent &event, void *user);
+  bool handleInput(InputEvent event);
   static size_t keyIndex(Key key);
   static size_t mouseIndex(MouseButton button);
   EventManager &events_;
-  SubscriptionToken keySub_{};
-  SubscriptionToken charSub_{};
-  SubscriptionToken mouseButtonSub_{};
-  SubscriptionToken mouseMoveSub_{};
-  SubscriptionToken mouseScrollSub_{};
-  SubscriptionToken focusSub_{};
-  SubscriptionToken cursorEnterSub_{};
+  SubscriptionToken inputSub_{};
   std::bitset<static_cast<size_t>(Key::Count)> keyDown_{};
   std::bitset<static_cast<size_t>(Key::Count)> keyPressed_{};
   std::bitset<static_cast<size_t>(Key::Count)> keyReleased_{};

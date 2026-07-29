@@ -3,9 +3,7 @@
 #include "nuri/core/thread_priority.h"
 #include "nuri/math/light.h"
 #include "nuri/math/utils.h"
-#include "nuri/pch.h"
 #include "nuri/resources/gpu/resource_manager.h"
-#include "nuri/resources/gpu/scene_material_resolution.h"
 namespace nuri {
 namespace {
 std::atomic<uint64_t> gNextRenderSceneId{1u};
@@ -86,15 +84,18 @@ deriveDDGICoverageBounds(const ResourceManager *resources,
         continue;
       }
       hasRayTracingGeometry = true;
-      const MaterialRef material = resolveSceneSubmeshMaterial(
-          *modelRecord, submeshIndex, renderable.material,
+      const MaterialRef material = resources->resolveRenderableMaterial(
+          renderable.model, submeshIndex, renderable.material,
           renderable.materialOverride);
       const MaterialRecord *materialRecord = resources->tryGet(material);
       if (materialRecord == nullptr) {
         result.complete = false;
         continue;
       }
-      rayVisible |= isDDGIRayVisibleMaterial(*materialRecord);
+      rayVisible |=
+          materialRecord->desc.alphaMode != MaterialAlphaMode::Blend &&
+          (materialRecord->desc.featureMask & kMaterialFeatureTransmission) ==
+              0u;
     }
     if (!hasRayTracingGeometry) {
       result.complete = false;
@@ -300,8 +301,9 @@ void RenderScene::rebuildFlatRenderables() {
     components.flatRenderableIndex[index] =
         static_cast<uint32_t>(renderables_.size());
     const Renderable renderable{
-        .id = makeRenderableId(index, components.slots.generation(index)),
-        .node = makeNodeId(nodeIndex, nodes.slots.generation(nodeIndex)),
+        .id =
+            RenderableId::fromParts(index, components.slots.generation(index)),
+        .node = NodeId::fromParts(nodeIndex, nodes.slots.generation(nodeIndex)),
         .model = components.models[index],
         .material = components.materials[index],
         .materialOverride = components.materialOverrides[index],
@@ -406,8 +408,8 @@ void RenderScene::rebuildDDGIVolumes() {
     }
     const uint32_t nodeIndex = record.node;
     ddgiVolumes_.push_back(RenderDDGIVolume{
-        .id = makeDDGIVolumeId(index, store.slots.generation(index)),
-        .node = makeNodeId(nodeIndex, nodes.slots.generation(nodeIndex)),
+        .id = DDGIVolumeId::fromParts(index, store.slots.generation(index)),
+        .node = NodeId::fromParts(nodeIndex, nodes.slots.generation(nodeIndex)),
         .name = std::string_view(record.name),
         .probeCounts = record.probeCounts,
         .probeSpacing = record.probeSpacing,
@@ -592,7 +594,7 @@ Result<bool, std::string> RenderScene::commit() {
       const uint32_t nodeIndex = components.node[index];
       renderables_[flatIndex].modelMatrix = nodes.worldFromRoot[nodeIndex];
       renderables_[flatIndex].node =
-          makeNodeId(nodeIndex, nodes.slots.generation(nodeIndex));
+          NodeId::fromParts(nodeIndex, nodes.slots.generation(nodeIndex));
       updatedAny = true;
     }
     if (updatedAny) {
@@ -726,8 +728,9 @@ RenderScene::commitInactiveStep(uint32_t maxOperations) {
         static_cast<uint32_t>(pending.renderables.size());
     components.flatRenderableIndex[index] = flatIndex;
     const Renderable renderable{
-        .id = makeRenderableId(index, components.slots.generation(index)),
-        .node = makeNodeId(nodeIndex, nodes.slots.generation(nodeIndex)),
+        .id =
+            RenderableId::fromParts(index, components.slots.generation(index)),
+        .node = NodeId::fromParts(nodeIndex, nodes.slots.generation(nodeIndex)),
         .model = model,
         .material = material,
         .materialOverride = materialOverride,

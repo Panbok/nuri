@@ -1,5 +1,5 @@
 #include "nuri/resources/detail/gltf_json_utils.h"
-#include "nuri/pch.h"
+#include "nuri/resources/storage/cache_utils.h"
 namespace nuri::detail {
 namespace {
 constexpr uint32_t kGlbMagic = 0x46546C67u;
@@ -50,11 +50,11 @@ template <size_t Size, typename Vector>
 [[nodiscard]] YyJsonDocResult
 loadGltfJsonDocumentFromBytes(const std::filesystem::path &path,
                               std::span<const std::byte> fileBytes) {
-  if (hasExtensionCaseInsensitive(path, ".gltf")) {
+  if (pathHasExtensionCaseInsensitive(path, ".gltf")) {
     return parseJsonDocument(std::string_view(
         reinterpret_cast<const char *>(fileBytes.data()), fileBytes.size()));
   }
-  if (!hasExtensionCaseInsensitive(path, ".glb")) {
+  if (!pathHasExtensionCaseInsensitive(path, ".glb")) {
     return YyJsonDocResult::makeError("Unsupported glTF file extension");
   }
   if (fileBytes.size() < 20u) {
@@ -84,23 +84,9 @@ loadGltfJsonDocumentFromBytes(const std::filesystem::path &path,
 }
 } // namespace
 
-bool hasExtensionCaseInsensitive(const std::filesystem::path &path,
-                                 std::string_view extension) {
-  const std::string pathExtension = path.extension().string();
-  const auto trimLeadingDot = [](std::string_view value) {
-    return value.starts_with('.') ? value.substr(1) : value;
-  };
-  const std::string_view lhs = trimLeadingDot(pathExtension);
-  const std::string_view rhs = trimLeadingDot(extension);
-  return std::ranges::equal(lhs, rhs, [](char left, char right) {
-    return std::tolower(static_cast<unsigned char>(left)) ==
-           std::tolower(static_cast<unsigned char>(right));
-  });
-}
-
 bool isGltfJsonAssetPath(const std::filesystem::path &path) {
-  return hasExtensionCaseInsensitive(path, ".gltf") ||
-         hasExtensionCaseInsensitive(path, ".glb");
+  return pathHasExtensionCaseInsensitive(path, ".gltf") ||
+         pathHasExtensionCaseInsensitive(path, ".glb");
 }
 
 bool isGltfJsonAssetPath(std::string_view path) {

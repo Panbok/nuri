@@ -1,4 +1,5 @@
 #pragma once
+#include "nuri/core/result.h"
 #include <bit>
 #include <cstddef>
 #include <cstdint>
@@ -81,6 +82,122 @@ private:
   size_t offset_ = 0u;
   bool valid_ = true;
 };
+
+[[nodiscard]] inline bool binaryRangeValid(size_t total, uint64_t offset,
+                                           uint64_t size);
+template <typename T, typename Allocator>
+void readPodArrayAt(std::span<const std::byte> bytes, uint64_t offset,
+                    uint32_t count, std::vector<T, Allocator> &out);
+
+struct BinarySection {
+  uint32_t fourcc = 0u;
+  uint32_t flags = 0u;
+  uint32_t count = 0u;
+  uint32_t stride = 0u;
+  std::span<const std::byte> payload{};
+};
+
+[[nodiscard]] inline bool alignBinaryOffset(uint64_t value, uint64_t alignment,
+                                            uint64_t &out) noexcept {
+  if (alignment == 0u) {
+    return false;
+  }
+  const uint64_t remainder = value % alignment;
+  const uint64_t padding = remainder == 0u ? 0u : alignment - remainder;
+  if (padding > std::numeric_limits<uint64_t>::max() - value) {
+    return false;
+  }
+  out = value + padding;
+  return true;
+}
+
+template <typename Header, typename TocEntry>
+[[nodiscard]] Result<std::vector<std::byte>, std::string>
+writeSectionedBinary(Header header, std::span<const BinarySection> sections,
+                     uint64_t alignment, std::string_view context) {
+  const auto fail = [context](std::string_view reason) {
+    return Result<std::vector<std::byte>, std::string>::makeError(
+        std::string(context) + ": " + std::string(reason));
+  };
+  if (sections.size() > std::numeric_limits<uint32_t>::max()) {
+    return fail("section count exceeds uint32");
+  }
+  const uint64_t tocBytes =
+      static_cast<uint64_t>(sections.size()) * sizeof(TocEntry);
+  if (tocBytes > std::numeric_limits<uint64_t>::max() - sizeof(Header)) {
+    return fail("TOC layout overflow");
+  }
+  uint64_t cursor = 0u;
+  if (!alignBinaryOffset(sizeof(Header) + tocBytes, alignment, cursor)) {
+    return fail("section layout overflow");
+  }
+  for (const BinarySection &section : sections) {
+    if (!alignBinaryOffset(cursor, alignment, cursor) ||
+        section.payload.size() >
+            std::numeric_limits<uint64_t>::max() - cursor) {
+      return fail("section layout overflow");
+    }
+    cursor += section.payload.size();
+  }
+  uint64_t fileSize = 0u;
+  if (!alignBinaryOffset(cursor, alignment, fileSize) ||
+      fileSize > std::numeric_limits<size_t>::max()) {
+    return fail("output is too large");
+  }
+  header.fileSize = fileSize;
+  header.tocOffset = sizeof(Header);
+  header.tocCount = static_cast<uint32_t>(sections.size());
+  std::vector<std::byte> out(static_cast<size_t>(fileSize), std::byte{0});
+  std::memcpy(out.data(), &header, sizeof(header));
+  cursor = 0u;
+  (void)alignBinaryOffset(sizeof(Header) + tocBytes, alignment, cursor);
+  for (size_t i = 0; i < sections.size(); ++i) {
+    (void)alignBinaryOffset(cursor, alignment, cursor);
+    const BinarySection &section = sections[i];
+    const TocEntry entry{.fourcc = section.fourcc,
+                         .flags = section.flags,
+                         .offset = cursor,
+                         .sizeBytes = section.payload.size(),
+                         .count = section.count,
+                         .stride = section.stride};
+    std::memcpy(out.data() + sizeof(Header) + i * sizeof(TocEntry), &entry,
+                sizeof(entry));
+    if (!section.payload.empty()) {
+      std::memcpy(out.data() + static_cast<size_t>(cursor),
+                  section.payload.data(), section.payload.size());
+    }
+    cursor += section.payload.size();
+  }
+  return Result<std::vector<std::byte>, std::string>::makeResult(
+      std::move(out));
+}
+
+template <typename TocEntry, typename Allocator>
+[[nodiscard]] Result<bool, std::string>
+readSectionToc(std::span<const std::byte> bytes, uint64_t offset,
+               uint32_t count, std::vector<TocEntry, Allocator> &out,
+               std::string_view context,
+               uint32_t maxCount = std::numeric_limits<uint32_t>::max()) {
+  const auto fail = [context](std::string_view reason) {
+    return Result<bool, std::string>::makeError(std::string(context) + ": " +
+                                                std::string(reason));
+  };
+  if (count > maxCount ||
+      count > std::numeric_limits<uint64_t>::max() / sizeof(TocEntry)) {
+    return fail("invalid TOC count");
+  }
+  const uint64_t tocBytes = static_cast<uint64_t>(count) * sizeof(TocEntry);
+  if (!binaryRangeValid(bytes.size(), offset, tocBytes)) {
+    return fail("invalid TOC range");
+  }
+  readPodArrayAt(bytes, offset, count, out);
+  for (const TocEntry &entry : out) {
+    if (!binaryRangeValid(bytes.size(), entry.offset, entry.sizeBytes)) {
+      return fail("invalid section range");
+    }
+  }
+  return Result<bool, std::string>::makeResult(true);
+}
 
 template <typename T>
 void appendPod(std::vector<std::byte> &out, const T &value) {

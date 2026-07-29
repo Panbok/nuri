@@ -42,16 +42,13 @@ resolveMemoryResource(std::pmr::memory_resource *memoryResource) {
 DebugDraw3D::DebugDraw3D(GPUDevice &gpu,
                          std::pmr::memory_resource *memoryResource)
     : gpu_(gpu), lines_(resolveMemoryResource(memoryResource)),
-      frameBuffers_(resolveMemoryResource(memoryResource)) {}
+      lineBuffers_(
+          gpu,
+          BufferDesc{.usage = BufferUsage::Storage | BufferUsage::Vertex,
+                     .storage = Storage::HostVisible},
+          "DebugDraw3D Buffer", resolveMemoryResource(memoryResource)) {}
 
-DebugDraw3D::~DebugDraw3D() {
-  if (nuri::isValid(pipeline_)) {
-    gpu_.destroyRenderPipeline(pipeline_);
-  }
-  for (ShaderHandle shader : shaders_)
-    if (nuri::isValid(shader))
-      gpu_.destroyShaderModule(shader);
-}
+DebugDraw3D::~DebugDraw3D() = default;
 
 void DebugDraw3D::line(const glm::vec3 &p1, const glm::vec3 &p2,
                        const glm::vec4 &c) {
@@ -147,7 +144,7 @@ void DebugDraw3D::frustum(const glm::mat4 &camView, const glm::mat4 &camProj,
 }
 
 Result<bool, std::string> DebugDraw3D::ensureShaderModules() {
-  if (nuri::isValid(shaders_[0])) {
+  if (shaders_[0]) {
     return Result<bool, std::string>::makeResult(true);
   }
   constexpr std::array descs{ShaderDesc{.moduleName = "debug_draw_3d_vs",
@@ -156,23 +153,21 @@ Result<bool, std::string> DebugDraw3D::ensureShaderModules() {
                              ShaderDesc{.moduleName = "debug_draw_3d_fs",
                                         .source = kDebugDraw3DFS,
                                         .stage = ShaderStage::Fragment}};
-  for (size_t index = 0; index < shaders_.size(); ++index) {
+  std::array<OwnedShaderHandle, 2u> createdShaders{};
+  for (size_t index = 0; index < createdShaders.size(); ++index) {
     auto created = gpu_.createShaderModule(descs[index]);
     if (created.hasError()) {
-      for (ShaderHandle shader : shaders_)
-        if (nuri::isValid(shader))
-          gpu_.destroyShaderModule(shader);
-      shaders_ = {};
       return Result<bool, std::string>::makeError(created.error());
     }
-    shaders_[index] = created.value();
+    createdShaders[index].reset(gpu_, created.value());
   }
+  shaders_ = std::move(createdShaders);
   return Result<bool, std::string>::makeResult(true);
 }
 
 Result<bool, std::string> DebugDraw3D::ensurePipeline(Format colorFormat,
                                                       Format depthFormat) {
-  if (nuri::isValid(pipeline_) && pipelineColorFormat_ == colorFormat &&
+  if (pipeline_ && pipelineColorFormat_ == colorFormat &&
       pipelineDepthFormat_ == depthFormat) {
     return Result<bool, std::string>::makeResult(true);
   }
@@ -180,14 +175,11 @@ Result<bool, std::string> DebugDraw3D::ensurePipeline(Format colorFormat,
   if (shaderResult.hasError()) {
     return shaderResult;
   }
-  if (nuri::isValid(pipeline_)) {
-    gpu_.destroyRenderPipeline(pipeline_);
-    pipeline_ = RenderPipelineHandle{};
-  }
+  pipeline_.reset();
   RenderPipelineDesc pipelineDesc{
       .vertexInput = {},
-      .vertexShader = shaders_[0],
-      .fragmentShader = shaders_[1],
+      .vertexShader = shaders_[0].get(),
+      .fragmentShader = shaders_[1].get(),
       .colorFormats = {colorFormat},
       .depthFormat = depthFormat,
       .cullMode = CullMode::None,
@@ -205,100 +197,64 @@ Result<bool, std::string> DebugDraw3D::ensurePipeline(Format colorFormat,
   if (pipelineResult.hasError()) {
     return Result<bool, std::string>::makeError(pipelineResult.error());
   }
-  pipeline_ = pipelineResult.value();
+  pipeline_.reset(gpu_, pipelineResult.value());
   pipelineColorFormat_ = colorFormat;
   pipelineDepthFormat_ = depthFormat;
   return Result<bool, std::string>::makeResult(true);
 }
 
-Result<DebugDraw3D::PreparedGraphPass, std::string>
-DebugDraw3D::buildGraphPass(uint64_t frameIndexValue,
-                            TextureHandle depthTexture, Format colorFormat,
-                            bool enableDepthTest) {
+Result<bool, std::string>
+DebugDraw3D::prepareDraw(uint64_t frameIndexValue, TextureHandle depthTexture,
+                         Format colorFormat, bool enableDepthTest,
+                         DrawItem &outDraw, BufferHandle &outDependency) {
   NURI_PROFILER_FUNCTION();
-  PreparedGraphPass pass{};
-  pass.desc.color.loadOp = LoadOp::Load;
-  pass.desc.color.storeOp = StoreOp::Store;
-  pass.desc.debugLabel = "DebugDraw3D Pass";
-  pass.desc.debugColor = 0xffffcc00u;
-  if (enableDepthTest && nuri::isValid(depthTexture)) {
-    pass.depthTextureHandle = depthTexture;
-    pass.desc.depth.loadOp = LoadOp::Load;
-    pass.desc.depth.storeOp = StoreOp::Store;
-    pass.desc.depth.clearDepth = 1.0f;
-    pass.desc.depth.clearStencil = 0;
-  }
+  outDraw = {};
+  outDependency = {};
   if (lines_.empty()) {
-    pass.desc.draws = {};
-    return Result<PreparedGraphPass, std::string>::makeResult(pass);
+    return Result<bool, std::string>::makeResult(false);
   }
   if (lines_.size() > std::numeric_limits<uint32_t>::max()) {
-    return Result<PreparedGraphPass, std::string>::makeError(
+    return Result<bool, std::string>::makeError(
         "DebugDraw3D: vertex count exceeds uint32_t range");
   }
   const size_t swapchainImageCount =
       std::max<size_t>(gpu_.getSwapchainImageCount(), 1u);
-  if (frameBuffers_.size() != swapchainImageCount)
-    frameBuffers_.resize(swapchainImageCount);
-  const uint64_t imageCount = static_cast<uint64_t>(frameBuffers_.size());
-  const uint64_t frameIndex = frameIndexValue % imageCount;
-  const size_t frameSlot = static_cast<size_t>(frameIndex);
   const size_t requiredBytes = lines_.size() * sizeof(LineData);
-  DynamicBufferSlot &lineBuffer = frameBuffers_[frameSlot];
-  auto lineBufferResult = ensureDynamicBufferCapacity(
-      gpu_, lineBuffer,
-      BufferDesc{.usage = BufferUsage::Storage | BufferUsage::Vertex,
-                 .storage = Storage::HostVisible,
-                 .size = requiredBytes},
-      "DebugDraw3D Buffer");
-  if (lineBufferResult.hasError()) {
-    return Result<PreparedGraphPass, std::string>::makeError(
-        lineBufferResult.error());
-  }
   const std::span<const std::byte> lineBytes{
       reinterpret_cast<const std::byte *>(lines_.data()), requiredBytes};
-  auto updateResult =
-      gpu_.updateBuffer(lineBuffer.buffer->handle(), lineBytes, 0);
-  if (updateResult.hasError()) {
-    return Result<PreparedGraphPass, std::string>::makeError(
-        updateResult.error());
+  auto lineBufferResult =
+      lineBuffers_.upload(frameIndexValue, swapchainImageCount, lineBytes);
+  if (lineBufferResult.hasError()) {
+    return Result<bool, std::string>::makeError(lineBufferResult.error());
   }
-  const Format depthFormat =
-      nuri::isValid(pass.depthTextureHandle)
-          ? gpu_.getTextureFormat(pass.depthTextureHandle)
-          : Format::Count;
-  const Format resolvedColorFormat =
-      colorFormat != Format::Count ? colorFormat : gpu_.getSwapchainFormat();
-  auto pipelineResult = ensurePipeline(resolvedColorFormat, depthFormat);
+  const Format depthFormat = enableDepthTest && nuri::isValid(depthTexture)
+                                 ? gpu_.getTextureFormat(depthTexture)
+                                 : Format::Count;
+  auto pipelineResult = ensurePipeline(colorFormat, depthFormat);
   if (pipelineResult.hasError()) {
-    return Result<PreparedGraphPass, std::string>::makeError(
-        pipelineResult.error());
+    return Result<bool, std::string>::makeError(pipelineResult.error());
   }
-  const BufferHandle lineBufferHandle = lineBuffer.buffer->handle();
+  const BufferHandle lineBufferHandle = lineBufferResult.value().buffer;
   const uint64_t address = gpu_.getBufferDeviceAddress(lineBufferHandle);
   pushConstants_.mvp = mvp_;
   pushConstants_.vertexBufferAddress = address;
-  drawItem_ = DrawItem{};
-  drawItem_.pipeline = pipeline_;
-  drawItem_.vertexCount = static_cast<uint32_t>(lines_.size());
-  drawItem_.instanceCount = 1;
-  drawItem_.pushConstants = std::span<const std::byte>(
+  outDraw.pipeline = pipeline_.get();
+  outDraw.vertexCount = static_cast<uint32_t>(lines_.size());
+  outDraw.instanceCount = 1;
+  outDraw.pushConstants = std::span<const std::byte>(
       reinterpret_cast<const std::byte *>(&pushConstants_),
       sizeof(pushConstants_));
-  drawItem_.debugLabel = "DebugDraw3D Draw";
-  drawItem_.debugColor = 0xffffcc00u;
-  dependencyBuffer_ = lineBufferHandle;
-  if (nuri::isValid(pass.depthTextureHandle)) {
-    drawItem_.useDepthState = true;
-    drawItem_.depthState = {
+  outDraw.debugLabel = "DebugDraw3D Draw";
+  outDraw.debugColor = 0xffffcc00u;
+  outDependency = lineBufferHandle;
+  if (enableDepthTest && nuri::isValid(depthTexture)) {
+    outDraw.useDepthState = true;
+    outDraw.depthState = {
         .compareOp = CompareOp::LessEqual,
         .isDepthWriteEnabled = false,
     };
   }
-  pass.desc.draws = std::span<const DrawItem>(&drawItem_, 1u);
-  pass.desc.dependencyBuffers =
-      std::span<const BufferHandle>(&dependencyBuffer_, 1u);
-  return Result<PreparedGraphPass, std::string>::makeResult(pass);
+  return Result<bool, std::string>::makeResult(true);
 }
 
 } // namespace nuri

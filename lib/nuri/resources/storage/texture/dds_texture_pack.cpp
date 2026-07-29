@@ -1,9 +1,7 @@
 #include "nuri/resources/storage/texture/dds_texture_pack.h"
-#include "nuri/pch.h"
 #include "nuri/resources/gpu/resource_keys.h"
 #include "nuri/resources/storage/binary_io.h"
 #include "nuri/resources/storage/cache_utils.h"
-#include "nuri/resources/storage/material/material_cache_utils.h"
 #include "nuri/utils/env_utils.h"
 #include <atomic>
 #include <fstream>

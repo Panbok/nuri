@@ -103,7 +103,7 @@ public:
   [[nodiscard]] bool takeSceneCancelRequest();
 
   void resetSceneState();
-  void finalizeSceneLighting(std::span<const ImportedSceneLight> fallbackLights,
+  void finalizeSceneLighting(std::span<const ScenePrefabLight> fallbackLights,
                              const glm::mat4 &baseModel);
   void configureStaticModelOpaqueSettings(const glm::vec3 &lodThresholds);
   [[nodiscard]] const Model &requireLoadedModel(ModelRef modelRef,
@@ -207,7 +207,7 @@ private:
                                           float baseFontSizePx,
                                           std::pmr::memory_resource &scratch);
   [[nodiscard]] bool
-  applyImportedLights(std::span<const ImportedSceneLight> importedLights,
+  applyImportedLights(std::span<const ScenePrefabLight> importedLights,
                       const glm::mat4 &modelMatrix);
   void setupDefaultSceneLighting();
 
@@ -239,7 +239,7 @@ private:
   EditorOverlayPass *editorRenderFeature_ = nullptr;
   CameraHandle mainCameraHandle_{};
   // Transient per-frame render settings after frame-local overrides.
-  RenderSettings frameRenderSettings_{};
+  ResolvedRenderSettings frameRenderSettings_{};
   RenderFrameContext frameContext_{};
   bool lastFrameOutputAvailable_ = false;
   TemporalFrameService temporalFrameService_{};

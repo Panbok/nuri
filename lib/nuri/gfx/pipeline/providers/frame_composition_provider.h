@@ -12,6 +12,9 @@
 #include <vector>
 namespace nuri {
 
+NURI_API void registerMsaaResolveStage(RenderPipeline &pipeline,
+                                       GPUDevice &gpu);
+
 class NURI_API FrameCompositionProvider final {
 public:
   explicit FrameCompositionProvider(

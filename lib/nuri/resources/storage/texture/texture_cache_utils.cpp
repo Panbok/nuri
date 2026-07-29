@@ -1,5 +1,4 @@
 #include "nuri/resources/storage/texture/texture_cache_utils.h"
-#include "nuri/pch.h"
 #include "nuri/resources/storage/binary_io.h"
 #include "nuri/resources/storage/cache_utils.h"
 #include "nuri/utils/env_utils.h"

@@ -159,8 +159,6 @@ struct RayTracingSceneFrameMetrics {
   RayTracingSceneReadiness readiness = RayTracingSceneReadiness::Disabled;
 };
 
-[[nodiscard]] NURI_API AccelerationStructureTransform
-makeAccelerationStructureTransform(const glm::mat4 &worldFromObject) noexcept;
 [[nodiscard]] constexpr uint32_t
 packRtGeometryFormats(IndexFormat indexFormat,
                       uint32_t packedVertexFormat) noexcept {

@@ -1,0 +1,33 @@
+{
+  "target": "ddgi_dirty_region_debug_preview",
+  "capturePointVersion": 4,
+  "kind": "debug_preview",
+  "format": 4,
+  "width": 640,
+  "height": 360,
+  "mip": 0,
+  "layer": 0,
+  "rowStride": 5120,
+  "origin": "top_left",
+  "colorSpace": "linear_hdr",
+  "profile": "debug_preview",
+  "payload": "ddgi_dirty_region_debug_preview.exr",
+  "hash": "sha256:302049364e9e1c3530688b426d4c6b2461ffc815e00fd23787538c392125f87a",
+  "ddgi": {
+    "valid": 1,
+    "effectiveKind": 0,
+    "effectiveKeyHash": 11247796127289098098,
+    "cascadeIndex": 4294967295,
+    "coverageGeneration": 1,
+    "layoutGeneration": 1,
+    "resourceGeneration": 1,
+    "sceneBoundsGeneration": 0,
+    "ringOrigin": [0, 0, 0],
+    "cameraCell": [0, 0, 0],
+    "requestedHalfExtents": [2.125, 1.275, 2.125],
+    "achievedHalfExtents": [2.125, 1.275, 2.125],
+    "fadeStartHalfExtents": [0, 0, 0],
+    "fadeEndHalfExtents": [2.125, 1.275, 2.125],
+    "transitionCells": 0
+  }
+}

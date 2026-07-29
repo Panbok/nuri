@@ -255,7 +255,7 @@ TEST(DDGICoverageTests,
 
 TEST(DDGICoverageTests, AuthoredKeysAreIsolatedBySceneActivation) {
   nuri::RenderDDGIVolume authored{};
-  authored.id = nuri::makeDDGIVolumeId(3u, 1u);
+  authored.id = nuri::DDGIVolumeId::fromParts(3u, 1u);
   std::array volumes{authored};
   nuri::DDGICoverageResolveInput input{};
   input.sceneId = 41u;
@@ -277,7 +277,7 @@ TEST(DDGICoverageTests, AuthoredKeysAreIsolatedBySceneActivation) {
 TEST(DDGICoverageTests, EffectivePlanOrdersAndReportsEveryOmittedKey) {
   std::array<nuri::RenderDDGIVolume, 10u> authored{};
   for (uint32_t index = 0u; index < authored.size(); ++index) {
-    authored[index].id = nuri::makeDDGIVolumeId(index, 1u);
+    authored[index].id = nuri::DDGIVolumeId::fromParts(index, 1u);
     authored[index].name = "authored";
     authored[index].priority = 100 - static_cast<int32_t>(index);
   }

@@ -12,13 +12,14 @@ namespace nuri::detail {
 
 [[nodiscard]] unsigned int
 sceneMeshImportFlags(const MeshImportOptions &options);
-[[nodiscard]] Result<std::pmr::vector<AdaptedSceneMesh>, std::string>
+[[nodiscard]] Result<std::pmr::vector<ScenePrefabAdaptedMesh>, std::string>
 adaptSceneMeshes(const aiScene &scene,
                  std::span<const uint32_t> sceneMeshIndices,
                  std::string_view sourcePath, const MeshImportOptions &options,
                  std::pmr::memory_resource *mem);
 [[nodiscard]] Result<MeshData, std::string>
-cookAdaptedSceneMesh(AdaptedSceneMesh source, const MeshImportOptions &options,
+cookAdaptedSceneMesh(ScenePrefabAdaptedMesh source,
+                     const MeshImportOptions &options,
                      std::pmr::memory_resource *mem);
 [[nodiscard]] Result<ImportedMaterialSet, std::string>
 adaptMaterialInfo(const aiScene &scene, std::string_view sourcePath);

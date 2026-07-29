@@ -1,5 +1,4 @@
 #include "nuri/sim/simulation_registry.h"
-#include "nuri/pch.h"
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -117,7 +116,7 @@ SimulationRegistry::create(const SimulationDesc &desc) {
   record.params.assign(desc.initialParams.begin(), desc.initialParams.end());
   initializeStats(record);
   return Result<SimulationHandle, std::string>::makeResult(
-      makeSimulationHandle(slot.index, slot.generation));
+      SimulationHandle::fromParts(slot.index, slot.generation));
 }
 
 bool SimulationRegistry::destroy(SimulationHandle handle) {

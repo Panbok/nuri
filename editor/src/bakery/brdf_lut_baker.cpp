@@ -73,14 +73,8 @@ setupBrdfLutBake(GPUDevice &gpu, const std::filesystem::path &shaderPath,
                  BrdfBakeGpuState &state) {
   cleanupBrdfLutBake(gpu, state);
 
-  auto shader = Shader::create("brdf_lut_baker", gpu);
-  if (!shader) {
-    return Result<bool, std::string>::makeError(
-        "BRDF LUT baker: failed to create shader helper");
-  }
-
-  auto compileResult =
-      shader->compileFromFile(shaderPath.string(), ShaderStage::Compute);
+  auto compileResult = compileShaderFile(
+      gpu, "brdf_lut_baker", shaderPath.string(), ShaderStage::Compute);
   if (compileResult.hasError()) {
     cleanupBrdfLutBake(gpu, state);
     return Result<bool, std::string>::makeError(

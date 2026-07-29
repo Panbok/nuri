@@ -28,6 +28,7 @@
 #include "scene_light_editor.h"
 
 #include <limits>
+#include <numeric>
 #include <unordered_set>
 
 #include <ImGuizmo.h>
@@ -2418,8 +2419,7 @@ bool hasTemporalAAFeature(RenderPipeline *renderPipeline) {
 std::string antiAliasingSettingsSummary(
     const RenderSettings::AntiAliasingSettings &settings,
     bool temporalFeaturePresent) {
-  const RenderSettings::AntiAliasingDebugSettings effectiveDebug =
-      effectiveTemporalAADebugSettings(settings);
+  const TemporalAATuning effectiveTuning = effectiveTemporalAATuning(settings);
   std::string summary = "AA mode=";
   summary += antiAliasingModeDisplayName(settings.mode);
   summary += " taaPreset=";
@@ -2435,34 +2435,34 @@ std::string antiAliasingSettingsSummary(
   summary += " debugView=";
   summary += antiAliasingDebugViewDisplayName(settings.debug.view);
   summary += " taaJitterScale=";
-  summary += std::format("{:.2f}", effectiveDebug.taaJitterScale);
+  summary += std::format("{:.2f}", effectiveTuning.jitterScale);
   summary += " taaCurrentWeight=";
-  summary += std::format("{:.2f}", effectiveDebug.taaCurrentFrameWeight);
+  summary += std::format("{:.2f}", effectiveTuning.currentFrameWeight);
   summary += " taaSharpen=";
-  summary += effectiveDebug.taaSharpenEnabled ? "enabled" : "disabled";
+  summary += effectiveTuning.sharpenEnabled ? "enabled" : "disabled";
   summary += " taaSharpenStrength=";
-  summary += std::format("{:.2f}", effectiveDebug.taaSharpenStrength);
+  summary += std::format("{:.2f}", effectiveTuning.sharpenStrength);
   summary += " taaMaterialMipBias=";
-  summary += effectiveDebug.taaMaterialMipBiasEnabled ? "enabled" : "disabled";
+  summary += effectiveTuning.materialMipBiasEnabled ? "enabled" : "disabled";
   summary += "/";
-  summary += std::format("{:.2f}", effectiveDebug.taaMaterialMipBias);
+  summary += std::format("{:.2f}", effectiveTuning.materialMipBias);
   summary += " transparentPostTaaSpatialCleanup=";
   summary +=
-      effectiveDebug.transparentPostTaaSpatialCleanup ? "enabled" : "disabled";
+      effectiveTuning.transparentPostTaaSpatialCleanup ? "enabled" : "disabled";
   summary += " spatialPostTaaCleanup=";
-  summary += effectiveDebug.spatialPostTaaCleanup ? "enabled" : "disabled";
+  summary += effectiveTuning.spatialPostTaaCleanup ? "enabled" : "disabled";
   summary += " taaMotionWeight=";
-  summary += std::format("{:.2f}", effectiveDebug.taaMotionCurrentWeight);
+  summary += std::format("{:.2f}", effectiveTuning.motionCurrentWeight);
   summary += " taaClampWeight=";
-  summary += std::format("{:.2f}", effectiveDebug.taaClampCurrentWeight);
+  summary += std::format("{:.2f}", effectiveTuning.clampCurrentWeight);
   summary += " taaHistoryFilter=";
-  summary += temporalAAHistoryFilterModeDisplayName(
-      effectiveDebug.taaHistoryFilterMode);
+  summary +=
+      temporalAAHistoryFilterModeDisplayName(effectiveTuning.historyFilterMode);
   summary += " taaClampMode=";
-  summary += temporalAAClampModeDisplayName(effectiveDebug.taaClampMode);
+  summary += temporalAAClampModeDisplayName(effectiveTuning.clampMode);
   summary += " taaHdrWeighting=";
   summary +=
-      temporalAAHdrWeightingModeDisplayName(effectiveDebug.taaHdrWeightingMode);
+      temporalAAHdrWeightingModeDisplayName(effectiveTuning.hdrWeightingMode);
   summary += " resetHistoryRequested=";
   summary += settings.debug.resetHistoryRequested ? "true" : "false";
   summary += " temporalFeaturePresent=";
@@ -2836,36 +2836,32 @@ void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
                      "%.2f s");
   ImGui::EndDisabled();
 
-  RenderSettings::AntiAliasingDebugSettings effectiveDebug =
-      effectiveTemporalAADebugSettings(aa);
-  RenderSettings::AntiAliasingDebugSettings presetPreview = effectiveDebug;
-  RenderSettings::AntiAliasingDebugSettings *tuningDebug =
-      customTemporalPreset ? &aa.debug : &presetPreview;
+  TemporalAATuning presetPreview = effectiveTemporalAATuning(aa);
+  TemporalAATuning *tuning =
+      customTemporalPreset ? &aa.temporalTuning : &presetPreview;
   ImGui::BeginDisabled(temporalControlsDisabled || !customTemporalPreset);
   ImGui::Checkbox("Post-TAA Spatial Cleanup##AntiAliasing",
-                  &tuningDebug->spatialPostTaaCleanup);
+                  &tuning->spatialPostTaaCleanup);
   ImGui::Checkbox("Transparent Post-TAA Spatial Cleanup##AntiAliasing",
-                  &tuningDebug->transparentPostTaaSpatialCleanup);
-  ImGui::Checkbox("TAA Sharpen##AntiAliasing", &tuningDebug->taaSharpenEnabled);
+                  &tuning->transparentPostTaaSpatialCleanup);
+  ImGui::Checkbox("TAA Sharpen##AntiAliasing", &tuning->sharpenEnabled);
   ImGui::Checkbox("TAA Material Mip Bias##AntiAliasing",
-                  &tuningDebug->taaMaterialMipBiasEnabled);
-  ImGui::SliderFloat("TAA Jitter Scale##AntiAliasing",
-                     &tuningDebug->taaJitterScale, 0.0f, 1.0f, "%.2f");
+                  &tuning->materialMipBiasEnabled);
+  ImGui::SliderFloat("TAA Jitter Scale##AntiAliasing", &tuning->jitterScale,
+                     0.0f, 1.0f, "%.2f");
   ImGui::SliderFloat("TAA Current Weight##AntiAliasing",
-                     &tuningDebug->taaCurrentFrameWeight, 0.0f, 1.0f, "%.2f");
+                     &tuning->currentFrameWeight, 0.0f, 1.0f, "%.2f");
   ImGui::SliderFloat("TAA Sharpen Strength##AntiAliasing",
-                     &tuningDebug->taaSharpenStrength, 0.0f, 1.0f, "%.2f");
+                     &tuning->sharpenStrength, 0.0f, 1.0f, "%.2f");
   ImGui::SliderFloat("TAA Sharpen Confidence##AntiAliasing",
-                     &tuningDebug->taaSharpenConfidenceThreshold, 0.0f, 1.0f,
-                     "%.2f");
+                     &tuning->sharpenConfidenceThreshold, 0.0f, 1.0f, "%.2f");
   ImGui::SliderFloat("TAA Material Mip Bias Value##AntiAliasing",
-                     &tuningDebug->taaMaterialMipBias, -1.0f, 0.0f, "%.2f");
+                     &tuning->materialMipBias, -1.0f, 0.0f, "%.2f");
   ImGui::SliderFloat("TAA Motion Current Weight##AntiAliasing",
-                     &tuningDebug->taaMotionCurrentWeight, 0.0f, 1.0f, "%.2f");
+                     &tuning->motionCurrentWeight, 0.0f, 1.0f, "%.2f");
   ImGui::SliderFloat("TAA Clamp Current Weight##AntiAliasing",
-                     &tuningDebug->taaClampCurrentWeight, 0.0f, 1.0f, "%.2f");
-  int historyFilterModeIndex =
-      static_cast<int>(tuningDebug->taaHistoryFilterMode);
+                     &tuning->clampCurrentWeight, 0.0f, 1.0f, "%.2f");
+  int historyFilterModeIndex = static_cast<int>(tuning->historyFilterMode);
   historyFilterModeIndex = std::clamp(
       historyFilterModeIndex, 0,
       static_cast<int>(kTemporalAAHistoryFilterModeLabels.size()) - 1);
@@ -2873,37 +2869,31 @@ void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
           "TAA History Filter##AntiAliasing", &historyFilterModeIndex,
           kTemporalAAHistoryFilterModeLabels.data(),
           static_cast<int>(kTemporalAAHistoryFilterModeLabels.size()))) {
-    tuningDebug->taaHistoryFilterMode =
+    tuning->historyFilterMode =
         static_cast<TemporalAAHistoryFilterMode>(historyFilterModeIndex);
   }
   ImGui::SliderFloat("TAA Depth Reject##AntiAliasing",
-                     &tuningDebug->taaDepthDiscontinuityThreshold, 0.0f, 0.1f,
-                     "%.4f");
+                     &tuning->depthDiscontinuityThreshold, 0.0f, 0.1f, "%.4f");
   ImGui::SliderFloat("TAA Velocity Reject (px)##AntiAliasing",
-                     &tuningDebug->taaVelocityRejectionThreshold, 0.0f, 16.0f,
-                     "%.2f");
+                     &tuning->velocityRejectionThreshold, 0.0f, 16.0f, "%.2f");
   ImGui::SliderFloat("TAA Motion Blend / px##AntiAliasing",
-                     &tuningDebug->taaVelocityBlendScale, 0.0f, 4.0f, "%.2f");
+                     &tuning->velocityBlendScale, 0.0f, 4.0f, "%.2f");
   ImGui::SliderFloat("TAA Disocclusion Weight##AntiAliasing",
-                     &tuningDebug->taaDisocclusionCurrentWeight, 0.0f, 1.0f,
-                     "%.2f");
+                     &tuning->disocclusionCurrentWeight, 0.0f, 1.0f, "%.2f");
   ImGui::SliderFloat("TAA Clamp Attenuation##AntiAliasing",
-                     &tuningDebug->taaClampBlendAttenuation, 0.0f, 1.0f,
-                     "%.2f");
-  int clampModeIndex = static_cast<int>(tuningDebug->taaClampMode);
+                     &tuning->clampBlendAttenuation, 0.0f, 1.0f, "%.2f");
+  int clampModeIndex = static_cast<int>(tuning->clampMode);
   clampModeIndex =
       std::clamp(clampModeIndex, 0,
                  static_cast<int>(kTemporalAAClampModeLabels.size()) - 1);
   if (ImGui::Combo("TAA Clamp Mode##AntiAliasing", &clampModeIndex,
                    kTemporalAAClampModeLabels.data(),
                    static_cast<int>(kTemporalAAClampModeLabels.size()))) {
-    tuningDebug->taaClampMode =
-        static_cast<TemporalAAClampMode>(clampModeIndex);
+    tuning->clampMode = static_cast<TemporalAAClampMode>(clampModeIndex);
   }
-  ImGui::SliderFloat("TAA Variance Gamma##AntiAliasing",
-                     &tuningDebug->taaVarianceGamma, 0.0f, 4.0f, "%.2f");
-  int hdrWeightingModeIndex =
-      static_cast<int>(tuningDebug->taaHdrWeightingMode);
+  ImGui::SliderFloat("TAA Variance Gamma##AntiAliasing", &tuning->varianceGamma,
+                     0.0f, 4.0f, "%.2f");
+  int hdrWeightingModeIndex = static_cast<int>(tuning->hdrWeightingMode);
   hdrWeightingModeIndex = std::clamp(
       hdrWeightingModeIndex, 0,
       static_cast<int>(kTemporalAAHdrWeightingModeLabels.size()) - 1);
@@ -2911,18 +2901,16 @@ void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
           "TAA HDR Weighting##AntiAliasing", &hdrWeightingModeIndex,
           kTemporalAAHdrWeightingModeLabels.data(),
           static_cast<int>(kTemporalAAHdrWeightingModeLabels.size()))) {
-    tuningDebug->taaHdrWeightingMode =
+    tuning->hdrWeightingMode =
         static_cast<TemporalAAHdrWeightingMode>(hdrWeightingModeIndex);
   }
   ImGui::SliderFloat("TAA HDR Weight Strength##AntiAliasing",
-                     &tuningDebug->taaHdrWeightStrength, 0.0f, 1.0f, "%.2f");
+                     &tuning->hdrWeightStrength, 0.0f, 1.0f, "%.2f");
   ImGui::SliderFloat("TAA Reactive Current Weight##AntiAliasing",
-                     &tuningDebug->taaReactiveCurrentWeight, 0.0f, 1.0f,
-                     "%.2f");
+                     &tuning->reactiveCurrentWeight, 0.0f, 1.0f, "%.2f");
   ImGui::SliderFloat("TAA Reactive Strength##AntiAliasing",
-                     &tuningDebug->taaReactiveStrength, 0.0f, 4.0f, "%.2f");
-  int dilationModeIndex =
-      static_cast<int>(tuningDebug->taaVelocityDilationMode);
+                     &tuning->reactiveStrength, 0.0f, 4.0f, "%.2f");
+  int dilationModeIndex = static_cast<int>(tuning->velocityDilationMode);
   dilationModeIndex = std::clamp(
       dilationModeIndex, 0,
       static_cast<int>(kTemporalAAVelocityDilationModeLabels.size()) - 1);
@@ -2930,12 +2918,12 @@ void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
           "TAA Velocity Dilation##AntiAliasing", &dilationModeIndex,
           kTemporalAAVelocityDilationModeLabels.data(),
           static_cast<int>(kTemporalAAVelocityDilationModeLabels.size()))) {
-    tuningDebug->taaVelocityDilationMode =
+    tuning->velocityDilationMode =
         static_cast<TemporalAAVelocityDilationMode>(dilationModeIndex);
   }
   ImGui::SliderFloat("TAA Dilation Depth Threshold##AntiAliasing",
-                     &tuningDebug->taaVelocityDilationDepthThreshold, 0.0f,
-                     0.1f, "%.4f");
+                     &tuning->velocityDilationDepthThreshold, 0.0f, 0.1f,
+                     "%.4f");
   ImGui::EndDisabled();
   if (temporalControlsDisabled) {
     aa.debug.jitterEnabled = false;
@@ -4542,40 +4530,52 @@ void drawBakeryWindow(bool &open, BakeryUiState &state,
 [[nodiscard]] std::string_view
 resolveTelemetryPassName(const RenderGraphTelemetrySnapshot &snapshot,
                          uint32_t passIndex) {
-  if (passIndex >= snapshot.compile.passDebugNames.size()) {
+  if (passIndex >= snapshot.passDebugNames.size()) {
     return "unnamed_pass";
   }
-  const std::pmr::string &name = snapshot.compile.passDebugNames[passIndex];
+  const std::pmr::string &name = snapshot.passDebugNames[passIndex];
   return name.empty() ? std::string_view("unnamed_pass")
                       : std::string_view(name.data(), name.size());
 }
 
-const char *drawBufferBindingTargetName(
-    RenderGraphCompileResult::DrawBufferBindingTarget target) {
+const char *commandResourcePatchTargetName(
+    RenderGraphPlan::CommandResourcePatchTarget target) {
+  using Target = RenderGraphPlan::CommandResourcePatchTarget;
   switch (target) {
-  case RenderGraphCompileResult::DrawBufferBindingTarget::Vertex:
-    return "vertex";
-  case RenderGraphCompileResult::DrawBufferBindingTarget::Index:
-    return "index";
-  case RenderGraphCompileResult::DrawBufferBindingTarget::Indirect:
-    return "indirect";
-  case RenderGraphCompileResult::DrawBufferBindingTarget::IndirectCount:
-    return "indirect_count";
-  }
-  return "unknown";
-}
-
-const char *passTextureBindingTargetName(
-    RenderGraphCompileResult::PassTextureBindingTarget target) {
-  switch (target) {
-  case RenderGraphCompileResult::PassTextureBindingTarget::Color:
+  case Target::PassColor:
     return "color";
-  case RenderGraphCompileResult::PassTextureBindingTarget::ColorResolve:
+  case Target::PassColorResolve:
     return "color_resolve";
-  case RenderGraphCompileResult::PassTextureBindingTarget::Depth:
+  case Target::PassDepth:
     return "depth";
-  case RenderGraphCompileResult::PassTextureBindingTarget::DepthResolve:
+  case Target::PassDepthResolve:
     return "depth_resolve";
+  case Target::PassDependencyBuffer:
+    return "dependency_buffer";
+  case Target::PassDependencyTexture:
+    return "dependency_texture";
+  case Target::PreDispatchDependencyBuffer:
+    return "pre_dispatch_buffer";
+  case Target::DrawVertexBuffer:
+    return "draw_vertex";
+  case Target::DrawIndexBuffer:
+    return "draw_index";
+  case Target::DrawIndirectBuffer:
+    return "draw_indirect";
+  case Target::DrawIndirectCountBuffer:
+    return "draw_indirect_count";
+  case Target::MeshDispatchIndirectBuffer:
+    return "mesh_indirect";
+  case Target::MeshDispatchIndirectCountBuffer:
+    return "mesh_indirect_count";
+  case Target::BufferCopySource:
+    return "buffer_copy_source";
+  case Target::BufferCopyDestination:
+    return "buffer_copy_destination";
+  case Target::TextureCopySource:
+    return "texture_copy_source";
+  case Target::TextureCopyDestination:
+    return "texture_copy_destination";
   }
   return "unknown";
 }
@@ -4719,7 +4719,7 @@ void recordCpuPassMetricSamples(PassMetricsUiState &state,
   }
 
   const uint32_t passCount =
-      static_cast<uint32_t>(snapshot.compile.orderedPassIndices.size());
+      static_cast<uint32_t>(snapshot.plan.orderedPassIndices.size());
   for (uint32_t orderedPassIndex = 0u; orderedPassIndex < passCount;
        ++orderedPassIndex) {
     const std::optional<float> cpuMs =
@@ -4728,7 +4728,7 @@ void recordCpuPassMetricSamples(PassMetricsUiState &state,
       continue;
     }
     const uint32_t declaredPassIndex =
-        snapshot.compile.orderedPassIndices[orderedPassIndex];
+        snapshot.plan.orderedPassIndices[orderedPassIndex];
     const std::string_view passName =
         resolveTelemetryPassName(snapshot, declaredPassIndex);
     PassMetricAggregate &aggregate =
@@ -4836,14 +4836,14 @@ void refreshPassMetrics(PassMetricsUiState &state,
   }
 
   const uint32_t passCount =
-      static_cast<uint32_t>(snapshot->compile.orderedPassIndices.size());
+      static_cast<uint32_t>(snapshot->plan.orderedPassIndices.size());
   std::vector<uint8_t> claimedGpuTimings(gpuReport.passTimings.size(), 0u);
   state.rows.reserve(passCount);
 
   for (uint32_t orderedPassIndex = 0u; orderedPassIndex < passCount;
        ++orderedPassIndex) {
     const uint32_t declaredPassIndex =
-        snapshot->compile.orderedPassIndices[orderedPassIndex];
+        snapshot->plan.orderedPassIndices[orderedPassIndex];
     const std::string_view passName =
         resolveTelemetryPassName(*snapshot, declaredPassIndex);
 
@@ -5063,12 +5063,7 @@ void drawTelemetrySummary(
           summary.resolvedDependencyBufferSlotCount);
   drawRow("Resolved Pre-Dispatch Slots",
           summary.resolvedPreDispatchDependencyBufferSlotCount);
-  drawRow("Unresolved Texture Bindings", summary.unresolvedTextureBindingCount);
-  drawRow("Unresolved Dependency Bindings",
-          summary.unresolvedDependencyBufferBindingCount);
-  drawRow("Unresolved Pre-Dispatch Bindings",
-          summary.unresolvedPreDispatchDependencyBufferBindingCount);
-  drawRow("Unresolved Draw Bindings", summary.unresolvedDrawBufferBindingCount);
+  drawRow("Command Resource Patches", summary.commandResourcePatchCount);
 
   ImGui::EndTable();
 }
@@ -5161,13 +5156,13 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
 
   drawTelemetryTableSection(
       "Passes", "RenderGraphTelemetryPasses", 2,
-      !snapshot->compile.passDebugNames.empty(), 160.0f, [&]() {
+      !snapshot->passDebugNames.empty(), 160.0f, [&]() {
         ImGui::TableSetupColumn("Pass", ImGuiTableColumnFlags_WidthFixed,
                                 64.0f);
         ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
         ImGui::TableHeadersRow();
         for (uint32_t passIndex = 0;
-             passIndex < snapshot->compile.passDebugNames.size(); ++passIndex) {
+             passIndex < snapshot->passDebugNames.size(); ++passIndex) {
           ImGui::TableNextRow();
           ImGui::TableNextColumn();
           ImGui::Text("%u", passIndex);
@@ -5177,7 +5172,7 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
       });
 
   drawTelemetryTableSection(
-      "Edges", "RenderGraphTelemetryEdges", 4, !snapshot->compile.edges.empty(),
+      "Edges", "RenderGraphTelemetryEdges", 4, !snapshot->plan.edges.empty(),
       140.0f, [&]() {
         ImGui::TableSetupColumn("Before", ImGuiTableColumnFlags_WidthFixed,
                                 60.0f);
@@ -5188,7 +5183,7 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
         ImGui::TableSetupColumn("After Name",
                                 ImGuiTableColumnFlags_WidthStretch);
         ImGui::TableHeadersRow();
-        for (const auto &edge : snapshot->compile.edges) {
+        for (const auto &edge : snapshot->plan.edges) {
           ImGui::TableNextRow();
           ImGui::TableNextColumn();
           ImGui::Text("%u", edge.before);
@@ -5203,16 +5198,16 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
 
   drawTelemetryTableSection(
       "Execution Order", "RenderGraphTelemetryExecution", 3,
-      !snapshot->compile.orderedPassIndices.empty(), 140.0f, [&]() {
+      !snapshot->plan.orderedPassIndices.empty(), 140.0f, [&]() {
         ImGui::TableSetupColumn("Rank", ImGuiTableColumnFlags_WidthFixed,
                                 60.0f);
         ImGui::TableSetupColumn("Pass", ImGuiTableColumnFlags_WidthFixed,
                                 60.0f);
         ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
         ImGui::TableHeadersRow();
-        for (uint32_t rank = 0;
-             rank < snapshot->compile.orderedPassIndices.size(); ++rank) {
-          const uint32_t passIndex = snapshot->compile.orderedPassIndices[rank];
+        for (uint32_t rank = 0; rank < snapshot->plan.orderedPassIndices.size();
+             ++rank) {
+          const uint32_t passIndex = snapshot->plan.orderedPassIndices[rank];
           ImGui::TableNextRow();
           ImGui::TableNextColumn();
           ImGui::Text("%u", rank);
@@ -5225,8 +5220,8 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
 
   drawTelemetryTableSection(
       "Transient Lifetimes", "RenderGraphTelemetryTextureLifetimes", 4,
-      !snapshot->compile.transientTextureLifetimes.empty() ||
-          !snapshot->compile.transientBufferLifetimes.empty(),
+      !snapshot->plan.transientTextureLifetimes.empty() ||
+          !snapshot->plan.transientBufferLifetimes.empty(),
       180.0f, [&]() {
         ImGui::TableSetupColumn("Kind", ImGuiTableColumnFlags_WidthFixed,
                                 70.0f);
@@ -5237,8 +5232,7 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
         ImGui::TableSetupColumn("Last", ImGuiTableColumnFlags_WidthFixed,
                                 70.0f);
         ImGui::TableHeadersRow();
-        for (const auto &lifetime :
-             snapshot->compile.transientTextureLifetimes) {
+        for (const auto &lifetime : snapshot->plan.transientTextureLifetimes) {
           ImGui::TableNextRow();
           ImGui::TableNextColumn();
           ImGui::TextUnformatted("tex");
@@ -5249,8 +5243,7 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
           ImGui::TableNextColumn();
           ImGui::Text("%u", lifetime.lastExecutionIndex);
         }
-        for (const auto &lifetime :
-             snapshot->compile.transientBufferLifetimes) {
+        for (const auto &lifetime : snapshot->plan.transientBufferLifetimes) {
           ImGui::TableNextRow();
           ImGui::TableNextColumn();
           ImGui::TextUnformatted("buf");
@@ -5265,8 +5258,8 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
 
   drawTelemetryTableSection(
       "Allocations", "RenderGraphTelemetryAllocations", 4,
-      !snapshot->compile.transientTextureAllocations.empty() ||
-          !snapshot->compile.transientBufferAllocations.empty(),
+      !snapshot->plan.transientTextureAllocations.empty() ||
+          !snapshot->plan.transientBufferAllocations.empty(),
       180.0f, [&]() {
         ImGui::TableSetupColumn("Kind", ImGuiTableColumnFlags_WidthFixed,
                                 70.0f);
@@ -5277,7 +5270,7 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
         ImGui::TableSetupColumn("Map", ImGuiTableColumnFlags_WidthStretch);
         ImGui::TableHeadersRow();
         for (const auto &allocation :
-             snapshot->compile.transientTextureAllocations) {
+             snapshot->plan.transientTextureAllocations) {
           ImGui::TableNextRow();
           ImGui::TableNextColumn();
           ImGui::TextUnformatted("tex");
@@ -5290,7 +5283,7 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
                       allocation.allocationIndex);
         }
         for (const auto &allocation :
-             snapshot->compile.transientBufferAllocations) {
+             snapshot->plan.transientBufferAllocations) {
           ImGui::TableNextRow();
           ImGui::TableNextColumn();
           ImGui::TextUnformatted("buf");
@@ -5306,8 +5299,8 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
 
   drawTelemetryTableSection(
       "Allocation Maps", "RenderGraphTelemetryAllocationMaps", 3,
-      !snapshot->compile.transientTextureAllocationByResource.empty() ||
-          !snapshot->compile.transientBufferAllocationByResource.empty(),
+      !snapshot->plan.transientTextureAllocationByResource.empty() ||
+          !snapshot->plan.transientBufferAllocationByResource.empty(),
       180.0f, [&]() {
         ImGui::TableSetupColumn("Kind", ImGuiTableColumnFlags_WidthFixed,
                                 70.0f);
@@ -5317,10 +5310,10 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
                                 70.0f);
         ImGui::TableHeadersRow();
         for (uint32_t i = 0;
-             i < snapshot->compile.transientTextureAllocationByResource.size();
+             i < snapshot->plan.transientTextureAllocationByResource.size();
              ++i) {
           const uint32_t physical =
-              snapshot->compile.transientTextureAllocationByResource[i];
+              snapshot->plan.transientTextureAllocationByResource[i];
           if (physical == UINT32_MAX) {
             continue;
           }
@@ -5333,10 +5326,10 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
           ImGui::Text("%u", physical);
         }
         for (uint32_t i = 0;
-             i < snapshot->compile.transientBufferAllocationByResource.size();
+             i < snapshot->plan.transientBufferAllocationByResource.size();
              ++i) {
           const uint32_t physical =
-              snapshot->compile.transientBufferAllocationByResource[i];
+              snapshot->plan.transientBufferAllocationByResource[i];
           if (physical == UINT32_MAX) {
             continue;
           }
@@ -5352,8 +5345,8 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
 
   drawTelemetryTableSection(
       "Physical Allocations", "RenderGraphTelemetryPhysicalAllocations", 5,
-      !snapshot->compile.transientTexturePhysicalAllocations.empty() ||
-          !snapshot->compile.transientBufferPhysicalAllocations.empty(),
+      !snapshot->plan.transientTexturePhysicalAllocations.empty() ||
+          !snapshot->plan.transientBufferPhysicalAllocations.empty(),
       200.0f, [&]() {
         ImGui::TableSetupColumn("Kind", ImGuiTableColumnFlags_WidthFixed,
                                 70.0f);
@@ -5366,7 +5359,7 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
         ImGui::TableSetupColumn("Details", ImGuiTableColumnFlags_WidthStretch);
         ImGui::TableHeadersRow();
         for (const auto &physical :
-             snapshot->compile.transientTexturePhysicalAllocations) {
+             snapshot->plan.transientTexturePhysicalAllocations) {
           ImGui::TableNextRow();
           ImGui::TableNextColumn();
           ImGui::TextUnformatted("tex");
@@ -5384,7 +5377,7 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
                       physical.desc.numSamples, physical.desc.numMipLevels);
         }
         for (const auto &physical :
-             snapshot->compile.transientBufferPhysicalAllocations) {
+             snapshot->plan.transientBufferPhysicalAllocations) {
           ImGui::TableNextRow();
           ImGui::TableNextColumn();
           ImGui::TextUnformatted("buf");
@@ -5403,12 +5396,8 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
 
   drawTelemetryTableSection(
       "Bindings", "RenderGraphTelemetryBindings", 5,
-      !snapshot->compile.unresolvedTextureBindings.empty() ||
-          !snapshot->compile.resolvedDependencyBuffers.empty() ||
-          !snapshot->compile.unresolvedDependencyBufferBindings.empty() ||
-          !snapshot->compile.unresolvedPreDispatchDependencyBufferBindings
-               .empty() ||
-          !snapshot->compile.unresolvedDrawBufferBindings.empty(),
+      !snapshot->plan.commandResourcePatches.empty() ||
+          !snapshot->plan.resolvedDependencyBufferResourceIndices.empty(),
       220.0f, [&]() {
         ImGui::TableSetupColumn("Section", ImGuiTableColumnFlags_WidthFixed,
                                 110.0f);
@@ -5420,26 +5409,35 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
                                 110.0f);
         ImGui::TableSetupColumn("Resource", ImGuiTableColumnFlags_WidthStretch);
         ImGui::TableHeadersRow();
-        for (const auto &binding :
-             snapshot->compile.unresolvedTextureBindings) {
+        for (const RenderGraphPlan::CommandResourcePatch &patch :
+             snapshot->plan.commandResourcePatches) {
           ImGui::TableNextRow();
           ImGui::TableNextColumn();
-          ImGui::TextUnformatted("pass_tex");
+          ImGui::TextUnformatted("patch");
           ImGui::TableNextColumn();
-          ImGui::Text("%u", binding.orderedPassIndex);
+          ImGui::Text("%u", patch.orderedPassIndex);
           ImGui::TableNextColumn();
-          ImGui::TextUnformatted("-");
+          if (patch.dependencyIndex != 0u) {
+            ImGui::Text("%u/%u", patch.commandIndex, patch.dependencyIndex);
+          } else {
+            ImGui::Text("%u", patch.commandIndex);
+          }
           ImGui::TableNextColumn();
-          ImGui::TextUnformatted(passTextureBindingTargetName(binding.target));
+          ImGui::TextUnformatted(commandResourcePatchTargetName(patch.target));
           ImGui::TableNextColumn();
-          ImGui::Text("tex[%u]", binding.textureResourceIndex);
+          ImGui::Text("%s[%u]",
+                      patch.resourceKind == RenderGraphResourceKind::Buffer
+                          ? "buf"
+                          : "tex",
+                      patch.resourceIndex);
         }
         for (uint32_t slot = 0;
-             slot < snapshot->compile.resolvedDependencyBuffers.size();
+             slot <
+             snapshot->plan.resolvedDependencyBufferResourceIndices.size();
              ++slot) {
-          const BufferHandle handle =
-              snapshot->compile.resolvedDependencyBuffers[slot];
-          if (!nuri::isValid(handle)) {
+          const uint32_t resource =
+              snapshot->plan.resolvedDependencyBufferResourceIndices[slot];
+          if (resource == UINT32_MAX) {
             continue;
           }
           ImGui::TableNextRow();
@@ -5450,61 +5448,18 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
           ImGui::TableNextColumn();
           ImGui::Text("%u", slot);
           ImGui::TableNextColumn();
-          ImGui::TextUnformatted("resolved");
+          ImGui::TextUnformatted("resource_slot");
           ImGui::TableNextColumn();
-          ImGui::Text("handle=(%u,%u)", handle.index, handle.generation);
-        }
-        for (const auto &binding :
-             snapshot->compile.unresolvedDependencyBufferBindings) {
-          ImGui::TableNextRow();
-          ImGui::TableNextColumn();
-          ImGui::TextUnformatted("dep_buf");
-          ImGui::TableNextColumn();
-          ImGui::Text("%u", binding.orderedPassIndex);
-          ImGui::TableNextColumn();
-          ImGui::Text("%u", binding.dependencyBufferIndex);
-          ImGui::TableNextColumn();
-          ImGui::TextUnformatted("dependency");
-          ImGui::TableNextColumn();
-          ImGui::Text("buf[%u]", binding.bufferResourceIndex);
-        }
-        for (const auto &binding :
-             snapshot->compile.unresolvedPreDispatchDependencyBufferBindings) {
-          ImGui::TableNextRow();
-          ImGui::TableNextColumn();
-          ImGui::TextUnformatted("pre_dep");
-          ImGui::TableNextColumn();
-          ImGui::Text("%u", binding.orderedPassIndex);
-          ImGui::TableNextColumn();
-          ImGui::Text("%u/%u", binding.preDispatchIndex,
-                      binding.dependencyBufferIndex);
-          ImGui::TableNextColumn();
-          ImGui::TextUnformatted("pre_dispatch");
-          ImGui::TableNextColumn();
-          ImGui::Text("buf[%u]", binding.bufferResourceIndex);
-        }
-        for (const auto &binding :
-             snapshot->compile.unresolvedDrawBufferBindings) {
-          ImGui::TableNextRow();
-          ImGui::TableNextColumn();
-          ImGui::TextUnformatted("draw_buf");
-          ImGui::TableNextColumn();
-          ImGui::Text("%u", binding.orderedPassIndex);
-          ImGui::TableNextColumn();
-          ImGui::Text("%u", binding.drawIndex);
-          ImGui::TableNextColumn();
-          ImGui::TextUnformatted(drawBufferBindingTargetName(binding.target));
-          ImGui::TableNextColumn();
-          ImGui::Text("buf[%u]", binding.bufferResourceIndex);
+          ImGui::Text("buf[%u]", resource);
         }
       });
 
   drawTelemetryTableSection(
       "Ranges", "RenderGraphTelemetryRanges", 4,
-      !snapshot->compile.dependencyBufferRangesByPass.empty() ||
-          !snapshot->compile.preDispatchRangesByPass.empty() ||
-          !snapshot->compile.preDispatchDependencyRanges.empty() ||
-          !snapshot->compile.drawRangesByPass.empty(),
+      !snapshot->plan.dependencyBufferRangesByPass.empty() ||
+          !snapshot->plan.preDispatchRangesByPass.empty() ||
+          !snapshot->plan.preDispatchDependencyRanges.empty() ||
+          !snapshot->plan.drawRangesByPass.empty(),
       220.0f, [&]() {
         ImGui::TableSetupColumn("Section", ImGuiTableColumnFlags_WidthFixed,
                                 110.0f);
@@ -5516,8 +5471,8 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
                                 70.0f);
         ImGui::TableHeadersRow();
         for (uint32_t i = 0;
-             i < snapshot->compile.dependencyBufferRangesByPass.size(); ++i) {
-          const auto &range = snapshot->compile.dependencyBufferRangesByPass[i];
+             i < snapshot->plan.dependencyBufferRangesByPass.size(); ++i) {
+          const auto &range = snapshot->plan.dependencyBufferRangesByPass[i];
           ImGui::TableNextRow();
           ImGui::TableNextColumn();
           ImGui::TextUnformatted("dep_pass");
@@ -5528,9 +5483,9 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
           ImGui::TableNextColumn();
           ImGui::Text("%u", range.count);
         }
-        for (uint32_t i = 0;
-             i < snapshot->compile.preDispatchRangesByPass.size(); ++i) {
-          const auto &range = snapshot->compile.preDispatchRangesByPass[i];
+        for (uint32_t i = 0; i < snapshot->plan.preDispatchRangesByPass.size();
+             ++i) {
+          const auto &range = snapshot->plan.preDispatchRangesByPass[i];
           ImGui::TableNextRow();
           ImGui::TableNextColumn();
           ImGui::TextUnformatted("pre_pass");
@@ -5542,8 +5497,8 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
           ImGui::Text("%u", range.count);
         }
         for (uint32_t i = 0;
-             i < snapshot->compile.preDispatchDependencyRanges.size(); ++i) {
-          const auto &range = snapshot->compile.preDispatchDependencyRanges[i];
+             i < snapshot->plan.preDispatchDependencyRanges.size(); ++i) {
+          const auto &range = snapshot->plan.preDispatchDependencyRanges[i];
           ImGui::TableNextRow();
           ImGui::TableNextColumn();
           ImGui::TextUnformatted("pre_dep");
@@ -5554,9 +5509,8 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
           ImGui::TableNextColumn();
           ImGui::Text("%u", range.count);
         }
-        for (uint32_t i = 0; i < snapshot->compile.drawRangesByPass.size();
-             ++i) {
-          const auto &range = snapshot->compile.drawRangesByPass[i];
+        for (uint32_t i = 0; i < snapshot->plan.drawRangesByPass.size(); ++i) {
+          const auto &range = snapshot->plan.drawRangesByPass[i];
           ImGui::TableNextRow();
           ImGui::TableNextColumn();
           ImGui::TextUnformatted("draw_pass");
@@ -5598,8 +5552,8 @@ overlayGpuFrameTimeSample(const GpuTimingReport &report) {
     return std::nullopt;
   }
   return GpuFrameTimeSample{
-      .sourceFrame = report.wholeFrameSourceFrameIndex,
-      .milliseconds = report.wholeFrameTimeMs,
+      .sourceFrame = report[GpuTimingScope::WholeFrame].sourceFrameIndex,
+      .milliseconds = report[GpuTimingScope::WholeFrame].timeMs,
   };
 }
 

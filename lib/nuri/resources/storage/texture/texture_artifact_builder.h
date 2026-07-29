@@ -47,6 +47,10 @@ struct TextureArtifactCacheTelemetry {
   uint64_t normalVarianceArtifactBuildTimeNs = 0u;
 };
 
+[[nodiscard]] NURI_API TextureArtifactBuildOptions
+materialTextureArtifactBuildOptions(const MaterialData &material,
+                                    MaterialTextureSlot slot) noexcept;
+
 class NURI_API SceneTextureArtifactBuilder final {
 public:
   ~SceneTextureArtifactBuilder();

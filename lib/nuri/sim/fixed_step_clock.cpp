@@ -1,5 +1,4 @@
 #include "nuri/sim/fixed_step_clock.h"
-#include "nuri/pch.h"
 #include <algorithm>
 #include <cmath>
 namespace nuri {

@@ -1,6 +1,5 @@
 #include "nuri/sim/simulation_scheduler.h"
 #include "nuri/core/log.h"
-#include "nuri/pch.h"
 #include "nuri/scene_runtime/scene_runtime_host.h"
 #include "nuri/sim/simulation_execution_context.h"
 #include "nuri/sim/simulation_registry.h"
@@ -102,7 +101,6 @@ SimulationScheduler::tick(SceneRuntimeHost &host,
       context.stepIndex = stepIndex;
       context.schedulerConfig = &config_;
       context.bindings = &host.bindings();
-      context.gpuContext = &host.gpuContext();
       auto phaseResult = host.executeSimulationPhase(
           record->kind, handle, SimulationPhase::PreSceneWrite, context);
       if (phaseResult.hasError()) {

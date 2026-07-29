@@ -6,6 +6,7 @@
 #include "nuri/sim/simulation_desc.h"
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <memory_resource>
 #include <span>
 #include <string_view>
@@ -50,8 +51,8 @@ static_assert(std::is_trivially_copyable_v<AnimationPoseSimulationParams>);
 static_assert(sizeof(AnimationPoseSimulationParams) == 40u);
 
 struct NURI_API AnimationPoseSimulationCreatePayload {
-  const ScenePrefab *prefab = nullptr;
-  const SceneInstantiationMap *instantiationMap = nullptr;
+  std::shared_ptr<const ScenePrefab> prefab{};
+  std::shared_ptr<const SceneInstantiationMap> instantiationMap{};
   std::span<const uint32_t> controlledPrefabNodeIndices{};
   AnimationPoseSimulationParams params{};
 };

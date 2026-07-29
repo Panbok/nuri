@@ -11,8 +11,8 @@
 #include "nuri/gfx/renderers/detail/opaque_lod_selection.h"
 #include "nuri/gfx/renderers/detail/opaque_meshlet_routing.h"
 #include "nuri/gfx/renderers/detail/shadow_math.h"
+#include "nuri/gfx/shader.h"
 #include "nuri/gfx/visibility/visibility.h"
-#include "nuri/pch.h"
 #include "nuri/resources/gpu/resource_manager.h"
 #include "nuri/scene/render_scene.h"
 #include <bit>
@@ -32,8 +32,6 @@ constexpr uint32_t kMeshDebugColor = 0xffcc5500;
 constexpr uint32_t kComputeDispatchColor = 0xff33aa33;
 constexpr uint32_t kComputeWorkgroupSize = 32;
 constexpr uint32_t kOpaqueMeshletTaskCandidatesPerGroup = 32u;
-constexpr uint32_t kOpaqueMeshletTaskPayloadBytes =
-    sizeof(uint32_t) * (1u + 4u * kOpaqueMeshletTaskCandidatesPerGroup);
 constexpr size_t kMeshletNormalDepthMergeMinVisibleInstances = 1u;
 constexpr uint32_t kTessellationPatchControlPoints = 3;
 constexpr size_t surfaceVariantIndex(bool tessellated, bool doubleSided) {
@@ -165,51 +163,6 @@ uint32_t visibilityReadbackAge(uint64_t currentFrame, uint32_t sourceFrame) {
              ? std::numeric_limits<uint32_t>::max()
              : static_cast<uint32_t>(age);
 }
-VisibilityPassResult evaluateCpuVisibilityFromCachedBounds(
-    const VisibilityPassRequest &request,
-    std::span<const VisibilityCandidate> candidates,
-    std::span<const VisibilityCandidateGpu> candidateGpuData,
-    std::pmr::memory_resource *memory) {
-  const size_t candidateCount = candidates.size();
-  VisibilityPassResult result(memory);
-  result.signature = request.signature;
-  result.cpuCandidates = static_cast<uint32_t>(
-      std::min(candidateCount,
-               static_cast<size_t>(std::numeric_limits<uint32_t>::max())));
-  result.visibleCandidateIndices.reserve(candidateCount);
-  for (size_t i = 0; i < candidateCount; ++i) {
-    const VisibilityCandidate &candidate = candidates[i];
-    bool visible = true;
-    if (request.enableCpuFrustumCulling) {
-      if ((candidate.flags & kVisibilityCandidateConservativeVisible) != 0u) {
-        ++result.uncertainVisible;
-      } else {
-        const VisibilityCandidateGpu &gpuCandidate = candidateGpuData[i];
-        visibility_detail::VisibilityClassification classification =
-            visibility_detail::classifySphere(request.frustum,
-                                              glm::vec3(gpuCandidate.bounds),
-                                              gpuCandidate.bounds.w);
-        if (classification ==
-            visibility_detail::VisibilityClassification::Intersects) {
-          const BoundingBox worldBounds(glm::vec3(gpuCandidate.boundsMin),
-                                        glm::vec3(gpuCandidate.boundsMax));
-          classification =
-              visibility_detail::classifyAabb(request.frustum, worldBounds);
-        }
-        visible = visibility_detail::isVisible(classification);
-      }
-    }
-    if (!visible) {
-      ++result.cpuRejected;
-      continue;
-    }
-    result.visibleCandidateIndices.push_back(static_cast<uint32_t>(i));
-  }
-  result.cpuVisibleCandidates = static_cast<uint32_t>(
-      std::min(result.visibleCandidateIndices.size(),
-               static_cast<size_t>(std::numeric_limits<uint32_t>::max())));
-  return result;
-}
 bool matrixNearlyEqual(const glm::mat4 &lhs, const glm::mat4 &rhs,
                        float epsilon = 1.0e-5f) {
   for (int column = 0; column < 4; ++column) {
@@ -238,8 +191,7 @@ bool previousDepthPyramidCameraStable(const RenderFrameContext &frame) {
   return levelCount;
 }
 void logOpaqueVisibilityCounters(const RenderFrameContext &frame) {
-  if (frame.settings == nullptr ||
-      !renderSettingsOrDefault(frame).visibility.debug.logCounters) {
+  if (!frame.settings.visibility.debug.logCounters) {
     return;
   }
   const VisibilityFrameMetrics &visibility = frame.metrics.visibility;
@@ -374,16 +326,6 @@ DrawItem makeBaseMeshDraw(RenderPipelineHandle pipeline,
   draw.debugColor = kMeshDebugColor;
   return draw;
 }
-float maxAxisScale(const glm::mat4 &transform) {
-  const float sx = glm::length(glm::vec3(transform[0]));
-  const float sy = glm::length(glm::vec3(transform[1]));
-  const float sz = glm::length(glm::vec3(transform[2]));
-  return std::max({sx, sy, sz});
-}
-bool nearlyEqualVec3(const glm::vec3 &a, const glm::vec3 &b, float epsilon) {
-  const glm::vec3 delta = glm::abs(a - b);
-  return delta.x <= epsilon && delta.y <= epsilon && delta.z <= epsilon;
-}
 float maxMatrixElementDelta(const glm::mat4 &a, const glm::mat4 &b) {
   float maxDelta = 0.0f;
   for (glm::length_t column = 0; column < 4; ++column) {
@@ -392,15 +334,6 @@ float maxMatrixElementDelta(const glm::mat4 &a, const glm::mat4 &b) {
     }
   }
   return maxDelta;
-}
-uint64_t textureStorageBytes(GPUDevice &gpu, TextureHandle texture) {
-  if (!nuri::isValid(texture)) {
-    return 0u;
-  }
-  const TextureDimensions dimensions = gpu.getTextureDimensions(texture);
-  return static_cast<uint64_t>(std::max(dimensions.width, 1u)) *
-         static_cast<uint64_t>(std::max(dimensions.height, 1u)) *
-         formatTexelBytes(gpu.getTextureFormat(texture));
 }
 uint64_t computeRemapSignature(std::span<const uint32_t> remap) {
   uint64_t signature = hashCombine64(kFnvOffsetBasis64, remap.size());
@@ -608,7 +541,7 @@ struct IndirectGroupKeyHash {
 OpaqueRenderer::OpaqueRenderer(GPUDevice &gpu, OpaqueRendererConfig config,
                                std::pmr::memory_resource *memory)
     : gpu_(gpu), config_(std::move(config)),
-      bufferRings_(resolveMemoryResource(memory)),
+      bufferRings_(gpu, BufferRingCount, resolveMemoryResource(memory)),
       singleInstanceBatchCaches_(resolveMemoryResource(memory)),
       staticBatchCache_(resolveMemoryResource(memory)),
       renderableTemplates_(std::pmr::new_delete_resource()),
@@ -653,31 +586,18 @@ OpaqueRenderer::OpaqueRenderer(GPUDevice &gpu, OpaqueRendererConfig config,
       normalPrepassDrawItems_(resolveMemoryResource(memory)),
       depthPyramidPushConstants_(resolveMemoryResource(memory)),
       depthPyramidDrawItems_(resolveMemoryResource(memory)),
-      meshletDepthPrepassDispatchItems_(resolveMemoryResource(memory)),
-      meshletDepthPrepassPushConstants_(resolveMemoryResource(memory)),
-      meshletDepthPrepassDispatchDependencyBuffers_(
-          resolveMemoryResource(memory)),
+      meshletDepthPrepassStream_(resolveMemoryResource(memory)),
       meshletDepthPrepassDependencyBuffers_(resolveMemoryResource(memory)),
       meshletDepthPrepassDependencyBufferAccessModes_(
           resolveMemoryResource(memory)),
-      meshletNormalPrepassDispatchItems_(resolveMemoryResource(memory)),
-      meshletNormalPrepassPushConstants_(resolveMemoryResource(memory)),
-      meshletNormalPrepassDispatchDependencyBuffers_(
-          resolveMemoryResource(memory)),
+      meshletNormalPrepassStream_(resolveMemoryResource(memory)),
       meshletNormalPrepassDependencyBuffers_(resolveMemoryResource(memory)),
       meshletNormalPrepassDependencyBufferAccessModes_(
           resolveMemoryResource(memory)),
-      meshletDispatchItems_(resolveMemoryResource(memory)),
-      meshletPushConstants_(resolveMemoryResource(memory)),
+      meshletMainStream_(resolveMemoryResource(memory)),
       meshletBatchGpuData_(resolveMemoryResource(memory)),
-      meshletDispatchDependencyBuffers_(resolveMemoryResource(memory)),
-      meshletVelocityDispatchItems_(resolveMemoryResource(memory)),
-      meshletVelocityPushConstants_(resolveMemoryResource(memory)),
-      meshletVelocityDispatchDependencyBuffers_(resolveMemoryResource(memory)),
-      meshletReactiveMaskDispatchItems_(resolveMemoryResource(memory)),
-      meshletReactiveMaskPushConstants_(resolveMemoryResource(memory)),
-      meshletReactiveMaskDispatchDependencyBuffers_(
-          resolveMemoryResource(memory)),
+      meshletVelocityStream_(resolveMemoryResource(memory)),
+      meshletReactiveMaskStream_(resolveMemoryResource(memory)),
       depthPyramidDependencyTextures_(resolveMemoryResource(memory)),
       shadowSdsmReducePushConstants_(resolveMemoryResource(memory)),
       shadowSdsmReduceDispatches_(resolveMemoryResource(memory)),
@@ -732,7 +652,6 @@ OpaqueRenderer::OpaqueRenderer(GPUDevice &gpu, OpaqueRendererConfig config,
       transmissionVisibilityDepthPushConstants_(resolveMemoryResource(memory)),
       preparedGraphPasses_(resolveMemoryResource(memory)) {
   auto *resource = resolveMemoryResource(memory);
-  bufferRings_.resize(BufferRingCount);
   singleInstanceBatchCaches_.reserve(kSingleInstanceCacheVariantCount);
   for (size_t i = 0; i < kSingleInstanceCacheVariantCount; ++i) {
     singleInstanceBatchCaches_.emplace_back(resource);
@@ -785,7 +704,10 @@ void OpaqueRenderer::stagePreviousTransforms(const RenderScene &scene,
   pendingPreviousTransformTransformVersion_ = transformVersion;
 }
 
-void OpaqueRenderer::commitSubmittedFrame(uint64_t frameIndex) noexcept {
+void OpaqueRenderer::commitSubmittedFrame(
+    const RenderFrameContext &frame) noexcept {
+  bufferRings_.submitPrepared(frame.submission);
+  const uint64_t frameIndex = frame.frameIndex;
   if (pendingPreviousTransformFrameIndex_ != frameIndex) {
     return;
   }
@@ -803,7 +725,10 @@ void OpaqueRenderer::commitSubmittedFrame(uint64_t frameIndex) noexcept {
   pendingPreviousTransformDataChanged_ = false;
 }
 
-void OpaqueRenderer::abandonPreparedFrame(uint64_t frameIndex) noexcept {
+void OpaqueRenderer::abandonPreparedFrame(
+    const RenderFrameContext &frame) noexcept {
+  bufferRings_.abandonPrepared();
+  const uint64_t frameIndex = frame.frameIndex;
   if (pendingPreviousTransformFrameIndex_ != frameIndex) {
     return;
   }
@@ -832,7 +757,7 @@ void OpaqueRenderer::onDetach() {
   visibilityIndirectMeshDispatchComputePipeline_.reset();
   meshletCompactionComputePipeline_.reset();
   shaders_.fill({});
-  tessellationUnsupported_ = false;
+  pipelines_.tessellationUnsupported = false;
   clearAll(renderableTemplates_, meshDrawTemplates_, templateBatchIndices_,
            batchWriteOffsets_);
   clearAll(instanceCentersPhase_, instanceBaseMatrices_,
@@ -852,17 +777,18 @@ void OpaqueRenderer::onDetach() {
   clearAll(transmissionVisibilityDepthDrawItems_,
            transmissionVisibilityDepthPushConstants_,
            depthPyramidPushConstants_, depthPyramidDrawItems_);
-  clearAll(meshletDispatchItems_, meshletPushConstants_, meshletBatchGpuData_,
-           meshletDispatchDependencyBuffers_);
-  clearAll(meshletNormalPrepassDispatchItems_,
-           meshletNormalPrepassPushConstants_,
-           meshletNormalPrepassDispatchDependencyBuffers_,
+  clearAll(meshletMainStream_.dispatches, meshletMainStream_.constants,
+           meshletBatchGpuData_, meshletMainStream_.dependencies);
+  clearAll(meshletNormalPrepassStream_.dispatches,
+           meshletNormalPrepassStream_.constants,
+           meshletNormalPrepassStream_.dependencies,
            meshletNormalPrepassDependencyBuffers_);
   clearAll(meshletNormalPrepassDependencyBufferAccessModes_,
-           meshletVelocityDispatchItems_, meshletVelocityPushConstants_,
-           meshletVelocityDispatchDependencyBuffers_);
-  clearAll(meshletReactiveMaskDispatchItems_, meshletReactiveMaskPushConstants_,
-           meshletReactiveMaskDispatchDependencyBuffers_,
+           meshletVelocityStream_.dispatches, meshletVelocityStream_.constants,
+           meshletVelocityStream_.dependencies);
+  clearAll(meshletReactiveMaskStream_.dispatches,
+           meshletReactiveMaskStream_.constants,
+           meshletReactiveMaskStream_.dependencies,
            depthPyramidDependencyTextures_);
   clearAll(preDispatches_, mainPreDispatches_, visibilityGpuDispatches_,
            visibilityGpuCandidates_);
@@ -941,7 +867,7 @@ void OpaqueRenderer::publishFrameData(RenderFrameContext &frame) {
   frame.sharedResources.sceneDepthPyramidTextures = {};
   frame.sharedResources.sceneDepthPyramidSourceFrameIndex.reset();
   frame.sharedResources.sceneDepthPyramidSourceViewProj.reset();
-  const RenderSettings &settings = renderSettingsOrDefault(frame);
+  const RenderSettings &settings = frame.settings;
   if (!settings.opaque.enabled) {
     return;
   }
@@ -949,7 +875,7 @@ void OpaqueRenderer::publishFrameData(RenderFrameContext &frame) {
       settings.visibility.occlusionMode ==
       VisibilityOcclusionMode::CurrentFrameHiZExperimental;
   if (!requiresDepthPyramid(settings) || ensureInitialized().hasError() ||
-      !nuri::isValid(depthPyramidPipelineHandle_) ||
+      !nuri::isValid(pipelines_.depthPyramid) ||
       ensureDepthPyramidTextures(currentFrameVerificationRequired).hasError()) {
     return;
   }
@@ -980,18 +906,15 @@ void OpaqueRenderer::readLatestVisibilityGpuReadback(
     if (expectedFrame == std::numeric_limits<uint64_t>::max()) {
       return;
     }
-    const uint64_t safeReadbackAge = bufferRings_[VisibilityCounterRing].size();
     if (expectedFrame >= frame.frameIndex ||
-        frame.frameIndex - expectedFrame < safeReadbackAge) {
+        !bufferRings_.completed(slotIndex)) {
       return;
     }
-    const DynamicBufferSlot &slot =
-        bufferRings_[VisibilityCounterRing][slotIndex];
     VisibilityCounterGpuData counter{};
-    auto readResult =
-        gpu_.readBuffer(slot.buffer->handle(), 0u,
-                        std::as_writable_bytes(
-                            std::span<VisibilityCounterGpuData>(&counter, 1u)));
+    auto readResult = gpu_.readBuffer(
+        bufferRings_.handle(VisibilityCounterRing, slotIndex), 0u,
+        std::as_writable_bytes(
+            std::span<VisibilityCounterGpuData>(&counter, 1u)));
     if (readResult.hasError()) {
       ++counterReadbackErrorCount;
       return;
@@ -1007,8 +930,8 @@ void OpaqueRenderer::readLatestVisibilityGpuReadback(
       selectedSourceFrame = sourceFrame;
     }
   };
-  for (size_t slotIndex = 0u;
-       slotIndex < bufferRings_[VisibilityCounterRing].size(); ++slotIndex) {
+  for (size_t slotIndex = 0u; slotIndex < bufferRings_.laneCount();
+       ++slotIndex) {
     readCounterSlot(slotIndex);
   }
   metrics.gpuMainReadbackErrorCount = counterReadbackErrorCount;
@@ -1075,17 +998,17 @@ void OpaqueRenderer::readLatestVisibilityGpuReadback(
     metrics.gpuMainVisibleListMismatches = 0u;
     return;
   }
-  const DynamicBufferSlot &visibleSlot =
-      bufferRings_[VisibilityVisibleIndexRing][selectedSlotIndex];
-  const size_t visibleCapacity = visibleSlot.capacityBytes / sizeof(uint32_t);
+  const size_t visibleCapacity =
+      bufferRings_.capacity(VisibilityVisibleIndexRing, selectedSlotIndex) /
+      sizeof(uint32_t);
   const size_t visibleCount =
       std::min(static_cast<size_t>(selectedCounter->main.y), visibleCapacity);
   visibilityVisibleIndexReadback_.assign(visibleCount, 0u);
-  auto readResult =
-      gpu_.readBuffer(visibleSlot.buffer->handle(), 0u,
-                      std::as_writable_bytes(std::span<uint32_t>(
-                          visibilityVisibleIndexReadback_.data(),
-                          visibilityVisibleIndexReadback_.size())));
+  auto readResult = gpu_.readBuffer(
+      bufferRings_.handle(VisibilityVisibleIndexRing, selectedSlotIndex), 0u,
+      std::as_writable_bytes(
+          std::span<uint32_t>(visibilityVisibleIndexReadback_.data(),
+                              visibilityVisibleIndexReadback_.size())));
   if (readResult.hasError()) {
     ++metrics.gpuMainReadbackErrorCount;
     return;
@@ -1289,13 +1212,13 @@ Result<bool, std::string> OpaqueRenderer::appendGpuVisibilityMainPass(
   visibilityCounterClear_.clear();
   visibilityCounterClear_.push_back(VisibilityCounterGpuData{});
   const BufferHandle candidateBuffer =
-      bufferRings_[VisibilityCandidateRing][frameSlot].buffer->handle();
+      bufferRings_.handle(VisibilityCandidateRing, frameSlot);
   const BufferHandle passBuffer =
-      bufferRings_[VisibilityPassRing][frameSlot].buffer->handle();
+      bufferRings_.handle(VisibilityPassRing, frameSlot);
   const BufferHandle visibleIndexBuffer =
-      bufferRings_[VisibilityVisibleIndexRing][frameSlot].buffer->handle();
+      bufferRings_.handle(VisibilityVisibleIndexRing, frameSlot);
   const BufferHandle counterBuffer =
-      bufferRings_[VisibilityCounterRing][frameSlot].buffer->handle();
+      bufferRings_.handle(VisibilityCounterRing, frameSlot);
   {
     NURI_PROFILER_ZONE("OpaqueRenderer.visibility_gpu_upload",
                        NURI_PROFILER_COLOR_CMD_COPY);
@@ -1333,13 +1256,11 @@ Result<bool, std::string> OpaqueRenderer::appendGpuVisibilityMainPass(
       gpu_.getBufferDeviceAddress(visibleIndexBuffer);
   const uint64_t counterAddress = gpu_.getBufferDeviceAddress(counterBuffer);
   const BufferHandle indirectBuffer =
-      gpuIndirectSafe
-          ? bufferRings_[IndirectCommandRing][frameSlot].buffer->handle()
-          : BufferHandle{};
+      gpuIndirectSafe ? bufferRings_.handle(IndirectCommandRing, frameSlot)
+                      : BufferHandle{};
   const BufferHandle remapBuffer =
-      gpuIndirectSafe
-          ? bufferRings_[InstanceRemapRing][frameSlot].buffer->handle()
-          : BufferHandle{};
+      gpuIndirectSafe ? bufferRings_.handle(InstanceRemapRing, frameSlot)
+                      : BufferHandle{};
   const uint64_t indirectAddress =
       gpuIndirectSafe ? gpu_.getBufferDeviceAddress(indirectBuffer) : 0u;
   const uint64_t remapAddress =
@@ -1486,16 +1407,18 @@ Result<bool, std::string> OpaqueRenderer::appendGpuVisibilityMainPass(
   visibilityPass.desc.hasColorAttachment = false;
   visibilityPass.desc.preDispatches = std::span<const ComputeDispatchItem>(
       visibilityGpuDispatches_.data(), visibilityGpuDispatches_.size());
-  visibilityPass.desc.dependencyBuffers =
-      std::span<const BufferHandle>(visibilityGpuDependencyBuffers_.data(),
-                                    visibilityGpuDependencyBuffers_.size());
-  visibilityPass.desc.dependencyBufferAccessModes =
-      std::span<const RenderGraphAccessMode>(
-          visibilityGpuDependencyBufferAccessModes_.data(),
-          visibilityGpuDependencyBufferAccessModes_.size());
-  visibilityPass.desc.dependencyTextures =
-      std::span<const TextureHandle>(visibilityGpuDependencyTextures_.data(),
-                                     visibilityGpuDependencyTextures_.size());
+  for (size_t index = 0u; index < visibilityGpuDependencyBuffers_.size();
+       ++index) {
+    visibilityPass.bufferUses.push_back({
+        .buffer = visibilityGpuDependencyBuffers_[index],
+        .access = visibilityGpuDependencyBufferAccessModes_[index],
+    });
+  }
+  for (TextureHandle texture : visibilityGpuDependencyTextures_) {
+    visibilityPass.textureUses.push_back({.texture = texture});
+  }
+  visibilityPass.desc.importedBufferUses = visibilityPass.bufferUses;
+  visibilityPass.desc.importedTextureUses = visibilityPass.textureUses;
   visibilityPass.desc.debugLabel = "Opaque Visibility Culling";
   visibilityPass.desc.debugColor = kComputeDispatchColor;
   visibilityPass.desc.gpuTimingScope = GpuTimingScope::Opaque;
@@ -1517,9 +1440,10 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   frame.metrics.visibility.shadowCpuRejected = shadowCpuRejected;
   const GpuTimingReport &timingReport = frame.gpuTiming;
   if (hasGpuTimingScope(timingReport, GpuTimingScope::Opaque)) {
-    frame.metrics.opaque.gpuTimeMs = timingReport.opaqueTimeMs;
+    frame.metrics.opaque.gpuTimeMs =
+        timingReport[GpuTimingScope::Opaque].timeMs;
     frame.metrics.opaque.gpuTimingSourceFrameIndex =
-        timingReport.opaqueSourceFrameIndex;
+        timingReport[GpuTimingScope::Opaque].sourceFrameIndex;
     frame.metrics.opaque.gpuTimingAvailable = 1u;
   }
   frame.opaquePickResult.reset();
@@ -1532,7 +1456,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     pendingShadowInspectRequest_ = frame.shadowInspectRequest;
     frame.shadowInspectRequest.reset();
   }
-  const RenderSettings &settings = renderSettingsOrDefault(frame);
+  const RenderSettings &settings = frame.settings;
   if (!settings.opaque.enabled) {
     return Result<bool, std::string>::makeResult(true);
   }
@@ -1545,8 +1469,10 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     return Result<bool, std::string>::makeError(initResult.error());
   }
   const TextureHandle sceneDepthTexture = resolveFrameDepthTexture(frame);
-  frame.sharedResources.transmissionVisibilityDepthTexture = {};
-  frame.sharedResources.transmissionVisibilityDepthGraphTexture = {};
+  frame.sharedResources[FrameTextureSlot::TransmissionVisibilityDepth]
+      .texture = {};
+  frame.sharedResources[FrameTextureSlot::TransmissionVisibilityDepth]
+      .graph = {};
   const bool needsPickResources =
       pendingPickRequest_.has_value() || inFlightPickReadback_.has_value();
   if (needsPickResources && !nuri::isValid(pickIdTexture_)) {
@@ -1664,9 +1590,15 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   if (ringResult.hasError()) {
     return ringResult;
   }
-  const uint32_t frameSlot =
-      static_cast<uint32_t>(frame.frameIndex % swapchainImageCount);
   readLatestVisibilityGpuReadback(frame);
+  auto laneResult = bufferRings_.acquire(frame.frameIndex, swapchainImageCount);
+  if (laneResult.hasError()) {
+    return Result<bool, std::string>::makeError(laneResult.error());
+  }
+  if (frameSlotStates_.size() < bufferRings_.laneCount()) {
+    frameSlotStates_.resize(bufferRings_.laneCount());
+  }
+  const uint32_t frameSlot = static_cast<uint32_t>(laneResult.value().lane);
   bool visibilityCounterPreparedForFrame = false;
   const AnimationSceneFrameData *animationSceneData =
       resolveAnimationSceneFrameData(frame);
@@ -1704,7 +1636,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
           kBoundsRadiusHalf * glm::length(bounds.getSize());
       const glm::vec3 worldCenter =
           glm::vec3(renderable->modelMatrix * glm::vec4(localCenter, 1.0f));
-      const float worldScale = maxAxisScale(renderable->modelMatrix);
+      const float worldScale =
+          visibility_detail::maxAxisScale(renderable->modelMatrix);
       const float worldRadius =
           std::max(localRadius * worldScale, kMinLodRadius);
       const float invRadiusSq = 1.0f / (worldRadius * worldRadius);
@@ -1829,7 +1762,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   if (matricesResult.hasError()) {
     return matricesResult;
   }
-  const PresentationAAPlan presentationAA = presentationAAPlanForFrame(frame);
+  const PresentationAAPlan &presentationAA = frame.presentationAA;
   const bool temporalMotionRequired = presentationAA.needsMotion;
   const bool reactiveMaskRequired = presentationAA.needsReactiveMask;
   const CoverageMode coverage = presentationAA.coverage;
@@ -1917,8 +1850,9 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       hasTaaVelocityInstances && animationPreviousFrameValid &&
       !animationSceneData->previousGeometryOverridesByRenderable.empty();
   const TextureHandle sceneDepthTarget =
-      msaaSelected ? frame.sharedResources.msaaSceneDepthTexture
-                   : sceneDepthTexture;
+      msaaSelected
+          ? frame.sharedResources[FrameTextureSlot::MsaaSceneDepth].texture
+          : sceneDepthTexture;
   if (needsVelocityInstanceBufferUpload) {
     auto previousMatricesResult = ensurePreviousInstanceMatricesRingCapacity(
         std::max(instanceCount * sizeof(InstanceData), sizeof(InstanceData)));
@@ -2008,13 +1942,10 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       gpu_.getBufferDeviceAddress(instanceLodBoundsBuffer_->handle());
   const uint64_t instanceBaseMatricesAddress =
       gpu_.getBufferDeviceAddress(instanceBaseMatricesBuffer_->handle());
-  const uint64_t directionalLightBufferAddress =
-      sceneGpu->directionalLightBufferAddress;
-  const uint64_t localLightBufferAddress = sceneGpu->localLightBufferAddress;
   const BufferHandle instanceMatricesBufferHandle =
       animationSceneData != nullptr
           ? animationSceneData->instanceMatricesBuffer
-          : bufferRings_[InstanceMatricesRing][frameSlot].buffer->handle();
+          : bufferRings_.handle(InstanceMatricesRing, frameSlot);
   const uint64_t instanceMatricesAddress =
       animationSceneData != nullptr
           ? animationSceneData->instanceMatricesAddress
@@ -2023,20 +1954,19 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       animationPreviousFrameValid
           ? animationSceneData->previousInstanceMatricesBuffer
           : (needsVelocityInstanceBufferUpload
-                 ? bufferRings_[PreviousInstanceMatricesRing][frameSlot]
-                       .buffer->handle()
+                 ? bufferRings_.handle(PreviousInstanceMatricesRing, frameSlot)
                  : BufferHandle{});
   const BufferHandle velocityInstanceFlagsBufferHandle =
       needsVelocityInstanceBufferUpload
-          ? bufferRings_[VelocityInstanceFlagsRing][frameSlot].buffer->handle()
+          ? bufferRings_.handle(VelocityInstanceFlagsRing, frameSlot)
           : BufferHandle{};
   const BufferHandle velocityFrameDataBufferHandle =
       hasTaaVelocityInstances
-          ? bufferRings_[VelocityFrameDataRing][frameSlot].buffer->handle()
+          ? bufferRings_.handle(VelocityFrameDataRing, frameSlot)
           : BufferHandle{};
   const BufferHandle velocityGeometryBufferHandle =
       needsVelocityGeometryUpload
-          ? bufferRings_[VelocityGeometryRing][frameSlot].buffer->handle()
+          ? bufferRings_.handle(VelocityGeometryRing, frameSlot)
           : BufferHandle{};
   const bool reuseCurrentMatricesForVelocity =
       velocityInstanceFlagsMode == VelocityInstanceFlagsMode::AllInvalid ||
@@ -2278,8 +2208,9 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
           : static_cast<size_t>(settings.opaque.tessMaxInstances);
   const bool tessellationRequested =
       (settings.opaque.enableTessellation || patchHeatmapRequested) &&
-      settings.opaque.forcedMeshLod < 1 && !tessellationUnsupported_ &&
-      nuri::isValid(meshScenePipelines_[rasterVariantIndex(
+      settings.opaque.forcedMeshLod < 1 &&
+      !pipelines_.tessellationUnsupported &&
+      nuri::isValid(pipelines_.meshScene[rasterVariantIndex(
           CoverageMode::Sample1, false, true, false)]);
   constexpr uint32_t kInvalidBatchIndex = std::numeric_limits<uint32_t>::max();
   ScratchArena batchScratchArena;
@@ -2457,10 +2388,9 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   if (cpuMainEvaluationEnabled) {
     NURI_PROFILER_ZONE("OpaqueRenderer.visibility_cpu_main",
                        NURI_PROFILER_COLOR_CMD_DRAW);
-    VisibilityPassResult visibilityResult =
-        evaluateCpuVisibilityFromCachedBounds(
-            visibilityRequest, visibilityCandidates, visibilityCandidateGpuData,
-            batchScratch.resource());
+    VisibilityPassResult visibilityResult = evaluateCpuVisibility(
+        visibilityRequest, visibilityCandidates, visibilityCandidateGpuData,
+        batchScratch.resource());
     if (cpuMainCullingEnabled) {
       visibleMainTemplates.assign(meshDrawTemplates_.size(), 0u);
       visibleMainTemplateIndices.clear();
@@ -3474,7 +3404,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     NURI_PROFILER_ZONE_END();
   }
   const uint64_t instanceRemapAddress = gpu_.getBufferDeviceAddress(
-      bufferRings_[InstanceRemapRing][frameSlot].buffer->handle());
+      bufferRings_.handle(InstanceRemapRing, frameSlot));
   if (!instanceRemapUploadSource->empty()) {
     if (!remapSignatureValid) {
       remapSignature = computeRemapSignature(
@@ -3494,8 +3424,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
               instanceRemapUploadSource->data()),
           instanceRemapUploadSource->size() * sizeof(uint32_t)};
       auto updateResult = gpu_.updateBuffer(
-          bufferRings_[InstanceRemapRing][frameSlot].buffer->handle(),
-          remapBytes, 0);
+          bufferRings_.handle(InstanceRemapRing, frameSlot), remapBytes, 0);
       if (updateResult.hasError()) {
         return updateResult;
       }
@@ -3574,8 +3503,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
           reinterpret_cast<const std::byte *>(instanceMatricesCpuCache_.data()),
           instanceMatricesCpuCache_.size() * sizeof(InstanceData)};
       auto updateResult = gpu_.updateBuffer(
-          bufferRings_[InstanceMatricesRing][frameSlot].buffer->handle(),
-          matricesBytes, 0);
+          bufferRings_.handle(InstanceMatricesRing, frameSlot), matricesBytes,
+          0);
       if (updateResult.hasError()) {
         return updateResult;
       }
@@ -3611,12 +3540,9 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     for (const TextureHandle handle : sceneGpu->indirectDependencyTextures) {
       appendUniqueDependency(passDependencyTextures_, handle);
     }
-    for (const BufferHandle materialHandle :
-         {materialGpu->headerBuffer, materialGpu->clearcoatBuffer,
-          materialGpu->sheenBuffer, materialGpu->transmissionBuffer,
-          materialGpu->specularBuffer}) {
+    for (const MaterialTableGpuRegion &region : materialGpu->regions) {
       appendUniqueDependency(passDependencyBuffers_,
-                             passDependencyBufferAccessModes_, materialHandle,
+                             passDependencyBufferAccessModes_, region.buffer,
                              RenderGraphAccessMode::Read);
     }
     if (animationSceneData != nullptr) {
@@ -3631,14 +3557,14 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
             geometryOverride.vertexBuffer, RenderGraphAccessMode::Read);
       }
     }
-    appendUniqueDependency(
-        passDependencyBuffers_, passDependencyBufferAccessModes_,
-        bufferRings_[InstanceRemapRing][frameSlot].buffer->handle(),
-        RenderGraphAccessMode::Read);
+    appendUniqueDependency(passDependencyBuffers_,
+                           passDependencyBufferAccessModes_,
+                           bufferRings_.handle(InstanceRemapRing, frameSlot),
+                           RenderGraphAccessMode::Read);
     if (hasIndirectDraws) {
       appendUniqueDependency(
           passDependencyBuffers_, passDependencyBufferAccessModes_,
-          bufferRings_[IndirectCommandRing][frameSlot].buffer->handle(),
+          bufferRings_.handle(IndirectCommandRing, frameSlot),
           RenderGraphAccessMode::Read);
     }
     if (instanceCount > 0) {
@@ -3658,7 +3584,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         }
         appendUniqueDependency(
             dispatchDependencyBuffers_,
-            bufferRings_[InstanceMatricesRing][frameSlot].buffer->handle());
+            bufferRings_.handle(InstanceMatricesRing, frameSlot));
         const uint32_t dispatchX = static_cast<uint32_t>(
             (instanceCount + (kComputeWorkgroupSize - 1)) /
             kComputeWorkgroupSize);
@@ -3682,7 +3608,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   size_t tessellatedDraws = 0;
   size_t tessellatedInstances = 0;
   if (tessellationRequested &&
-      nuri::isValid(meshScenePipelines_[rasterVariantIndex(
+      nuri::isValid(pipelines_.meshScene[rasterVariantIndex(
           CoverageMode::Sample1, false, true, false)])) {
     for (const DrawItem &draw : drawItems_) {
       if (isTessPipeline(draw.pipeline)) {
@@ -3704,7 +3630,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         if (nuri::isValid(sceneGpu->buffer)) {
           appendRead(sceneGpu->buffer);
         }
-        appendRead(materialGpu->headerBuffer);
+        appendRead((*materialGpu)[MaterialTableRegion::Header].buffer);
         if (animationSceneData != nullptr) {
           for (const AnimatedRenderableGeometryOverride &geometryOverride :
                animationSceneData->geometryOverridesByRenderable) {
@@ -3715,10 +3641,9 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
             appendRead(geometryOverride.vertexBuffer);
           }
         }
-        appendRead(bufferRings_[InstanceRemapRing][frameSlot].buffer->handle());
+        appendRead(bufferRings_.handle(InstanceRemapRing, frameSlot));
         if (hasIndirectBaseDraws) {
-          appendRead(
-              bufferRings_[IndirectCommandRing][frameSlot].buffer->handle());
+          appendRead(bufferRings_.handle(IndirectCommandRing, frameSlot));
         }
         if (instanceCount > 0) {
           appendRead(instanceMatricesBufferHandle);
@@ -3756,7 +3681,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
             ? &frame.metrics.opaque.meshletRejectedIncompatibleFrame
         : missingMeshletData
             ? &frame.metrics.opaque.meshletRejectedMissingAssetData
-        : !meshletPipelineInitialized_
+        : !pipelines_.meshletInitialized
             ? &frame.metrics.opaque.meshletRejectedMissingFeature
             : nullptr;
     if (rejection) {
@@ -3778,22 +3703,22 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   transmissionVisibilityDepthDrawItems_.clear();
   transmissionVisibilityDepthPushConstants_.clear();
   normalPrepassDrawItems_.clear();
-  meshletDepthPrepassDispatchItems_.clear();
-  meshletDepthPrepassPushConstants_.clear();
-  meshletDepthPrepassDispatchDependencyBuffers_.clear();
+  meshletDepthPrepassStream_.dispatches.clear();
+  meshletDepthPrepassStream_.constants.clear();
+  meshletDepthPrepassStream_.dependencies.clear();
   meshletDepthPrepassDependencyBuffers_.clear();
   meshletDepthPrepassDependencyBufferAccessModes_.clear();
-  meshletNormalPrepassDispatchItems_.clear();
-  meshletNormalPrepassPushConstants_.clear();
-  meshletNormalPrepassDispatchDependencyBuffers_.clear();
+  meshletNormalPrepassStream_.dispatches.clear();
+  meshletNormalPrepassStream_.constants.clear();
+  meshletNormalPrepassStream_.dependencies.clear();
   meshletNormalPrepassDependencyBuffers_.clear();
   meshletNormalPrepassDependencyBufferAccessModes_.clear();
-  meshletVelocityDispatchItems_.clear();
-  meshletVelocityPushConstants_.clear();
-  meshletVelocityDispatchDependencyBuffers_.clear();
-  meshletReactiveMaskDispatchItems_.clear();
-  meshletReactiveMaskPushConstants_.clear();
-  meshletReactiveMaskDispatchDependencyBuffers_.clear();
+  meshletVelocityStream_.dispatches.clear();
+  meshletVelocityStream_.constants.clear();
+  meshletVelocityStream_.dependencies.clear();
+  meshletReactiveMaskStream_.dispatches.clear();
+  meshletReactiveMaskStream_.constants.clear();
+  meshletReactiveMaskStream_.dependencies.clear();
   visibilityMeshletDispatchGpuData_.clear();
   visibilityMeshletCandidateMap_.clear();
   visibilityIndirectMeshDispatchPushConstants_.clear();
@@ -3812,18 +3737,20 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       AmbientOcclusionInputMode::DepthOnlyReconstructedNormal;
   const bool normalPrepassRequested =
       (ambientOcclusionSettings.active || ddgiSurfaceCacheNormalInput) &&
-      (depthOnlyInput || nuri::isValid(frame.sharedResources.normalTexture)) &&
+      (depthOnlyInput ||
+       nuri::isValid(
+           frame.sharedResources[FrameTextureSlot::Normal].texture)) &&
       !wireframeOnlyRequested && !baseDrawItems.empty();
   const bool msaaGtaoAuxiliaryPrepass =
       msaaSelected && normalPrepassRequested &&
-      nuri::isValid(frame.sharedResources.sceneDepthTexture);
+      nuri::isValid(
+          frame.sharedResources[FrameTextureSlot::SceneDepth].texture);
   const bool visibilityDepthPrepassRequested =
       visibilitySettings.enableOcclusionCulling;
   const bool requiresDepthPyramid = this->requiresDepthPyramid(settings);
   frame.metrics.opaque.depthPyramidRequested = requiresDepthPyramid ? 1u : 0u;
   frame.metrics.opaque.hiZRequested =
-      sanitizeVisibilityOcclusionMode(visibilitySettings.occlusionMode) !=
-              VisibilityOcclusionMode::Disabled
+      visibilitySettings.occlusionMode != VisibilityOcclusionMode::Disabled
           ? 1u
           : 0u;
   frame.metrics.opaque.hiZSourceFramePolicy =
@@ -3840,7 +3767,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       meshletActive && normalPrepassRequested && !drawItems_.empty() &&
       (materialNormalInput
            ? std::ranges::all_of(
-                 meshletNormalPipelines_,
+                 pipelines_.meshletNormal,
                  [](auto pipeline) { return isValid(pipeline); })
            : nuri::isValid(selectMeshletDepthPipeline(CoverageMode::Sample1,
                                                       false, false)) &&
@@ -3993,8 +3920,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     if (visibilityDepthResult.hasError()) {
       return visibilityDepthResult;
     }
-    frame.sharedResources.transmissionVisibilityDepthTexture =
-        transmissionVisibilityDepthTexture_;
+    frame.sharedResources[FrameTextureSlot::TransmissionVisibilityDepth]
+        .texture = transmissionVisibilityDepthTexture_;
     NURI_PROFILER_ZONE("OpaqueRenderer.transmission_visibility_depth_build",
                        NURI_PROFILER_COLOR_CMD_DRAW);
     transmissionVisibilityDepthDrawItems_.reserve(baseDrawItems.size());
@@ -4008,7 +3935,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         transmissionVisibilityDepthEnabled = false;
         transmissionVisibilityDepthDrawItems_.clear();
         transmissionVisibilityDepthPushConstants_.clear();
-        frame.sharedResources.transmissionVisibilityDepthTexture = {};
+        frame.sharedResources[FrameTextureSlot::TransmissionVisibilityDepth]
+            .texture = {};
         break;
       }
       PushConstants constants{};
@@ -4066,8 +3994,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         normalPrepassDrawItems_.clear();
         normalPrepassEnabled = false;
         ambientOcclusionSettings.active = false;
-        frame.sharedResources.ambientOcclusionTexture = {};
-        frame.sharedResources.ambientOcclusionGraphTexture = {};
+        frame.sharedResources[FrameTextureSlot::AmbientOcclusion].texture = {};
+        frame.sharedResources[FrameTextureSlot::AmbientOcclusion].graph = {};
         aoMetrics.active = false;
         aoMetrics.disabledReason = AmbientOcclusionDisabledReason::Unsupported;
         break;
@@ -4157,8 +4085,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     if (batchBufferResult.hasError()) {
       return batchBufferResult;
     }
-    meshletBatchBufferHandle =
-        bufferRings_[MeshletBatchRing][frameSlot].buffer->handle();
+    meshletBatchBufferHandle = bufferRings_.handle(MeshletBatchRing, frameSlot);
     meshletBatchBufferAddress =
         gpu_.getBufferDeviceAddress(meshletBatchBufferHandle);
   }
@@ -4197,7 +4124,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   const bool currentDepthVerificationAvailable =
       meshletCurrentFrameOcclusionRequested &&
       currentDepthVerificationExtentFits &&
-      nuri::isValid(currentFrameDepthVerificationPipelineHandle_) &&
+      nuri::isValid(pipelines_.currentFrameDepthVerification) &&
       nuri::isValid(currentFrameDepthVerificationTexture_);
   const uint32_t currentDepthVerificationTexId =
       currentDepthVerificationAvailable
@@ -4218,7 +4145,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       return counterResult;
     }
     meshletVisibilityCounterBuffer =
-        bufferRings_[VisibilityCounterRing][frameSlot].buffer->handle();
+        bufferRings_.handle(VisibilityCounterRing, frameSlot);
     if (!visibilityCounterPreparedForFrame) {
       visibilityCounterClear_.clear();
       visibilityCounterClear_.push_back(VisibilityCounterGpuData{});
@@ -4813,16 +4740,17 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
                            meshletDepthPrepassDependencyBufferAccessModes_,
                            instanceLodBoundsBuffer_->handle(),
                            RenderGraphAccessMode::Read);
-    buildMeshletDispatches(
-        meshletDepthPrepassDispatchItems_, meshletDepthPrepassPushConstants_,
-        meshletDepthPrepassDispatchDependencyBuffers_,
-        selectMeshletDepthPipeline(coverage, false, false),
-        selectMeshletDepthPipeline(coverage, false, true),
-        selectMeshletDepthPipeline(coverage, true, false),
-        selectMeshletDepthPipeline(coverage, true, true), CompareOp::Less, true,
-        "OpaqueMeshletDepth", kMeshDebugColor, MeshletOcclusionSource::Disabled,
-        0u, 0u, 0u, false, false, MeshletSourceFilter{});
-    if (meshletDepthPrepassDispatchItems_.empty()) {
+    buildMeshletDispatches(meshletDepthPrepassStream_.dispatches,
+                           meshletDepthPrepassStream_.constants,
+                           meshletDepthPrepassStream_.dependencies,
+                           selectMeshletDepthPipeline(coverage, false, false),
+                           selectMeshletDepthPipeline(coverage, false, true),
+                           selectMeshletDepthPipeline(coverage, true, false),
+                           selectMeshletDepthPipeline(coverage, true, true),
+                           CompareOp::Less, true, "OpaqueMeshletDepth",
+                           kMeshDebugColor, MeshletOcclusionSource::Disabled,
+                           0u, 0u, 0u, false, false, MeshletSourceFilter{});
+    if (meshletDepthPrepassStream_.dispatches.empty()) {
       meshletDepthPrepassEnabled = false;
       meshletDepthPrepassDependencyBuffers_.clear();
       meshletDepthPrepassDependencyBufferAccessModes_.clear();
@@ -4844,31 +4772,32 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
                                                : CompareOp::LessEqual;
     const MeshletPipelineHandle singleSidedInputPipeline =
         materialNormalInput
-            ? meshletNormalPipelines_[0]
+            ? pipelines_.meshletNormal[0]
             : selectMeshletDepthPipeline(CoverageMode::Sample1, false, false);
     const MeshletPipelineHandle doubleSidedInputPipeline =
         materialNormalInput
-            ? meshletNormalPipelines_[1]
+            ? pipelines_.meshletNormal[1]
             : selectMeshletDepthPipeline(CoverageMode::Sample1, false, true);
     const MeshletPipelineHandle alphaInputPipeline =
         materialNormalInput
-            ? meshletNormalPipelines_[2]
+            ? pipelines_.meshletNormal[2]
             : selectMeshletDepthPipeline(CoverageMode::Sample1, true, false);
     const MeshletPipelineHandle alphaDoubleSidedInputPipeline =
         materialNormalInput
-            ? meshletNormalPipelines_[3]
+            ? pipelines_.meshletNormal[3]
             : selectMeshletDepthPipeline(CoverageMode::Sample1, true, true);
     buildMeshletDispatches(
-        meshletNormalPrepassDispatchItems_, meshletNormalPrepassPushConstants_,
-        meshletNormalPrepassDispatchDependencyBuffers_,
-        singleSidedInputPipeline, doubleSidedInputPipeline, alphaInputPipeline,
+        meshletNormalPrepassStream_.dispatches,
+        meshletNormalPrepassStream_.constants,
+        meshletNormalPrepassStream_.dependencies, singleSidedInputPipeline,
+        doubleSidedInputPipeline, alphaInputPipeline,
         alphaDoubleSidedInputPipeline, normalPrepassCompare,
         meshletNormalPrepassWritesDepth,
         materialNormalInput ? "OpaqueMeshletNormals" : "OpaqueMeshletGTAODepth",
         0xff66ddff, MeshletOcclusionSource::Disabled, 0u, 0u, 0u, false, false,
         MeshletSourceFilter{.materialNormalUsesAuxPipelines =
                                 materialNormalInput});
-    if (meshletNormalPrepassDispatchItems_.empty()) {
+    if (meshletNormalPrepassStream_.dispatches.empty()) {
       meshletNormalPrepassEnabled = false;
       meshletNormalPrepassWritesDepth = false;
       meshletNormalPrepassDependencyBuffers_.clear();
@@ -4879,18 +4808,19 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   frame.metrics.opaque.msaaDepthPrepassDraws =
       msaaSelected ? saturateToU32(depthPrepassDrawItems_.size()) : 0u;
   frame.metrics.opaque.msaaDepthPrepassDispatches =
-      msaaSelected ? saturateToU32(meshletDepthPrepassDispatchItems_.size())
+      msaaSelected ? saturateToU32(meshletDepthPrepassStream_.dispatches.size())
                    : 0u;
   frame.metrics.opaque.gtaoAuxiliaryPrepassDraws =
       msaaGtaoAuxiliaryPrepass ? saturateToU32(normalPrepassDrawItems_.size())
                                : 0u;
   frame.metrics.opaque.gtaoAuxiliaryPrepassDispatches =
       msaaGtaoAuxiliaryPrepass
-          ? saturateToU32(meshletNormalPrepassDispatchItems_.size())
+          ? saturateToU32(meshletNormalPrepassStream_.dispatches.size())
           : 0u;
   frame.metrics.opaque.gtaoAuxiliaryWritesSingleSampleDepth =
-      msaaGtaoAuxiliaryPrepass && (!normalPrepassDrawItems_.empty() ||
-                                   !meshletNormalPrepassDispatchItems_.empty())
+      msaaGtaoAuxiliaryPrepass &&
+              (!normalPrepassDrawItems_.empty() ||
+               !meshletNormalPrepassStream_.dispatches.empty())
           ? 1u
           : 0u;
   std::span<const DrawItem> finalPassDrawItems = shadedBaseDrawItems;
@@ -5036,11 +4966,12 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   frame.metrics.opaque.computeDispatchX = computeDispatchX;
   const size_t meshletNormalDepthPrepassDraws =
       meshletNormalPrepassWritesDepth
-          ? meshletNormalPrepassDispatchItems_.size()
+          ? meshletNormalPrepassStream_.dispatches.size()
           : 0u;
-  frame.metrics.opaque.depthPrepassDraws = saturateToU32(
-      depthPrepassDrawItems_.size() + meshletDepthPrepassDispatchItems_.size() +
-      meshletNormalDepthPrepassDraws);
+  frame.metrics.opaque.depthPrepassDraws =
+      saturateToU32(depthPrepassDrawItems_.size() +
+                    meshletDepthPrepassStream_.dispatches.size() +
+                    meshletNormalDepthPrepassDraws);
   frame.metrics.opaque.depthPyramidLevels = 0u;
   frame.metrics.opaque.depthPrepassEnabled =
       (depthPrepassEnabled || meshletDepthPrepassEnabled ||
@@ -5049,7 +4980,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
           : 0u;
   aoMetrics.inputPassDraws =
       saturateToU32(normalPrepassDrawItems_.size() +
-                    meshletNormalPrepassDispatchItems_.size());
+                    meshletNormalPrepassStream_.dispatches.size());
   aoMetrics.normalPrepassDraws =
       materialNormalInput ? aoMetrics.inputPassDraws : 0u;
   if (gpuMainCullingEnabled && !gpuVisibilityCandidateIndices.empty()) {
@@ -5077,9 +5008,21 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
           uint32_t debugColor) -> PreparedGraphPass & {
     PreparedGraphPass &pass =
         out.emplace_back(drawItems_.get_allocator().resource());
-    pass.desc.dependencyBuffers = dependencyBuffers;
-    pass.desc.dependencyBufferAccessModes = dependencyBufferAccessModes;
-    pass.desc.dependencyTextures = dependencyTextures;
+    pass.bufferUses.reserve(dependencyBuffers.size());
+    for (size_t index = 0u; index < dependencyBuffers.size(); ++index) {
+      pass.bufferUses.push_back(RenderGraphImportedBufferUse{
+          .buffer = dependencyBuffers[index],
+          .access = index < dependencyBufferAccessModes.size()
+                        ? dependencyBufferAccessModes[index]
+                        : RenderGraphAccessMode::Read,
+      });
+    }
+    pass.textureUses.reserve(dependencyTextures.size());
+    for (TextureHandle texture : dependencyTextures) {
+      pass.textureUses.push_back({.texture = texture});
+    }
+    pass.desc.importedBufferUses = pass.bufferUses;
+    pass.desc.importedTextureUses = pass.textureUses;
     pass.desc.draws = draws;
     pass.desc.meshDispatches = meshDispatches;
     pass.desc.drawBuffersPreResolved = true;
@@ -5097,8 +5040,16 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     PreparedGraphPass &pass =
         out.emplace_back(drawItems_.get_allocator().resource());
     pass.desc.preDispatches = dispatches;
-    pass.desc.dependencyBuffers = dependencyBuffers;
-    pass.desc.dependencyTextures = dependencyTextures;
+    pass.bufferUses.reserve(dependencyBuffers.size());
+    for (BufferHandle buffer : dependencyBuffers) {
+      pass.bufferUses.push_back({.buffer = buffer});
+    }
+    pass.textureUses.reserve(dependencyTextures.size());
+    for (TextureHandle texture : dependencyTextures) {
+      pass.textureUses.push_back({.texture = texture});
+    }
+    pass.desc.importedBufferUses = pass.bufferUses;
+    pass.desc.importedTextureUses = pass.textureUses;
     pass.desc.debugLabel = debugLabel;
     pass.desc.debugColor = kComputeDispatchColor;
     pass.desc.gpuTimingScope = timingScope;
@@ -5107,7 +5058,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   };
   bool pickPassSubmitted = false;
   if (pendingPickRequest_.has_value() && nuri::isValid(pickIdTexture_) &&
-      nuri::isValid(meshPickPipelines_[surfaceVariantIndex(false, false)])) {
+      nuri::isValid(pipelines_.meshPick[surfaceVariantIndex(false, false)])) {
     NURI_PROFILER_ZONE("OpaqueRenderer.pick_pass",
                        NURI_PROFILER_COLOR_CMD_DRAW);
     pickDrawItems_.clear();
@@ -5176,7 +5127,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   }
   if (meshletDepthPrepassEnabled) {
     PreparedGraphPass &depthPass = makePreparedPass(
-        {}, meshletDepthPrepassDispatchItems_,
+        {}, meshletDepthPrepassStream_.dispatches,
         meshletDepthPrepassDependencyBuffers_,
         meshletDepthPrepassDependencyBufferAccessModes_,
         passDependencyTextures_, "Opaque Meshlet Depth Pre-Pass",
@@ -5228,16 +5179,17 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       transmissionVisibilityDepthEnabled;
   const bool hasMeshletNormalPrepass =
       meshletNormalPrepassEnabled &&
-      !meshletNormalPrepassDispatchItems_.empty();
+      !meshletNormalPrepassStream_.dispatches.empty();
   const bool hasClassicNormalPrepass =
       normalPrepassEnabled && !normalPrepassDrawItems_.empty();
   const bool hasClassicNormalDepthPrepass =
       hasClassicNormalPrepass && classicNormalPrepassWritesDepth;
   if (hasMeshletNormalPrepass &&
       (!materialNormalInput ||
-       nuri::isValid(frame.sharedResources.normalTexture))) {
+       nuri::isValid(
+           frame.sharedResources[FrameTextureSlot::Normal].texture))) {
     PreparedGraphPass &normalPass = makePreparedPass(
-        {}, meshletNormalPrepassDispatchItems_,
+        {}, meshletNormalPrepassStream_.dispatches,
         meshletNormalPrepassDependencyBuffers_,
         meshletNormalPrepassDependencyBufferAccessModes_,
         passDependencyTextures_,
@@ -5249,7 +5201,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       normalPass.desc.color = {.loadOp = LoadOp::Clear,
                                .storeOp = StoreOp::Store,
                                .clearColor = kFrameCompositionNormalClearValue};
-      normalPass.colorTextureHandle = frame.sharedResources.normalTexture;
+      normalPass.colorTextureHandle =
+          frame.sharedResources[FrameTextureSlot::Normal].texture;
     }
     normalPass.desc.depth = {.loadOp = meshletNormalPrepassWritesDepth
                                            ? LoadOp::Clear
@@ -5258,8 +5211,9 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
                              .clearDepth = kClearDepthOne,
                              .clearStencil = 0};
     normalPass.depthTextureHandle =
-        msaaGtaoAuxiliaryPrepass ? frame.sharedResources.sceneDepthTexture
-                                 : sceneDepthTarget;
+        msaaGtaoAuxiliaryPrepass
+            ? frame.sharedResources[FrameTextureSlot::SceneDepth].texture
+            : sceneDepthTarget;
     if (meshletNormalPrepassWritesDepth && !preDispatchSubmittedBeforeNormal) {
       normalPass.desc.preDispatches = std::span<const ComputeDispatchItem>(
           preDispatches_.data(), preDispatches_.size());
@@ -5273,12 +5227,13 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     normalPass.kind = PreparedPassKind::Normal;
     normalPass.publishesDepth = meshletNormalPrepassWritesDepth;
     aoMetrics.inputPassDraws =
-        saturateToU32(meshletNormalPrepassDispatchItems_.size());
+        saturateToU32(meshletNormalPrepassStream_.dispatches.size());
     aoMetrics.normalPrepassDraws =
         materialNormalInput ? aoMetrics.inputPassDraws : 0u;
   } else if (hasClassicNormalPrepass &&
              (!materialNormalInput ||
-              nuri::isValid(frame.sharedResources.normalTexture))) {
+              nuri::isValid(
+                  frame.sharedResources[FrameTextureSlot::Normal].texture))) {
     PreparedGraphPass &normalPass = makePreparedPass(
         normalPrepassDrawItems_, {}, passDependencyBuffers_,
         passDependencyBufferAccessModes_, passDependencyTextures_,
@@ -5290,7 +5245,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       normalPass.desc.color = {.loadOp = LoadOp::Clear,
                                .storeOp = StoreOp::Store,
                                .clearColor = kFrameCompositionNormalClearValue};
-      normalPass.colorTextureHandle = frame.sharedResources.normalTexture;
+      normalPass.colorTextureHandle =
+          frame.sharedResources[FrameTextureSlot::Normal].texture;
     }
     normalPass.desc.depth = {
         .loadOp = hasClassicNormalDepthPrepass ? LoadOp::Clear : LoadOp::Load,
@@ -5298,8 +5254,9 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         .clearDepth = kClearDepthOne,
         .clearStencil = 0};
     normalPass.depthTextureHandle =
-        msaaGtaoAuxiliaryPrepass ? frame.sharedResources.sceneDepthTexture
-                                 : sceneDepthTarget;
+        msaaGtaoAuxiliaryPrepass
+            ? frame.sharedResources[FrameTextureSlot::SceneDepth].texture
+            : sceneDepthTarget;
     if (hasClassicNormalDepthPrepass) {
       if (!preDispatchSubmittedBeforeNormal) {
         normalPass.desc.preDispatches = std::span<const ComputeDispatchItem>(
@@ -5351,7 +5308,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       depthPyramidPushConstants_.push_back(
           glm::uvec4(sourceTexId, samplerId, 2u, 0u));
       DrawItem draw{};
-      draw.pipeline = currentFrameDepthVerificationPipelineHandle_;
+      draw.pipeline = pipelines_.currentFrameDepthVerification;
       draw.vertexCount = 3u;
       draw.pushConstants =
           std::span<const std::byte>(reinterpret_cast<const std::byte *>(
@@ -5391,7 +5348,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       depthPyramidPushConstants_.push_back(
           glm::uvec4(sourceTexId, samplerId, level == 0u ? 1u : 0u, 0u));
       DrawItem draw{};
-      draw.pipeline = depthPyramidPipelineHandle_;
+      draw.pipeline = pipelines_.depthPyramid;
       draw.vertexCount = 3u;
       draw.pushConstants =
           std::span<const std::byte>(reinterpret_cast<const std::byte *>(
@@ -5505,10 +5462,14 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   mainPassDependencyTextureAccessModes_.assign(
       mainPassDependencyTextures_.size(), RenderGraphAccessMode::Read);
   if (sceneGpu->frameData.ddgiReserved1 != 0u &&
-      nuri::isValid(frame.sharedResources.ddgiOpaqueSurfaceCacheTexture)) {
+      nuri::isValid(
+          frame.sharedResources[FrameTextureSlot::DdgiOpaqueSurfaceCache]
+              .texture)) {
     const size_t oldTextureDependencyCount = mainPassDependencyTextures_.size();
-    appendUniqueDependency(mainPassDependencyTextures_,
-                           frame.sharedResources.ddgiOpaqueSurfaceCacheTexture);
+    appendUniqueDependency(
+        mainPassDependencyTextures_,
+        frame.sharedResources[FrameTextureSlot::DdgiOpaqueSurfaceCache]
+            .texture);
     if (mainPassDependencyTextures_.size() != oldTextureDependencyCount) {
       mainPassDependencyTextureAccessModes_.push_back(
           RenderGraphAccessMode::Read);
@@ -5520,7 +5481,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         meshletVisibilityCounterBuffer,
         RenderGraphAccessMode::Read | RenderGraphAccessMode::Write);
   }
-  if ((sceneGpu->shadowFlags & kShadowFrameFlagEnabled) != 0u &&
+  if ((sceneGpu->frameData.shadowFlags & kShadowFrameFlagEnabled) != 0u &&
       frame.sharedResources.shadowFrameGpuData.has_value()) {
     appendUniqueDependency(mainPassDependencyBuffers_,
                            mainPassDependencyBufferAccessModes_,
@@ -5543,10 +5504,12 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     }
   }
   if (ambientOcclusionSettings.active &&
-      nuri::isValid(frame.sharedResources.ambientOcclusionTexture)) {
+      nuri::isValid(
+          frame.sharedResources[FrameTextureSlot::AmbientOcclusion].texture)) {
     const size_t oldTextureDependencyCount = mainPassDependencyTextures_.size();
-    appendUniqueDependency(mainPassDependencyTextures_,
-                           frame.sharedResources.ambientOcclusionTexture);
+    appendUniqueDependency(
+        mainPassDependencyTextures_,
+        frame.sharedResources[FrameTextureSlot::AmbientOcclusion].texture);
     if (mainPassDependencyTextures_.size() != oldTextureDependencyCount) {
       mainPassDependencyTextureAccessModes_.push_back(
           RenderGraphAccessMode::Read);
@@ -5610,9 +5573,9 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       frame.metrics.visibility.currentFrameHiZActive = 1u;
     }
   }
-  meshletDispatchItems_.clear();
-  meshletPushConstants_.clear();
-  meshletDispatchDependencyBuffers_.clear();
+  meshletMainStream_.dispatches.clear();
+  meshletMainStream_.constants.clear();
+  meshletMainStream_.dependencies.clear();
   meshletCompactionWorkItems_.clear();
   meshletCompactionPushConstants_.clear();
   meshletCompactionDispatches_.clear();
@@ -5653,8 +5616,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         nuri::isValid(selectMeshletScenePipeline(true, coverage, true, true)) &&
         meshletVisibilityCounterBufferAddress != 0u;
     const uint64_t mainCandidateCount = buildMeshletDispatches(
-        meshletDispatchItems_, meshletPushConstants_,
-        meshletDispatchDependencyBuffers_,
+        meshletMainStream_.dispatches, meshletMainStream_.constants,
+        meshletMainStream_.dependencies,
         selectMeshletScenePipeline(meshletPreTaskCompactionEligible, coverage,
                                    false, false),
         selectMeshletScenePipeline(meshletPreTaskCompactionEligible, coverage,
@@ -5675,11 +5638,12 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
                 meshletMainSourceMask.data(), meshletMainSourceMask.size())});
     bool meshletIndirectDispatchUsed = false;
     constexpr size_t kMeshDispatchCommandBytes = sizeof(uint32_t) * 3u;
-    if (meshletPreTaskCompactionEligible && !meshletDispatchItems_.empty()) {
-      const size_t dispatchCount = meshletDispatchItems_.size();
+    if (meshletPreTaskCompactionEligible &&
+        !meshletMainStream_.dispatches.empty()) {
+      const size_t dispatchCount = meshletMainStream_.dispatches.size();
       uint64_t workItemCount64 = 0u;
       uint64_t compactRecordCount64 = 0u;
-      for (const MeshDispatchItem &dispatch : meshletDispatchItems_) {
+      for (const MeshDispatchItem &dispatch : meshletMainStream_.dispatches) {
         const uint64_t groupCount = static_cast<uint64_t>(dispatch.groupsX) *
                                     dispatch.groupsY * dispatch.groupsZ;
         workItemCount64 += groupCount;
@@ -5711,20 +5675,20 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         if (compactRingResult.hasError()) {
           return compactRingResult;
         }
-        const DynamicBufferSlot &workSlot =
-            bufferRings_[VisibilityMeshletDispatchRing][frameSlot];
-        const DynamicBufferSlot &commandSlot =
-            bufferRings_[VisibilityMeshletIndirectCommandRing][frameSlot];
-        const DynamicBufferSlot &compactSlot =
-            bufferRings_[MeshletCompactionRing][frameSlot];
-        if (workSlot.buffer && workSlot.buffer->valid() && commandSlot.buffer &&
-            commandSlot.buffer->valid() && compactSlot.buffer &&
-            compactSlot.buffer->valid()) {
+        const BufferHandle workBuffer =
+            bufferRings_.handle(VisibilityMeshletDispatchRing, frameSlot);
+        const BufferHandle commandBuffer = bufferRings_.handle(
+            VisibilityMeshletIndirectCommandRing, frameSlot);
+        const BufferHandle compactBuffer =
+            bufferRings_.handle(MeshletCompactionRing, frameSlot);
+        if (nuri::isValid(workBuffer) && nuri::isValid(commandBuffer) &&
+            nuri::isValid(compactBuffer)) {
           meshletCompactionWorkItems_.reserve(workItemCount);
           uint32_t outputRecordBase = 0u;
           for (size_t i = 0; i < dispatchCount; ++i) {
-            const MeshDispatchItem &dispatch = meshletDispatchItems_[i];
-            const MeshletPushConstants &constants = meshletPushConstants_[i];
+            const MeshDispatchItem &dispatch = meshletMainStream_.dispatches[i];
+            const MeshletPushConstants &constants =
+                meshletMainStream_.constants[i];
             const uint64_t dispatchRecordCapacity =
                 static_cast<uint64_t>(dispatch.groupsX) * dispatch.groupsY *
                 dispatch.groupsZ * kOpaqueMeshletTaskCandidatesPerGroup;
@@ -5745,12 +5709,12 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
           meshletCompactionCounterClear_.assign(dispatchCount, 0u);
           const std::array updates{
               BufferUpdate{
-                  .buffer = workSlot.buffer->handle(),
+                  .buffer = workBuffer,
                   .data = std::as_bytes(
                       std::span<const MeshletCompactionWorkItemGpuData>(
                           meshletCompactionWorkItems_.data(),
                           meshletCompactionWorkItems_.size()))},
-              BufferUpdate{.buffer = compactSlot.buffer->handle(),
+              BufferUpdate{.buffer = compactBuffer,
                            .data = std::as_bytes(std::span<const uint32_t>(
                                meshletCompactionCounterClear_.data(),
                                meshletCompactionCounterClear_.size()))},
@@ -5759,11 +5723,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
           if (updateResult.hasError()) {
             return updateResult;
           }
-          const BufferHandle workBuffer = workSlot.buffer->handle();
-          const BufferHandle commandBuffer = commandSlot.buffer->handle();
-          const BufferHandle compactBuffer = compactSlot.buffer->handle();
           const BufferHandle remapBuffer =
-              bufferRings_[InstanceRemapRing][frameSlot].buffer->handle();
+              bufferRings_.handle(InstanceRemapRing, frameSlot);
           const uint64_t workAddress = gpu_.getBufferDeviceAddress(workBuffer);
           const uint64_t commandAddress =
               gpu_.getBufferDeviceAddress(commandBuffer);
@@ -5836,7 +5797,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
             meshletCompactionFinalizeDependencyBuffers_.assign(
                 {compactBuffer, commandBuffer, meshletVisibilityCounterBuffer});
             for (const MeshletDispatchDependencyBuffers &dependencies :
-                 meshletDispatchDependencyBuffers_) {
+                 meshletMainStream_.dependencies) {
               for (const BufferHandle handle : dependencies.buffers) {
                 appendUniqueDependency(mainPassDependencyBuffers_,
                                        mainPassDependencyBufferAccessModes_,
@@ -5903,11 +5864,11 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
             meshletCompactionDispatches_.push_back(publishDispatch);
             uint32_t patchedRecordBase = 0u;
             for (size_t i = 0; i < dispatchCount; ++i) {
-              MeshDispatchItem &meshDispatch = meshletDispatchItems_[i];
-              MeshletPushConstants &constants = meshletPushConstants_[i];
+              MeshDispatchItem &meshDispatch = meshletMainStream_.dispatches[i];
+              MeshletPushConstants &constants = meshletMainStream_.constants[i];
               for (const BufferHandle handle : {compactBuffer, commandBuffer}) {
                 appendUniqueDependency(
-                    meshletDispatchDependencyBuffers_[i].buffers, handle);
+                    meshletMainStream_.dependencies[i].buffers, handle);
               }
               const uint64_t dispatchRecordCapacity =
                   static_cast<uint64_t>(meshDispatch.groupsX) *
@@ -5924,7 +5885,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
                   reinterpret_cast<const std::byte *>(&constants),
                   sizeof(constants));
               meshDispatch.dependencyBuffers =
-                  meshletDispatchDependencyBuffers_[i].span();
+                  meshletMainStream_.dependencies[i].span();
               meshDispatch.command = MeshDispatchCommandType::Indirect;
               meshDispatch.indirectBuffer = commandBuffer;
               meshDispatch.indirectBufferOffset =
@@ -5941,8 +5902,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       }
     }
     if (!meshletPreTaskCompactionUsed && meshletIndirectDispatchEligible &&
-        !meshletDispatchItems_.empty()) {
-      const size_t dispatchCount = meshletDispatchItems_.size();
+        !meshletMainStream_.dispatches.empty()) {
+      const size_t dispatchCount = meshletMainStream_.dispatches.size();
       if (dispatchCount <=
               static_cast<size_t>(std::numeric_limits<uint32_t>::max()) &&
           instanceCount <=
@@ -5970,27 +5931,25 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
             return indirectRingResult;
           }
         }
-        const DynamicBufferSlot &dispatchSlot =
-            bufferRings_[VisibilityMeshletDispatchRing][frameSlot];
-        const DynamicBufferSlot &commandSlot =
-            bufferRings_[VisibilityMeshletIndirectCommandRing][frameSlot];
-        const DynamicBufferSlot &candidateSlot =
-            bufferRings_[VisibilityCandidateRing][frameSlot];
-        const DynamicBufferSlot &passSlot =
-            bufferRings_[VisibilityPassRing][frameSlot];
-        const DynamicBufferSlot &remapSlot =
-            bufferRings_[InstanceRemapRing][frameSlot];
-        if (candidateMapAddressable && dispatchSlot.buffer &&
-            dispatchSlot.buffer->valid() && commandSlot.buffer &&
-            commandSlot.buffer->valid() && candidateSlot.buffer &&
-            candidateSlot.buffer->valid() && passSlot.buffer &&
-            passSlot.buffer->valid() && remapSlot.buffer &&
-            remapSlot.buffer->valid()) {
+        const BufferHandle dispatchBuffer =
+            bufferRings_.handle(VisibilityMeshletDispatchRing, frameSlot);
+        const BufferHandle commandBuffer = bufferRings_.handle(
+            VisibilityMeshletIndirectCommandRing, frameSlot);
+        const BufferHandle candidateBuffer =
+            bufferRings_.handle(VisibilityCandidateRing, frameSlot);
+        const BufferHandle passBuffer =
+            bufferRings_.handle(VisibilityPassRing, frameSlot);
+        const BufferHandle remapBuffer =
+            bufferRings_.handle(InstanceRemapRing, frameSlot);
+        if (candidateMapAddressable && nuri::isValid(dispatchBuffer) &&
+            nuri::isValid(commandBuffer) && nuri::isValid(candidateBuffer) &&
+            nuri::isValid(passBuffer) && nuri::isValid(remapBuffer)) {
           visibilityMeshletDispatchGpuData_.clear();
           visibilityMeshletDispatchGpuData_.reserve(dispatchCount);
           for (size_t i = 0; i < dispatchCount; ++i) {
-            const MeshDispatchItem &dispatch = meshletDispatchItems_[i];
-            const MeshletPushConstants &constants = meshletPushConstants_[i];
+            const MeshDispatchItem &dispatch = meshletMainStream_.dispatches[i];
+            const MeshletPushConstants &constants =
+                meshletMainStream_.constants[i];
             visibilityMeshletDispatchGpuData_.push_back(
                 VisibilityMeshletDispatchGpuData{
                     .groups = glm::uvec4(dispatch.groupsX, dispatch.groupsY,
@@ -6019,12 +5978,12 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
           }
           const std::array updates{
               BufferUpdate{
-                  .buffer = dispatchSlot.buffer->handle(),
+                  .buffer = dispatchBuffer,
                   .data = std::as_bytes(
                       std::span<const VisibilityMeshletDispatchGpuData>(
                           visibilityMeshletDispatchGpuData_.data(),
                           visibilityMeshletDispatchGpuData_.size()))},
-              BufferUpdate{.buffer = dispatchSlot.buffer->handle(),
+              BufferUpdate{.buffer = dispatchBuffer,
                            .data = std::as_bytes(std::span<const uint32_t>(
                                visibilityMeshletCandidateMap_.data(),
                                visibilityMeshletCandidateMap_.size())),
@@ -6034,11 +5993,6 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
           if (updateResult.hasError()) {
             return updateResult;
           }
-          const BufferHandle commandBuffer = commandSlot.buffer->handle();
-          const BufferHandle dispatchBuffer = dispatchSlot.buffer->handle();
-          const BufferHandle candidateBuffer = candidateSlot.buffer->handle();
-          const BufferHandle passBuffer = passSlot.buffer->handle();
-          const BufferHandle remapBuffer = remapSlot.buffer->handle();
           const uint64_t commandAddress =
               gpu_.getBufferDeviceAddress(commandBuffer);
           const uint64_t dispatchAddress =
@@ -6110,8 +6064,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
             dispatch.debugLabel = "Opaque Visibility Indirect Mesh Dispatch";
             dispatch.debugColor = kComputeDispatchColor;
             visibilityMeshletGpuDispatches_.push_back(dispatch);
-            for (size_t i = 0; i < meshletDispatchItems_.size(); ++i) {
-              MeshDispatchItem &meshDispatch = meshletDispatchItems_[i];
+            for (size_t i = 0; i < meshletMainStream_.dispatches.size(); ++i) {
+              MeshDispatchItem &meshDispatch = meshletMainStream_.dispatches[i];
               meshDispatch.command = MeshDispatchCommandType::Indirect;
               meshDispatch.indirectBuffer = commandBuffer;
               meshDispatch.indirectBufferOffset =
@@ -6124,7 +6078,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       }
     }
     uint64_t submittedMeshletTaskGroups = 0u;
-    for (const MeshDispatchItem &dispatch : meshletDispatchItems_) {
+    for (const MeshDispatchItem &dispatch : meshletMainStream_.dispatches) {
       submittedMeshletTaskGroups += static_cast<uint64_t>(dispatch.groupsX) *
                                     dispatch.groupsY * dispatch.groupsZ;
     }
@@ -6132,9 +6086,9 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       finalPassDrawItems = {};
     }
     frame.metrics.opaque.meshletModeActive =
-        meshletDispatchItems_.empty() ? 0u : 1u;
+        meshletMainStream_.dispatches.empty() ? 0u : 1u;
     frame.metrics.opaque.meshletDispatches =
-        saturateToU32(meshletDispatchItems_.size());
+        saturateToU32(meshletMainStream_.dispatches.size());
     frame.metrics.opaque.meshletTaskGroups =
         saturateToU32(submittedMeshletTaskGroups);
     frame.metrics.opaque.meshletCandidateCount =
@@ -6143,7 +6097,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         saturateToU32(mainCandidateCount);
     frame.metrics.visibility.indirectMeshDispatchCount =
         meshletIndirectDispatchUsed
-            ? saturateToU32(meshletDispatchItems_.size())
+            ? saturateToU32(meshletMainStream_.dispatches.size())
             : 0u;
     NURI_PROFILER_ZONE_END();
   }
@@ -6166,13 +6120,13 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     opaqueMetrics.meshletMainRepresentedItems = representedItems;
     opaqueMetrics.meshletAlphaMaskedMainItems = alphaRepresentedItems;
     opaqueMetrics.meshletMainDispatches =
-        saturateToU32(meshletDispatchItems_.size());
+        saturateToU32(meshletMainStream_.dispatches.size());
     const auto sameMeshletPipeline = [](MeshletPipelineHandle lhs,
                                         MeshletPipelineHandle rhs) noexcept {
       return lhs.index == rhs.index && lhs.generation == rhs.generation;
     };
     uint32_t alphaDispatches = 0u;
-    for (const MeshDispatchItem &dispatch : meshletDispatchItems_) {
+    for (const MeshDispatchItem &dispatch : meshletMainStream_.dispatches) {
       bool alphaPipeline = false;
       for (const bool compacted : {false, true}) {
         for (const bool doubleSided : {false, true}) {
@@ -6187,18 +6141,22 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     }
     opaqueMetrics.meshletAlphaMaskedMainDispatches = alphaDispatches;
   }
-  pass.desc.dependencyBuffers = std::span<const BufferHandle>(
-      mainPassDependencyBuffers_.data(), mainPassDependencyBuffers_.size());
-  pass.desc.dependencyBufferAccessModes =
-      std::span<const RenderGraphAccessMode>(
-          mainPassDependencyBufferAccessModes_.data(),
-          mainPassDependencyBufferAccessModes_.size());
-  pass.desc.dependencyTextures = std::span<const TextureHandle>(
-      mainPassDependencyTextures_.data(), mainPassDependencyTextures_.size());
-  pass.desc.dependencyTextureAccessModes =
-      std::span<const RenderGraphAccessMode>(
-          mainPassDependencyTextureAccessModes_.data(),
-          mainPassDependencyTextureAccessModes_.size());
+  pass.bufferUses.reserve(mainPassDependencyBuffers_.size());
+  for (size_t index = 0u; index < mainPassDependencyBuffers_.size(); ++index) {
+    pass.bufferUses.push_back({
+        .buffer = mainPassDependencyBuffers_[index],
+        .access = mainPassDependencyBufferAccessModes_[index],
+    });
+  }
+  pass.textureUses.reserve(mainPassDependencyTextures_.size());
+  for (size_t index = 0u; index < mainPassDependencyTextures_.size(); ++index) {
+    pass.textureUses.push_back({
+        .texture = mainPassDependencyTextures_[index],
+        .access = mainPassDependencyTextureAccessModes_[index],
+    });
+  }
+  pass.desc.importedBufferUses = pass.bufferUses;
+  pass.desc.importedTextureUses = pass.textureUses;
   uint32_t msaaAlphaMaskedDrawCount = 0u;
   if (msaaSelected && !finalPassDrawItems.empty()) {
     msaaPassDrawItems_.assign(finalPassDrawItems.begin(),
@@ -6217,8 +6175,9 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
                                                    msaaPassDrawItems_.size());
   }
   pass.desc.draws = finalPassDrawItems;
-  pass.desc.meshDispatches = std::span<const MeshDispatchItem>(
-      meshletDispatchItems_.data(), meshletDispatchItems_.size());
+  pass.desc.meshDispatches =
+      std::span<const MeshDispatchItem>(meshletMainStream_.dispatches.data(),
+                                        meshletMainStream_.dispatches.size());
   for (const DrawItem &draw : finalPassDrawItems) {
     const bool equalReadOnly = draw.useDepthState &&
                                draw.depthState.compareOp == CompareOp::Equal &&
@@ -6231,7 +6190,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         draw.depthState.isDepthWriteEnabled;
     opaqueMetrics.mainLessWriteDraws += lessWrite ? 1u : 0u;
   }
-  for (const MeshDispatchItem &dispatch : meshletDispatchItems_) {
+  for (const MeshDispatchItem &dispatch : meshletMainStream_.dispatches) {
     const bool equalReadOnly =
         dispatch.useDepthState &&
         dispatch.depthState.compareOp == CompareOp::Equal &&
@@ -6263,8 +6222,9 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   pass.desc.borrowPayload = mainPreDispatches_.empty();
   pass.kind = PreparedPassKind::Main;
   const TextureHandle sceneColorTarget =
-      msaaSelected ? frame.sharedResources.msaaSceneColorTexture
-                   : frame.sharedResources.sceneColorTexture;
+      msaaSelected
+          ? frame.sharedResources[FrameTextureSlot::MsaaSceneColor].texture
+          : frame.sharedResources[FrameTextureSlot::SceneColor].texture;
   pass.colorTextureHandle = sceneColorTarget;
   AntiAliasingFrameMetrics &aaMetrics = frame.metrics.antiAliasing;
   aaMetrics.msaaMainColorFormat = kFrameCompositionSceneColorFormat;
@@ -6311,8 +6271,9 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
                 out.end() - 1);
   }
   if (meshletActive && reactiveMaskRequired &&
-      nuri::isValid(frame.sharedResources.reactiveMaskTexture) &&
-      nuri::isValid(meshletReactiveMaskPipelines_[0])) {
+      nuri::isValid(
+          frame.sharedResources[FrameTextureSlot::ReactiveMask].texture) &&
+      nuri::isValid(pipelines_.meshletReactiveMask[0])) {
     const bool motionUncertainReactiveMode =
         hasTaaVelocityInstances &&
         velocityInstanceFlagsMode != VelocityInstanceFlagsMode::AllValid;
@@ -6347,14 +6308,15 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         static_cast<float>(potentialReactiveDraws) / drawDenominator;
     if (potentialReactiveDraws > 0u) {
       buildMeshletDispatches(
-          meshletReactiveMaskDispatchItems_, meshletReactiveMaskPushConstants_,
-          meshletReactiveMaskDispatchDependencyBuffers_,
-          meshletReactiveMaskPipelines_[0], meshletReactiveMaskPipelines_[1],
+          meshletReactiveMaskStream_.dispatches,
+          meshletReactiveMaskStream_.constants,
+          meshletReactiveMaskStream_.dependencies,
+          pipelines_.meshletReactiveMask[0], pipelines_.meshletReactiveMask[1],
           {}, {}, CompareOp::LessEqual, false, "OpaqueMeshletReactiveMask",
           0xff33cc88, MeshletOcclusionSource::Disabled, 0u, 0u,
           velocityFrameDataAddress, false, false,
           MeshletSourceFilter{.alphaMaskedOnly = !motionUncertainReactiveMode});
-      if (!meshletReactiveMaskDispatchItems_.empty()) {
+      if (!meshletReactiveMaskStream_.dispatches.empty()) {
         populateCoverageDependencyBuffers(
             reactivePassDependencyBuffers_,
             reactivePassDependencyBufferAccessModes_);
@@ -6366,7 +6328,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
                                  handle, RenderGraphAccessMode::Read);
         }
         PreparedGraphPass &reactivePass = makePreparedPass(
-            {}, meshletReactiveMaskDispatchItems_,
+            {}, meshletReactiveMaskStream_.dispatches,
             reactivePassDependencyBuffers_,
             reactivePassDependencyBufferAccessModes_, passDependencyTextures_,
             "Opaque Meshlet Reactive Mask Pass", 0xff33cc88);
@@ -6375,7 +6337,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
             .storeOp = StoreOp::Store,
             .clearColor = kFrameCompositionReactiveMaskClearValue};
         reactivePass.colorTextureHandle =
-            frame.sharedResources.reactiveMaskTexture;
+            frame.sharedResources[FrameTextureSlot::ReactiveMask].texture;
         reactivePass.desc.depth = {.loadOp = LoadOp::Load,
                                    .storeOp = StoreOp::Store,
                                    .clearDepth = kClearDepthOne,
@@ -6392,14 +6354,15 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
                                  : PreparedPassPhase::MainLighting;
         reactivePass.kind = PreparedPassKind::ReactiveMask;
         aaMetrics.reactiveMaskDrawCount =
-            saturateToU32(meshletReactiveMaskDispatchItems_.size());
+            saturateToU32(meshletReactiveMaskStream_.dispatches.size());
         aaMetrics.reactiveMaskPassCount = 1u;
       }
     }
   }
   if (!meshletActive && reactiveMaskRequired &&
-      nuri::isValid(frame.sharedResources.reactiveMaskTexture) &&
-      nuri::isValid(meshReactiveMaskPipelines_[0])) {
+      nuri::isValid(
+          frame.sharedResources[FrameTextureSlot::ReactiveMask].texture) &&
+      nuri::isValid(pipelines_.meshReactiveMask[0])) {
     reactiveMaskDrawItems_.clear();
     reactiveMaskDrawItems_.reserve(shadedBaseDrawItems.size());
     const bool motionUncertainReactiveMode =
@@ -6473,7 +6436,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
           .storeOp = StoreOp::Store,
           .clearColor = kFrameCompositionReactiveMaskClearValue};
       reactivePass.colorTextureHandle =
-          frame.sharedResources.reactiveMaskTexture;
+          frame.sharedResources[FrameTextureSlot::ReactiveMask].texture;
       reactivePass.desc.depth = {.loadOp = LoadOp::Load,
                                  .storeOp = StoreOp::Store,
                                  .clearDepth = kClearDepthOne,
@@ -6493,10 +6456,13 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     }
   }
   const bool gtaoTemporalVelocityRequested =
-      presentationAAPlanForFrame(frame).gtaoTemporal &&
+      frame.presentationAA.gtaoTemporal &&
       hasTemporalCameraContinuity(frame.camera) &&
       frame.camera.temporalDataValid &&
-      nuri::isValid(frame.sharedResources.previousAmbientOcclusionTexture);
+      nuri::isValid(frame
+                        .sharedResources
+                            [FrameHistoryTextureSlot::PreviousAmbientOcclusion]
+                        .texture);
   const bool depthMotionVectorEligible =
       hasTaaVelocityInstances && staticVelocityScene &&
       canReuseStaticPreviousMatrices &&
@@ -6504,9 +6470,10 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       !needsVelocityGeometryUpload &&
       hasTemporalCameraContinuity(frame.camera) &&
       frame.camera.temporalDataValid &&
-      nuri::isValid(frame.sharedResources.motionVectorTexture) &&
+      nuri::isValid(
+          frame.sharedResources[FrameTextureSlot::MotionVector].texture) &&
       nuri::isValid(sceneDepthTexture) &&
-      nuri::isValid(depthMotionVectorPipelineHandle_);
+      nuri::isValid(pipelines_.depthMotionVector);
   bool depthMotionVectorPassBuilt = false;
   if (depthMotionVectorEligible) {
     const uint32_t depthTexId = gpu_.getTextureBindlessIndex(sceneDepthTexture);
@@ -6514,7 +6481,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     if (depthTexId != kInvalidTextureBindlessIndex &&
         pointSamplerId != kInvalidTextureBindlessIndex) {
       const TextureDimensions motionVectorDimensions =
-          gpu_.getTextureDimensions(frame.sharedResources.motionVectorTexture);
+          gpu_.getTextureDimensions(
+              frame.sharedResources[FrameTextureSlot::MotionVector].texture);
       const float inverseWidth =
           1.0f / static_cast<float>(std::max(motionVectorDimensions.width, 1u));
       const float inverseHeight =
@@ -6534,7 +6502,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
               glm::inverse(frame.camera.currentJitteredViewProj),
       };
       depthMotionVectorDrawItem_ = {};
-      depthMotionVectorDrawItem_.pipeline = depthMotionVectorPipelineHandle_;
+      depthMotionVectorDrawItem_.pipeline = pipelines_.depthMotionVector;
       depthMotionVectorDrawItem_.vertexCount = 3u;
       depthMotionVectorDrawItem_.instanceCount = 1u;
       depthMotionVectorDrawItem_.pushConstants = std::span<const std::byte>(
@@ -6553,7 +6521,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
           .storeOp = StoreOp::Store,
           .clearColor = kFrameCompositionMotionVectorClearValue};
       velocityPass.colorTextureHandle =
-          frame.sharedResources.motionVectorTexture;
+          frame.sharedResources[FrameTextureSlot::MotionVector].texture;
       velocityPass.desc.gpuTimingScope = GpuTimingScope::Velocity;
       velocityPass.desc.borrowPayload = true;
       velocityPass.phase = gtaoTemporalVelocityRequested
@@ -6572,16 +6540,17 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     }
   }
   if (meshletActive && temporalMotionRequired &&
-      nuri::isValid(frame.sharedResources.motionVectorTexture) &&
-      nuri::isValid(meshletVelocityPipelines_[0]) && instanceCount > 0 &&
+      nuri::isValid(
+          frame.sharedResources[FrameTextureSlot::MotionVector].texture) &&
+      nuri::isValid(pipelines_.meshletVelocity[0]) && instanceCount > 0 &&
       !depthMotionVectorPassBuilt) {
     buildMeshletDispatches(
-        meshletVelocityDispatchItems_, meshletVelocityPushConstants_,
-        meshletVelocityDispatchDependencyBuffers_, meshletVelocityPipelines_[0],
-        meshletVelocityPipelines_[1], {}, {}, CompareOp::LessEqual, false,
+        meshletVelocityStream_.dispatches, meshletVelocityStream_.constants,
+        meshletVelocityStream_.dependencies, pipelines_.meshletVelocity[0],
+        pipelines_.meshletVelocity[1], {}, {}, CompareOp::LessEqual, false,
         "OpaqueMeshletVelocity", 0xff44aaff, MeshletOcclusionSource::Disabled,
         0u, 0u, velocityFrameDataAddress, false, false, MeshletSourceFilter{});
-    if (!meshletVelocityDispatchItems_.empty()) {
+    if (!meshletVelocityStream_.dispatches.empty()) {
       populateCoverageDependencyBuffers(
           velocityPassDependencyBuffers_,
           velocityPassDependencyBufferAccessModes_);
@@ -6595,7 +6564,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
                                RenderGraphAccessMode::Read);
       }
       PreparedGraphPass &velocityPass = makePreparedPass(
-          {}, meshletVelocityDispatchItems_, velocityPassDependencyBuffers_,
+          {}, meshletVelocityStream_.dispatches, velocityPassDependencyBuffers_,
           velocityPassDependencyBufferAccessModes_, passDependencyTextures_,
           "Opaque Meshlet Velocity Pass", 0xff44aaff);
       velocityPass.desc.color = AttachmentColor{
@@ -6603,7 +6572,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
           .storeOp = StoreOp::Store,
           .clearColor = kFrameCompositionMotionVectorClearValue};
       velocityPass.colorTextureHandle =
-          frame.sharedResources.motionVectorTexture;
+          frame.sharedResources[FrameTextureSlot::MotionVector].texture;
       velocityPass.desc.depth = {.loadOp = LoadOp::Load,
                                  .storeOp = StoreOp::Store,
                                  .clearDepth = kClearDepthOne,
@@ -6635,9 +6604,10 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     }
   }
   if (!meshletActive && temporalMotionRequired &&
-      nuri::isValid(frame.sharedResources.motionVectorTexture) &&
       nuri::isValid(
-          meshVelocityPipelines_[surfaceVariantIndex(false, false)]) &&
+          frame.sharedResources[FrameTextureSlot::MotionVector].texture) &&
+      nuri::isValid(
+          pipelines_.meshVelocity[surfaceVariantIndex(false, false)]) &&
       instanceCount > 0 && !depthMotionVectorPassBuilt) {
     velocityDrawItems_.clear();
     velocityDrawItems_.reserve(shadedBaseDrawItems.size());
@@ -6684,7 +6654,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
           .storeOp = StoreOp::Store,
           .clearColor = kFrameCompositionMotionVectorClearValue};
       velocityPass.colorTextureHandle =
-          frame.sharedResources.motionVectorTexture;
+          frame.sharedResources[FrameTextureSlot::MotionVector].texture;
       velocityPass.desc.depth = {.loadOp = LoadOp::Load,
                                  .storeOp = StoreOp::Store,
                                  .clearDepth = kClearDepthOne,
@@ -6732,7 +6702,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   if (pendingShadowInspectRequest_.has_value() &&
       nuri::isValid(shadowInspectTexture_) &&
       nuri::isValid(
-          meshShadowInspectPipelines_[surfaceVariantIndex(false, false)])) {
+          pipelines_.meshShadowInspect[surfaceVariantIndex(false, false)])) {
     shadowInspectDrawItems_.clear();
     shadowInspectDrawItems_.reserve(shadedBaseDrawItems.size());
     int32_t framebufferWidth = 0;
@@ -6795,7 +6765,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
 bool OpaqueRenderer::requiresDepthPyramid(
     const RenderSettings &settings) const {
   const VisibilityOcclusionMode visibilityOcclusionMode =
-      sanitizeVisibilityOcclusionMode(settings.visibility.occlusionMode);
+      settings.visibility.occlusionMode;
   return settings.opaque.enableDepthPyramid ||
          visibilityOcclusionMode == VisibilityOcclusionMode::PreviousFrameHiZ ||
          visibilityOcclusionMode ==
@@ -6806,8 +6776,7 @@ bool OpaqueRenderer::requiresDepthPyramid(
 bool OpaqueRenderer::shouldBuildTransmissionVisibilityDepth(
     const RenderFrameContext &frame, const RenderSettings &settings) const {
   if (!settings.transmission.enabled || !frame.camera.jitterEnabled ||
-      sanitizeAntiAliasingMode(settings.antiAliasing.mode) !=
-          AntiAliasingMode::TAA) {
+      settings.antiAliasing.mode != AntiAliasingMode::TAA) {
     return false;
   }
   if (!frame.sharedResources.forwardSceneGpuData.has_value()) {
@@ -6829,6 +6798,9 @@ OpaqueRenderer::prepareOpaqueGraphPasses(RenderFrameContext &frame) {
                      NURI_PROFILER_COLOR_CMD_DRAW);
   result = buildOpaquePasses(frame, preparedGraphPasses_);
   NURI_PROFILER_ZONE_END();
+  if (result.hasError()) {
+    bufferRings_.abandonPrepared();
+  }
   return result;
 }
 
@@ -6859,7 +6831,7 @@ bool OpaqueRenderer::hasPreparedOpaquePickPasses() const noexcept {
 
 bool OpaqueRenderer::shouldPublishSceneDepthGraphTexture(
     const RenderFrameContext &frame) const {
-  const RenderSettings &settings = renderSettingsOrDefault(frame);
+  const RenderSettings &settings = frame.settings;
   if (isRenderCaptureRequested(frame, "scene_depth")) {
     return true;
   }
@@ -6869,8 +6841,7 @@ bool OpaqueRenderer::shouldPublishSceneDepthGraphTexture(
   if (settings.skybox.enabled) {
     return true;
   }
-  if (sanitizeVisibilityOcclusionMode(settings.visibility.occlusionMode) !=
-      VisibilityOcclusionMode::Disabled) {
+  if (settings.visibility.occlusionMode != VisibilityOcclusionMode::Disabled) {
     return true;
   }
   if (settings.transmission.enabled || settings.transparent.enabled) {
@@ -6957,14 +6928,18 @@ void OpaqueRenderer::appendPreparedGraphPass(RenderFrameContext &frame,
        nuri::isValid(pass.depthResolveTextureHandle));
   if ((pass.publishesDepth || pass.kind == PreparedPassKind::Main) &&
       nuri::isValid(pass.depthTextureHandle) && publishDepthGraphTexture) {
-    if (isSameTextureHandle(pass.depthTextureHandle,
-                            frame.sharedResources.msaaSceneDepthTexture)) {
-      frame.sharedResources.msaaSceneDepthGraphTexture = passDesc.depthTexture;
+    if (isSameTextureHandle(
+            pass.depthTextureHandle,
+            frame.sharedResources[FrameTextureSlot::MsaaSceneDepth].texture)) {
+      frame.sharedResources[FrameTextureSlot::MsaaSceneDepth].graph =
+          passDesc.depthTexture;
       frame.metrics.antiAliasing.msaaDepthGraphPublished = true;
     } else {
-      frame.sharedResources.sceneDepthGraphTexture = passDesc.depthTexture;
+      frame.sharedResources[FrameTextureSlot::SceneDepth].graph =
+          passDesc.depthTexture;
       publishRequestedCapture(
-          frame, gpu_, "scene_depth", frame.sharedResources.sceneDepthTexture,
+          frame, gpu_, "scene_depth",
+          frame.sharedResources[FrameTextureSlot::SceneDepth].texture,
           RenderCaptureValueKind::Depth,
           RenderCaptureLifetimeClass::FrameSharedRingTexture, "linear_depth",
           "depth", pass.desc.debugLabel);
@@ -6972,7 +6947,7 @@ void OpaqueRenderer::appendPreparedGraphPass(RenderFrameContext &frame,
   }
   if (pass.kind == PreparedPassKind::TransmissionDepth &&
       nuri::isValid(pass.depthTextureHandle)) {
-    frame.sharedResources.transmissionVisibilityDepthGraphTexture =
+    frame.sharedResources[FrameTextureSlot::TransmissionVisibilityDepth].graph =
         passDesc.depthTexture;
     publishRequestedCapture(
         frame, gpu_, "transmission_visibility_depth", pass.depthTextureHandle,
@@ -6982,60 +6957,68 @@ void OpaqueRenderer::appendPreparedGraphPass(RenderFrameContext &frame,
   }
   if (pass.kind == PreparedPassKind::Main &&
       nuri::isValid(pass.depthResolveTextureHandle) &&
-      isSameTextureHandle(pass.depthResolveTextureHandle,
-                          frame.sharedResources.sceneDepthTexture)) {
-    frame.sharedResources.sceneDepthGraphTexture = passDesc.depthResolveTexture;
+      isSameTextureHandle(
+          pass.depthResolveTextureHandle,
+          frame.sharedResources[FrameTextureSlot::SceneDepth].texture)) {
+    frame.sharedResources[FrameTextureSlot::SceneDepth].graph =
+        passDesc.depthResolveTexture;
     frame.metrics.antiAliasing.msaaDepthResolveTargetBound = true;
-    publishRequestedCapture(frame, gpu_, "scene_depth",
-                            frame.sharedResources.sceneDepthTexture,
-                            RenderCaptureValueKind::Depth,
-                            RenderCaptureLifetimeClass::FrameSharedRingTexture,
-                            "linear_depth", "depth", pass.desc.debugLabel);
+    publishRequestedCapture(
+        frame, gpu_, "scene_depth",
+        frame.sharedResources[FrameTextureSlot::SceneDepth].texture,
+        RenderCaptureValueKind::Depth,
+        RenderCaptureLifetimeClass::FrameSharedRingTexture, "linear_depth",
+        "depth", pass.desc.debugLabel);
   }
   if ((pass.publishesDepth || pass.kind == PreparedPassKind::Main) &&
-      nuri::isValid(frame.sharedResources.sceneDepthGraphTexture)) {
+      nuri::isValid(
+          frame.sharedResources[FrameTextureSlot::SceneDepth].graph)) {
     frame.sharedResources.historyWriteRequirements |=
         FrameTextureRequirementFlags::SceneDepth;
   }
   if (pass.kind == PreparedPassKind::Main &&
       nuri::isValid(pass.colorTextureHandle)) {
-    if (isSameTextureHandle(pass.colorTextureHandle,
-                            frame.sharedResources.msaaSceneColorTexture)) {
-      frame.sharedResources.msaaSceneColorGraphTexture = passDesc.colorTexture;
+    if (isSameTextureHandle(
+            pass.colorTextureHandle,
+            frame.sharedResources[FrameTextureSlot::MsaaSceneColor].texture)) {
+      frame.sharedResources[FrameTextureSlot::MsaaSceneColor].graph =
+          passDesc.colorTexture;
       frame.metrics.antiAliasing.msaaColorGraphPublished = true;
       if (nuri::isValid(pass.colorResolveTextureHandle) &&
-          isSameTextureHandle(pass.colorResolveTextureHandle,
-                              frame.sharedResources.sceneColorTexture)) {
-        frame.sharedResources.sceneColorGraphTexture =
+          isSameTextureHandle(
+              pass.colorResolveTextureHandle,
+              frame.sharedResources[FrameTextureSlot::SceneColor].texture)) {
+        frame.sharedResources[FrameTextureSlot::SceneColor].graph =
             passDesc.colorResolveTexture;
         frame.metrics.antiAliasing.msaaColorResolveTargetBound = true;
         publishRequestedCapture(
             frame, gpu_, "scene_color_hdr",
-            frame.sharedResources.sceneColorTexture,
+            frame.sharedResources[FrameTextureSlot::SceneColor].texture,
             RenderCaptureValueKind::LinearHdrColor,
             RenderCaptureLifetimeClass::FrameSharedRingTexture, "linear_hdr",
             "hdr_color", pass.desc.debugLabel);
-        if (renderSettingsOrDefault(frame).shadow.debug.visualizeShadowFactor) {
+        if (frame.settings.shadow.debug.visualizeShadowFactor) {
           publishRequestedCapture(
               frame, gpu_, "shadow_factor",
-              frame.sharedResources.sceneColorTexture,
+              frame.sharedResources[FrameTextureSlot::SceneColor].texture,
               RenderCaptureValueKind::Scalar,
               RenderCaptureLifetimeClass::FrameSharedRingTexture, "linear",
               "scalar", pass.desc.debugLabel);
         }
       }
     } else {
-      frame.sharedResources.sceneColorGraphTexture = passDesc.colorTexture;
+      frame.sharedResources[FrameTextureSlot::SceneColor].graph =
+          passDesc.colorTexture;
       publishRequestedCapture(
           frame, gpu_, "scene_color_hdr",
-          frame.sharedResources.sceneColorTexture,
+          frame.sharedResources[FrameTextureSlot::SceneColor].texture,
           RenderCaptureValueKind::LinearHdrColor,
           RenderCaptureLifetimeClass::FrameSharedRingTexture, "linear_hdr",
           "hdr_color", pass.desc.debugLabel);
-      if (renderSettingsOrDefault(frame).shadow.debug.visualizeShadowFactor) {
+      if (frame.settings.shadow.debug.visualizeShadowFactor) {
         publishRequestedCapture(
             frame, gpu_, "shadow_factor",
-            frame.sharedResources.sceneColorTexture,
+            frame.sharedResources[FrameTextureSlot::SceneColor].texture,
             RenderCaptureValueKind::Scalar,
             RenderCaptureLifetimeClass::FrameSharedRingTexture, "linear",
             "scalar", pass.desc.debugLabel);
@@ -7044,7 +7027,8 @@ void OpaqueRenderer::appendPreparedGraphPass(RenderFrameContext &frame,
   }
   if (pass.kind == PreparedPassKind::Velocity &&
       nuri::isValid(pass.colorTextureHandle)) {
-    frame.sharedResources.motionVectorGraphTexture = passDesc.colorTexture;
+    frame.sharedResources[FrameTextureSlot::MotionVector].graph =
+        passDesc.colorTexture;
     frame.sharedResources.historyWriteRequirements |=
         FrameTextureRequirementFlags::MotionVectors;
     frame.metrics.antiAliasing.motionVectorGraphPublished = true;
@@ -7058,7 +7042,8 @@ void OpaqueRenderer::appendPreparedGraphPass(RenderFrameContext &frame,
   }
   if (pass.kind == PreparedPassKind::ReactiveMask &&
       nuri::isValid(pass.colorTextureHandle)) {
-    frame.sharedResources.reactiveMaskGraphTexture = passDesc.colorTexture;
+    frame.sharedResources[FrameTextureSlot::ReactiveMask].graph =
+        passDesc.colorTexture;
     frame.metrics.antiAliasing.reactiveMaskGraphPublished = true;
     publishRequestedCapture(frame, gpu_, "reactive_mask",
                             pass.colorTextureHandle,
@@ -7068,7 +7053,8 @@ void OpaqueRenderer::appendPreparedGraphPass(RenderFrameContext &frame,
   }
   if (pass.kind == PreparedPassKind::Normal &&
       nuri::isValid(pass.colorTextureHandle)) {
-    frame.sharedResources.normalGraphTexture = passDesc.colorTexture;
+    frame.sharedResources[FrameTextureSlot::Normal].graph =
+        passDesc.colorTexture;
     frame.metrics.ambientOcclusion.normalGraphPublished = true;
     publishRequestedCapture(frame, gpu_, "material_normals",
                             pass.colorTextureHandle,
@@ -7197,13 +7183,13 @@ Result<bool, std::string> OpaqueRenderer::ensureSingleInstanceBatchCache(
       cache.templateRevision == singleInstanceTemplateRevision_ &&
       isSamePipelineHandle(cache.basePipeline, baseDraw.pipeline) &&
       isSamePipelineHandle(cache.doubleSidedBasePipeline,
-                           meshScenePipelines_[rasterVariantIndex(
+                           pipelines_.meshScene[rasterVariantIndex(
                                CoverageMode::Sample1, false, false, true)]) &&
       isSamePipelineHandle(cache.tessPipeline,
-                           meshScenePipelines_[rasterVariantIndex(
+                           pipelines_.meshScene[rasterVariantIndex(
                                CoverageMode::Sample1, false, true, false)]) &&
       isSamePipelineHandle(cache.doubleSidedTessPipeline,
-                           meshScenePipelines_[rasterVariantIndex(
+                           pipelines_.meshScene[rasterVariantIndex(
                                CoverageMode::Sample1, false, true, true)]);
   if (canReuseSingleInstanceCache) {
     return Result<bool, std::string>::makeResult(true);
@@ -7270,11 +7256,11 @@ Result<bool, std::string> OpaqueRenderer::ensureSingleInstanceBatchCache(
   cache.automaticLod = automaticLod;
   cache.tessPipelineEnabled = tessPipelineEnabled;
   cache.basePipeline = baseDraw.pipeline;
-  cache.doubleSidedBasePipeline = meshScenePipelines_[rasterVariantIndex(
+  cache.doubleSidedBasePipeline = pipelines_.meshScene[rasterVariantIndex(
       CoverageMode::Sample1, false, false, true)];
-  cache.tessPipeline = meshScenePipelines_[rasterVariantIndex(
+  cache.tessPipeline = pipelines_.meshScene[rasterVariantIndex(
       CoverageMode::Sample1, false, true, false)];
-  cache.doubleSidedTessPipeline = meshScenePipelines_[rasterVariantIndex(
+  cache.doubleSidedTessPipeline = pipelines_.meshScene[rasterVariantIndex(
       CoverageMode::Sample1, false, true, true)];
   cache.templateRevision = singleInstanceTemplateRevision_;
   cache.valid = true;
@@ -7428,7 +7414,7 @@ OpaqueRenderer::rebuildIndirectPack(uint32_t frameSlot,
     indirectDrawItems_.reserve(totalIndirectDrawItems);
     indirectSourceDrawIndices_.reserve(totalIndirectDrawItems);
     const BufferHandle indirectBufferHandle =
-        bufferRings_[IndirectCommandRing][frameSlot].buffer->handle();
+        bufferRings_.handle(IndirectCommandRing, frameSlot);
     uint64_t indirectBufferSignature =
         hashBufferHandleSignature(kFnvOffsetBasis64, indirectBufferHandle);
     for (const IndirectGroup &group : indirectGroups) {
@@ -7484,8 +7470,7 @@ OpaqueRenderer::rebuildIndirectPack(uint32_t frameSlot,
   const std::span<const std::byte> uploadBytes{
       indirectCommandUploadBytes_.data(), indirectCommandUploadBytes_.size()};
   auto updateIndirectResult = gpu_.updateBuffer(
-      bufferRings_[IndirectCommandRing][frameSlot].buffer->handle(),
-      uploadBytes, 0);
+      bufferRings_.handle(IndirectCommandRing, frameSlot), uploadBytes, 0);
   if (updateIndirectResult.hasError()) {
     return updateIndirectResult;
   }
@@ -7501,7 +7486,7 @@ OpaqueRenderer::refreshCachedIndirectPack(uint32_t frameSlot,
                                           uint64_t drawSignature) {
   indirectAlphaMasked_.resize(indirectDrawItems_.size(), 0u);
   const BufferHandle indirectBufferHandle =
-      bufferRings_[IndirectCommandRing][frameSlot].buffer->handle();
+      bufferRings_.handle(IndirectCommandRing, frameSlot);
   uint64_t indirectBufferSignature =
       hashBufferHandleSignature(kFnvOffsetBasis64, indirectBufferHandle);
   for (size_t i = 0; i < indirectSourceDrawIndices_.size(); ++i) {
@@ -7522,8 +7507,7 @@ OpaqueRenderer::refreshCachedIndirectPack(uint32_t frameSlot,
     const std::span<const std::byte> uploadBytes{
         indirectCommandUploadBytes_.data(), indirectCommandUploadBytes_.size()};
     auto updateIndirectResult = gpu_.updateBuffer(
-        bufferRings_[IndirectCommandRing][frameSlot].buffer->handle(),
-        uploadBytes, 0);
+        bufferRings_.handle(IndirectCommandRing, frameSlot), uploadBytes, 0);
     if (updateIndirectResult.hasError()) {
       return updateIndirectResult;
     }
@@ -7802,13 +7786,13 @@ OpaqueRenderer::ensureStaticInstanceBufferCapacity(size_t count) {
 
 Result<bool, std::string>
 OpaqueRenderer::ensureRingBufferCount(uint32_t requiredCount) {
-  if (!resizeDynamicBufferRings(requiredCount, bufferRings_)) {
-    return Result<bool, std::string>::makeResult(true);
+  auto result = bufferRings_.ensureLaneCount(requiredCount);
+  if (result.hasError()) {
+    return result;
   }
-  requiredCount =
-      static_cast<uint32_t>(bufferRings_[InstanceMatricesRing].size());
-  frameSlotStates_.assign(
-      requiredCount, FrameSlotState{.expectedVisibleHash = kFnvOffsetBasis64});
+  if (frameSlotStates_.size() < bufferRings_.laneCount()) {
+    frameSlotStates_.resize(bufferRings_.laneCount());
+  }
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -7817,8 +7801,8 @@ OpaqueRenderer::ensureInstanceMatricesRingCapacity(size_t requiredBytes) {
   const size_t sceneInstanceBytes =
       std::max(instanceMatricesCpuCache_.size(), size_t{1u}) *
       sizeof(InstanceData);
-  return ensureDynamicBufferRingCapacity(
-      gpu_, bufferRings_[InstanceMatricesRing],
+  return bufferRings_.ensureRole(
+      InstanceMatricesRing,
       BufferDesc{.usage = BufferUsage::Storage,
                  .storage = Storage::Device,
                  .size = std::max({requiredBytes, sceneInstanceBytes,
@@ -7830,10 +7814,10 @@ OpaqueRenderer::ensureInstanceMatricesRingCapacity(size_t requiredBytes) {
 }
 
 Result<bool, std::string> OpaqueRenderer::ensureDynamicRingCapacity(
-    std::pmr::vector<DynamicBufferSlot> &ring, size_t requiredBytes,
-    size_t minimumBytes, std::string_view debugNamePrefix, Storage storage) {
-  return ensureDynamicBufferRingCapacity(
-      gpu_, ring,
+    BufferRingSlot role, size_t requiredBytes, size_t minimumBytes,
+    std::string_view debugNamePrefix, Storage storage) {
+  return bufferRings_.ensureRole(
+      role,
       BufferDesc{.usage = BufferUsage::Storage,
                  .storage = storage,
                  .size = std::max(requiredBytes, minimumBytes)},
@@ -7843,33 +7827,31 @@ Result<bool, std::string> OpaqueRenderer::ensureDynamicRingCapacity(
 Result<bool, std::string>
 OpaqueRenderer::ensurePreviousInstanceMatricesRingCapacity(
     size_t requiredBytes) {
-  return ensureDynamicRingCapacity(bufferRings_[PreviousInstanceMatricesRing],
-                                   requiredBytes, sizeof(InstanceData),
-                                   "opaque_previous_instance_matrices_buffer",
-                                   Storage::HostVisible);
+  return ensureDynamicRingCapacity(
+      PreviousInstanceMatricesRing, requiredBytes, sizeof(InstanceData),
+      "opaque_previous_instance_matrices_buffer", Storage::HostVisible);
 }
 
 Result<bool, std::string>
 OpaqueRenderer::ensureVelocityInstanceFlagsRingCapacity(size_t requiredBytes) {
   return ensureDynamicRingCapacity(
-      bufferRings_[VelocityInstanceFlagsRing], requiredBytes, sizeof(uint32_t),
+      VelocityInstanceFlagsRing, requiredBytes, sizeof(uint32_t),
       "opaque_velocity_instance_flags_buffer", Storage::HostVisible);
 }
 
 Result<bool, std::string>
 OpaqueRenderer::ensureVelocityFrameDataRingCapacity(size_t requiredBytes) {
-  return ensureDynamicRingCapacity(bufferRings_[VelocityFrameDataRing],
-                                   requiredBytes, sizeof(VelocityFrameGpuData),
-                                   "opaque_velocity_frame_data_buffer",
-                                   Storage::HostVisible);
+  return ensureDynamicRingCapacity(
+      VelocityFrameDataRing, requiredBytes, sizeof(VelocityFrameGpuData),
+      "opaque_velocity_frame_data_buffer", Storage::HostVisible);
 }
 
 Result<bool, std::string>
 OpaqueRenderer::ensureVelocityGeometryRingCapacity(size_t requiredBytes) {
-  return ensureDynamicRingCapacity(
-      bufferRings_[VelocityGeometryRing], requiredBytes,
-      sizeof(VelocityRenderableGeometryGpuData),
-      "opaque_velocity_geometry_buffer", Storage::HostVisible);
+  return ensureDynamicRingCapacity(VelocityGeometryRing, requiredBytes,
+                                   sizeof(VelocityRenderableGeometryGpuData),
+                                   "opaque_velocity_geometry_buffer",
+                                   Storage::HostVisible);
 }
 
 Result<bool, std::string>
@@ -7879,12 +7861,11 @@ OpaqueRenderer::ensureMeshletBatchRingCapacity(size_t requiredBytes) {
         sizeof(MeshletBatchGpuData) - 1u) /
        sizeof(MeshletBatchGpuData)) *
       sizeof(MeshletBatchGpuData);
-  return ensureDynamicBufferRingCapacity(
-      gpu_, bufferRings_[MeshletBatchRing],
-      BufferDesc{.usage = BufferUsage::Storage,
-                 .storage = Storage::HostVisible,
-                 .size = requested},
-      "opaque_meshlet_batch_buffer");
+  return bufferRings_.ensureRole(MeshletBatchRing,
+                                 BufferDesc{.usage = BufferUsage::Storage,
+                                            .storage = Storage::HostVisible,
+                                            .size = requested},
+                                 "opaque_meshlet_batch_buffer");
 }
 
 Result<bool, std::string>
@@ -7897,15 +7878,14 @@ OpaqueRenderer::ensureVisibilityGpuRingCapacity(size_t candidateBytes,
       sceneCandidateCount * sizeof(VisibilityCandidateGpu);
   const size_t sceneVisibleIndexBytes = sceneCandidateCount * sizeof(uint32_t);
   auto candidateResult = ensureDynamicRingCapacity(
-      bufferRings_[VisibilityCandidateRing],
-      std::max(candidateBytes, sceneCandidateBytes),
+      VisibilityCandidateRing, std::max(candidateBytes, sceneCandidateBytes),
       sizeof(VisibilityCandidateGpu), "opaque_visibility_candidate_buffer",
       Storage::HostVisible);
   if (candidateResult.hasError()) {
     return candidateResult;
   }
   auto passResult = ensureDynamicRingCapacity(
-      bufferRings_[VisibilityPassRing], sizeof(VisibilityPassGpuData),
+      VisibilityPassRing, sizeof(VisibilityPassGpuData),
       sizeof(VisibilityPassGpuData), "opaque_visibility_pass_buffer",
       Storage::HostVisible);
   if (passResult.hasError()) {
@@ -7925,8 +7905,7 @@ OpaqueRenderer::ensureVisibilityMeshletIndirectRingCapacity(
   const size_t maxDispatchBytes =
       kMaxDrawItemsForIndirectPath * sizeof(VisibilityMeshletDispatchGpuData);
   auto dispatchResult = ensureDynamicRingCapacity(
-      bufferRings_[VisibilityMeshletDispatchRing],
-      std::max(dispatchBytes, maxDispatchBytes),
+      VisibilityMeshletDispatchRing, std::max(dispatchBytes, maxDispatchBytes),
       sizeof(VisibilityMeshletDispatchGpuData),
       "opaque_visibility_meshlet_dispatch_buffer", Storage::HostVisible);
   if (dispatchResult.hasError()) {
@@ -7938,9 +7917,8 @@ OpaqueRenderer::ensureVisibilityMeshletIndirectRingCapacity(
 Result<bool, std::string>
 OpaqueRenderer::ensureMeshletCompactionRingCapacity(size_t requiredBytes) {
   return ensureDynamicRingCapacity(
-      bufferRings_[MeshletCompactionRing], requiredBytes,
-      sizeof(CompactedMeshletGpuData), "opaque_meshlet_compaction_buffer",
-      Storage::Device);
+      MeshletCompactionRing, requiredBytes, sizeof(CompactedMeshletGpuData),
+      "opaque_meshlet_compaction_buffer", Storage::Device);
 }
 
 Result<bool, std::string>
@@ -7954,8 +7932,8 @@ OpaqueRenderer::ensureVisibilityMeshletIndirectCommandRingCapacity(
                              kMeshDispatchCommandBytes - 1u) /
                             kMeshDispatchCommandBytes) *
                            kMeshDispatchCommandBytes;
-  return ensureDynamicBufferRingCapacity(
-      gpu_, bufferRings_[VisibilityMeshletIndirectCommandRing],
+  return bufferRings_.ensureRole(
+      VisibilityMeshletIndirectCommandRing,
       BufferDesc{.usage = BufferUsage::Storage | BufferUsage::Indirect,
                  .storage = Storage::Device,
                  .size = requested},
@@ -7964,8 +7942,8 @@ OpaqueRenderer::ensureVisibilityMeshletIndirectCommandRingCapacity(
 
 Result<bool, std::string>
 OpaqueRenderer::ensureVisibilityVisibleIndexRingCapacity(size_t requiredBytes) {
-  return ensureDynamicBufferRingCapacity(
-      gpu_, bufferRings_[VisibilityVisibleIndexRing],
+  return bufferRings_.ensureRole(
+      VisibilityVisibleIndexRing,
       BufferDesc{.usage = BufferUsage::Storage,
                  .storage = Storage::HostVisible,
                  .size = std::max(requiredBytes, sizeof(uint32_t))},
@@ -7975,8 +7953,8 @@ OpaqueRenderer::ensureVisibilityVisibleIndexRingCapacity(size_t requiredBytes) {
 
 Result<bool, std::string>
 OpaqueRenderer::ensureVisibilityCounterRingCapacity(size_t requiredBytes) {
-  return ensureDynamicBufferRingCapacity(
-      gpu_, bufferRings_[VisibilityCounterRing],
+  return bufferRings_.ensureRole(
+      VisibilityCounterRing,
       BufferDesc{.usage = BufferUsage::Storage,
                  .storage = Storage::HostVisible,
                  .size =
@@ -7997,8 +7975,8 @@ Result<bool, std::string>
 OpaqueRenderer::ensureInstanceRemapRingCapacity(size_t requiredBytes) {
   const size_t sceneRemapBytes =
       std::max(meshDrawTemplates_.size(), size_t{1u}) * sizeof(uint32_t);
-  return ensureDynamicBufferRingCapacity(
-      gpu_, bufferRings_[InstanceRemapRing],
+  return bufferRings_.ensureRole(
+      InstanceRemapRing,
       BufferDesc{
           .usage = BufferUsage::Storage,
           .storage = Storage::HostVisible,
@@ -8014,8 +7992,8 @@ OpaqueRenderer::ensureIndirectCommandRingCapacity(size_t requiredBytes) {
       kIndirectCountHeaderBytes + sizeof(DrawIndexedIndirectCommand);
   constexpr size_t kMaxIndirectCommandBytes =
       kMaxDrawItemsForIndirectPath * kIndirectCommandBytesPerDraw;
-  return ensureDynamicBufferRingCapacity(
-      gpu_, bufferRings_[IndirectCommandRing],
+  return bufferRings_.ensureRole(
+      IndirectCommandRing,
       BufferDesc{.usage = BufferUsage::Storage | BufferUsage::Indirect,
                  .storage = Storage::HostVisible,
                  .size = std::max({requiredBytes, kIndirectCountHeaderBytes,
@@ -8107,8 +8085,8 @@ Result<bool, std::string> OpaqueRenderer::rebuildMaterialTextureAccessCache(
 
 Result<bool, std::string> OpaqueRenderer::createShaders() {
   shaders_.fill({});
-  tessellationUnsupported_ = false;
-  overlayPipelineUnsupported_.fill(false);
+  pipelines_.tessellationUnsupported = false;
+  pipelines_.overlayUnsupported.fill(false);
   struct ShaderSpec {
     std::string_view name;
     const std::filesystem::path *path = nullptr;
@@ -8117,8 +8095,8 @@ Result<bool, std::string> OpaqueRenderer::createShaders() {
   };
   const auto compileGroup = [this](std::span<const ShaderSpec> specs) {
     for (const ShaderSpec &spec : specs) {
-      auto result = Shader{spec.name, gpu_}.compileFromFile(spec.path->string(),
-                                                            spec.stage);
+      auto result =
+          compileShaderFile(gpu_, spec.name, spec.path->string(), spec.stage);
       if (result.hasError()) {
         for (const ShaderSpec &resetSpec : specs) {
           *resetSpec.outHandle = {};
@@ -8159,16 +8137,17 @@ Result<bool, std::string> OpaqueRenderer::createShaders() {
             "visibility_indirect_mesh_dispatch",
             "visibility_indirect_mesh_dispatch.comp",
             &shaders_[VisibilityIndirectMeshDispatchCompute]}}) {
-    auto result = Shader{spec.name, gpu_}.compileFromFile(
-        (shaderDir / spec.file).string(), ShaderStage::Compute);
+    auto result =
+        compileShaderFile(gpu_, spec.name, (shaderDir / spec.file).string(),
+                          ShaderStage::Compute);
     if (!result.hasError()) {
       *spec.output = result.value();
     }
   }
   auto compactionResult =
-      Shader{"opaque_meshlet_compact", gpu_}.compileFromFile(
-          (shaderDir / "opaque_meshlet_compact.comp").string(),
-          ShaderStage::Compute);
+      compileShaderFile(gpu_, "opaque_meshlet_compact",
+                        (shaderDir / "opaque_meshlet_compact.comp").string(),
+                        ShaderStage::Compute);
   if (compactionResult.hasError()) {
     return Result<bool, std::string>::makeError(
         "OpaqueRenderer::createShaders: meshlet pre-task compaction shader "
@@ -8257,8 +8236,8 @@ Result<bool, std::string> OpaqueRenderer::createShaders() {
       ShaderSpec{"main_tess", &config_.tessEval, ShaderStage::TessEval,
                  &shaders_[MeshTessEval]},
   };
-  tessellationUnsupported_ = !compileOptional(tessShaderSpecs);
-  if (!tessellationUnsupported_) {
+  pipelines_.tessellationUnsupported = !compileOptional(tessShaderSpecs);
+  if (!pipelines_.tessellationUnsupported) {
     const std::array<std::filesystem::path, 9> tessPaths = {
         shaderDir / "main_id_tess.vert",
         shaderDir / "main_id_tess.tesc",
@@ -8299,10 +8278,10 @@ Result<bool, std::string> OpaqueRenderer::createShaders() {
                  ShaderStage::Fragment, &shaders_[MeshDebugOverlayFragment]},
   };
   const bool overlayUnsupported = !compileOptional(overlayShaderSpecs);
-  overlayPipelineUnsupported_[overlayPipelineIndex(
+  pipelines_.overlayUnsupported[overlayPipelineIndex(
       OverlayPipelineKind::Geometry, CoverageMode::Sample1)] =
       overlayUnsupported;
-  overlayPipelineUnsupported_[overlayPipelineIndex(
+  pipelines_.overlayUnsupported[overlayPipelineIndex(
       OverlayPipelineKind::TessGeometry, CoverageMode::Sample1)] =
       overlayUnsupported;
   return Result<bool, std::string>::makeResult(true);
@@ -8371,7 +8350,7 @@ Result<bool, std::string> OpaqueRenderer::createPipelines() {
                 alphaMasked ? makeAlphaMsaaSceneDesc(baseDesc, sampleCount)
                             : makeMsaaSceneDesc(baseDesc, sampleCount);
             RenderPipelineHandle &output =
-                meshScenePipelines_[rasterVariantIndex(
+                pipelines_.meshScene[rasterVariantIndex(
                     coverage, alphaMasked, tessellated, doubleSided)];
             if (std::string error = createPipeline(
                     desc, names[coverageIndex][alphaIndex], output);
@@ -8386,7 +8365,7 @@ Result<bool, std::string> OpaqueRenderer::createPipelines() {
   doubleSidedMeshDesc.cullMode = CullMode::None;
   std::string meshVariantError =
       createPipeline(doubleSidedMeshDesc, "opaque_mesh_double_sided",
-                     meshScenePipelines_[rasterVariantIndex(
+                     pipelines_.meshScene[rasterVariantIndex(
                          CoverageMode::Sample1, false, false, true)]);
   if (meshVariantError.empty()) {
     meshVariantError = createMsaaSceneVariants(
@@ -8419,20 +8398,20 @@ Result<bool, std::string> OpaqueRenderer::createPipelines() {
             kFrameCompositionMotionVectorFormat, shaders_[MeshVelocityVertex],
             shaders_[MeshVelocityFragment], "opaque_velocity",
             "opaque_velocity_double_sided",
-            &meshVelocityPipelines_[surfaceVariantIndex(false, false)],
-            &meshVelocityPipelines_[surfaceVariantIndex(false, true)]},
+            &pipelines_.meshVelocity[surfaceVariantIndex(false, false)],
+            &pipelines_.meshVelocity[surfaceVariantIndex(false, true)]},
         AuxiliaryPipelineSpec{
             kFrameCompositionReactiveMaskFormat,
             shaders_[MeshReactiveMaskVertex],
             shaders_[MeshReactiveMaskFragment], "opaque_reactive_mask",
-            "opaque_reactive_mask_double_sided", &meshReactiveMaskPipelines_[0],
-            &meshReactiveMaskPipelines_[1]},
+            "opaque_reactive_mask_double_sided",
+            &pipelines_.meshReactiveMask[0], &pipelines_.meshReactiveMask[1]},
         AuxiliaryPipelineSpec{
             kFrameCompositionNormalFormat, shaders_[MeshVertex],
             shaders_[MeshNormalFragment], "opaque_material_normals",
             "opaque_material_normals_double_sided",
-            &meshNormalPipelines_[surfaceVariantIndex(false, false)],
-            &meshNormalPipelines_[surfaceVariantIndex(false, true)]}}) {
+            &pipelines_.meshNormal[surfaceVariantIndex(false, false)],
+            &pipelines_.meshNormal[surfaceVariantIndex(false, true)]}}) {
     if (!nuri::isValid(spec.vertex) || !nuri::isValid(spec.fragment)) {
       continue;
     }
@@ -8470,7 +8449,7 @@ Result<bool, std::string> OpaqueRenderer::createPipelines() {
           desc.numSamples = coverageSampleCount(coverage);
           createDepthPipeline(
               desc, names[index],
-              meshDepthPipelines_[rasterVariantIndex(
+              pipelines_.meshDepth[rasterVariantIndex(
                   coverage, alphaMasked, tessellated, doubleSided)]);
         }
       };
@@ -8507,27 +8486,27 @@ Result<bool, std::string> OpaqueRenderer::createPipelines() {
                          "opaque_mesh_depth_alpha_double_sided_msaa4x",
                          "opaque_mesh_depth_alpha_double_sided_msaa8x"});
   }
-  const bool canCreateTessPipeline = !tessellationUnsupported_ &&
+  const bool canCreateTessPipeline = !pipelines_.tessellationUnsupported &&
                                      nuri::isValid(shaders_[MeshTessVertex]) &&
                                      nuri::isValid(shaders_[MeshTessControl]) &&
                                      nuri::isValid(shaders_[MeshTessEval]) &&
                                      nuri::isValid(shaders_[MeshFragment]);
   const auto canCreatePickTessPipeline = [this]() -> bool {
-    return !tessellationUnsupported_ &&
+    return !pipelines_.tessellationUnsupported &&
            nuri::isValid(shaders_[MeshPickTessVertex]) &&
            nuri::isValid(shaders_[MeshPickTessControl]) &&
            nuri::isValid(shaders_[MeshPickTessEval]) &&
            nuri::isValid(shaders_[MeshPickFragment]);
   };
   const auto canCreateDepthTessPipeline = [this]() -> bool {
-    return !tessellationUnsupported_ &&
+    return !pipelines_.tessellationUnsupported &&
            nuri::isValid(shaders_[DepthTessVertex]) &&
            nuri::isValid(shaders_[DepthTessControl]) &&
            nuri::isValid(shaders_[DepthTessEval]) &&
            nuri::isValid(shaders_[DepthFragment]);
   };
   const auto canCreateDepthAlphaTessPipeline = [this]() -> bool {
-    return !tessellationUnsupported_ &&
+    return !pipelines_.tessellationUnsupported &&
            nuri::isValid(shaders_[DepthAlphaTessVertex]) &&
            nuri::isValid(shaders_[DepthAlphaTessControl]) &&
            nuri::isValid(shaders_[DepthAlphaTessEval]) &&
@@ -8542,7 +8521,7 @@ Result<bool, std::string> OpaqueRenderer::createPipelines() {
     tessDesc.specInfo = meshDesc.specInfo;
     std::string tessError =
         createPipeline(tessDesc, "opaque_mesh_tess",
-                       meshScenePipelines_[rasterVariantIndex(
+                       pipelines_.meshScene[rasterVariantIndex(
                            CoverageMode::Sample1, false, true, false)]);
     if (tessError.empty()) {
       tessError = createMsaaSceneVariants(
@@ -8561,7 +8540,7 @@ Result<bool, std::string> OpaqueRenderer::createPipelines() {
       doubleSidedTessDesc.specInfo = meshDesc.specInfo;
       tessError =
           createPipeline(doubleSidedTessDesc, "opaque_mesh_tess_double_sided",
-                         meshScenePipelines_[rasterVariantIndex(
+                         pipelines_.meshScene[rasterVariantIndex(
                              CoverageMode::Sample1, false, true, true)]);
       if (tessError.empty()) {
         tessError = createMsaaSceneVariants(
@@ -8573,14 +8552,14 @@ Result<bool, std::string> OpaqueRenderer::createPipelines() {
       }
     }
     if (!tessError.empty()) {
-      tessellationUnsupported_ = true;
-      for (RenderPipelineHandle &pipeline : meshScenePipelines_) {
-        if (matchesVariantBit(pipeline, meshScenePipelines_, 2u)) {
+      pipelines_.tessellationUnsupported = true;
+      for (RenderPipelineHandle &pipeline : pipelines_.meshScene) {
+        if (matchesVariantBit(pipeline, pipelines_.meshScene, 2u)) {
           destroyPipelineHandle(gpu_, pipeline);
         }
       }
     }
-    if (!tessellationUnsupported_) {
+    if (!pipelines_.tessellationUnsupported) {
       if (canCreateDepthTessPipeline()) {
         const RenderPipelineDesc depthTessDesc = depthPipelineDesc(
             depthFormat, shaders_[DepthTessVertex], shaders_[DepthTessControl],
@@ -8630,11 +8609,11 @@ Result<bool, std::string> OpaqueRenderer::createPipelines() {
                 PolygonMode::Fill, Topology::Patch,
                 kTessellationPatchControlPoints));
         createOptional(normalTessDesc, "opaque_material_normals_tess",
-                       meshNormalPipelines_[surfaceVariantIndex(true, false)]);
+                       pipelines_.meshNormal[surfaceVariantIndex(true, false)]);
         normalTessDesc.cullMode = CullMode::None;
         createOptional(normalTessDesc,
                        "opaque_material_normals_tess_double_sided",
-                       meshNormalPipelines_[surfaceVariantIndex(true, true)]);
+                       pipelines_.meshNormal[surfaceVariantIndex(true, true)]);
       }
       if (nuri::isValid(shaders_[MeshVelocityTessVertex]) &&
           nuri::isValid(shaders_[MeshVelocityTessControl]) &&
@@ -8650,36 +8629,37 @@ Result<bool, std::string> OpaqueRenderer::createPipelines() {
                 Topology::Patch, kTessellationPatchControlPoints));
         createOptional(
             velocityTessDesc, "opaque_velocity_tess",
-            meshVelocityPipelines_[surfaceVariantIndex(true, false)]);
+            pipelines_.meshVelocity[surfaceVariantIndex(true, false)]);
         velocityTessDesc.cullMode = CullMode::None;
-        createOptional(velocityTessDesc, "opaque_velocity_tess_double_sided",
-                       meshVelocityPipelines_[surfaceVariantIndex(true, true)]);
+        createOptional(
+            velocityTessDesc, "opaque_velocity_tess_double_sided",
+            pipelines_.meshVelocity[surfaceVariantIndex(true, true)]);
       }
     }
   } else {
-    tessellationUnsupported_ = true;
+    pipelines_.tessellationUnsupported = true;
   }
   RenderPipelineDesc pickDesc = meshPipelineDesc(
       Format::R32_UINT, depthFormat, shaders_[MeshPickVertex], {}, {}, {},
       shaders_[MeshPickFragment], PolygonMode::Fill);
   std::string pickError =
       createPipeline(pickDesc, "opaque_mesh_pick",
-                     meshPickPipelines_[surfaceVariantIndex(false, false)]);
+                     pipelines_.meshPick[surfaceVariantIndex(false, false)]);
   if (pickError.empty()) {
     pickDesc.cullMode = CullMode::None;
     pickError =
         createPipeline(pickDesc, "opaque_mesh_pick_double_sided",
-                       meshPickPipelines_[surfaceVariantIndex(false, true)]);
+                       pipelines_.meshPick[surfaceVariantIndex(false, true)]);
   }
   if (!pickError.empty()) {
     for (RenderPipelineHandle *handle :
-         {&meshPickPipelines_[surfaceVariantIndex(false, false)],
-          &meshScenePipelines_[rasterVariantIndex(CoverageMode::Sample1, false,
-                                                  true, false)],
-          &meshScenePipelines_[rasterVariantIndex(CoverageMode::Sample1, false,
-                                                  true, true)],
-          &meshScenePipelines_[rasterVariantIndex(CoverageMode::Sample1, false,
-                                                  false, true)]}) {
+         {&pipelines_.meshPick[surfaceVariantIndex(false, false)],
+          &pipelines_.meshScene[rasterVariantIndex(CoverageMode::Sample1, false,
+                                                   true, false)],
+          &pipelines_.meshScene[rasterVariantIndex(CoverageMode::Sample1, false,
+                                                   true, true)],
+          &pipelines_.meshScene[rasterVariantIndex(CoverageMode::Sample1, false,
+                                                   false, true)]}) {
       destroyPipelineHandle(gpu_, *handle);
     }
     return Result<bool, std::string>::makeError(std::move(pickError));
@@ -8691,10 +8671,10 @@ Result<bool, std::string> OpaqueRenderer::createPipelines() {
         shaders_[MeshPickFragment], PolygonMode::Fill, Topology::Patch,
         kTessellationPatchControlPoints);
     createOptional(pickTessDesc, "opaque_mesh_tess_pick",
-                   meshPickPipelines_[surfaceVariantIndex(true, false)]);
+                   pipelines_.meshPick[surfaceVariantIndex(true, false)]);
     pickTessDesc.cullMode = CullMode::None;
     createOptional(pickTessDesc, "opaque_mesh_tess_pick_double_sided",
-                   meshPickPipelines_[surfaceVariantIndex(true, true)]);
+                   pipelines_.meshPick[surfaceVariantIndex(true, true)]);
   }
   RenderPipelineDesc inspectDesc =
       withOpaqueReadOnlyAuxiliaryVariant(meshPipelineDesc(
@@ -8702,10 +8682,11 @@ Result<bool, std::string> OpaqueRenderer::createPipelines() {
           shaders_[MeshShadowInspectFragment], PolygonMode::Fill));
   createOptional(
       inspectDesc, "opaque_mesh_shadow_inspect",
-      meshShadowInspectPipelines_[surfaceVariantIndex(false, false)]);
+      pipelines_.meshShadowInspect[surfaceVariantIndex(false, false)]);
   inspectDesc.cullMode = CullMode::None;
-  createOptional(inspectDesc, "opaque_mesh_shadow_inspect_double_sided",
-                 meshShadowInspectPipelines_[surfaceVariantIndex(false, true)]);
+  createOptional(
+      inspectDesc, "opaque_mesh_shadow_inspect_double_sided",
+      pipelines_.meshShadowInspect[surfaceVariantIndex(false, true)]);
   if (canCreateTessPipeline) {
     RenderPipelineDesc inspectTessDesc =
         withOpaqueReadOnlyAuxiliaryVariant(meshPipelineDesc(
@@ -8715,12 +8696,12 @@ Result<bool, std::string> OpaqueRenderer::createPipelines() {
             Topology::Patch, kTessellationPatchControlPoints));
     createOptional(
         inspectTessDesc, "opaque_mesh_tess_shadow_inspect",
-        meshShadowInspectPipelines_[surfaceVariantIndex(true, false)]);
-    if (!tessellationUnsupported_) {
+        pipelines_.meshShadowInspect[surfaceVariantIndex(true, false)]);
+    if (!pipelines_.tessellationUnsupported) {
       inspectTessDesc.cullMode = CullMode::None;
       createOptional(
           inspectTessDesc, "opaque_mesh_tess_shadow_inspect_double_sided",
-          meshShadowInspectPipelines_[surfaceVariantIndex(true, true)]);
+          pipelines_.meshShadowInspect[surfaceVariantIndex(true, true)]);
     }
   }
   const ComputePipelineDesc computeDesc{
@@ -8778,18 +8759,17 @@ Result<bool, std::string> OpaqueRenderer::createPipelines() {
         .blendEnabled = false,
     };
     createOptional(pyramidDesc, "opaque_depth_minmax_pyramid",
-                   depthPyramidPipelineHandle_);
+                   pipelines_.depthPyramid);
     pyramidDesc.colorFormats[0] = Format::R32_FLOAT;
     createOptional(pyramidDesc, "opaque_current_frame_depth_verification",
-                   currentFrameDepthVerificationPipelineHandle_);
+                   pipelines_.currentFrameDepthVerification);
   }
   if (nuri::isValid(shaders_[DepthMotionVectorVertex]) &&
       nuri::isValid(shaders_[DepthMotionVectorFragment])) {
     createOptional(fullscreenPipelineDesc(kFrameCompositionMotionVectorFormat,
                                           shaders_[DepthMotionVectorVertex],
                                           shaders_[DepthMotionVectorFragment]),
-                   "opaque_depth_motion_vector",
-                   depthMotionVectorPipelineHandle_);
+                   "opaque_depth_motion_vector", pipelines_.depthMotionVector);
   }
   baseMeshFillDraw_ = makeBaseMeshDraw(meshPipeline_.get(), "OpaqueMesh");
   for (uint8_t kind = 0u;
@@ -8805,7 +8785,6 @@ Result<bool, std::string> OpaqueRenderer::createPipelines() {
 }
 
 Result<bool, std::string> OpaqueRenderer::createMeshletPipelineState() {
-  Shader shader{"opaque_meshlet", gpu_};
   const std::filesystem::path compactTaskPath =
       config_.meshletTask.parent_path() / "opaque_meshlet_compact.task.glsl";
   const auto meshletShaderDir = config_.meshletMesh.parent_path();
@@ -8843,7 +8822,8 @@ Result<bool, std::string> OpaqueRenderer::createMeshletPipelineState() {
                  ShaderStage::Fragment, &shaders_[MeshletReactiveMaskFragment]},
   };
   for (const ShaderSpec &spec : shaderSpecs) {
-    auto result = shader.compileFromFile(spec.path.string(), spec.stage);
+    auto result = compileShaderFile(gpu_, "opaque_meshlet", spec.path.string(),
+                                    spec.stage);
     if (result.hasError()) {
       resetMeshletPipelineState();
       return Result<bool, std::string>::makeError(result.error());
@@ -8945,117 +8925,117 @@ Result<bool, std::string> OpaqueRenderer::createMeshletPipelineState() {
   std::array pipelineSpecs{
       PipelineSpec{desc,
                    {"opaque_meshlet", "opaque_meshlet_double_sided"},
-                   meshletScenePipelines_.data()},
+                   pipelines_.meshletScene.data()},
       PipelineSpec{
           compactedDesc,
           {"opaque_meshlet_compacted", "opaque_meshlet_compacted_double_sided"},
-          meshletScenePipelines_.data() +
+          pipelines_.meshletScene.data() +
               meshletSceneVariantIndex(true, CoverageMode::Sample1, false,
                                        false)},
       PipelineSpec{
           msaaDesc,
           {"opaque_meshlet_msaa4x", "opaque_meshlet_msaa4x_double_sided"},
-          meshletScenePipelines_.data() +
+          pipelines_.meshletScene.data() +
               meshletSceneVariantIndex(false, CoverageMode::Sample4, false,
                                        false),
           createMeshletMsaa4x},
       PipelineSpec{compactedMsaaDesc,
                    {"opaque_meshlet_compacted_msaa4x",
                     "opaque_meshlet_compacted_msaa4x_double_sided"},
-                   meshletScenePipelines_.data() +
+                   pipelines_.meshletScene.data() +
                        meshletSceneVariantIndex(true, CoverageMode::Sample4,
                                                 false, false),
                    createMeshletMsaa4x},
       PipelineSpec{msaaAlphaDesc,
                    {"opaque_meshlet_alpha_msaa4x",
                     "opaque_meshlet_alpha_msaa4x_double_sided"},
-                   meshletScenePipelines_.data() +
+                   pipelines_.meshletScene.data() +
                        meshletSceneVariantIndex(false, CoverageMode::Sample4,
                                                 true, false),
                    createMeshletMsaa4x},
       PipelineSpec{compactedMsaaAlphaDesc,
                    {"opaque_meshlet_compacted_alpha_msaa4x",
                     "opaque_meshlet_compacted_alpha_msaa4x_double_sided"},
-                   meshletScenePipelines_.data() +
+                   pipelines_.meshletScene.data() +
                        meshletSceneVariantIndex(true, CoverageMode::Sample4,
                                                 true, false),
                    createMeshletMsaa4x},
       PipelineSpec{
           msaa8xDesc,
           {"opaque_meshlet_msaa8x", "opaque_meshlet_msaa8x_double_sided"},
-          meshletScenePipelines_.data() +
+          pipelines_.meshletScene.data() +
               meshletSceneVariantIndex(false, CoverageMode::Sample8, false,
                                        false),
           createMeshletMsaa8x},
       PipelineSpec{compactedMsaa8xDesc,
                    {"opaque_meshlet_compacted_msaa8x",
                     "opaque_meshlet_compacted_msaa8x_double_sided"},
-                   meshletScenePipelines_.data() +
+                   pipelines_.meshletScene.data() +
                        meshletSceneVariantIndex(true, CoverageMode::Sample8,
                                                 false, false),
                    createMeshletMsaa8x},
       PipelineSpec{msaa8xAlphaDesc,
                    {"opaque_meshlet_alpha_msaa8x",
                     "opaque_meshlet_alpha_msaa8x_double_sided"},
-                   meshletScenePipelines_.data() +
+                   pipelines_.meshletScene.data() +
                        meshletSceneVariantIndex(false, CoverageMode::Sample8,
                                                 true, false),
                    createMeshletMsaa8x},
       PipelineSpec{compactedMsaa8xAlphaDesc,
                    {"opaque_meshlet_compacted_alpha_msaa8x",
                     "opaque_meshlet_compacted_alpha_msaa8x_double_sided"},
-                   meshletScenePipelines_.data() +
+                   pipelines_.meshletScene.data() +
                        meshletSceneVariantIndex(true, CoverageMode::Sample8,
                                                 true, false),
                    createMeshletMsaa8x},
       PipelineSpec{
           depthDesc,
           {"opaque_meshlet_depth", "opaque_meshlet_depth_double_sided"},
-          meshletDepthPipelines_.data()},
+          pipelines_.meshletDepth.data()},
       PipelineSpec{depthAlphaDesc,
                    {"opaque_meshlet_depth_alpha",
                     "opaque_meshlet_depth_alpha_double_sided"},
-                   meshletDepthPipelines_.data() + 2u},
+                   pipelines_.meshletDepth.data() + 2u},
       PipelineSpec{msaaDepthDesc,
                    {"opaque_meshlet_depth_msaa4x",
                     "opaque_meshlet_depth_msaa4x_double_sided"},
-                   meshletDepthPipelines_.data() + 4u,
+                   pipelines_.meshletDepth.data() + 4u,
                    createMeshletMsaa4x},
       PipelineSpec{msaaDepthAlphaDesc,
                    {"opaque_meshlet_depth_alpha_msaa4x",
                     "opaque_meshlet_depth_alpha_msaa4x_double_sided"},
-                   meshletDepthPipelines_.data() + 6u,
+                   pipelines_.meshletDepth.data() + 6u,
                    createMeshletMsaa4x},
       PipelineSpec{
           msaa8xDepthDesc,
           {"opaque_meshlet_depth_msaa8x",
            "opaque_meshlet_depth_msaa8x_double_sided"},
-          meshletDepthPipelines_.data() +
+          pipelines_.meshletDepth.data() +
               meshletDepthVariantIndex(CoverageMode::Sample8, false, false),
           createMeshletMsaa8x},
       PipelineSpec{
           msaa8xDepthAlphaDesc,
           {"opaque_meshlet_depth_alpha_msaa8x",
            "opaque_meshlet_depth_alpha_msaa8x_double_sided"},
-          meshletDepthPipelines_.data() +
+          pipelines_.meshletDepth.data() +
               meshletDepthVariantIndex(CoverageMode::Sample8, true, false),
           createMeshletMsaa8x},
       PipelineSpec{simpleNormalDesc,
                    {"opaque_meshlet_normal_simple",
                     "opaque_meshlet_normal_simple_double_sided"},
-                   meshletNormalPipelines_.data()},
+                   pipelines_.meshletNormal.data()},
       PipelineSpec{normalDesc,
                    {"opaque_meshlet_normal_material",
                     "opaque_meshlet_normal_double_sided"},
-                   meshletNormalPipelines_.data() + 2u},
+                   pipelines_.meshletNormal.data() + 2u},
       PipelineSpec{
           velocityDesc,
           {"opaque_meshlet_velocity", "opaque_meshlet_velocity_double_sided"},
-          meshletVelocityPipelines_.data()},
+          pipelines_.meshletVelocity.data()},
       PipelineSpec{reactiveMaskDesc,
                    {"opaque_meshlet_reactive_mask",
                     "opaque_meshlet_reactive_mask_double_sided"},
-                   meshletReactiveMaskPipelines_.data()},
+                   pipelines_.meshletReactiveMask.data()},
   };
   for (PipelineSpec &spec : pipelineSpecs) {
     if (!spec.enabled) {
@@ -9071,25 +9051,25 @@ Result<bool, std::string> OpaqueRenderer::createMeshletPipelineState() {
       spec.handles[side] = result.value();
     }
   }
-  meshletPipelineInitialized_ = true;
+  pipelines_.meshletInitialized = true;
   return Result<bool, std::string>::makeResult(true);
 }
 
 RenderPipelineHandle
 OpaqueRenderer::selectMeshPipeline(bool doubleSided, bool tessellated) const {
-  const RenderPipelineHandle selected = meshScenePipelines_[rasterVariantIndex(
+  const RenderPipelineHandle selected = pipelines_.meshScene[rasterVariantIndex(
       CoverageMode::Sample1, false, tessellated, doubleSided)];
   if (nuri::isValid(selected)) {
     return selected;
   }
-  return tessellated ? meshScenePipelines_[rasterVariantIndex(
+  return tessellated ? pipelines_.meshScene[rasterVariantIndex(
                            CoverageMode::Sample1, false, true, false)]
                      : meshPipeline_.get();
 }
 
 RenderPipelineHandle OpaqueRenderer::selectVelocityPipeline(
     RenderPipelineHandle sourcePipeline) const {
-  return selectSurfaceVariant(meshVelocityPipelines_,
+  return selectSurfaceVariant(pipelines_.meshVelocity,
                               isTessPipeline(sourcePipeline),
                               isDoubleSidedPipeline(sourcePipeline), false);
 }
@@ -9097,15 +9077,15 @@ RenderPipelineHandle OpaqueRenderer::selectVelocityPipeline(
 RenderPipelineHandle OpaqueRenderer::selectReactiveMaskPipeline(
     RenderPipelineHandle sourcePipeline) const {
   const bool doubleSided = isDoubleSidedPipeline(sourcePipeline);
-  if (doubleSided && nuri::isValid(meshReactiveMaskPipelines_[1])) {
-    return meshReactiveMaskPipelines_[1];
+  if (doubleSided && nuri::isValid(pipelines_.meshReactiveMask[1])) {
+    return pipelines_.meshReactiveMask[1];
   }
-  return meshReactiveMaskPipelines_[0];
+  return pipelines_.meshReactiveMask[0];
 }
 
 RenderPipelineHandle OpaqueRenderer::selectNormalPipeline(
     RenderPipelineHandle sourcePipeline) const {
-  return selectSurfaceVariant(meshNormalPipelines_,
+  return selectSurfaceVariant(pipelines_.meshNormal,
                               isTessPipeline(sourcePipeline),
                               isDoubleSidedPipeline(sourcePipeline), false);
 }
@@ -9116,20 +9096,20 @@ OpaqueRenderer::selectDepthPipeline(RenderPipelineHandle sourcePipeline,
                                     CoverageMode coverage) const {
   const bool tessellated = isTessPipeline(sourcePipeline);
   const bool doubleSided = isDoubleSidedPipeline(sourcePipeline);
-  return meshDepthPipelines_[rasterVariantIndex(coverage, alphaMasked,
-                                                tessellated, doubleSided)];
+  return pipelines_.meshDepth[rasterVariantIndex(coverage, alphaMasked,
+                                                 tessellated, doubleSided)];
 }
 
 RenderPipelineHandle
 OpaqueRenderer::selectPickPipeline(RenderPipelineHandle sourcePipeline) const {
-  return selectSurfaceVariant(meshPickPipelines_,
+  return selectSurfaceVariant(pipelines_.meshPick,
                               isTessPipeline(sourcePipeline),
                               isDoubleSidedPipeline(sourcePipeline), true);
 }
 
 RenderPipelineHandle OpaqueRenderer::selectShadowInspectPipeline(
     RenderPipelineHandle sourcePipeline) const {
-  return selectSurfaceVariant(meshShadowInspectPipelines_,
+  return selectSurfaceVariant(pipelines_.meshShadowInspect,
                               isTessPipeline(sourcePipeline),
                               isDoubleSidedPipeline(sourcePipeline), true);
 }
@@ -9144,21 +9124,21 @@ OpaqueRenderer::selectMsaaScenePipeline(RenderPipelineHandle sourcePipeline,
     const RenderPipelineHandle base =
         variant == 0u
             ? meshPipeline_.get()
-            : meshScenePipelines_[rasterVariantIndex(
+            : pipelines_.meshScene[rasterVariantIndex(
                   CoverageMode::Sample1, false, tessellated, doubleSided)];
     if (!isSamePipelineHandle(sourcePipeline, base)) {
       continue;
     }
-    const RenderPipelineHandle alpha = meshScenePipelines_[rasterVariantIndex(
+    const RenderPipelineHandle alpha = pipelines_.meshScene[rasterVariantIndex(
         coverage, true, tessellated, doubleSided)];
     return alphaMasked && nuri::isValid(alpha)
                ? alpha
-               : meshScenePipelines_[rasterVariantIndex(
+               : pipelines_.meshScene[rasterVariantIndex(
                      coverage, false, tessellated, doubleSided)];
   }
   for (size_t kind = 0; kind < static_cast<size_t>(OverlayPipelineKind::Count);
        ++kind) {
-    if (isSamePipelineHandle(sourcePipeline, overlayPipelines_[kind])) {
+    if (isSamePipelineHandle(sourcePipeline, pipelines_.overlay[kind])) {
       return overlayPipeline(static_cast<OverlayPipelineKind>(kind), coverage);
     }
   }
@@ -9168,56 +9148,56 @@ OpaqueRenderer::selectMsaaScenePipeline(RenderPipelineHandle sourcePipeline,
 MeshletPipelineHandle OpaqueRenderer::selectMeshletScenePipeline(
     bool compacted, CoverageMode coverage, bool alphaMasked,
     bool doubleSided) const {
-  return meshletScenePipelines_[meshletSceneVariantIndex(
+  return pipelines_.meshletScene[meshletSceneVariantIndex(
       compacted, coverage, alphaMasked, doubleSided)];
 }
 
 MeshletPipelineHandle OpaqueRenderer::selectMeshletDepthPipeline(
     CoverageMode coverage, bool alphaMasked, bool doubleSided) const {
-  return meshletDepthPipelines_[meshletDepthVariantIndex(coverage, alphaMasked,
-                                                         doubleSided)];
+  return pipelines_.meshletDepth[meshletDepthVariantIndex(coverage, alphaMasked,
+                                                          doubleSided)];
 }
 
 bool OpaqueRenderer::isDoubleSidedPipeline(RenderPipelineHandle handle) const {
-  return matchesVariantBit(handle, meshScenePipelines_, 4u) ||
-         matchesVariantBit(handle, meshNormalPipelines_, 2u);
+  return matchesVariantBit(handle, pipelines_.meshScene, 4u) ||
+         matchesVariantBit(handle, pipelines_.meshNormal, 2u);
 }
 
 bool OpaqueRenderer::isTessPipeline(RenderPipelineHandle handle) const {
-  return matchesVariantBit(handle, meshScenePipelines_, 2u) ||
-         matchesVariantBit(handle, meshNormalPipelines_, 1u);
+  return matchesVariantBit(handle, pipelines_.meshScene, 2u) ||
+         matchesVariantBit(handle, pipelines_.meshNormal, 1u);
 }
 
 RenderPipelineHandle
 OpaqueRenderer::overlayPipeline(OverlayPipelineKind kind,
                                 CoverageMode coverage) const noexcept {
-  return overlayPipelines_[overlayPipelineIndex(kind, coverage)];
+  return pipelines_.overlay[overlayPipelineIndex(kind, coverage)];
 }
 
 bool OpaqueRenderer::ensureOverlayPipeline(OverlayPipelineKind kind,
                                            CoverageMode coverage) {
   const size_t baseIndex = overlayPipelineIndex(kind, CoverageMode::Sample1);
   const size_t requestedIndex = overlayPipelineIndex(kind, coverage);
-  RenderPipelineHandle &requestedPipeline = overlayPipelines_[requestedIndex];
-  bool &requestedUnsupported = overlayPipelineUnsupported_[requestedIndex];
+  RenderPipelineHandle &requestedPipeline = pipelines_.overlay[requestedIndex];
+  bool &requestedUnsupported = pipelines_.overlayUnsupported[requestedIndex];
   if (nuri::isValid(requestedPipeline)) {
     return true;
   }
-  if (overlayPipelineUnsupported_[baseIndex] || requestedUnsupported) {
+  if (pipelines_.overlayUnsupported[baseIndex] || requestedUnsupported) {
     return false;
   }
   const bool tessellated = kind == OverlayPipelineKind::TessWireframe ||
                            kind == OverlayPipelineKind::TessGeometry;
   const bool geometry = kind == OverlayPipelineKind::Geometry ||
                         kind == OverlayPipelineKind::TessGeometry;
-  if (tessellated && !nuri::isValid(meshScenePipelines_[rasterVariantIndex(
+  if (tessellated && !nuri::isValid(pipelines_.meshScene[rasterVariantIndex(
                          CoverageMode::Sample1, false, true, false)])) {
-    overlayPipelineUnsupported_[baseIndex] = true;
+    pipelines_.overlayUnsupported[baseIndex] = true;
     return false;
   }
   if (geometry && (!nuri::isValid(shaders_[MeshDebugOverlayGeometry]) ||
                    !nuri::isValid(shaders_[MeshDebugOverlayFragment]))) {
-    overlayPipelineUnsupported_[baseIndex] = true;
+    pipelines_.overlayUnsupported[baseIndex] = true;
     return false;
   }
   RenderPipelineDesc desc = meshPipelineDesc(
@@ -9248,8 +9228,8 @@ bool OpaqueRenderer::ensureOverlayPipeline(OverlayPipelineKind kind,
   const size_t kindIndex = static_cast<size_t>(kind);
   const auto create = [&](CoverageMode variantCoverage) {
     const size_t index = overlayPipelineIndex(kind, variantCoverage);
-    RenderPipelineHandle &pipeline = overlayPipelines_[index];
-    bool &unsupported = overlayPipelineUnsupported_[index];
+    RenderPipelineHandle &pipeline = pipelines_.overlay[index];
+    bool &unsupported = pipelines_.overlayUnsupported[index];
     if (nuri::isValid(pipeline)) {
       return true;
     }
@@ -9268,10 +9248,10 @@ bool OpaqueRenderer::ensureOverlayPipeline(OverlayPipelineKind kind,
 }
 
 void OpaqueRenderer::resetOverlayPipelineState() {
-  for (RenderPipelineHandle &pipeline : overlayPipelines_) {
+  for (RenderPipelineHandle &pipeline : pipelines_.overlay) {
     destroyPipelineHandle(gpu_, pipeline);
   }
-  overlayPipelineUnsupported_.fill(false);
+  pipelines_.overlayUnsupported.fill(false);
 }
 
 void OpaqueRenderer::invalidateAutoLodHistory() {
@@ -9350,17 +9330,16 @@ void OpaqueRenderer::destroyMeshPipelineState() {
       destroyPipelineHandle(gpu_, handle);
     }
   };
-  destroy(meshScenePipelines_);
-  destroy(meshPickPipelines_);
-  destroy(meshShadowInspectPipelines_);
-  destroy(meshVelocityPipelines_);
-  destroy(meshReactiveMaskPipelines_);
-  destroy(meshNormalPipelines_);
-  destroy(meshDepthPipelines_);
+  destroy(pipelines_.meshScene);
+  destroy(pipelines_.meshPick);
+  destroy(pipelines_.meshShadowInspect);
+  destroy(pipelines_.meshVelocity);
+  destroy(pipelines_.meshReactiveMask);
+  destroy(pipelines_.meshNormal);
+  destroy(pipelines_.meshDepth);
   for (RenderPipelineHandle *handle :
-       {&depthMotionVectorPipelineHandle_,
-        &currentFrameDepthVerificationPipelineHandle_,
-        &depthPyramidPipelineHandle_}) {
+       {&pipelines_.depthMotionVector,
+        &pipelines_.currentFrameDepthVerification, &pipelines_.depthPyramid}) {
     destroyPipelineHandle(gpu_, *handle);
   }
   resetMeshPipelineState();
@@ -9372,20 +9351,20 @@ void OpaqueRenderer::destroyMeshletPipelineState() {
       destroyMeshletPipelineHandle(gpu_, pipeline);
     }
   };
-  destroy(meshletScenePipelines_);
-  destroy(meshletDepthPipelines_);
-  destroy(meshletNormalPipelines_);
-  destroy(meshletVelocityPipelines_);
-  destroy(meshletReactiveMaskPipelines_);
+  destroy(pipelines_.meshletScene);
+  destroy(pipelines_.meshletDepth);
+  destroy(pipelines_.meshletNormal);
+  destroy(pipelines_.meshletVelocity);
+  destroy(pipelines_.meshletReactiveMask);
   resetMeshletPipelineState();
 }
 
 void OpaqueRenderer::resetMeshletPipelineState() {
-  meshletScenePipelines_.fill({});
-  meshletDepthPipelines_.fill({});
-  meshletNormalPipelines_.fill({});
-  meshletVelocityPipelines_.fill({});
-  meshletReactiveMaskPipelines_.fill({});
+  pipelines_.meshletScene.fill({});
+  pipelines_.meshletDepth.fill({});
+  pipelines_.meshletNormal.fill({});
+  pipelines_.meshletVelocity.fill({});
+  pipelines_.meshletReactiveMask.fill({});
   shaders_[MeshletTask] = {};
   shaders_[MeshletCompactedTask] = {};
   shaders_[MeshletMesh] = {};
@@ -9399,20 +9378,20 @@ void OpaqueRenderer::resetMeshletPipelineState() {
   shaders_[MeshletVelocityFragment] = {};
   shaders_[MeshletReactiveMaskMesh] = {};
   shaders_[MeshletReactiveMaskFragment] = {};
-  meshletPipelineInitialized_ = false;
+  pipelines_.meshletInitialized = false;
 }
 
 void OpaqueRenderer::resetMeshPipelineState() {
-  meshScenePipelines_.fill({});
-  meshPickPipelines_.fill({});
-  meshShadowInspectPipelines_.fill({});
-  meshVelocityPipelines_.fill({});
-  meshReactiveMaskPipelines_.fill({});
-  meshNormalPipelines_.fill({});
-  meshDepthPipelines_.fill({});
-  currentFrameDepthVerificationPipelineHandle_ = {};
-  depthPyramidPipelineHandle_ = {};
-  depthMotionVectorPipelineHandle_ = {};
+  pipelines_.meshScene.fill({});
+  pipelines_.meshPick.fill({});
+  pipelines_.meshShadowInspect.fill({});
+  pipelines_.meshVelocity.fill({});
+  pipelines_.meshReactiveMask.fill({});
+  pipelines_.meshNormal.fill({});
+  pipelines_.meshDepth.fill({});
+  pipelines_.currentFrameDepthVerification = {};
+  pipelines_.depthPyramid = {};
+  pipelines_.depthMotionVector = {};
   depthMotionVectorDrawItem_ = {};
   baseMeshFillDraw_ = {};
 }
@@ -9463,10 +9442,7 @@ void OpaqueRenderer::destroyBuffers() {
                       instanceLodBoundsBufferCapacityBytes_);
   retireDynamicBuffer(instanceBaseMatricesBuffer_,
                       instanceBaseMatricesBufferCapacityBytes_);
-  for (auto &ring : bufferRings_) {
-    retireDynamicBufferRing(ring);
-    ring.clear();
-  }
+  bufferRings_.reset();
   frameSlotStates_.clear();
   visibilityVisibleIndexReadback_.clear();
   invalidateIndirectPackCache();
@@ -9482,8 +9458,7 @@ void addOpaqueStage(RenderPipeline &pipeline, std::string_view componentName,
       .state = &renderer,
       .enabled =
           [](const void *state, const FrameBuildContext &ctx) {
-            return (!ctx.frame.settings ||
-                    renderSettingsOrDefault(ctx.frame).opaque.enabled) &&
+            return ctx.frame.settings.opaque.enabled &&
                    (static_cast<const OpaqueRenderer *>(state)->*Ready)();
           },
       .build =
@@ -9528,12 +9503,12 @@ OpaqueRenderer *registerOpaquePrepassStages(RenderPipeline &pipeline,
           .submitted =
               [](void *state, const RenderFrameContext &frame) noexcept {
                 static_cast<OpaqueRenderer *>(state)->commitSubmittedFrame(
-                    frame.frameIndex);
+                    frame);
               },
           .abandoned =
               [](void *state, const RenderFrameContext &frame) noexcept {
                 static_cast<OpaqueRenderer *>(state)->abandonPreparedFrame(
-                    frame.frameIndex);
+                    frame);
               },
       });
   addOpaqueStage<&OpaqueRenderer::hasPreparedOpaquePickPasses,
