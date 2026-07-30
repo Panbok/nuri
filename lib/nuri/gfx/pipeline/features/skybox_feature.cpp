@@ -31,7 +31,7 @@ SkyboxPass::~SkyboxPass() {
 }
 
 bool SkyboxPass::isEnabled(const FrameBuildContext &ctx) const {
-  return ctx.frame.settings.skybox.enabled;
+  return ctx.frame.settings->skybox.enabled;
 }
 
 Result<bool, std::string> SkyboxPass::prepare(FrameBuildContext &ctx) {

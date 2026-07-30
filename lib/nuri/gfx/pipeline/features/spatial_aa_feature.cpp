@@ -94,7 +94,7 @@ isAADebugOutputView(AntiAliasingDebugView view) noexcept {
 }
 [[nodiscard]] inline bool
 shouldRunSpatialAA(const RenderFrameContext &frame) noexcept {
-  const RenderSettings &settings = frame.settings;
+  const RenderSettings &settings = frame.settings.facts();
   const AntiAliasingMode mode = settings.antiAliasing.mode;
   const AntiAliasingDebugView debugView = settings.antiAliasing.debug.view;
   if (isSpatialAADebugView(debugView)) {
@@ -122,7 +122,7 @@ shouldRunSpatialAA(const RenderFrameContext &frame) noexcept {
 }
 [[nodiscard]] inline bool
 shouldRunPostTransparentSpatialAA(const RenderFrameContext &frame) noexcept {
-  const RenderSettings &settings = frame.settings;
+  const RenderSettings &settings = frame.settings.facts();
   const AntiAliasingMode mode = settings.antiAliasing.mode;
   const AntiAliasingDebugView debugView = settings.antiAliasing.debug.view;
   const PresentationAAPlan &presentationAA = frame.presentationAA;
@@ -142,7 +142,7 @@ shouldRunPostTransparentSpatialAA(const RenderFrameContext &frame) noexcept {
 }
 [[nodiscard]] inline bool
 isSpatialFallbackActive(const RenderFrameContext &frame) noexcept {
-  const RenderSettings &settings = frame.settings;
+  const RenderSettings &settings = frame.settings.facts();
   const AntiAliasingMode mode = settings.antiAliasing.mode;
   if (mode == AntiAliasingMode::SpatialFallback) {
     return true;
@@ -157,7 +157,7 @@ isSpatialFallbackActive(const RenderFrameContext &frame) noexcept {
 }
 [[nodiscard]] inline bool
 isSpatialCleanupActive(const RenderFrameContext &frame) noexcept {
-  const RenderSettings &settings = frame.settings;
+  const RenderSettings &settings = frame.settings.facts();
   const AntiAliasingMode mode = settings.antiAliasing.mode;
   if (frame.presentationAA.coverage != CoverageMode::Sample1) {
     const PostAAPlan &postAA = frame.presentationAA.postAA;
@@ -169,7 +169,7 @@ isSpatialCleanupActive(const RenderFrameContext &frame) noexcept {
 }
 [[nodiscard]] inline bool
 isTaaPostSpatialCleanupActive(const RenderFrameContext &frame) noexcept {
-  const RenderSettings &settings = frame.settings;
+  const RenderSettings &settings = frame.settings.facts();
   return settings.antiAliasing.mode == AntiAliasingMode::TAA &&
          isSpatialCleanupActive(frame);
 }
@@ -281,20 +281,7 @@ SpatialAALifecycleSnapshot SpatialAAPass::lifecycleSnapshot() const noexcept {
 }
 
 void SpatialAAPass::destroyResources() {
-  for (RenderPipelineHandle &pipeline : pipelines_) {
-    if (nuri::isValid(pipeline))
-      gpu_.destroyRenderPipeline(pipeline);
-    pipeline = {};
-  }
-  if (nuri::isValid(vertexShader_)) {
-    gpu_.destroyShaderModule(vertexShader_);
-  }
-  vertexShader_ = {};
-  for (ShaderHandle &shader : fragmentShaders_) {
-    if (nuri::isValid(shader))
-      gpu_.destroyShaderModule(shader);
-    shader = {};
-  }
+  program_.reset();
   submittedPostAA_.clear();
   pendingLease_.reset();
   for (TextureHandle &lut : luts_) {
@@ -314,26 +301,31 @@ Result<bool, std::string> SpatialAAPass::initialize() {
   const std::filesystem::path vertexPath =
       config_.fullscreenVertex.empty() ? basePath / "fullscreen_copy.vert"
                                        : config_.fullscreenVertex;
-  auto vertex = compileShaderFile(gpu_, "spatial_aa_vertex",
-                                  vertexPath.string(), ShaderStage::Vertex);
-  if (vertex.hasError())
-    return Result<bool, std::string>::makeError(vertex.error());
-  vertexShader_ = vertex.value();
+  std::array<ShaderSpec, StageCount + 1u> shaderSpecs{};
+  shaderSpecs[0] = {.debugName = "spatial_aa_vertex",
+                    .path = vertexPath,
+                    .stage = ShaderStage::Vertex};
   for (size_t index = 0; index < kSpatialAAStages.size(); ++index) {
     const SpatialAAStageSpec &spec = kSpatialAAStages[index];
-    auto fragment =
-        compileShaderFile(gpu_, spec.name, (basePath / spec.fragment).string(),
-                          ShaderStage::Fragment);
-    if (fragment.hasError())
-      return Result<bool, std::string>::makeError(fragment.error());
-    fragmentShaders_[index] = fragment.value();
-    auto pipeline = gpu_.createRenderPipeline(
-        fullscreenPipelineDesc(spec.format, vertexShader_,
-                               fragmentShaders_[index]),
-        spec.name);
-    if (pipeline.hasError())
-      return Result<bool, std::string>::makeError(pipeline.error());
-    pipelines_[index] = pipeline.value();
+    shaderSpecs[index + 1u] = {.debugName = spec.name,
+                               .path = basePath / spec.fragment,
+                               .stage = ShaderStage::Fragment};
+  }
+  auto shaders = program_.compileShaders(gpu_, shaderSpecs);
+  if (shaders.hasError()) {
+    return shaders;
+  }
+  std::array<GraphicsPipelineSpec, StageCount> pipelineSpecs{};
+  for (size_t index = 0; index < kSpatialAAStages.size(); ++index) {
+    const SpatialAAStageSpec &spec = kSpatialAAStages[index];
+    pipelineSpecs[index] = {
+        .debugName = spec.name,
+        .desc = fullscreenPipelineDesc(spec.format, program_.shader(0u),
+                                       program_.shader(index + 1u))};
+  }
+  auto pipelines = program_.replaceGraphicsPipelines(gpu_, pipelineSpecs);
+  if (pipelines.hasError()) {
+    return pipelines;
   }
   for (size_t index = 0; index < samplers_.size(); ++index) {
     const SamplerFilter filter =
@@ -409,7 +401,7 @@ Result<bool, std::string> SpatialAAPass::prepare(FrameBuildContext &ctx) {
     it = submittedPostAA_.erase(it);
   }
   if (placement_ == SpatialAAPlacement::PostTransparent) {
-    const RenderSettings &settings = ctx.frame.settings;
+    const RenderSettings &settings = ctx.frame.settings.facts();
     if (ctx.frame.presentationAA.coverage != CoverageMode::Sample1) {
       ctx.frame.metrics.antiAliasing.msaaSpatialCleanupEnabled = postAA;
     } else {
@@ -461,6 +453,8 @@ Result<bool, std::string> SpatialAAPass::build(FrameBuildContext &ctx) {
       gpu_.getSamplerBindlessIndex(samplers_[LinearSampler]);
   const uint32_t pointSamplerId =
       gpu_.getSamplerBindlessIndex(samplers_[PointSampler]);
+  const std::array recordingSamplers{samplers_[LinearSampler],
+                                     samplers_[PointSampler]};
   auto importSource = ctx.graph.importTexture(
       sourceTexture, postTransparent ? "transparent_spatial_aa_frame_color"
                                      : "spatial_aa_scene");
@@ -511,7 +505,7 @@ Result<bool, std::string> SpatialAAPass::build(FrameBuildContext &ctx) {
       1.0f / static_cast<float>(std::max(dimensions.width, 1u));
   const float inverseHeight =
       1.0f / static_cast<float>(std::max(dimensions.height, 1u));
-  const RenderSettings &settings = ctx.frame.settings;
+  const RenderSettings &settings = ctx.frame.settings.facts();
   const AntiAliasingDebugView debugView = settings.antiAliasing.debug.view;
   const bool multisampled =
       ctx.frame.presentationAA.coverage != CoverageMode::Sample1;
@@ -594,7 +588,7 @@ Result<bool, std::string> SpatialAAPass::build(FrameBuildContext &ctx) {
     aaMetrics.taaTransparentPostSpatialCleanupActive = true;
   }
   const DrawItem edgeDraw = makeFullscreenDraw(
-      pipelines_[EdgeStage],
+      program_.graphicsPipeline(EdgeStage),
       std::span<const std::byte>(
           reinterpret_cast<const std::byte *>(&baseConstants),
           sizeof(baseConstants)),
@@ -605,9 +599,8 @@ Result<bool, std::string> SpatialAAPass::build(FrameBuildContext &ctx) {
                     .storeOp = StoreOp::Store,
                     .clearColor = {0.0f, 0.0f, 0.0f, 1.0f}};
   edgePass.colorTexture = edges;
-  edgePass.dependencyTextures =
-      std::span<const TextureHandle>(edgeReads.data(), edgeReads.size());
   edgePass.draws = std::span<const DrawItem>(&edgeDraw, 1u);
+  edgePass.recordingSamplers = recordingSamplers;
   edgePass.gpuTimingScope = GpuTimingScope::SpatialAA;
   edgePass.debugLabel = postTransparent ? "Transparent SpatialAA Edge Pass"
                                         : "SMAA Edge Detection Pass";
@@ -615,6 +608,11 @@ Result<bool, std::string> SpatialAAPass::build(FrameBuildContext &ctx) {
   auto addEdge = ctx.graph.addGraphicsPass(edgePass);
   if (addEdge.hasError()) {
     return Result<bool, std::string>::makeError(addEdge.error());
+  }
+  auto edgeReadsResult = ctx.graph.addImportedTextureReads(
+      addEdge.value(), edgeReads, edgePass.debugLabel);
+  if (edgeReadsResult.hasError()) {
+    return Result<bool, std::string>::makeError(edgeReadsResult.error());
   }
   if (postTransparent) {
     if (multisampled) {
@@ -634,7 +632,7 @@ Result<bool, std::string> SpatialAAPass::build(FrameBuildContext &ctx) {
       debugView == AntiAliasingDebugView::SpatialAABlendWeights;
   if (!edgeDebug) {
     DrawItem blendDraw = makeFullscreenDraw(
-        pipelines_[BlendStage],
+        program_.graphicsPipeline(BlendStage),
         std::span<const std::byte>(
             reinterpret_cast<const std::byte *>(&baseConstants),
             sizeof(baseConstants)),
@@ -650,9 +648,8 @@ Result<bool, std::string> SpatialAAPass::build(FrameBuildContext &ctx) {
                        .storeOp = StoreOp::Store,
                        .clearColor = {0.0f, 0.0f, 0.0f, 1.0f}};
     blendPass.colorTexture = blend;
-    blendPass.dependencyTextures =
-        std::span<const TextureHandle>(blendReads.data(), blendReads.size());
     blendPass.draws = std::span<const DrawItem>(&blendDraw, 1u);
+    blendPass.recordingSamplers = recordingSamplers;
     blendPass.gpuTimingScope = GpuTimingScope::SpatialAA;
     blendPass.debugLabel = postTransparent ? "Transparent SpatialAA Blend Pass"
                                            : "SMAA Blend Weight Pass";
@@ -660,6 +657,11 @@ Result<bool, std::string> SpatialAAPass::build(FrameBuildContext &ctx) {
     auto addBlend = ctx.graph.addGraphicsPass(blendPass);
     if (addBlend.hasError()) {
       return Result<bool, std::string>::makeError(addBlend.error());
+    }
+    auto blendReadsResult = ctx.graph.addImportedTextureReads(
+        addBlend.value(), blendReads, blendPass.debugLabel);
+    if (blendReadsResult.hasError()) {
+      return Result<bool, std::string>::makeError(blendReadsResult.error());
     }
     if (postTransparent) {
       if (multisampled) {
@@ -709,7 +711,7 @@ Result<bool, std::string> SpatialAAPass::build(FrameBuildContext &ctx) {
     aaMetrics.spatialAASplitCompareDebugViewRendered = true;
   }
   DrawItem outputDraw = makeFullscreenDraw(
-      pipelines_[NeighborhoodStage],
+      program_.graphicsPipeline(NeighborhoodStage),
       std::span<const std::byte>(
           reinterpret_cast<const std::byte *>(&outputConstants),
           sizeof(outputConstants)),
@@ -723,9 +725,8 @@ Result<bool, std::string> SpatialAAPass::build(FrameBuildContext &ctx) {
                       .storeOp = StoreOp::Store,
                       .clearColor = {0.0f, 0.0f, 0.0f, 1.0f}};
   outputPass.colorTexture = output;
-  outputPass.dependencyTextures =
-      std::span<const TextureHandle>(outputReads.data(), outputReadCount);
   outputPass.draws = std::span<const DrawItem>(&outputDraw, 1u);
+  outputPass.recordingSamplers = recordingSamplers;
   outputPass.gpuTimingScope = GpuTimingScope::SpatialAA;
   outputPass.debugLabel = outputLabel;
   outputPass.debugColor = isSpatialAADebugView(debugView)
@@ -734,6 +735,13 @@ Result<bool, std::string> SpatialAAPass::build(FrameBuildContext &ctx) {
   auto addOutput = ctx.graph.addGraphicsPass(outputPass);
   if (addOutput.hasError()) {
     return Result<bool, std::string>::makeError(addOutput.error());
+  }
+  auto outputReadsResult = ctx.graph.addImportedTextureReads(
+      addOutput.value(),
+      std::span<const TextureHandle>(outputReads.data(), outputReadCount),
+      outputPass.debugLabel);
+  if (outputReadsResult.hasError()) {
+    return Result<bool, std::string>::makeError(outputReadsResult.error());
   }
   if (postTransparent) {
     if (multisampled) {
@@ -758,7 +766,7 @@ Result<bool, std::string> SpatialAAPass::build(FrameBuildContext &ctx) {
   copyConstants.sourceTexId = outputTexId;
   copyConstants.mode = kSpatialAAModeCopy;
   DrawItem copyDraw = makeFullscreenDraw(
-      pipelines_[NeighborhoodStage],
+      program_.graphicsPipeline(NeighborhoodStage),
       std::span<const std::byte>(
           reinterpret_cast<const std::byte *>(&copyConstants),
           sizeof(copyConstants)),
@@ -773,6 +781,7 @@ Result<bool, std::string> SpatialAAPass::build(FrameBuildContext &ctx) {
                     .clearColor = {0.0f, 0.0f, 0.0f, 1.0f}};
   copyPass.colorTexture = importSource.value();
   copyPass.draws = std::span<const DrawItem>(&copyDraw, 1u);
+  copyPass.recordingSamplers = recordingSamplers;
   copyPass.gpuTimingScope = GpuTimingScope::SpatialAA;
   copyPass.debugLabel = postTransparent ? "Transparent SpatialAA Copy Back Pass"
                                         : "SMAA Copy Back Pass";

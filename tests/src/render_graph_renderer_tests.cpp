@@ -870,7 +870,7 @@ TEST(RenderGraphRendererTest,
   auto renderResult = renderer.render(pipeline, frameContext);
 
   ASSERT_FALSE(renderResult.hasError());
-  const RenderSettings &resolved = frameContext.settings;
+  const RenderSettings &resolved = frameContext.settings.facts();
   EXPECT_FLOAT_EQ(resolved.hdrPostProcess.bloomStrength,
                   kDefaultHDRBloomStrength);
   EXPECT_FLOAT_EQ(resolved.transmission.taaJitterPrefilterMaxLod, 2.0f);

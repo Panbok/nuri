@@ -182,7 +182,7 @@ EditorOverlayController::buildOverlayPass(RenderFrameContext &frame,
         "EditorOverlayController has no ImGui editor");
   }
 
-  editor_->setRenderSettings(frame.settings);
+  editor_->setRenderSettings(frame.settings.facts());
   editor_->setShadowDebugResources(
       frame.sharedResources.shadowDebugFrameData,
       frame.sharedResources[FrameTextureSlot::ShadowDebugPreview].texture);
@@ -227,6 +227,11 @@ EditorOverlayController::buildOverlayPass(RenderFrameContext &frame,
   auto addResult = graph.addGraphicsPass(passResult.value());
   if (addResult.hasError()) {
     return Result<void, std::string>::makeError(addResult.error());
+  }
+  auto useResult = graph.addImportedTextureAccesses(
+      addResult.value(), editor_->textureUses(), passResult.value().debugLabel);
+  if (useResult.hasError()) {
+    return Result<void, std::string>::makeError(useResult.error());
   }
 
   return Result<void, std::string>::makeResult();

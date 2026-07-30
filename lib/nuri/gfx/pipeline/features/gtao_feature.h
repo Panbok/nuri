@@ -2,6 +2,7 @@
 #include "nuri/core/runtime_config.h"
 #include "nuri/defines.h"
 #include "nuri/gfx/gpu_device.h"
+#include "nuri/gfx/pipeline/owned_program_bundle.h"
 #include "nuri/gfx/pipeline/render_pipeline.h"
 #include <array>
 #include <cstddef>
@@ -25,8 +26,7 @@ public:
 private:
   GPUDevice &gpu_;
   RuntimeOpaqueShaderConfig config_{};
-  std::array<ShaderHandle, 6> shaders_{};
-  std::array<ComputePipelineHandle, 6> pipelines_{};
+  OwnedProgramBundle program_{};
   std::array<SamplerHandle, 2> samplers_{};
   std::string initializationError_{};
   uint64_t lastTemporalPolicySignature_ = 0u;

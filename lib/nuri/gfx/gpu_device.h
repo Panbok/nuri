@@ -228,14 +228,14 @@ public:
   virtual Result<bool, std::string>
   recordGraphicsBarriers(RecordingContextHandle ctx,
                          std::span<const GraphicsBarrierRecord> barriers);
-  virtual Result<bool, std::string> retainGraphicsRecordingReferences(
-      RecordingContextHandle ctx,
-      const GraphicsRecordingReferences &references);
   virtual Result<bool, std::string>
   recordGraphicsPass(RecordingContextHandle ctx, const RenderPass &pass);
   virtual Result<bool, std::string>
   recordGraphicsRange(RecordingContextHandle ctx,
                       std::span<const GraphicsRecordingStep> steps);
+  virtual Result<bool, std::string> recordGraphicsRangeWithReferences(
+      RecordingContextHandle ctx, std::span<const GraphicsRecordingStep> steps,
+      const GraphicsRecordingReferences &references);
   virtual Result<bool, std::string> recordExternalTemporalDispatch(
       RecordingContextHandle ctx, const ExternalTemporalDispatchItem &dispatch,
       GpuTimingScope timingScope, std::string_view debugLabel) {

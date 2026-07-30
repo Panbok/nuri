@@ -63,7 +63,6 @@ void fingerprint(uint64_t &hash, std::string_view value) {
                     compiled.plan.declaredPassCount,
                     compiled.plan.culledPassCount, compiled.plan.rootPassCount,
                     compiled.plan.usedParallelCompile,
-                    compiled.commands.usedParallelPayloadResolution,
                     compiled.plan.usedParallelHazardAnalysis,
                     compiled.plan.usedParallelLifetimeAnalysis);
   for (const auto &name : compiled.commands.passDebugNames) {
@@ -96,9 +95,14 @@ void fingerprint(uint64_t &hash, std::string_view value) {
   hashAllocations(compiled.plan.transientTextureAllocations);
   hashAllocations(compiled.plan.transientBufferAllocations);
   for (const auto &patch : compiled.plan.commandResourcePatches) {
-    fingerprintValues(hash, patch.orderedPassIndex, patch.commandIndex,
-                      patch.dependencyIndex, patch.resourceIndex,
-                      patch.resourceKind, patch.target);
+    fingerprintValues(hash, patch.index());
+    std::visit(
+        [&](const auto &site) {
+          fingerprintValues(hash, site.orderedPassIndex, site.resourceIndex);
+          if constexpr (requires { site.commandIndex; })
+            fingerprintValues(hash, site.commandIndex);
+        },
+        patch);
   }
   return hash;
 }
@@ -172,17 +176,11 @@ buildSummary(CompiledRenderGraphView compiled,
       count(compiled.plan.transientBufferPhysicalAllocations);
   result.commandResourcePatchCount =
       count(compiled.plan.commandResourcePatches);
-  result.resolvedDependencyBufferSlotCount =
-      count(compiled.commands.resolvedDependencyBuffers);
   result.ownedPreDispatchCount = count(compiled.commands.ownedPreDispatches);
   result.ownedDrawItemCount = count(compiled.commands.ownedDrawItems);
   result.ownedMeshDispatchItemCount =
       count(compiled.commands.ownedMeshDispatchItems);
-  result.resolvedPreDispatchDependencyBufferSlotCount =
-      count(compiled.commands.resolvedPreDispatchDependencyBuffers);
   result.usedParallelCompile = compiled.plan.usedParallelCompile;
-  result.usedParallelPayloadResolution =
-      compiled.commands.usedParallelPayloadResolution;
   result.usedParallelHazardAnalysis = compiled.plan.usedParallelHazardAnalysis;
   result.usedParallelLifetimeAnalysis =
       compiled.plan.usedParallelLifetimeAnalysis;
@@ -357,8 +355,6 @@ writeRenderGraphTelemetryTextDump(const RenderGraphTelemetrySnapshot &snapshot,
       {"owned_mesh_dispatch_items", summary.ownedMeshDispatchItemCount},
       {"command_resource_patches", summary.commandResourcePatchCount},
       {"used_parallel_compile", summary.usedParallelCompile},
-      {"used_parallel_payload_resolution",
-       summary.usedParallelPayloadResolution},
       {"used_parallel_hazard_analysis", summary.usedParallelHazardAnalysis},
       {"used_parallel_lifetime_analysis", summary.usedParallelLifetimeAnalysis},
       {"used_parallel_recording", summary.usedParallelRecording},

@@ -300,23 +300,13 @@ private:
     bool alphaMasked = false;
     bool materialNormalRequired = false;
   };
-  struct MeshletDispatchDependencyBuffers {
-    std::pmr::vector<BufferHandle> buffers;
-    explicit MeshletDispatchDependencyBuffers(
-        std::pmr::memory_resource *memory = std::pmr::get_default_resource())
-        : buffers(memory) {}
-    [[nodiscard]] std::span<const BufferHandle> span() const noexcept {
-      return std::span<const BufferHandle>(buffers.data(), buffers.size());
-    }
-  };
   struct MeshletPreparedStream {
     std::pmr::vector<MeshDispatchItem> dispatches;
     std::pmr::vector<MeshletPushConstants> constants;
-    std::pmr::vector<MeshletDispatchDependencyBuffers> dependencies;
 
     explicit MeshletPreparedStream(
         std::pmr::memory_resource *memory = std::pmr::get_default_resource())
-        : dispatches(memory), constants(memory), dependencies(memory) {}
+        : dispatches(memory), constants(memory) {}
   };
   struct alignas(16) VelocityFrameGpuData {
     glm::mat4 currentViewProjNoJitter{1.0f};
@@ -437,15 +427,14 @@ private:
     std::pmr::vector<MeshletBatchInfo> meshletBatchInfos;
     std::pmr::vector<MeshDispatchItem> meshletDispatches;
     std::pmr::vector<MeshletPushConstants> meshletPushConstantsTemplates;
-    std::pmr::vector<MeshletDispatchDependencyBuffers>
-        meshletDispatchDependencyBuffers;
+    std::pmr::vector<BufferHandle> meshletAddressBackingBuffers;
     std::pmr::vector<MeshletBatchGpuData> meshletBatchGpuData;
     std::pmr::vector<uint32_t> remap;
     explicit StaticBatchCache(std::pmr::memory_resource *memory)
         : draws(memory), pushConstantsTemplates(memory), alphaMasked(memory),
           meshletBatchInfos(memory), meshletDispatches(memory),
           meshletPushConstantsTemplates(memory),
-          meshletDispatchDependencyBuffers(memory), meshletBatchGpuData(memory),
+          meshletAddressBackingBuffers(memory), meshletBatchGpuData(memory),
           remap(memory) {}
   };
   struct SurfacePipelineLibrary {
@@ -479,40 +468,7 @@ private:
   Result<bool, std::string> recreatePickTexture();
   Result<bool, std::string> ensureStaticInstanceBufferCapacity(size_t count);
   Result<bool, std::string> ensureRingBufferCount(uint32_t requiredCount);
-  Result<bool, std::string>
-  ensureInstanceMatricesRingCapacity(size_t requiredBytes);
-  Result<bool, std::string>
-  ensurePreviousInstanceMatricesRingCapacity(size_t requiredBytes);
-  Result<bool, std::string>
-  ensureVelocityInstanceFlagsRingCapacity(size_t requiredBytes);
-  Result<bool, std::string>
-  ensureVelocityFrameDataRingCapacity(size_t requiredBytes);
-  Result<bool, std::string>
-  ensureVelocityGeometryRingCapacity(size_t requiredBytes);
-  Result<bool, std::string>
-  ensureMeshletBatchRingCapacity(size_t requiredBytes);
-  Result<bool, std::string>
-  ensureVisibilityGpuRingCapacity(size_t candidateBytes,
-                                  size_t visibleIndexBytes);
-  Result<bool, std::string>
-  ensureVisibilityMeshletIndirectRingCapacity(size_t dispatchBytes,
-                                              size_t commandBytes);
-  Result<bool, std::string>
-  ensureMeshletCompactionRingCapacity(size_t requiredBytes);
-  Result<bool, std::string>
-  ensureVisibilityMeshletIndirectCommandRingCapacity(size_t requiredBytes);
-  Result<bool, std::string>
-  ensureVisibilityCounterRingCapacity(size_t requiredBytes);
   void invalidateVisibilityReadbackSlot(size_t slot);
-  Result<bool, std::string>
-  ensureVisibilityVisibleIndexRingCapacity(size_t requiredBytes);
-  Result<bool, std::string> ensureDynamicRingCapacity(
-      BufferRingSlot role, size_t requiredBytes, size_t minimumBytes,
-      std::string_view debugNamePrefix, Storage storage = Storage::Device);
-  Result<bool, std::string>
-  ensureInstanceRemapRingCapacity(size_t requiredBytes);
-  Result<bool, std::string>
-  ensureIndirectCommandRingCapacity(size_t requiredBytes);
   [[nodiscard]] uint32_t
   resolveSingleInstanceRequestedLod(const RenderSettings &settings,
                                     uint32_t forcedLod) const;
@@ -803,7 +759,6 @@ private:
   std::pmr::vector<RenderGraphAccessMode> passDependencyBufferAccessModes_;
   std::pmr::vector<BufferHandle> preResolvedDecodeBuffers_;
   std::pmr::vector<BufferHandle> preResolvedDrawBuffers_;
-  std::pmr::vector<BufferHandle> dispatchDependencyBuffers_;
   std::pmr::vector<TextureHandle> passDependencyTextures_;
   std::pmr::vector<BufferHandle> mainPassDependencyBuffers_;
   std::pmr::vector<RenderGraphAccessMode> mainPassDependencyBufferAccessModes_;

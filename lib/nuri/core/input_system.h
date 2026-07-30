@@ -15,7 +15,6 @@ public:
   InputSystem(InputSystem &&) = delete;
   InputSystem &operator=(InputSystem &&) = delete;
   void beginFrame();
-  void endFrame();
   bool isKeyDown(Key key) const;
   bool wasKeyPressed(Key key) const;
   bool wasKeyReleased(Key key) const;

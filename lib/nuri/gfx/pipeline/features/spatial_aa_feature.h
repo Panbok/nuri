@@ -2,6 +2,7 @@
 #include "nuri/core/runtime_config.h"
 #include "nuri/defines.h"
 #include "nuri/gfx/gpu_device.h"
+#include "nuri/gfx/pipeline/owned_program_bundle.h"
 #include "nuri/gfx/pipeline/render_pipeline.h"
 #include <array>
 #include <cstdint>
@@ -50,9 +51,7 @@ private:
   GPUDevice &gpu_;
   RuntimeCompositeConfig config_{};
   SpatialAAPlacement placement_;
-  ShaderHandle vertexShader_{};
-  std::array<ShaderHandle, 3> fragmentShaders_{};
-  std::array<RenderPipelineHandle, 3> pipelines_{};
+  OwnedProgramBundle program_{};
   std::array<SamplerHandle, 2> samplers_{};
   std::array<TextureHandle, 2> luts_{};
   std::vector<SubmittedPostAA> submittedPostAA_{};

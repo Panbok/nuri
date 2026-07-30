@@ -909,8 +909,6 @@ constexpr BenchmarkMetricDescriptor kDescriptors[] = {
         "rendergraph.summary.transient_buffer_physical_allocation_count"),
     NURI_RENDERGRAPH_COUNTER(
         "rendergraph.summary.command_resource_patch_count"),
-    NURI_RENDERGRAPH_COUNTER(
-        "rendergraph.summary.resolved_dependency_buffer_slot_count"),
     NURI_RENDERGRAPH_COUNTER("rendergraph.summary.owned_pre_dispatch_count"),
     NURI_RENDERGRAPH_COUNTER("rendergraph.summary.owned_draw_item_count"),
     NURI_RENDERGRAPH_COUNTER(

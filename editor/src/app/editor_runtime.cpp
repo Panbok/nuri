@@ -1514,7 +1514,7 @@ void EditorRuntime::buildFrameContext(const Camera &camera,
               planResult.error().c_str());
   frameContext_.presentationAA = planResult.value();
   auto cameraResult = temporalFrameService_.prepareFrame(
-      camera, app_.getAspectRatio(), frameRenderSettings_.antiAliasing,
+      camera, app_.getAspectRatio(), frameRenderSettings_->antiAliasing,
       frameContext_.presentationAA,
       TemporalCameraFrameDesc{
           .renderExtent =
@@ -1527,7 +1527,6 @@ void EditorRuntime::buildFrameContext(const Camera &camera,
               cameraResult.error().c_str());
   frameContext_.camera = cameraResult.value();
   frameContext_.temporalFrameService = &temporalFrameService_;
-  frameRenderSettings_.antiAliasing.debug.resetHistoryRequested = false;
   frameContext_.settings = frameRenderSettings_;
   frameContext_.metrics = {};
   frameContext_.metrics.frameIndex = frameContext_.frameIndex;
@@ -1562,7 +1561,7 @@ void EditorRuntime::submitPipelineFrame() {
     }
   }
   persistFrameRenderSettings(activeDocument_->renderSettings,
-                             frameRenderSettings_);
+                             frameRenderSettings_.facts());
 }
 
 void EditorRuntime::enqueueDebugShadowInspectProbe() {

@@ -18,18 +18,19 @@ TEST(DDGISettingsTests, NamedPresetsOverrideStaleOwnedFields) {
   settings.ddgi.distanceHysteresis = 0.2f;
   settings.ddgi.selfShadowBias = 0.75f;
 
-  const nuri::RenderSettings resolved = nuri::resolveRenderSettings(settings);
+  const nuri::ResolvedRenderSettings resolved =
+      nuri::resolveRenderSettings(settings);
 
-  EXPECT_EQ(resolved.ddgi.preset, nuri::DDGIQualityPreset::High);
-  EXPECT_EQ(resolved.ddgi.requestedPreset, nuri::DDGIQualityPreset::High);
-  EXPECT_EQ(resolved.ddgi.raysPerProbe, 256u);
-  EXPECT_EQ(resolved.ddgi.maxProbeUpdatesPerFrame, 512u);
-  EXPECT_EQ(resolved.ddgi.maxRadianceProbeUpdatesPerFrame, 128u);
-  EXPECT_EQ(resolved.ddgi.maxMaintenanceProbeUpdatesPerFrame, 64u);
-  EXPECT_EQ(resolved.ddgi.maxRayQueriesPerFrame, 131'072u);
-  EXPECT_FLOAT_EQ(resolved.ddgi.irradianceHysteresis, 0.95f);
-  EXPECT_FLOAT_EQ(resolved.ddgi.distanceHysteresis, 0.98f);
-  EXPECT_FLOAT_EQ(resolved.ddgi.selfShadowBias, 0.25f);
+  EXPECT_EQ(resolved->ddgi.preset, nuri::DDGIQualityPreset::High);
+  EXPECT_EQ(resolved->ddgi.requestedPreset, nuri::DDGIQualityPreset::High);
+  EXPECT_EQ(resolved->ddgi.raysPerProbe, 256u);
+  EXPECT_EQ(resolved->ddgi.maxProbeUpdatesPerFrame, 512u);
+  EXPECT_EQ(resolved->ddgi.maxRadianceProbeUpdatesPerFrame, 128u);
+  EXPECT_EQ(resolved->ddgi.maxMaintenanceProbeUpdatesPerFrame, 64u);
+  EXPECT_EQ(resolved->ddgi.maxRayQueriesPerFrame, 131'072u);
+  EXPECT_FLOAT_EQ(resolved->ddgi.irradianceHysteresis, 0.95f);
+  EXPECT_FLOAT_EQ(resolved->ddgi.distanceHysteresis, 0.98f);
+  EXPECT_FLOAT_EQ(resolved->ddgi.selfShadowBias, 0.25f);
 }
 
 TEST(DDGISettingsTests, QualityAndCoveragePresetsResolveIndependently) {
@@ -39,16 +40,17 @@ TEST(DDGISettingsTests, QualityAndCoveragePresetsResolveIndependently) {
   settings.ddgi.coverage.cascadeCount = 1u;
   settings.ddgi.coverage.requestedNearSpacing = {99.0f, 99.0f, 99.0f};
 
-  const nuri::RenderSettings resolved = nuri::resolveRenderSettings(settings);
+  const nuri::ResolvedRenderSettings resolved =
+      nuri::resolveRenderSettings(settings);
 
-  EXPECT_EQ(resolved.ddgi.preset, nuri::DDGIQualityPreset::High);
-  EXPECT_EQ(resolved.ddgi.raysPerProbe, 256u);
-  EXPECT_EQ(resolved.ddgi.coveragePreset, nuri::DDGICoveragePreset::Automatic);
-  EXPECT_EQ(resolved.ddgi.requestedCoveragePreset,
+  EXPECT_EQ(resolved->ddgi.preset, nuri::DDGIQualityPreset::High);
+  EXPECT_EQ(resolved->ddgi.raysPerProbe, 256u);
+  EXPECT_EQ(resolved->ddgi.coveragePreset, nuri::DDGICoveragePreset::Automatic);
+  EXPECT_EQ(resolved->ddgi.requestedCoveragePreset,
             nuri::DDGICoveragePreset::Automatic);
-  EXPECT_EQ(resolved.ddgi.coverage.mode, nuri::DDGICoverageMode::SceneFit);
-  EXPECT_EQ(resolved.ddgi.coverage.cascadeCount, 3u);
-  EXPECT_FLOAT_EQ(resolved.ddgi.coverage.requestedNearSpacing.x, 2.0f);
+  EXPECT_EQ(resolved->ddgi.coverage.mode, nuri::DDGICoverageMode::SceneFit);
+  EXPECT_EQ(resolved->ddgi.coverage.cascadeCount, 3u);
+  EXPECT_FLOAT_EQ(resolved->ddgi.coverage.requestedNearSpacing.x, 2.0f);
 }
 
 TEST(DDGISettingsTests, LegacyRawCoverageBecomesCustomWithoutChangingQuality) {
@@ -57,15 +59,16 @@ TEST(DDGISettingsTests, LegacyRawCoverageBecomesCustomWithoutChangingQuality) {
   settings.ddgi.coverage.mode = nuri::DDGICoverageMode::Hybrid;
   settings.ddgi.coverage.cascadeCount = 4u;
 
-  const nuri::RenderSettings resolved = nuri::resolveRenderSettings(settings);
+  const nuri::ResolvedRenderSettings resolved =
+      nuri::resolveRenderSettings(settings);
 
-  EXPECT_EQ(resolved.ddgi.preset, nuri::DDGIQualityPreset::High);
-  EXPECT_EQ(resolved.ddgi.requestedPreset, nuri::DDGIQualityPreset::High);
-  EXPECT_EQ(resolved.ddgi.coveragePreset, nuri::DDGICoveragePreset::Custom);
-  EXPECT_EQ(resolved.ddgi.requestedCoveragePreset,
+  EXPECT_EQ(resolved->ddgi.preset, nuri::DDGIQualityPreset::High);
+  EXPECT_EQ(resolved->ddgi.requestedPreset, nuri::DDGIQualityPreset::High);
+  EXPECT_EQ(resolved->ddgi.coveragePreset, nuri::DDGICoveragePreset::Custom);
+  EXPECT_EQ(resolved->ddgi.requestedCoveragePreset,
             nuri::DDGICoveragePreset::Authored);
-  EXPECT_EQ(resolved.ddgi.coverage.mode, nuri::DDGICoverageMode::Hybrid);
-  EXPECT_EQ(resolved.ddgi.coverage.cascadeCount, 4u);
+  EXPECT_EQ(resolved->ddgi.coverage.mode, nuri::DDGICoverageMode::Hybrid);
+  EXPECT_EQ(resolved->ddgi.coverage.cascadeCount, 4u);
 }
 
 TEST(DDGISettingsTests, CustomSettingsClampEveryNormativeRange) {

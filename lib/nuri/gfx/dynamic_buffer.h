@@ -4,6 +4,7 @@
 #include "nuri/resources/gpu/buffer.h"
 #include <algorithm>
 #include <cstddef>
+#include <initializer_list>
 #include <memory>
 #include <memory_resource>
 #include <optional>
@@ -152,6 +153,14 @@ struct DynamicBufferLaneAcquisition {
   bool grew = false;
 };
 
+struct DynamicBufferRoleDesc {
+  BufferUsage usage = BufferUsage::Storage;
+  Storage storage = Storage::Device;
+  size_t minimumBytes = 1u;
+  size_t alignmentBytes = 1u;
+  std::string_view debugName;
+};
+
 class DynamicBufferRoleRing {
   struct LaneBuffer {
     std::unique_ptr<Buffer> buffer;
@@ -163,17 +172,25 @@ class DynamicBufferRoleRing {
     std::pmr::vector<LaneBuffer> lanes;
     BufferDesc desc{};
     std::string debugName;
+    size_t minimumBytes = 1u;
+    size_t alignmentBytes = 1u;
     bool configured = false;
   };
 
 public:
   DynamicBufferRoleRing(
-      GPUDevice &gpu, size_t roleCount,
+      GPUDevice &gpu, std::initializer_list<DynamicBufferRoleDesc> roleDescs,
       std::pmr::memory_resource *memory = std::pmr::get_default_resource())
       : gpu_(gpu), roles_(memory), submissions_(memory) {
-    roles_.reserve(roleCount);
-    for (size_t role = 0u; role < roleCount; ++role) {
+    roles_.reserve(roleDescs.size());
+    for (const DynamicBufferRoleDesc &desc : roleDescs) {
       roles_.emplace_back(memory);
+      Role &role = roles_.back();
+      role.desc.usage = desc.usage;
+      role.desc.storage = desc.storage;
+      role.minimumBytes = std::max(desc.minimumBytes, size_t{1u});
+      role.alignmentBytes = std::max(desc.alignmentBytes, size_t{1u});
+      role.debugName.assign(desc.debugName);
     }
   }
 
@@ -242,15 +259,17 @@ public:
 
   template <typename OnReplacement>
   [[nodiscard]] Result<bool, std::string>
-  ensureRole(size_t roleIndex, BufferDesc desc, std::string_view debugName,
+  ensureRole(size_t roleIndex, size_t requiredBytes,
              OnReplacement &&onReplacement) {
     if (roleIndex >= roles_.size()) {
       return Result<bool, std::string>::makeError(
           "dynamic buffer role index is out of range");
     }
     Role &role = roles_[roleIndex];
-    role.desc = desc;
-    role.debugName.assign(debugName);
+    const size_t requested = std::max(requiredBytes, role.minimumBytes);
+    role.desc.size =
+        ((requested + role.alignmentBytes - 1u) / role.alignmentBytes) *
+        role.alignmentBytes;
     role.configured = true;
     bool replaced = false;
     for (size_t lane = 0u; lane < submissions_.size(); ++lane) {
@@ -266,9 +285,9 @@ public:
     return Result<bool, std::string>::makeResult(replaced);
   }
 
-  [[nodiscard]] Result<bool, std::string>
-  ensureRole(size_t role, BufferDesc desc, std::string_view debugName) {
-    return ensureRole(role, desc, debugName, [](size_t) {});
+  [[nodiscard]] Result<bool, std::string> ensureRole(size_t role,
+                                                     size_t requiredBytes) {
+    return ensureRole(role, requiredBytes, [](size_t) {});
   }
 
   [[nodiscard]] BufferHandle handle(size_t role, size_t lane) const noexcept {

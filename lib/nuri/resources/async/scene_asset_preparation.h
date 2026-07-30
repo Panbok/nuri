@@ -13,14 +13,6 @@
 #include <vector>
 namespace nuri {
 
-struct PreparedSceneManifest {
-  ScenePrefab prefab{};
-  std::vector<ScenePrefabAdaptedMesh> meshes{};
-  std::vector<MaterialData> materials{};
-  std::shared_ptr<const std::vector<EmbeddedSceneTextureData>>
-      embeddedTextures{};
-};
-
 struct PreparedImportedMaterial {
   MaterialDesc desc{};
   std::array<std::optional<TextureRequest>, kMaterialTextureSlotCount>
@@ -29,10 +21,6 @@ struct PreparedImportedMaterial {
   std::string sourceIdentity{};
   std::vector<std::string> optionalTextureErrors{};
 };
-
-[[nodiscard]] Result<PreparedSceneManifest, std::string>
-prepareSceneManifest(std::string_view path,
-                     const SceneImportOptions &options = {});
 
 [[nodiscard]] Result<PreparedImportedMaterial, std::string>
 prepareImportedMaterial(

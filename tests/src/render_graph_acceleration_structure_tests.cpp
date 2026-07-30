@@ -39,7 +39,6 @@ Result<GraphIds, std::string> buildGraph(RenderGraphBuilder &builder,
   RenderGraphGraphicsPassDesc writerDesc{};
   writerDesc.hasColorAttachment = false;
   writerDesc.markImplicitOutputSideEffect = false;
-  writerDesc.borrowPayload = true;
   writerDesc.debugLabel = "geometry_writer";
   auto writer = builder.addGraphicsPass(writerDesc);
   if (writer.hasError()) {
@@ -121,7 +120,6 @@ Result<GraphIds, std::string> buildGraph(RenderGraphBuilder &builder,
   RenderGraphGraphicsPassDesc queryDesc{};
   queryDesc.hasColorAttachment = false;
   queryDesc.markImplicitOutputSideEffect = false;
-  queryDesc.borrowPayload = true;
   queryDesc.debugLabel = "query_tlas";
   auto queryPass = builder.addGraphicsPass(queryDesc);
   if (queryPass.hasError()) {

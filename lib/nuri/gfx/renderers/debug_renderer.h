@@ -3,7 +3,7 @@
 #include "nuri/core/runtime_config.h"
 #include "nuri/defines.h"
 #include "nuri/gfx/frame/render_frame_context.h"
-#include "nuri/gfx/owned_gpu_resource.h"
+#include "nuri/gfx/pipeline/owned_program_bundle.h"
 #include <array>
 #include <glm/glm.hpp>
 #include <memory>
@@ -55,7 +55,6 @@ private:
     uint32_t reserved = 0u;
   };
   static_assert(sizeof(DDGIRayPushConstants) == 80u);
-  [[nodiscard]] Result<bool, std::string> createGridShaders();
   [[nodiscard]] Result<bool, std::string>
   ensureGridPipeline(Format colorFormat, Format depthFormat);
   [[nodiscard]] Result<bool, std::string>
@@ -78,15 +77,9 @@ private:
   DebugRendererConfig config_{};
   std::pmr::memory_resource *memory_ = std::pmr::get_default_resource();
   std::unique_ptr<DebugDraw3D> debugDraw3D_;
-  OwnedRenderPipelineHandle gridPipeline_;
-  OwnedRenderPipelineHandle ddgiProbePipeline_;
-  OwnedRenderPipelineHandle ddgiRayPipeline_;
-  ShaderHandle gridVertexShader_{};
-  ShaderHandle gridFragmentShader_{};
-  ShaderHandle ddgiProbeVertexShader_{};
-  ShaderHandle ddgiProbeFragmentShader_{};
-  ShaderHandle ddgiRayVertexShader_{};
-  ShaderHandle ddgiRayFragmentShader_{};
+  OwnedProgramBundle gridProgram_{};
+  OwnedProgramBundle ddgiProbeProgram_{};
+  OwnedProgramBundle ddgiRayProgram_{};
   Format gridPipelineColorFormat_ = Format::Count;
   Format gridPipelineDepthFormat_ = Format::Count;
   Format ddgiProbePipelineColorFormat_ = Format::Count;

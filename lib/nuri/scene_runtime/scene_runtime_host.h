@@ -26,10 +26,6 @@ public:
   explicit SceneRuntimeHost(
       std::pmr::memory_resource *memory = std::pmr::get_default_resource());
   ~SceneRuntimeHost();
-  [[nodiscard]] SceneRuntimeHost &simulations() noexcept { return *this; }
-  [[nodiscard]] const SceneRuntimeHost &simulations() const noexcept {
-    return *this;
-  }
   [[nodiscard]] Result<SimulationHandle, std::string>
   createSimulation(const SimulationDesc &desc);
   [[nodiscard]] bool destroySimulation(SimulationHandle handle);

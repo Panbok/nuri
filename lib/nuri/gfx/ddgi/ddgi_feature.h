@@ -270,16 +270,37 @@ private:
     bool radiometric = false;
   };
 
-  struct PendingDDGIFrame {
-    explicit PendingDDGIFrame(std::pmr::memory_resource *memory)
+  struct DDGIFrameWork {
+    explicit DDGIFrameWork(std::pmr::memory_resource *memory)
         : volumes(memory), scrollLayouts(memory), localLights(memory),
-          directionalLights(memory) {}
+          directionalLights(memory), scheduledEntries(memory),
+          dispatchEntries(memory), scrollInvalidations(memory),
+          dispatches(memory), irradianceDispatches(memory),
+          distanceDispatches(memory), blendPushConstants(memory),
+          bufferUses(memory), textureUses(memory),
+          irradianceTextureUses(memory), distanceTextureUses(memory),
+          forwardDependencyBuffers(memory), forwardDependencyTextures(memory),
+          selectedLocalLights(memory) {}
 
     PendingSourceFacts sources{};
     std::pmr::vector<VolumeResource> volumes;
     std::pmr::vector<DDGIVolumeLayout> scrollLayouts;
     std::pmr::vector<LocalLightSnapshot> localLights;
     std::pmr::vector<DirectionalLightGpuData> directionalLights;
+    std::pmr::vector<DDGIProbeUpdateEntry> scheduledEntries;
+    std::pmr::vector<DDGIProbeUpdateEntry> dispatchEntries;
+    std::pmr::vector<DDGIProbeUpdateEntry> scrollInvalidations;
+    std::pmr::vector<ComputeDispatchItem> dispatches;
+    std::pmr::vector<ComputeDispatchItem> irradianceDispatches;
+    std::pmr::vector<ComputeDispatchItem> distanceDispatches;
+    std::pmr::vector<BlendPushConstants> blendPushConstants;
+    std::pmr::vector<RenderGraphImportedBufferUse> bufferUses;
+    std::pmr::vector<RenderGraphImportedTextureUse> textureUses;
+    std::pmr::vector<RenderGraphImportedTextureUse> irradianceTextureUses;
+    std::pmr::vector<RenderGraphImportedTextureUse> distanceTextureUses;
+    std::pmr::vector<BufferHandle> forwardDependencyBuffers;
+    std::pmr::vector<TextureHandle> forwardDependencyTextures;
+    std::pmr::vector<LocalLightGpuData> selectedLocalLights;
     DDGITieredScheduleResult tierSchedule{};
     DDGICoverageSettings coverageSettings{};
     std::array<DDGIEffectiveVolume, kMaxDDGIEffectiveVolumes>
@@ -323,23 +344,10 @@ private:
   AccelerationStructureHandle boundTlas_{};
   AccelerationStructureHandle inspectBoundTlas_{};
   OwnedSamplerHandle sampler_{};
+  std::array<SamplerHandle, 1u> recordingSamplers_{};
   std::string initializationError_{};
   std::pmr::vector<VolumeResource> volumes_;
   std::pmr::vector<FrameSlot> frameSlots_;
-  std::pmr::vector<DDGIProbeUpdateEntry> scheduledEntries_;
-  std::pmr::vector<DDGIProbeUpdateEntry> dispatchEntries_;
-  std::pmr::vector<DDGIProbeUpdateEntry> scrollInvalidations_;
-  std::pmr::vector<ComputeDispatchItem> dispatches_;
-  std::pmr::vector<ComputeDispatchItem> irradianceDispatches_;
-  std::pmr::vector<ComputeDispatchItem> distanceDispatches_;
-  std::pmr::vector<BlendPushConstants> blendPushConstants_;
-  std::pmr::vector<RenderGraphImportedBufferUse> bufferUses_;
-  std::pmr::vector<RenderGraphImportedTextureUse> textureUses_;
-  std::pmr::vector<RenderGraphImportedTextureUse> irradianceTextureUses_;
-  std::pmr::vector<RenderGraphImportedTextureUse> distanceTextureUses_;
-  std::pmr::vector<BufferHandle> forwardDependencyBuffers_;
-  std::pmr::vector<TextureHandle> forwardDependencyTextures_;
-  std::pmr::vector<LocalLightGpuData> selectedLocalLights_;
   std::pmr::vector<LocalLightSnapshot> submittedLocalLights_;
   std::pmr::vector<DirectionalLightGpuData> submittedDirectionalLights_;
   DDGIFrameGpuData frameData_{};
@@ -364,7 +372,7 @@ private:
   uint64_t lightTransformVersion_ = UINT64_MAX;
   uint64_t materialVersion_ = UINT64_MAX;
   uint64_t environmentVersion_ = UINT64_MAX;
-  PendingDDGIFrame pending_;
+  DDGIFrameWork work_;
   uint32_t selectedLocalLightCount_ = 0u;
   uint32_t totalLocalLightCount_ = 0u;
   uint32_t secondaryQueriesPer1024Primary_ = 1024u;

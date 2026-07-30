@@ -27,13 +27,11 @@ struct NURI_API RenderGraphTelemetrySnapshot {
     uint32_t transientTexturePhysicalAllocationCount = 0;
     uint32_t transientBufferPhysicalAllocationCount = 0;
     uint32_t commandResourcePatchCount = 0;
-    uint32_t resolvedDependencyBufferSlotCount = 0;
     uint32_t ownedPreDispatchCount = 0, ownedDrawItemCount = 0;
     uint32_t ownedMeshDispatchItemCount = 0;
-    uint32_t resolvedPreDispatchDependencyBufferSlotCount = 0;
     uint64_t compileFingerprint = 0, barrierFingerprint = 0;
     uint64_t executionFingerprint = 0;
-    bool usedParallelCompile = false, usedParallelPayloadResolution = false;
+    bool usedParallelCompile = false;
     bool usedParallelHazardAnalysis = false;
     bool usedParallelLifetimeAnalysis = false, usedParallelRecording = false;
   };

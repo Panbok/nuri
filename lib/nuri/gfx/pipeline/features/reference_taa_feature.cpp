@@ -189,6 +189,7 @@ ReferenceTAAResolvePass::build(FrameBuildContext &ctx) {
   const uint32_t linearSamplerId =
       gpu_.getSamplerBindlessIndex(linearClampSampler_);
   const uint32_t pointSamplerId = gpu_.getDefaultSamplerBindlessIndex();
+  const std::array recordingSamplers{linearClampSampler_};
   if (currentTexId == kInvalidBindlessIndex ||
       opaqueSceneTexId == kInvalidBindlessIndex ||
       historyTexId == kInvalidBindlessIndex ||
@@ -220,7 +221,7 @@ ReferenceTAAResolvePass::build(FrameBuildContext &ctx) {
       1.0f / static_cast<float>(std::max(dimensions.width, 1u));
   const float inverseHeight =
       1.0f / static_cast<float>(std::max(dimensions.height, 1u));
-  const RenderSettings &settings = ctx.frame.settings;
+  const RenderSettings &settings = ctx.frame.settings.facts();
   const TemporalAATuning &tuning = settings.antiAliasing.temporalTuning;
   const float sharpenStrength =
       tuning.sharpenEnabled ? tuning.sharpenStrength : 0.0f;
@@ -266,7 +267,7 @@ ReferenceTAAResolvePass::build(FrameBuildContext &ctx) {
                        .storeOp = StoreOp::Store,
                        .clearColor = {0.0f, 0.0f, 0.0f, 1.0f}};
   resolvePass.colorTexture = historyOutput.value();
-  resolvePass.dependencyTextures = resolveReads;
+  resolvePass.recordingSamplers = recordingSamplers;
   resolvePass.draws = std::span<const DrawItem>(&resolveDraw, 1u);
   resolvePass.gpuTimingScope = GpuTimingScope::TemporalAAResolve;
   resolvePass.debugLabel = "Reference TAA Resolve Pass";
@@ -274,6 +275,11 @@ ReferenceTAAResolvePass::build(FrameBuildContext &ctx) {
   auto addResolve = ctx.graph.addGraphicsPass(resolvePass);
   if (addResolve.hasError()) {
     return Result<bool, std::string>::makeError(addResolve.error());
+  }
+  auto resolveReadsResult = ctx.graph.addImportedTextureReads(
+      addResolve.value(), resolveReads, resolvePass.debugLabel);
+  if (resolveReadsResult.hasError()) {
+    return Result<bool, std::string>::makeError(resolveReadsResult.error());
   }
   constants.currentTexId = gpu_.getTextureBindlessIndex(
       ctx.shared[FrameHistoryTextureSlot::ColorWrite].texture);
@@ -287,7 +293,7 @@ ReferenceTAAResolvePass::build(FrameBuildContext &ctx) {
                     .storeOp = StoreOp::Store,
                     .clearColor = {0.0f, 0.0f, 0.0f, 1.0f}};
   copyPass.colorTexture = frameOutput.value();
-  copyPass.dependencyTextures = copyReads;
+  copyPass.recordingSamplers = recordingSamplers;
   copyPass.draws = std::span<const DrawItem>(&copyDraw, 1u);
   copyPass.gpuTimingScope = GpuTimingScope::TemporalAACopyBack;
   copyPass.debugLabel = "Reference TAA Copy Back Pass";
@@ -295,6 +301,11 @@ ReferenceTAAResolvePass::build(FrameBuildContext &ctx) {
   auto addCopy = ctx.graph.addGraphicsPass(copyPass);
   if (addCopy.hasError()) {
     return Result<bool, std::string>::makeError(addCopy.error());
+  }
+  auto copyReadsResult = ctx.graph.addImportedTextureReads(
+      addCopy.value(), copyReads, copyPass.debugLabel);
+  if (copyReadsResult.hasError()) {
+    return Result<bool, std::string>::makeError(copyReadsResult.error());
   }
   ctx.shared[FrameTextureSlot::FrameColor].graph = frameOutput.value();
   ctx.frame.sharedResources[FrameTextureSlot::FrameColor].graph =

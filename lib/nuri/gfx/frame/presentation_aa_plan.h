@@ -130,9 +130,9 @@ buildPresentationAAPlan(
     const PresentationAAProviderCapabilities &providerCapabilities = {},
     const PresentationAAGpuCapabilities &gpuCapabilities = {}) {
   PresentationAAPlan plan{};
-  const AntiAliasingMode mode = settings.antiAliasing.mode;
+  const AntiAliasingMode mode = settings->antiAliasing.mode;
   const TemporalReconstructionProvider temporalProvider =
-      settings.antiAliasing.temporalProvider;
+      settings->antiAliasing.temporalProvider;
   switch (mode) {
   case AntiAliasingMode::None:
     break;
@@ -182,21 +182,21 @@ buildPresentationAAPlan(
       plan.needsCompositionMask = true;
       break;
     }
-    plan.jitterScene = settings.antiAliasing.debug.jitterEnabled;
+    plan.jitterScene = settings->antiAliasing.debug.jitterEnabled;
     plan.needsMotion = true;
     plan.needsReactiveMask = providerCapabilities.reactiveMask;
     plan.needsMotionClass = true;
     if (temporalProvider == TemporalReconstructionProvider::Legacy &&
-        settings.antiAliasing.temporalTuning.spatialPostTaaCleanup) {
+        settings->antiAliasing.temporalTuning.spatialPostTaaCleanup) {
       plan.spatialCleanup = SpatialCleanupPoint::PreComposition;
     }
     break;
   }
-  plan.gtaoTemporal = settings.ambientOcclusion.active &&
-                      settings.ambientOcclusion.temporalAccumulation;
+  plan.gtaoTemporal = settings->ambientOcclusion.active &&
+                      settings->ambientOcclusion.temporalAccumulation;
   plan.needsMotion = plan.needsMotion || plan.gtaoTemporal;
   plan.needsReactiveMask = plan.needsReactiveMask || plan.gtaoTemporal;
-  plan.postAA = resolvePostAAPlan(settings.antiAliasing, plan.coverage);
+  plan.postAA = resolvePostAAPlan(settings->antiAliasing, plan.coverage);
   plan.valid = true;
   return Result<PresentationAAPlan, std::string>::makeResult(plan);
 }

@@ -83,7 +83,7 @@ constexpr std::array<std::string_view, kMaxShadowCascades>
     kShadowCascadeCaptureNames{"shadow_cascade_0", "shadow_cascade_1",
                                "shadow_cascade_2", "shadow_cascade_3"};
 void logShadowVisibilityCounters(const RenderFrameContext &frame) {
-  if (!frame.settings.visibility.debug.logCounters) {
+  if (!frame.settings->visibility.debug.logCounters) {
     return;
   }
   const VisibilityFrameMetrics &visibility = frame.metrics.visibility;
@@ -417,38 +417,6 @@ cameraWithShadowSplitRange(const CameraFrameState &camera,
   adjustedCamera.farPlane =
       std::max(adjustedCamera.nearPlane + 0.01f, range.farDepth);
   return adjustedCamera;
-}
-[[nodiscard]] Result<bool, std::string>
-importDependencies(RenderGraphBuilder &graph,
-                   std::span<const RenderGraphImportedBufferUse> dependencies,
-                   std::pmr::vector<RenderGraphBufferUse> &uses,
-                   std::string_view debugName) {
-  uses.clear();
-  uses.reserve(dependencies.size());
-  for (const RenderGraphImportedBufferUse dependency : dependencies) {
-    auto imported = graph.importBuffer(dependency.buffer, debugName);
-    if (imported.hasError()) {
-      return Result<bool, std::string>::makeError(imported.error());
-    }
-    uses.push_back({.buffer = imported.value(), .access = dependency.access});
-  }
-  return Result<bool, std::string>::makeResult(true);
-}
-[[nodiscard]] Result<bool, std::string>
-importDependencies(RenderGraphBuilder &graph,
-                   std::span<const RenderGraphImportedTextureUse> dependencies,
-                   std::pmr::vector<RenderGraphTextureUse> &uses,
-                   std::string_view debugName) {
-  uses.clear();
-  uses.reserve(dependencies.size());
-  for (const RenderGraphImportedTextureUse dependency : dependencies) {
-    auto imported = graph.importTexture(dependency.texture, debugName);
-    if (imported.hasError()) {
-      return Result<bool, std::string>::makeError(imported.error());
-    }
-    uses.push_back({.texture = imported.value(), .access = dependency.access});
-  }
-  return Result<bool, std::string>::makeResult(true);
 }
 void appendAnimatedGeometryDependencies(
     std::pmr::vector<RenderGraphImportedBufferUse> &dependencies,
@@ -1001,7 +969,20 @@ ShadowRenderer::ShadowRenderer(GPUDevice &gpu,
                                const ShadowRendererConfig &config,
                                std::pmr::memory_resource *memory)
     : gpu_(gpu), config_(config), memory_(resolveMemoryResource(memory)),
-      bufferRings_(gpu, BufferRingCount, memory_), frameSlotStates_(memory_),
+      bufferRings_(
+          gpu,
+          {{BufferUsage::Storage, Storage::HostVisible, sizeof(InstanceData),
+            1u, "shadow_instance_matrices"},
+           {BufferUsage::Storage, Storage::HostVisible, sizeof(uint32_t), 1u,
+            "shadow_instance_remap"},
+           {BufferUsage::Storage | BufferUsage::Indirect, Storage::HostVisible,
+            sizeof(uint32_t), 1u, "shadow_draw_packet"},
+           {BufferUsage::Storage, Storage::HostVisible,
+            sizeof(ShadowFrameGpuData), 1u, "shadow_frame_gpu_data"},
+           {BufferUsage::Storage, Storage::HostVisible,
+            sizeof(SdsmGpuMinMaxResult), 1u, "shadow_sdsm_minmax_result"}},
+          memory_),
+      frameSlotStates_(memory_),
       meshDrawTemplates_(std::pmr::new_delete_resource()),
       batchBuildScratchArena_(memory_),
       staticShadowTemplateIndices_(std::pmr::new_delete_resource()),
@@ -1026,7 +1007,6 @@ ShadowRenderer::ShadowRenderer(GPUDevice &gpu,
       cascadeWork_{CascadeWork(memory_), CascadeWork(memory_),
                    CascadeWork(memory_), CascadeWork(memory_)},
       shadowDrawPacketUploadBytes_(memory_), passBufferDependencies_(memory_),
-      passBufferUses_(memory_), passTextureUses_(memory_),
       preResolvedDrawBuffers_(memory_),
       passTextureDependencies_(std::pmr::new_delete_resource()),
       previewTextureDependencies_(memory_) {}
@@ -1360,58 +1340,6 @@ ShadowRenderer::ensureRingBufferCount(uint32_t requiredCount) {
   }
   frameSlotStates_.resize(bufferRings_.laneCount());
   return Result<bool, std::string>::makeResult(true);
-}
-
-Result<bool, std::string> ShadowRenderer::ensureRingCapacity(
-    BufferRingSlot slot, size_t requiredBytes, std::string_view debugName,
-    uint64_t FrameSlotState::*version, Storage storage) {
-  return bufferRings_.ensureRole(slot,
-                                 BufferDesc{.usage = BufferUsage::Storage,
-                                            .storage = storage,
-                                            .size = requiredBytes},
-                                 debugName, [this, version](size_t i) {
-                                   frameSlotStates_[i].*version =
-                                       std::numeric_limits<uint64_t>::max();
-                                 });
-}
-
-Result<bool, std::string>
-ShadowRenderer::ensureInstanceMatricesRingCapacity(size_t requiredBytes) {
-  return ensureRingCapacity(
-      InstanceMatricesRing, requiredBytes, "shadow_instance_matrices",
-      &FrameSlotState::instanceUploadVersion, Storage::HostVisible);
-}
-
-Result<bool, std::string>
-ShadowRenderer::ensureInstanceRemapRingCapacity(size_t requiredBytes) {
-  return ensureRingCapacity(
-      InstanceRemapRing, requiredBytes, "shadow_instance_remap",
-      &FrameSlotState::remapUploadSignature, Storage::HostVisible);
-}
-
-Result<bool, std::string>
-ShadowRenderer::ensureShadowFrameRingCapacity(size_t requiredBytes) {
-  return ensureRingCapacity(
-      ShadowFrameRing, requiredBytes, "shadow_frame_gpu_data",
-      &FrameSlotState::frameUploadSignature, Storage::HostVisible);
-}
-
-Result<bool, std::string>
-ShadowRenderer::ensureSdsmReduceResultRingCount(uint32_t requiredCount) {
-  return ensureRingBufferCount(requiredCount);
-}
-
-Result<bool, std::string>
-ShadowRenderer::ensureSdsmReduceResultRingCapacity(size_t requiredBytes) {
-  const uint64_t invalidPublishedFrame = std::numeric_limits<uint64_t>::max();
-  return bufferRings_.ensureRole(
-      SdsmReduceResultRing,
-      BufferDesc{.usage = BufferUsage::Storage,
-                 .storage = Storage::HostVisible,
-                 .size = requiredBytes},
-      "shadow_sdsm_minmax_result", [this](size_t slotIndex) {
-        frameSlotStates_[slotIndex].sdsmPublishedFrame = invalidPublishedFrame;
-      });
 }
 
 Result<bool, std::string> ShadowRenderer::prepareSceneCache(
@@ -2258,7 +2186,7 @@ Result<bool, std::string>
 ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
                                  const ForwardSceneGpuData &sceneGpu) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CMD_DRAW);
-  const RenderSettings &settings = frame.settings;
+  const RenderSettings &settings = frame.settings.facts();
   const RenderSettings::ShadowSettings &shadowSettings = settings.shadow;
   const auto emitShadowDiagnostics = [&]() {
     if (!shadowSettings.debug.logDiagnostics) {
@@ -2329,8 +2257,12 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
       slot.instanceUploadVersion = std::numeric_limits<uint64_t>::max();
     }
   }
-  auto matricesResult = ensureInstanceMatricesRingCapacity(std::max(
-      instanceMatrices_.size() * sizeof(InstanceData), sizeof(InstanceData)));
+  auto matricesResult = bufferRings_.ensureRole(
+      InstanceMatricesRing, instanceMatrices_.size() * sizeof(InstanceData),
+      [this](size_t i) {
+        frameSlotStates_[i].instanceUploadVersion =
+            std::numeric_limits<uint64_t>::max();
+      });
   if (matricesResult.hasError()) {
     return matricesResult;
   }
@@ -2439,8 +2371,12 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
       std::max<size_t>(1u, static_cast<size_t>(cascadeCount) *
                                (staticShadowCasterCache_.size() +
                                 frameDynamicTemplateIndices.size()));
-  auto remapResult = ensureInstanceRemapRingCapacity(std::max(
-      maxShadowInstanceRemapCount * sizeof(uint32_t), sizeof(uint32_t)));
+  auto remapResult = bufferRings_.ensureRole(
+      InstanceRemapRing, maxShadowInstanceRemapCount * sizeof(uint32_t),
+      [this](size_t i) {
+        frameSlotStates_[i].remapUploadSignature =
+            std::numeric_limits<uint64_t>::max();
+      });
   if (remapResult.hasError()) {
     return remapResult;
   }
@@ -3585,8 +3521,12 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
     }
   }
   if (!shadowDrawPacketUploadBytes_.empty()) {
-    auto packetCapacityResult =
-        ensureShadowDrawPacketRingCapacity(shadowDrawPacketUploadBytes_.size());
+    auto packetCapacityResult = bufferRings_.ensureRole(
+        ShadowDrawPacketRing, shadowDrawPacketUploadBytes_.size(),
+        [this](size_t i) {
+          frameSlotStates_[i].drawPacketUploadSignature =
+              std::numeric_limits<uint64_t>::max();
+        });
     if (packetCapacityResult.hasError()) {
       return packetCapacityResult;
     }
@@ -4057,19 +3997,6 @@ void ShadowRenderer::destroyShadowDepthPipelineState() {
   shadowPipelineRasterState_ = {};
 }
 
-Result<bool, std::string>
-ShadowRenderer::ensureShadowDrawPacketRingCapacity(size_t requiredBytes) {
-  return bufferRings_.ensureRole(
-      ShadowDrawPacketRing,
-      BufferDesc{.usage = BufferUsage::Storage | BufferUsage::Indirect,
-                 .storage = Storage::HostVisible,
-                 .size = std::max(requiredBytes, sizeof(uint32_t))},
-      "shadow_draw_packet", [this](size_t i) {
-        frameSlotStates_[i].drawPacketUploadSignature =
-            std::numeric_limits<uint64_t>::max();
-      });
-}
-
 void ShadowRenderer::destroyPipelineState() {
   if (nuri::isValid(previewPipelineHandle_)) {
     gpu_.destroyRenderPipeline(previewPipelineHandle_);
@@ -4097,7 +4024,7 @@ void ShadowRenderer::resetCachedState() {
   invalidateReusableStaticOnlyCascadeCache();
   resetCascadeStabilizationHistory();
   clearAll(instanceMatrices_, instanceRemap_, passTextureDependencies_,
-           passBufferUses_, passTextureUses_, preResolvedDrawBuffers_);
+           preResolvedDrawBuffers_);
 }
 
 void ShadowRenderer::resetFrameBuildState() {
@@ -4117,8 +4044,8 @@ void ShadowRenderer::resetFrameBuildState() {
     clearAll(work.pushConstants, work.draws, work.indirectPushConstants,
              work.indirectDraws);
   }
-  clearAll(passBufferDependencies_, passBufferUses_, passTextureUses_,
-           preResolvedDrawBuffers_, previewTextureDependencies_);
+  clearAll(passBufferDependencies_, preResolvedDrawBuffers_,
+           previewTextureDependencies_);
   previewPushConstants_ = {};
   previewDraw_ = {};
 }
@@ -4207,7 +4134,7 @@ ShadowRenderer::publishFrameData(RenderFrameContext &frame) {
   frame.sharedResources.shadowCompareSamplerId = kInvalidShadowBindlessIndex;
   frame.sharedResources.shadowDebugFrameData.reset();
   frame.metrics.shadow = {};
-  const RenderSettings::ShadowSettings &settings = frame.settings.shadow;
+  const RenderSettings::ShadowSettings &settings = frame.settings->shadow;
   if (settings.enabled && !config_.shaderBasePath.empty()) {
     auto initResult = ensureInitialized();
     if (initResult.hasError()) {
@@ -4267,8 +4194,11 @@ ShadowRenderer::publishFrameData(RenderFrameContext &frame) {
   if (ringCountResult.hasError()) {
     return ringCountResult;
   }
-  auto shadowFrameResult =
-      ensureShadowFrameRingCapacity(sizeof(ShadowFrameGpuData));
+  auto shadowFrameResult = bufferRings_.ensureRole(
+      ShadowFrameRing, sizeof(ShadowFrameGpuData), [this](size_t i) {
+        frameSlotStates_[i].frameUploadSignature =
+            std::numeric_limits<uint64_t>::max();
+      });
   if (shadowFrameResult.hasError()) {
     return shadowFrameResult;
   }
@@ -4298,12 +4228,16 @@ ShadowRenderer::publishFrameData(RenderFrameContext &frame) {
   frame.sharedResources.shadowFrameGpuData = ShadowFrameGpuDataHandle{
       .buffer = shadowFrameBuffer,
       .bufferAddress = shadowFrameAddress,
+      .samplers = {rawDepthSampler_, compareDepthSampler_},
   };
   if (settings.enabled && nuri::isValid(sdsmReducePipelineHandle_)) {
-    const auto ringCount = ensureSdsmReduceResultRingCount(std::max(
+    const auto ringCount = ensureRingBufferCount(std::max(
         kMinSdsmReduceResultRingCount, gpu_.getSwapchainImageCount() + 1u));
-    const auto ring =
-        ensureSdsmReduceResultRingCapacity(sizeof(SdsmGpuMinMaxResult));
+    const auto ring = bufferRings_.ensureRole(
+        SdsmReduceResultRing, sizeof(SdsmGpuMinMaxResult), [this](size_t i) {
+          frameSlotStates_[i].sdsmPublishedFrame =
+              std::numeric_limits<uint64_t>::max();
+        });
     if (!ringCount.hasError() && !ring.hasError()) {
       const uint32_t slot = frameSlot;
       std::array<std::byte, sizeof(SdsmGpuMinMaxResult)> cleared{};
@@ -4373,7 +4307,7 @@ ShadowRenderer::prepareShadowGraphPasses(RenderFrameContext &frame) {
   resetFrameBuildState();
   frame.metrics.visibility.shadowCpuCandidates = 0u;
   frame.metrics.visibility.shadowCpuRejected = 0u;
-  const RenderSettings::ShadowSettings &settings = frame.settings.shadow;
+  const RenderSettings::ShadowSettings &settings = frame.settings->shadow;
   if (!settings.enabled) {
     diagnosticLogState_ = {};
     invalidateReusableStaticOnlyCascadeCache();
@@ -4389,8 +4323,11 @@ ShadowRenderer::prepareShadowGraphPasses(RenderFrameContext &frame) {
   if (ringCountResult.hasError()) {
     return ringCountResult;
   }
-  auto shadowFrameResult =
-      ensureShadowFrameRingCapacity(sizeof(ShadowFrameGpuData));
+  auto shadowFrameResult = bufferRings_.ensureRole(
+      ShadowFrameRing, sizeof(ShadowFrameGpuData), [this](size_t i) {
+        frameSlotStates_[i].frameUploadSignature =
+            std::numeric_limits<uint64_t>::max();
+      });
   if (shadowFrameResult.hasError()) {
     return shadowFrameResult;
   }
@@ -4416,7 +4353,7 @@ ShadowRenderer::prepareShadowGraphPasses(RenderFrameContext &frame) {
   }
   auto shadowFrameDataResult =
       updateShadowFrameData(frame, settings, settings.shadowMapSize,
-                            frame.settings.opaque.forcedMeshLod);
+                            frame.settings->opaque.forcedMeshLod);
   if (shadowFrameDataResult.hasError()) {
     return shadowFrameDataResult;
   }
@@ -4519,22 +4456,6 @@ Result<bool, std::string>
 ShadowRenderer::appendShadowDepthPasses(RenderFrameContext &frame,
                                         RenderGraphBuilder &graph) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CMD_DRAW);
-  auto bufferUses = importDependencies(
-      graph,
-      std::span<const RenderGraphImportedBufferUse>(
-          passBufferDependencies_.data(), passBufferDependencies_.size()),
-      passBufferUses_, "shadow_pass_dependency_buffer");
-  if (bufferUses.hasError()) {
-    return bufferUses;
-  }
-  auto textureUses = importDependencies(
-      graph,
-      std::span<const RenderGraphImportedTextureUse>(
-          passTextureDependencies_.data(), passTextureDependencies_.size()),
-      passTextureUses_, "shadow_pass_dependency_texture");
-  if (textureUses.hasError()) {
-    return textureUses;
-  }
   const auto publishStaticOnlyCascadeState = [&](uint32_t cascadeIndex,
                                                  TextureHandle texture) {
     if (cascadeStates_[cascadeIndex].dynamicDrawCount == 0u) {
@@ -4602,8 +4523,8 @@ ShadowRenderer::appendShadowDepthPasses(RenderFrameContext &frame,
         .viewport = {.width = shadowViewportWidth,
                      .height = shadowViewportHeight,
                      .maxDepth = 1.0f},
-        .bufferUses = passBufferUses_,
-        .textureUses = passTextureUses_,
+        .importedBufferUses = passBufferDependencies_,
+        .importedTextureUses = passTextureDependencies_,
         .draws = submittedDraws,
         .drawBuffersPreResolved = true,
         .preResolvedDrawBuffers = preResolvedDrawBuffers_,
@@ -4611,7 +4532,6 @@ ShadowRenderer::appendShadowDepthPasses(RenderFrameContext &frame,
         .debugLabel = kShadowCascadePassLabels[cascadeIndex],
         .debugColor = kShadowPassDebugColor,
     };
-    desc.borrowPayload = false;
     const RenderGraphPassId pass = graph.addGraphicsPass(desc).value();
     (void)graph.markPassSideEffect(pass).value();
     publishStaticOnlyCascadeState(cascadeIndex, shadowDepthTexture);
@@ -4640,16 +4560,6 @@ ShadowRenderer::appendShadowDepthPasses(RenderFrameContext &frame,
         RenderCaptureValueKind::DebugPreview,
         RenderCaptureLifetimeClass::FeaturePersistentTexture, "display_sdr",
         "debug_preview", "Shadow Depth Preview Pass");
-    std::pmr::vector<RenderGraphTextureUse> previewTextureUses(memory_);
-    auto previewUses = importDependencies(
-        graph,
-        std::span<const RenderGraphImportedTextureUse>(
-            previewTextureDependencies_.data(),
-            previewTextureDependencies_.size()),
-        previewTextureUses, "shadow_preview_dependency_texture");
-    if (previewUses.hasError()) {
-      return previewUses;
-    }
     const RenderGraphGraphicsPassDesc previewDesc{
         .color = {.loadOp = LoadOp::Clear,
                   .storeOp = StoreOp::Store,
@@ -4660,11 +4570,10 @@ ShadowRenderer::appendShadowDepthPasses(RenderFrameContext &frame,
         .viewport = {.width = previewViewportWidth,
                      .height = previewViewportHeight,
                      .maxDepth = 1.0f},
-        .textureUses = previewTextureUses,
+        .importedTextureUses = previewTextureDependencies_,
         .draws = std::span<const DrawItem>(&previewDraw_, 1u),
         .debugLabel = kShadowPreviewPassLabel,
         .debugColor = kShadowPreviewPassDebugColor,
-        .borrowPayload = true,
     };
     const RenderGraphPassId previewPass =
         graph.addGraphicsPass(previewDesc).value();
@@ -4712,7 +4621,7 @@ ShadowRenderer *registerShadowRenderer(RenderPipeline &pipeline,
       .state = renderer,
       .enabled =
           [](const void *state, const FrameBuildContext &ctx) {
-            return ctx.frame.settings.shadow.enabled &&
+            return ctx.frame.settings->shadow.enabled &&
                    static_cast<const ShadowRenderer *>(state)
                        ->hasPreparedShadowDepthPasses();
           },

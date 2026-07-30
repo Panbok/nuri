@@ -33,7 +33,6 @@ void populateTelemetryCompileResult(CompiledRenderGraph &compiled,
   compiled.plan.culledPassCount = 1u;
   compiled.plan.rootPassCount = 2u;
   compiled.plan.usedParallelCompile = true;
-  compiled.commands.usedParallelPayloadResolution = true;
   compiled.plan.usedParallelHazardAnalysis = true;
   compiled.plan.usedParallelLifetimeAnalysis = false;
   compiled.plan.resourceStats.importedTextures = 4u;
@@ -109,41 +108,13 @@ void populateTelemetryCompileResult(CompiledRenderGraph &compiled,
   compiled.plan.transientBufferPhysicalAllocations.push_back(bufferPhysical);
 
   compiled.plan.commandResourcePatches.push_back(
-      {.orderedPassIndex = 0u,
-       .resourceIndex = 3u,
-       .target = RenderGraphPlan::CommandResourcePatchTarget::PassColor});
-  compiled.commands.resolvedDependencyBuffers.push_back(
-      BufferHandle{.index = 11u, .generation = 2u});
-  compiled.plan.dependencyBufferRangesByPass.push_back(
-      {.offset = 0u, .count = 1u});
-  compiled.plan.commandResourcePatches.push_back(
-      {.orderedPassIndex = 0u,
-       .dependencyIndex = 0u,
-       .resourceIndex = 4u,
-       .resourceKind = RenderGraphResourceKind::Buffer,
-       .target =
-           RenderGraphPlan::CommandResourcePatchTarget::PassDependencyBuffer});
+      RenderGraphPlan::PassColorTexturePatch{.orderedPassIndex = 0u,
+                                             .resourceIndex = 3u});
   compiled.plan.preDispatchRangesByPass.push_back({.offset = 0u, .count = 1u});
-  compiled.plan.preDispatchDependencyRanges.push_back(
-      {.offset = 0u, .count = 1u});
-  compiled.plan.commandResourcePatches.push_back(
-      {.orderedPassIndex = 0u,
-       .commandIndex = 0u,
-       .dependencyIndex = 0u,
-       .resourceIndex = 4u,
-       .resourceKind = RenderGraphResourceKind::Buffer,
-       .target = RenderGraphPlan::CommandResourcePatchTarget::
-           PreDispatchDependencyBuffer});
   compiled.plan.drawRangesByPass.push_back({.offset = 0u, .count = 2u});
   compiled.plan.commandResourcePatches.push_back(
-      {.orderedPassIndex = 0u,
-       .commandIndex = 0u,
-       .resourceIndex = 4u,
-       .resourceKind = RenderGraphResourceKind::Buffer,
-       .target =
-           RenderGraphPlan::CommandResourcePatchTarget::DrawVertexBuffer});
-  compiled.commands.resolvedPreDispatchDependencyBuffers.push_back(
-      BufferHandle{.index = 12u, .generation = 3u});
+      RenderGraphPlan::DrawVertexBufferPatch{
+          .orderedPassIndex = 0u, .commandIndex = 0u, .resourceIndex = 4u});
   compiled.commands.ownedPreDispatches.push_back(ComputeDispatchItem{});
   compiled.commands.ownedDrawItems.push_back(DrawItem{});
   DrawItem indirectDraw{};
@@ -239,7 +210,6 @@ TEST(RenderGraphTelemetryTest, CaptureDeepCopiesStructuredData) {
   EXPECT_EQ(snapshot->execution.passRanges[1].firstOrderedPassIndex, 1u);
   EXPECT_EQ(snapshot->execution.passRanges[1].passCount, 1u);
   EXPECT_TRUE(snapshot->summary.usedParallelCompile);
-  EXPECT_TRUE(snapshot->summary.usedParallelPayloadResolution);
   EXPECT_TRUE(snapshot->summary.usedParallelHazardAnalysis);
   EXPECT_FALSE(snapshot->summary.usedParallelLifetimeAnalysis);
   EXPECT_TRUE(snapshot->summary.usedParallelRecording);
@@ -252,8 +222,10 @@ TEST(RenderGraphTelemetryTest, CaptureDeepCopiesStructuredData) {
   ASSERT_EQ(snapshot->plan.edges.size(), 1u);
   EXPECT_EQ(snapshot->plan.edges[0].before, 0u);
   EXPECT_EQ(snapshot->plan.edges[0].after, 1u);
-  ASSERT_EQ(snapshot->plan.commandResourcePatches.size(), 4u);
-  EXPECT_EQ(snapshot->plan.commandResourcePatches.back().resourceIndex, 4u);
+  ASSERT_EQ(snapshot->plan.commandResourcePatches.size(), 2u);
+  EXPECT_EQ(std::visit([](const auto &site) { return site.resourceIndex; },
+                       snapshot->plan.commandResourcePatches.back()),
+            4u);
 }
 
 TEST(RenderGraphTelemetryTest, WriteDumpSerializesSnapshotAndValidatesInputs) {
@@ -289,8 +261,6 @@ TEST(RenderGraphTelemetryTest, WriteDumpSerializesSnapshotAndValidatesInputs) {
   EXPECT_NE(contents.find("first_pass"), std::string::npos);
   EXPECT_NE(contents.find("compile_fingerprint:"), std::string::npos);
   EXPECT_NE(contents.find("final_barrier_record_count: 1"), std::string::npos);
-  EXPECT_NE(contents.find("used_parallel_payload_resolution: 1"),
-            std::string::npos);
   EXPECT_NE(contents.find("owned_draw_items: 2"), std::string::npos);
   EXPECT_NE(contents.find("Recorded Command Buffers:"), std::string::npos);
   EXPECT_NE(contents.find("Submit Batches:"), std::string::npos);

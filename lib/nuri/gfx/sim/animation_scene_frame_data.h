@@ -21,6 +21,7 @@ struct NURI_API AnimationSceneFrameData {
   BufferHandle previousInstanceMatricesBuffer{};
   uint64_t previousInstanceMatricesAddress = 0u;
   std::span<const ComputeDispatchItem> preDispatches{};
+  std::span<const RenderGraphImportedBufferUse> bufferUses{};
   std::span<const AnimatedRenderableGeometryOverride>
       geometryOverridesByRenderable{};
   std::span<const AnimatedRenderableGeometryOverride>

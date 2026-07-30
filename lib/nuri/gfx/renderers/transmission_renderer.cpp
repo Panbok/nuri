@@ -270,6 +270,7 @@ TransmissionRenderer::TransmissionRenderer(
       blendedSortableDraws_(memory_), sortedDepthTemplates_(memory_),
       passTextureReads_(memory_), blendedTextureReads_(memory_),
       passDependencyBuffers_(memory_), blendedDependencyBuffers_(memory_),
+      passRecordingSamplers_(memory_),
       passDependencyBufferAccessModes_(memory_),
       preResolvedTemplateBuffers_(memory_),
       cachedPreResolvedDrawBuffers_(memory_) {
@@ -305,7 +306,7 @@ void TransmissionRenderer::onDetach() {
 }
 
 void TransmissionRenderer::publishFrameData(RenderFrameContext &frame) {
-  const RenderSettings &settings = frame.settings;
+  const RenderSettings &settings = frame.settings.facts();
   if (!settings.transmission.enabled) {
     return;
   }
@@ -338,7 +339,7 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
   instanceBuffers_->abandonPrepared();
   blendedFrameDataRing_->abandonPrepared();
   resetFrameBuildState();
-  const RenderSettings &settings = frame.settings;
+  const RenderSettings &settings = frame.settings.facts();
   if (!settings.transmission.enabled) {
     passTextureReads_.clear();
     blendedTextureReads_.clear();
@@ -373,37 +374,21 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
           : frame.sharedResources[FrameTextureSlot::SceneDepth].graph;
   frame.metrics.antiAliasing.taaTransmissionStableVisibilityDepth =
       stableVisibilityDepth;
-  const MaterialTableSnapshot materialSnapshot =
-      frame.resources->materialSnapshot();
-  const bool topologyDirty =
-      sceneCache_.scene != frame.scene ||
-      sceneCache_.topologyVersion != frame.scene->topologyVersion();
-  const uint64_t modelMaterialBindingVersion =
-      frame.resources->modelMaterialBindingVersion();
-  const bool materialDirty =
-      topologyDirty ||
-      sceneCache_.materialVersion != materialSnapshot.version ||
-      sceneCache_.modelMaterialBindingVersion != modelMaterialBindingVersion;
+  const SceneDrawDatabase &drawDatabase =
+      *frame.sharedResources.sceneDrawDatabase;
+  const bool databaseDirty =
+      drawDatabaseGeneration_ != drawDatabase.generation();
   const bool transformDirty =
-      topologyDirty ||
+      sceneCache_.scene != frame.scene ||
       sceneCache_.transformVersion != frame.scene->transformVersion();
-  const uint64_t geometryMutationVersion = gpu_.geometryMutationVersion();
-  const bool geometryDirty =
-      geometryMutationVersion != 0u &&
-      geometryMutationVersion != sceneCache_.geometryMutationVersion;
-  const bool needsGeometryRebuild =
-      geometryDirty && !meshDrawTemplates_.empty();
   bool drawTemplatesRebuilt = false;
-  if (topologyDirty || materialDirty || needsGeometryRebuild) {
+  if (databaseDirty) {
     NURI_PROFILER_ZONE("TransmissionRenderer.cache_rebuild",
                        NURI_PROFILER_COLOR_CMD_DRAW);
-    rebuildSceneCache(*frame.sharedResources.sceneDrawDatabase, *frame.scene);
+    rebuildSceneCache(drawDatabase, *frame.scene);
     NURI_PROFILER_ZONE_END();
     drawTemplatesRebuilt = true;
-    sceneCache_.materialVersion = materialSnapshot.version;
-    sceneCache_.modelMaterialBindingVersion = modelMaterialBindingVersion;
-  } else if (geometryDirty) {
-    sceneCache_.geometryMutationVersion = geometryMutationVersion;
+    drawDatabaseGeneration_ = drawDatabase.generation();
   }
   const EnvironmentHandles &environment = frame.scene->environment();
   const bool environmentDirty = cachedEnvironmentHandles_ != environment;
@@ -417,7 +402,7 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
     environmentTextureAccessCacheValid_ = true;
     NURI_PROFILER_ZONE_END();
   }
-  if (materialDirty || !materialTextureAccessCacheValid_) {
+  if (databaseDirty || !materialTextureAccessCacheValid_) {
     NURI_PROFILER_ZONE("TransmissionRenderer.material_texture_cache",
                        NURI_PROFILER_COLOR_CMD_DRAW);
     collectForwardMaterialTextures(*frame.resources, meshDrawTemplates_,
@@ -427,6 +412,8 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
   }
   const ForwardSceneGpuData *sceneGpu =
       &*frame.sharedResources.forwardSceneGpuData;
+  passRecordingSamplers_.assign(sceneGpu->recordingSamplers.begin(),
+                                sceneGpu->recordingSamplers.end());
   staticPassTextureReads_.clear();
   staticPassTextureReads_.reserve(
       sceneCache_.environmentTextureAccessHandles.size() +
@@ -821,7 +808,7 @@ TransmissionRenderer::appendTransmissionMainPass(RenderFrameContext &frame,
         "unavailable at build time");
   }
   AntiAliasingFrameMetrics &aaMetrics = frame.metrics.antiAliasing;
-  const RenderSettings &settings = frame.settings;
+  const RenderSettings &settings = frame.settings.facts();
   const AntiAliasingDebugView debugView = settings.antiAliasing.debug.view;
   if (shouldSuppressTransmissionForAntiAliasingDebugView(debugView)) {
     return Result<bool, std::string>::makeResult(true);
@@ -956,17 +943,30 @@ TransmissionRenderer::appendTransmissionMainPass(RenderFrameContext &frame,
       std::span<const DrawItem>(passDrawItems_.data(), passDrawItems_.size());
   passDesc.drawBuffersPreResolved = true;
   passDesc.preResolvedDrawBuffers = cachedPreResolvedDrawBuffers_;
-  passDesc.dependencyBuffers = std::span<const BufferHandle>(
-      passDependencyBuffers_.data(), passDependencyBuffers_.size());
-  passDesc.dependencyBufferAccessModes = passDependencyBufferAccessModes_;
-  passDesc.dependencyTextures = passTextureReads_;
+  passDesc.recordingSamplers = passRecordingSamplers_;
   passDesc.debugLabel = kTransmissionPassLabel;
   passDesc.debugColor = kTransmissionPassDebugColor;
-  passDesc.borrowPayload = true;
   passDesc.gpuTimingScope = GpuTimingScope::Transmission;
   auto addResult = graph.addGraphicsPass(passDesc);
   if (addResult.hasError()) {
     return Result<bool, std::string>::makeError(addResult.error());
+  }
+  for (size_t i = 0; i < passDependencyBuffers_.size(); ++i) {
+    const RenderGraphAccessMode access =
+        i < passDependencyBufferAccessModes_.size()
+            ? passDependencyBufferAccessModes_[i]
+            : RenderGraphAccessMode::Read;
+    auto useResult = graph.addImportedBufferAccess(addResult.value(),
+                                                   passDependencyBuffers_[i],
+                                                   access, passDesc.debugLabel);
+    if (useResult.hasError()) {
+      return Result<bool, std::string>::makeError(useResult.error());
+    }
+  }
+  auto textureResult = graph.addImportedTextureReads(
+      addResult.value(), passTextureReads_, passDesc.debugLabel);
+  if (textureResult.hasError()) {
+    return Result<bool, std::string>::makeError(textureResult.error());
   }
   NURI_PROFILER_ZONE_END();
   return Result<bool, std::string>::makeResult(true);
@@ -1192,14 +1192,19 @@ TransmissionRenderer::appendTransparentFeedbackRefresh(
                       .clearColor = {0.0f, 0.0f, 0.0f, 1.0f}};
     passDesc.colorTexture = destination;
     passDesc.draws = std::span<const DrawItem>(&draw, 1u);
-    if (nuri::isValid(sourceHandle))
-      passDesc.dependencyTextures =
-          std::span<const TextureHandle>(&sourceHandle, 1u);
     passDesc.debugLabel = debugLabel;
     passDesc.debugColor = kTransparentPassDebugColor;
     auto addResult = graph.addGraphicsPass(passDesc);
     if (addResult.hasError()) {
       return Result<bool, std::string>::makeError(addResult.error());
+    }
+    if (nuri::isValid(sourceHandle)) {
+      auto useResult = graph.addImportedTextureAccess(
+          addResult.value(), sourceHandle, RenderGraphAccessMode::Read,
+          passDesc.debugLabel);
+      if (useResult.hasError()) {
+        return Result<bool, std::string>::makeError(useResult.error());
+      }
     }
     return Result<bool, std::string>::makeResult(true);
   };
@@ -1283,8 +1288,6 @@ void TransmissionRenderer::rebuildSceneCache(const SceneDrawDatabase &database,
   cachedPreResolvedDrawBuffers_.clear();
   cachedPreResolvedDrawBufferSignature_ = std::numeric_limits<uint64_t>::max();
   sceneCache_.scene = &scene;
-  sceneCache_.topologyVersion = scene.topologyVersion();
-  sceneCache_.geometryMutationVersion = gpu_.geometryMutationVersion();
 }
 
 void TransmissionRenderer::refreshDrawTemplateTransforms() {
@@ -1300,6 +1303,7 @@ void TransmissionRenderer::refreshDrawTemplateTransforms() {
 
 void TransmissionRenderer::resetCachedState() {
   sceneCache_.reset();
+  drawDatabaseGeneration_ = std::numeric_limits<uint64_t>::max();
   loggedTransparentFeedbackFallbackWarning_ = false;
   cachedEnvironmentHandles_ = {};
   environmentTextureAccessCacheValid_ = false;
@@ -1311,6 +1315,7 @@ void TransmissionRenderer::resetCachedState() {
   blendedTextureReads_.clear();
   blendedDependencyBuffers_.clear();
   passDependencyBufferAccessModes_.clear();
+  passRecordingSamplers_.clear();
   preResolvedTemplateBuffers_.clear();
   cachedPreResolvedDrawBuffers_.clear();
   cachedPreResolvedDrawBufferSignature_ = std::numeric_limits<uint64_t>::max();
@@ -1327,6 +1332,7 @@ void TransmissionRenderer::resetFrameBuildState() {
   passDependencyBuffers_.clear();
   blendedDependencyBuffers_.clear();
   passDependencyBufferAccessModes_.clear();
+  passRecordingSamplers_.clear();
   preparedSceneColorTexture_ = {};
   preparedSceneColorHalfResTexture_ = {};
   preparedSceneColorQuarterResTexture_ = {};
@@ -1415,7 +1421,7 @@ void registerTransmissionStage(RenderPipeline &pipeline, GPUDevice &gpu,
       .state = renderer,
       .enabled =
           [](const void *state, const FrameBuildContext &ctx) {
-            return ctx.frame.settings.transmission.enabled &&
+            return ctx.frame.settings->transmission.enabled &&
                    static_cast<const TransmissionRenderer *>(state)
                        ->hasPreparedTransmissionMainPass();
           },

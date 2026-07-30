@@ -1745,7 +1745,7 @@ MeshImporter::loadFromFile(std::string_view path,
         "MeshImporter::loadFromFile: " + importedSceneResult.error());
   }
   return buildFlattenedSceneDataFromImportedScene(
-      path, importedSceneResult.value(), options, mem, false);
+      path, importedSceneResult.value().prefab, options, mem, false);
 }
 
 nuri::Result<MeshData, std::string> detail::loadSceneMeshFromSourceIndex(

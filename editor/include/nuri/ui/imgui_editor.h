@@ -57,6 +57,8 @@ public:
   void applyDeferredUiActions();
   void beginFrame() override;
   Result<RenderGraphGraphicsPassDesc, std::string> endFrame() override;
+  [[nodiscard]] std::span<const RenderGraphImportedTextureUse>
+  textureUses() const noexcept;
 
 private:
   struct Impl;

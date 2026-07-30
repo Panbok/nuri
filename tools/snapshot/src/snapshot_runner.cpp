@@ -1276,7 +1276,7 @@ void buildFrameContext(RenderFrameContext &frameContext, RenderScene &scene,
   frameContext.presentationAA = planResult.value();
   auto cameraResult = temporalFrameService.prepareFrame(
       camera, static_cast<float>(width) / static_cast<float>(height),
-      resolvedSettings.antiAliasing, frameContext.presentationAA,
+      resolvedSettings->antiAliasing, frameContext.presentationAA,
       TemporalCameraFrameDesc{.renderExtent = glm::uvec2(width, height),
                               .sceneContent = sceneContent},
       frameIndex, timeSeconds, deltaSeconds);
@@ -1285,7 +1285,6 @@ void buildFrameContext(RenderFrameContext &frameContext, RenderScene &scene,
   frameContext.camera = cameraResult.value();
   frameContext.temporalFrameService = &temporalFrameService;
   settings.antiAliasing.debug.resetHistoryRequested = false;
-  resolvedSettings.antiAliasing.debug.resetHistoryRequested = false;
   frameContext.settings = std::move(resolvedSettings);
   frameContext.metrics = {};
   frameContext.metrics.frameIndex = frameContext.frameIndex;

@@ -21,32 +21,6 @@ std::array<std::mutex, 64u> gArtifactBuildMutexes{};
 }
 } // namespace
 
-Result<PreparedSceneManifest, std::string>
-prepareSceneManifest(std::string_view path, const SceneImportOptions &options) {
-  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
-  SceneImportOptions manifestOptions = options;
-  manifestOptions.adaptAssetSources = true;
-  auto imported = SceneImporter::loadSceneFromFile(path, manifestOptions);
-  if (imported.hasError()) {
-    return Result<PreparedSceneManifest, std::string>::makeError(
-        imported.error());
-  }
-  ScenePrefab &scene = imported.value();
-  PreparedSceneManifest manifest{};
-  manifest.meshes.assign(std::make_move_iterator(scene.adaptedMeshes.begin()),
-                         std::make_move_iterator(scene.adaptedMeshes.end()));
-  manifest.embeddedTextures =
-      std::make_shared<const std::vector<EmbeddedSceneTextureData>>(
-          std::move(scene.embeddedTextures));
-  manifest.materials.reserve(scene.materialAssets.size());
-  for (const ScenePrefabAssetRef &asset : scene.materialAssets)
-    manifest.materials.push_back(
-        scene.adaptedMaterials.materials[asset.sourceIndex]);
-  manifest.prefab = std::move(scene);
-  return Result<PreparedSceneManifest, std::string>::makeResult(
-      std::move(manifest));
-}
-
 Result<PreparedImportedMaterial, std::string> prepareImportedMaterial(
     const MaterialData &material, std::string_view scenePath,
     uint32_t sourceMaterialIndex, const TextureCompressionCaps &compressionCaps,

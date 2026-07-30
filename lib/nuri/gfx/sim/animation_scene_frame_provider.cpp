@@ -34,6 +34,7 @@ AnimationSceneFrameProvider::prepare(FrameBuildContext &ctx) {
         .executionMode = RenderPassExecutionMode::ComputeOnly,
         .hasColorAttachment = false,
         .preDispatches = frameData->preDispatches,
+        .importedBufferUses = frameData->bufferUses,
         .gpuTimingScope = GpuTimingScope::None,
         .debugLabel = "Animation Scene Deformation",
         .debugColor = 0xff33cc88u,

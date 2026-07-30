@@ -61,9 +61,9 @@ RenderPipeline::buildRenderGraph(RenderFrameContext &frame,
   aaMetrics.msaaDepthResolveMinSupported = gpuCapabilities.depthResolveMin;
   aaMetrics.msaaAlphaToCoverageSupported = gpuCapabilities.alphaToCoverage;
   aaMetrics.msaaSampleRateShadingSupported = gpuCapabilities.sampleRateShading;
-  const AntiAliasingMode antiAliasingMode = frame.settings.antiAliasing.mode;
+  const AntiAliasingMode antiAliasingMode = frame.settings->antiAliasing.mode;
   aaMetrics.msaaAlphaCoverageRequested = isMsaaMode(antiAliasingMode);
-  frame.metrics.ddgi.requested = frame.settings.ddgi.enabled ? 1u : 0u;
+  frame.metrics.ddgi.requested = frame.settings->ddgi.enabled ? 1u : 0u;
   aaMetrics.msaaUnsupportedReason =
       isMsaaMode(antiAliasingMode)
           ? msaaUnsupportedReason(antiAliasingMode, gpuCapabilities)

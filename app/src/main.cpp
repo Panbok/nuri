@@ -671,7 +671,7 @@ private:
                 planResult.error().c_str());
     frameContext_.presentationAA = planResult.value();
     auto cameraResult = temporalFrameService_.prepareFrame(
-        camera, getAspectRatio(), resolvedSettings.antiAliasing,
+        camera, getAspectRatio(), resolvedSettings->antiAliasing,
         frameContext_.presentationAA,
         nuri::TemporalCameraFrameDesc{
             .renderExtent =
@@ -685,7 +685,6 @@ private:
     frameContext_.camera = cameraResult.value();
     frameContext_.temporalFrameService = &temporalFrameService_;
     renderSettings_.antiAliasing.debug.resetHistoryRequested = false;
-    resolvedSettings.antiAliasing.debug.resetHistoryRequested = false;
     frameContext_.settings = std::move(resolvedSettings);
     frameContext_.metrics = {};
     frameContext_.metrics.frameIndex = frameContext_.frameIndex;

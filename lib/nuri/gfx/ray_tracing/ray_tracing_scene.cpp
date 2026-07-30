@@ -169,6 +169,7 @@ void RayTracingScene::clearSceneResources(bool clearChangeTracking) noexcept {
   transformVersion_ = 0u;
   deformationVersion_ = 0u;
   geometryMutationVersion_ = 0u;
+  drawDatabaseGeneration_ = UINT64_MAX;
   staticInstanceCount_ = 0u;
   staticSurfaceBoundsCount_ = 0u;
   dynamicSurfaceBoundsCount_ = 0u;
@@ -552,6 +553,7 @@ RayTracingScene::rebuildStaticScene(FrameBuildContext &ctx,
                               ? animationData->version
                               : scene.deformationVersion();
     geometryMutationVersion_ = gpu_.geometryMutationVersion();
+    drawDatabaseGeneration_ = database.generation();
     animationVersion_ = animationDataMatchesScene ? animationData->version : 0u;
     return Result<bool, std::string>::makeResult(true);
   }
@@ -577,6 +579,7 @@ RayTracingScene::rebuildStaticScene(FrameBuildContext &ctx,
                                                   : scene.deformationVersion();
   animationVersion_ = animationDataMatchesScene ? animationData->version : 0u;
   geometryMutationVersion_ = gpu_.geometryMutationVersion();
+  drawDatabaseGeneration_ = database.generation();
   return appendTopologyBuildPasses(ctx);
 }
 
@@ -1639,7 +1642,7 @@ Result<bool, std::string> RayTracingScene::prepare(FrameBuildContext &ctx) {
   ctx.frame.metrics.rayTracingScene.consumedRebuildEpoch =
       consumedRebuildEpoch_;
   pendingFrame_.topology = false;
-  const RenderSettings::DDGISettings &settings = ctx.frame.settings.ddgi;
+  const RenderSettings::DDGISettings &settings = ctx.frame.settings->ddgi;
   if (!settings.enabled || ctx.frame.scene == nullptr) {
     clearSceneResources();
     ctx.frame.metrics.rayTracingScene.readiness =
@@ -1678,6 +1681,7 @@ Result<bool, std::string> RayTracingScene::prepare(FrameBuildContext &ctx) {
   const bool topologyChanged =
       explicitRebuild || sceneId_ != scene.id() ||
       topologyVersion_ != scene.topologyVersion() ||
+      drawDatabaseGeneration_ != ctx.shared.sceneDrawDatabase->generation() ||
       geometryMutationVersion_ != geometryVersion || failed_ ||
       (matchingAnimationData && animationVersion_ == 0u &&
        animationData->version != 0u);

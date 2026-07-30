@@ -475,7 +475,7 @@ TEST(GltfScenePrefabImport, LoadsPrefabHierarchyRenderablesAndLightsFromFile) {
   auto result = nuri::SceneImporter::loadSceneFromFile(gltfPath.string());
   ASSERT_FALSE(result.hasError()) << result.error();
 
-  const nuri::ScenePrefab &prefab = result.value();
+  const nuri::ScenePrefab &prefab = result.value().prefab;
   EXPECT_EQ(prefab.sourceSceneName, "PrefabScene");
   EXPECT_EQ(prefab.meshAssets.size(), 1u);
   EXPECT_GE(prefab.materialAssets.size(), 1u);
@@ -771,7 +771,7 @@ TEST(GltfScenePrefabImport, PreservesSingleMeshPrimitiveMaterialBindings) {
       nuri::SceneImportOptions{.assetBuildOptions = options});
   ASSERT_FALSE(sceneResult.hasError()) << sceneResult.error();
 
-  const nuri::ScenePrefab &scene = sceneResult.value();
+  const nuri::ScenePrefab &scene = sceneResult.value().prefab;
   ASSERT_EQ(scene.renderables.size(), 2u);
   ASSERT_EQ(scene.meshAssets.size(), 2u);
   ASSERT_GE(scene.materialAssets.size(), 2u);

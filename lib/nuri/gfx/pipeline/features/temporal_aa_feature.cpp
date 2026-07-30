@@ -2,6 +2,7 @@
 #include "nuri/gfx/frame/presentation_aa_plan.h"
 #include "nuri/gfx/frame/render_frame_context.h"
 #include "nuri/gfx/fullscreen.h"
+#include "nuri/gfx/pipeline/owned_program_bundle.h"
 #include "nuri/gfx/pipeline/render_pipeline.h"
 #include "nuri/gfx/shader.h"
 #include <algorithm>
@@ -15,10 +16,6 @@ enum class TemporalInputPlacement : uint8_t {
   ColorReconstruction = 1u,
 };
 enum class TemporalInput : uint8_t { MotionVectors, ReactiveMask };
-struct TemporalAAPipelineState {
-  std::array<ShaderHandle, 2> shaders{};
-  RenderPipelineHandle pipeline{};
-};
 class TemporalAAClearPass final {
 public:
   TemporalAAClearPass(TemporalInput input, TemporalInputPlacement placement)
@@ -44,7 +41,7 @@ public:
 
 private:
   GPUDevice &gpu_;
-  TemporalAAPipelineState pipeline_{};
+  OwnedProgramBundle pipeline_{};
   std::filesystem::path vertexPath_{};
   std::filesystem::path fragmentPath_{};
   bool initialized_ = false;
@@ -62,7 +59,7 @@ public:
 
 private:
   GPUDevice &gpu_;
-  TemporalAAPipelineState pipeline_{};
+  OwnedProgramBundle pipeline_{};
   std::filesystem::path vertexPath_{};
   std::filesystem::path fragmentPath_{};
   bool initialized_ = false;
@@ -79,7 +76,7 @@ public:
 
 private:
   GPUDevice &gpu_;
-  TemporalAAPipelineState pipeline_{};
+  OwnedProgramBundle pipeline_{};
   SamplerHandle linearClampSampler_{};
   std::filesystem::path vertexPath_{};
   std::filesystem::path fragmentPath_{};
@@ -182,7 +179,7 @@ isLegacyTAAEnabled(const RenderFrameContext &frame) noexcept {
   return frame.presentationAA.valid
              ? frame.presentationAA.reconstruction ==
                    ColorReconstruction::LegacyTAA
-             : frame.settings.antiAliasing.mode == AntiAliasingMode::TAA;
+             : frame.settings->antiAliasing.mode == AntiAliasingMode::TAA;
 }
 [[nodiscard]] inline bool
 isVelocityDebugView(AntiAliasingDebugView view) noexcept {
@@ -298,41 +295,28 @@ resolveShaderBasePath(const RuntimeCompositeConfig &config) {
   }
   return {};
 }
-void destroyTemporalPipeline(GPUDevice &gpu, TemporalAAPipelineState &state) {
-  if (nuri::isValid(state.pipeline)) {
-    gpu.destroyRenderPipeline(state.pipeline);
-  }
-  for (ShaderHandle shader : state.shaders) {
-    if (nuri::isValid(shader)) {
-      gpu.destroyShaderModule(shader);
-    }
-  }
-}
+void destroyTemporalPipeline(OwnedProgramBundle &program) { program.reset(); }
 Result<bool, std::string>
-createTemporalPipeline(GPUDevice &gpu, TemporalAAPipelineState &state,
+createTemporalPipeline(GPUDevice &gpu, OwnedProgramBundle &program,
                        const std::filesystem::path &vertexPath,
                        const std::filesystem::path &fragmentPath,
                        RenderPipelineDesc desc, std::string_view name) {
-  auto vertex =
-      compileShaderFile(gpu, name, vertexPath.string(), ShaderStage::Vertex);
-  if (vertex.hasError()) {
-    return Result<bool, std::string>::makeError(vertex.error());
+  const std::array shaderSpecs{
+      ShaderSpec{name, vertexPath, ShaderStage::Vertex},
+      ShaderSpec{name, fragmentPath, ShaderStage::Fragment}};
+  auto shaders = program.compileShaders(gpu, shaderSpecs);
+  if (shaders.hasError()) {
+    return shaders;
   }
-  state.shaders[0] = vertex.value();
-  auto fragment = compileShaderFile(gpu, name, fragmentPath.string(),
-                                    ShaderStage::Fragment);
-  if (fragment.hasError()) {
-    return Result<bool, std::string>::makeError(fragment.error());
-  }
-  state.shaders[1] = fragment.value();
-  desc.vertexShader = state.shaders[0];
-  desc.fragmentShader = state.shaders[1];
-  auto pipeline = gpu.createRenderPipeline(desc, name);
+  desc.vertexShader = program.shader(0u);
+  desc.fragmentShader = program.shader(1u);
+  const GraphicsPipelineSpec pipelineSpec{name, desc};
+  auto pipeline = program.replaceGraphicsPipelines(
+      gpu, std::span<const GraphicsPipelineSpec>(&pipelineSpec, 1u));
   if (pipeline.hasError()) {
-    return Result<bool, std::string>::makeError(pipeline.error());
+    program.reset();
   }
-  state.pipeline = pipeline.value();
-  return Result<bool, std::string>::makeResult(true);
+  return pipeline;
 }
 [[nodiscard]] uint64_t textureStorageBytes(GPUDevice &gpu,
                                            TextureHandle texture) {
@@ -431,7 +415,7 @@ TemporalAABackgroundMotionPass::TemporalAABackgroundMotionPass(
 }
 
 TemporalAABackgroundMotionPass::~TemporalAABackgroundMotionPass() {
-  destroyTemporalPipeline(gpu_, pipeline_);
+  destroyTemporalPipeline(pipeline_);
 }
 
 bool TemporalAABackgroundMotionPass::isEnabled(
@@ -494,7 +478,7 @@ TemporalAABackgroundMotionPass::build(FrameBuildContext &ctx) {
       .historyValid = ctx.frame.camera.historyValid ? 1u : 0u,
   };
   DrawItem draw = makeFullscreenDraw(
-      pipeline_.pipeline,
+      pipeline_.graphicsPipeline(0u),
       std::span<const std::byte>(
           reinterpret_cast<const std::byte *>(&constants), sizeof(constants)),
       "TaaBackgroundMotion", kDrawDebugColor);
@@ -544,7 +528,7 @@ TemporalAAMotionClassPass::TemporalAAMotionClassPass(
 }
 
 TemporalAAMotionClassPass::~TemporalAAMotionClassPass() {
-  destroyTemporalPipeline(gpu_, pipeline_);
+  destroyTemporalPipeline(pipeline_);
 }
 
 bool TemporalAAMotionClassPass::isEnabled(const FrameBuildContext &ctx) const {
@@ -600,7 +584,7 @@ TemporalAAMotionClassPass::build(FrameBuildContext &ctx) {
               : 0u,
   };
   const DrawItem draw = makeFullscreenDraw(
-      pipeline_.pipeline,
+      pipeline_.graphicsPipeline(0u),
       std::span<const std::byte>(
           reinterpret_cast<const std::byte *>(&constants), sizeof(constants)),
       "TaaMotionClass", kDrawDebugColor);
@@ -614,11 +598,14 @@ TemporalAAMotionClassPass::build(FrameBuildContext &ctx) {
                 .storeOp = StoreOp::Store,
                 .clearColor = kFrameCompositionMotionClassClearValue};
   pass.colorTexture = ctx.shared[FrameTextureSlot::MotionClass].graph;
-  pass.dependencyTextures = reads;
   pass.draws = std::span<const DrawItem>(&draw, 1u);
   pass.debugLabel = "TAA Motion Class Pass";
   pass.debugColor = 0xff55aaff;
-  (void)ctx.graph.addGraphicsPass(pass).value();
+  const RenderGraphPassId motionClassPass =
+      ctx.graph.addGraphicsPass(pass).value();
+  (void)ctx.graph
+      .addImportedTextureReads(motionClassPass, reads, pass.debugLabel)
+      .value();
   ctx.shared.historyWriteRequirements |=
       FrameTextureRequirementFlags::MotionClass;
   if (isRenderCaptureRequested(ctx.frame, "motion_class")) {
@@ -658,7 +645,7 @@ TemporalAAResolvePass::~TemporalAAResolvePass() {
   if (nuri::isValid(linearClampSampler_)) {
     gpu_.destroySampler(linearClampSampler_);
   }
-  destroyTemporalPipeline(gpu_, pipeline_);
+  destroyTemporalPipeline(pipeline_);
 }
 
 bool TemporalAAResolvePass::isEnabled(const FrameBuildContext &ctx) const {
@@ -695,7 +682,7 @@ Result<bool, std::string> TemporalAAResolvePass::prepare(FrameBuildContext &) {
 }
 
 Result<bool, std::string> TemporalAAResolvePass::build(FrameBuildContext &ctx) {
-  const RenderSettings &settings = ctx.frame.settings;
+  const RenderSettings &settings = ctx.frame.settings.facts();
   const RenderSettings::AntiAliasingDebugSettings &aaDebug =
       settings.antiAliasing.debug;
   const AntiAliasingDebugView debugView = aaDebug.view;
@@ -737,6 +724,7 @@ Result<bool, std::string> TemporalAAResolvePass::build(FrameBuildContext &ctx) {
           : velocityTexId;
   const uint32_t linearSamplerId =
       gpu_.getSamplerBindlessIndex(linearClampSampler_);
+  const std::array recordingSamplers{linearClampSampler_};
   const uint32_t pointSamplerId = gpu_.getDefaultSamplerBindlessIndex();
   uint32_t resolveFlags =
       temporalHistoryValid ? kTaaResolveFlagHistoryValid : 0u;
@@ -945,7 +933,7 @@ Result<bool, std::string> TemporalAAResolvePass::build(FrameBuildContext &ctx) {
       .previousRawJitterDeltaUvYBits = floatBits(previousRawJitterDeltaUv.y),
   };
   const DrawItem resolveDraw = makeFullscreenDraw(
-      pipeline_.pipeline,
+      pipeline_.graphicsPipeline(0u),
       std::span<const std::byte>(
           reinterpret_cast<const std::byte *>(&resolveConstants),
           sizeof(resolveConstants)),
@@ -955,13 +943,19 @@ Result<bool, std::string> TemporalAAResolvePass::build(FrameBuildContext &ctx) {
                        .storeOp = StoreOp::Store,
                        .clearColor = {0.0f, 0.0f, 0.0f, 1.0f}};
   resolvePass.colorTexture = historyWriteGraphTexture;
-  resolvePass.dependencyTextures =
-      std::span<const TextureHandle>(resolveReads.data(), resolveReadCount);
+  resolvePass.recordingSamplers = recordingSamplers;
   resolvePass.draws = std::span<const DrawItem>(&resolveDraw, 1u);
   resolvePass.gpuTimingScope = GpuTimingScope::TemporalAAResolve;
   resolvePass.debugLabel = "TAA Resolve Pass";
   resolvePass.debugColor = kTaaResolvePassDebugColor;
-  (void)ctx.graph.addGraphicsPass(resolvePass).value();
+  const RenderGraphPassId resolvePassId =
+      ctx.graph.addGraphicsPass(resolvePass).value();
+  (void)ctx.graph
+      .addImportedTextureReads(
+          resolvePassId,
+          std::span<const TextureHandle>(resolveReads.data(), resolveReadCount),
+          resolvePass.debugLabel)
+      .value();
   ctx.shared.historyWriteRequirements |=
       FrameTextureRequirementFlags::HistoryColor;
   ++aaMetrics.taaResolvePassCount;
@@ -1075,7 +1069,7 @@ Result<bool, std::string> TemporalAAResolvePass::build(FrameBuildContext &ctx) {
         floatBits(tuning.sharpenConfidenceThreshold);
   }
   const DrawItem copyDraw = makeFullscreenDraw(
-      pipeline_.pipeline,
+      pipeline_.graphicsPipeline(0u),
       std::span<const std::byte>(
           reinterpret_cast<const std::byte *>(&copyConstants),
           sizeof(copyConstants)),
@@ -1128,18 +1122,24 @@ Result<bool, std::string> TemporalAAResolvePass::build(FrameBuildContext &ctx) {
                        .storeOp = StoreOp::Store,
                        .clearColor = {0.0f, 0.0f, 0.0f, 1.0f}};
     debugPass.colorTexture = debugOutput;
-    debugPass.dependencyTextures =
-        std::span<const TextureHandle>(copyReads.data(), copyReadCount);
+    debugPass.recordingSamplers = recordingSamplers;
     debugPass.draws = std::span<const DrawItem>(&copyDraw, 1u);
     debugPass.gpuTimingScope = GpuTimingScope::TemporalAADebug;
     debugPass.debugLabel = displayLabel;
     debugPass.debugColor = displayColor;
-    (void)ctx.graph.addGraphicsPass(debugPass).value();
+    const RenderGraphPassId debugPassId =
+        ctx.graph.addGraphicsPass(debugPass).value();
+    (void)ctx.graph
+        .addImportedTextureReads(
+            debugPassId,
+            std::span<const TextureHandle>(copyReads.data(), copyReadCount),
+            debugPass.debugLabel)
+        .value();
     TAAResolvePushConstants debugCopyConstants = copyConstants;
     debugCopyConstants.currentTexId = debugOutputTexId;
     debugCopyConstants.mode = kTaaResolveModeCopyCurrent;
     const DrawItem debugCopyDraw = makeFullscreenDraw(
-        pipeline_.pipeline,
+        pipeline_.graphicsPipeline(0u),
         std::span<const std::byte>(
             reinterpret_cast<const std::byte *>(&debugCopyConstants),
             sizeof(debugCopyConstants)),
@@ -1151,27 +1151,37 @@ Result<bool, std::string> TemporalAAResolvePass::build(FrameBuildContext &ctx) {
                            .storeOp = StoreOp::Store,
                            .clearColor = {0.0f, 0.0f, 0.0f, 1.0f}};
     debugCopyPass.colorTexture = sceneGraphTexture;
-    debugCopyPass.dependencyTextures = std::span<const TextureHandle>(
-        debugCopyReads.data(), debugCopyReads.size());
+    debugCopyPass.recordingSamplers = recordingSamplers;
     debugCopyPass.draws = std::span<const DrawItem>(&debugCopyDraw, 1u);
     debugCopyPass.gpuTimingScope = GpuTimingScope::TemporalAADebug;
     debugCopyPass.debugLabel = "TAA Debug Copy Back Pass";
     debugCopyPass.debugColor = kTaaCopyBackPassDebugColor;
-    (void)ctx.graph.addGraphicsPass(debugCopyPass).value();
+    const RenderGraphPassId debugCopyPassId =
+        ctx.graph.addGraphicsPass(debugCopyPass).value();
+    (void)ctx.graph
+        .addImportedTextureReads(debugCopyPassId, debugCopyReads,
+                                 debugCopyPass.debugLabel)
+        .value();
   } else {
     RenderGraphGraphicsPassDesc copyPass{};
     copyPass.color = {.loadOp = LoadOp::Clear,
                       .storeOp = StoreOp::Store,
                       .clearColor = {0.0f, 0.0f, 0.0f, 1.0f}};
     copyPass.colorTexture = sceneGraphTexture;
-    copyPass.dependencyTextures =
-        std::span<const TextureHandle>(copyReads.data(), copyReadCount);
+    copyPass.recordingSamplers = recordingSamplers;
     copyPass.draws = std::span<const DrawItem>(&copyDraw, 1u);
     copyPass.gpuTimingScope = debugDisplay ? GpuTimingScope::TemporalAADebug
                                            : GpuTimingScope::TemporalAACopyBack;
     copyPass.debugLabel = displayLabel;
     copyPass.debugColor = displayColor;
-    (void)ctx.graph.addGraphicsPass(copyPass).value();
+    const RenderGraphPassId copyPassId =
+        ctx.graph.addGraphicsPass(copyPass).value();
+    (void)ctx.graph
+        .addImportedTextureReads(
+            copyPassId,
+            std::span<const TextureHandle>(copyReads.data(), copyReadCount),
+            copyPass.debugLabel)
+        .value();
   }
   ctx.shared[FrameTextureSlot::SceneColor].graph = sceneGraphTexture;
   aaMetrics.taaCopyBackPassCount += displaySamplesTemporalEvaluation ? 2u : 1u;

@@ -119,7 +119,7 @@ addTestGraphicsPass(RenderGraphBuilder &builder, const RenderPass &pass,
   desc.useViewport = pass.useViewport;
   desc.viewport = pass.viewport;
   desc.preDispatches = pass.preDispatches;
-  desc.dependencyBuffers = pass.dependencyBuffers;
+  desc.recordingSamplers = pass.recordingSamplers;
   desc.draws = pass.draws;
   desc.gpuTimingScope = pass.gpuTimingScope;
   desc.debugLabel = !debugName.empty() ? debugName : pass.debugLabel;
@@ -392,12 +392,15 @@ FakeExecutorGPUDevice::createTexture(const TextureDesc &desc,
 }
 
 Result<bool, std::string>
-FakeExecutorGPUDevice::retainGraphicsRecordingReferences(
-    RecordingContextHandle, const GraphicsRecordingReferences &references) {
-  ++retainReferencesCallCount;
+FakeExecutorGPUDevice::recordGraphicsRangeWithReferences(
+    RecordingContextHandle ctx, std::span<const GraphicsRecordingStep> steps,
+    const GraphicsRecordingReferences &references) {
+  ++combinedRecordingCallCount;
   retainedBuffers.assign(references.buffers.begin(), references.buffers.end());
   retainedTextures.assign(references.textures.begin(),
                           references.textures.end());
+  retainedSamplers.assign(references.samplers.begin(),
+                          references.samplers.end());
   retainedAccelerationStructures.assign(
       references.accelerationStructures.begin(),
       references.accelerationStructures.end());
@@ -409,7 +412,7 @@ FakeExecutorGPUDevice::retainGraphicsRecordingReferences(
                                   references.meshletPipelines.end());
   retainedRayQueryBindings.assign(references.rayQueryBindings.begin(),
                                   references.rayQueryBindings.end());
-  return Result<bool, std::string>::makeResult(true);
+  return GPUDevice::recordGraphicsRange(ctx, steps);
 }
 
 Result<TextureHandle, std::string>
@@ -992,8 +995,6 @@ FakeExecutorGPUDevice::submitRecordedGraphicsFrame(
 
   lastColorTexture = {};
   lastDepthTexture = {};
-  lastDependencyBuffer = {};
-  lastPreDispatchDependencyBuffer = {};
   lastDrawVertexBuffer = {};
 
   if (recordedPasses.empty()) {
@@ -1004,14 +1005,6 @@ FakeExecutorGPUDevice::submitRecordedGraphicsFrame(
   lastColorTexture = pass.colorTexture;
   lastDepthTexture = pass.depthTexture;
 
-  if (!pass.dependencyBuffers.empty()) {
-    lastDependencyBuffer = pass.dependencyBuffers[0u];
-  }
-  if (!pass.preDispatches.empty() &&
-      !pass.preDispatches[0u].dependencyBuffers.empty()) {
-    lastPreDispatchDependencyBuffer =
-        pass.preDispatches[0u].dependencyBuffers[0u];
-  }
   if (!pass.draws.empty()) {
     lastDrawVertexBuffer = pass.draws[0u].vertexBuffer;
   }

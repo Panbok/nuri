@@ -1206,9 +1206,6 @@ void buildParsedNodePathsRecursive(uint32_t nodeIndex,
   }
   return match;
 }
-[[nodiscard]] unsigned int structuralSceneAssimpFlags() {
-  return aiProcess_SortByPType | aiProcess_FindInvalidData;
-}
 [[nodiscard]] std::string importedSceneName(const aiScene &scene,
                                             std::string_view path) {
   if (scene.mName.length > 0u) {
@@ -1228,7 +1225,7 @@ SceneImporter::loadLightsFromFile(std::string_view path) {
   if (loaded.hasError()) {
     return Result<ImportedLightSet, std::string>::makeError(loaded.error());
   }
-  const ScenePrefab &scene = loaded.value();
+  const ScenePrefab &scene = loaded.value().prefab;
   if (scene.lightSources.size() != scene.lights.size()) {
     return Result<ImportedLightSet, std::string>::makeError(
         "SceneImporter::loadLightsFromFile: inconsistent light metadata");
@@ -1255,13 +1252,13 @@ SceneImporter::loadLightsFromFile(std::string_view path) {
   return Result<ImportedLightSet, std::string>::makeResult(std::move(lights));
 }
 
-Result<ScenePrefab, std::string>
+Result<SceneImportProduct, std::string>
 SceneImporter::loadSceneFromFile(std::string_view path,
                                  const SceneImportOptions &options,
                                  std::pmr::memory_resource *memory) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
   if (path.empty()) {
-    return Result<ScenePrefab, std::string>::makeError(
+    return Result<SceneImportProduct, std::string>::makeError(
         "SceneImporter::loadSceneFromFile: path is empty");
   }
   memory = memory ? memory : std::pmr::get_default_resource();
@@ -1271,12 +1268,10 @@ SceneImporter::loadSceneFromFile(std::string_view path,
   Assimp::Importer importer;
   const std::string pathString(path);
   const unsigned int assimpFlags =
-      options.adaptAssetSources
-          ? detail::sceneMeshImportFlags(options.assetBuildOptions)
-          : structuralSceneAssimpFlags();
+      detail::sceneMeshImportFlags(options.assetBuildOptions);
   const aiScene *scene = importer.ReadFile(pathString, assimpFlags);
   if (scene == nullptr || scene->mRootNode == nullptr) {
-    return Result<ScenePrefab, std::string>::makeError(
+    return Result<SceneImportProduct, std::string>::makeError(
         std::string("SceneImporter::loadSceneFromFile: Assimp error: ") +
         importer.GetErrorString());
   }
@@ -1342,10 +1337,8 @@ SceneImporter::loadSceneFromFile(std::string_view path,
   imported.rootNodes.push_back(0u);
   appendRemainingSceneAssets(imported, *scene, meshOrdinalToAsset,
                              materialOrdinalToAsset);
-  const auto finalizeImported = [&]() -> Result<ScenePrefab, std::string> {
-    if (!options.adaptAssetSources) {
-      return Result<ScenePrefab, std::string>::makeResult(std::move(imported));
-    }
+  const auto finalizeImported =
+      [&]() -> Result<SceneImportProduct, std::string> {
     std::pmr::vector<uint32_t> sourceMeshIndices(memory);
     sourceMeshIndices.reserve(imported.meshAssets.size());
     for (const ScenePrefabAssetRef &asset : imported.meshAssets) {
@@ -1357,21 +1350,35 @@ SceneImporter::loadSceneFromFile(std::string_view path,
                                   sourceMeshIndices.size()),
         imported.sourcePath, options.assetBuildOptions, memory);
     if (adaptedMeshes.hasError()) {
-      return Result<ScenePrefab, std::string>::makeError(
+      return Result<SceneImportProduct, std::string>::makeError(
           "SceneImporter::loadSceneFromFile: failed to adapt mesh sources: " +
           adaptedMeshes.error());
     }
     auto adaptedMaterials =
         detail::adaptMaterialInfo(*scene, imported.sourcePath);
     if (adaptedMaterials.hasError()) {
-      return Result<ScenePrefab, std::string>::makeError(
+      return Result<SceneImportProduct, std::string>::makeError(
           "SceneImporter::loadSceneFromFile: failed to adapt material "
           "sources: " +
           adaptedMaterials.error());
     }
-    imported.adaptedMeshes = std::move(adaptedMeshes.value());
-    imported.adaptedMaterials = std::move(adaptedMaterials.value());
-    imported.embeddedTextures.reserve(scene->mNumTextures);
+    SceneImportProduct product{};
+    product.meshes.assign(
+        std::make_move_iterator(adaptedMeshes.value().begin()),
+        std::make_move_iterator(adaptedMeshes.value().end()));
+    product.materials.reserve(imported.materialAssets.size());
+    for (const ScenePrefabAssetRef &asset : imported.materialAssets) {
+      if (asset.sourceIndex < adaptedMaterials.value().materials.size()) {
+        product.materials.push_back(
+            std::move(adaptedMaterials.value().materials[asset.sourceIndex]));
+      } else {
+        MaterialData fallback{};
+        fallback.name = std::string(asset.sourceName);
+        product.materials.push_back(std::move(fallback));
+      }
+    }
+    std::vector<EmbeddedSceneTextureData> embeddedTextures;
+    embeddedTextures.reserve(scene->mNumTextures);
     for (uint32_t textureIndex = 0u; textureIndex < scene->mNumTextures;
          ++textureIndex) {
       const aiTexture *texture = scene->mTextures[textureIndex];
@@ -1402,9 +1409,14 @@ SceneImporter::loadSceneFromFile(std::string_view path,
               static_cast<std::byte>(source.a);
         }
       }
-      imported.embeddedTextures.push_back(std::move(adaptedTexture));
+      embeddedTextures.push_back(std::move(adaptedTexture));
     }
-    return Result<ScenePrefab, std::string>::makeResult(std::move(imported));
+    product.embeddedTextures =
+        std::make_shared<const std::vector<EmbeddedSceneTextureData>>(
+            std::move(embeddedTextures));
+    product.prefab = std::move(imported);
+    return Result<SceneImportProduct, std::string>::makeResult(
+        std::move(product));
   };
   if (!detail::isGltfJsonAssetPath(path)) {
     return finalizeImported();
@@ -1412,7 +1424,8 @@ SceneImporter::loadSceneFromFile(std::string_view path,
   const std::filesystem::path scenePath{std::string(path)};
   auto fileBytesResult = readBinaryFile(scenePath);
   if (fileBytesResult.hasError()) {
-    return Result<ScenePrefab, std::string>::makeError(fileBytesResult.error());
+    return Result<SceneImportProduct, std::string>::makeError(
+        fileBytesResult.error());
   }
   auto docResult = detail::loadGltfJsonDocument(
       scenePath,
@@ -1420,11 +1433,12 @@ SceneImporter::loadSceneFromFile(std::string_view path,
                                  fileBytesResult.value().size()),
       "glTF scene source");
   if (docResult.hasError()) {
-    return Result<ScenePrefab, std::string>::makeError(docResult.error());
+    return Result<SceneImportProduct, std::string>::makeError(
+        docResult.error());
   }
   yyjson_val *root = yyjson_doc_get_root(docResult.value().get());
   if (!yyjson_is_obj(root)) {
-    return Result<ScenePrefab, std::string>::makeError(
+    return Result<SceneImportProduct, std::string>::makeError(
         "glTF root is not a JSON object");
   }
   auto buffersResult = detail::loadGltfBuffers(
@@ -1433,27 +1447,30 @@ SceneImporter::loadSceneFromFile(std::string_view path,
                                  fileBytesResult.value().size()),
       memory);
   if (buffersResult.hasError()) {
-    return Result<ScenePrefab, std::string>::makeError(buffersResult.error());
+    return Result<SceneImportProduct, std::string>::makeError(
+        buffersResult.error());
   }
   auto lightsResult = parseLightDefinitions(root);
   if (lightsResult.hasError()) {
-    return Result<ScenePrefab, std::string>::makeError(lightsResult.error());
+    return Result<SceneImportProduct, std::string>::makeError(
+        lightsResult.error());
   }
   auto parsedNodesResult = parseNodes(root);
   if (parsedNodesResult.hasError()) {
-    return Result<ScenePrefab, std::string>::makeError(
+    return Result<SceneImportProduct, std::string>::makeError(
         parsedNodesResult.error());
   }
   std::vector<ParsedNode> parsedNodes = std::move(parsedNodesResult.value());
   auto skinsResult = parseSkinDefinitions(root, buffersResult.value(), memory);
   if (skinsResult.hasError()) {
-    return Result<ScenePrefab, std::string>::makeError(skinsResult.error());
+    return Result<SceneImportProduct, std::string>::makeError(
+        skinsResult.error());
   }
   imported.skins = std::move(skinsResult.value());
   auto animationsResult = parseAnimationDefinitions(
       root, parsedNodes, buffersResult.value(), memory);
   if (animationsResult.hasError()) {
-    return Result<ScenePrefab, std::string>::makeError(
+    return Result<SceneImportProduct, std::string>::makeError(
         animationsResult.error());
   }
   imported.animations = std::move(animationsResult.value());
@@ -1462,7 +1479,8 @@ SceneImporter::loadSceneFromFile(std::string_view path,
   }
   auto rootsResult = resolveSceneRootNodes(root, parsedNodes.size());
   if (rootsResult.hasError()) {
-    return Result<ScenePrefab, std::string>::makeError(rootsResult.error());
+    return Result<SceneImportProduct, std::string>::makeError(
+        rootsResult.error());
   }
   const std::vector<uint32_t> parsedRoots = std::move(rootsResult.value());
   std::vector<std::string> parsedPaths(parsedNodes.size());
@@ -1477,7 +1495,7 @@ SceneImporter::loadSceneFromFile(std::string_view path,
   auto primitiveMaterialMappingResult =
       detail::readGltfPrimitiveMaterialMapping(root);
   if (primitiveMaterialMappingResult.hasError()) {
-    return Result<ScenePrefab, std::string>::makeError(
+    return Result<SceneImportProduct, std::string>::makeError(
         primitiveMaterialMappingResult.error());
   }
   const detail::GltfPrimitiveMaterialMapping primitiveMaterialMapping =
@@ -1487,70 +1505,12 @@ SceneImporter::loadSceneFromFile(std::string_view path,
       importedPathToNode, importedNameToNodes, lightsResult.value(),
       primitiveMaterialMapping, parsedToImportedNodeIndex);
   if (rebuildResult.hasError()) {
-    return Result<ScenePrefab, std::string>::makeError(rebuildResult.error());
+    return Result<SceneImportProduct, std::string>::makeError(
+        rebuildResult.error());
   }
   remapSkinAndAnimationNodeIndices(imported.skins, imported.animations,
                                    parsedToImportedNodeIndex);
   return finalizeImported();
-}
-
-Result<ImportedSceneAssets, std::string>
-SceneImporter::buildSceneAssets(const ScenePrefab &scene,
-                                std::pmr::memory_resource *memory) {
-  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
-  memory = memory ? memory : std::pmr::get_default_resource();
-  ImportedSceneAssets assets(memory);
-  std::pmr::vector<uint32_t> sourceMeshIndices(memory);
-  sourceMeshIndices.reserve(scene.meshAssets.size());
-  for (const ScenePrefabAssetRef &meshAsset : scene.meshAssets) {
-    sourceMeshIndices.push_back(meshAsset.sourceIndex);
-  }
-  if (!sourceMeshIndices.empty()) {
-    auto meshesResult = detail::loadSceneMeshesFromSourceIndices(
-        scene.sourcePath,
-        std::span<const uint32_t>(sourceMeshIndices.data(),
-                                  sourceMeshIndices.size()),
-        scene.importOptions, memory);
-    if (meshesResult.hasError()) {
-      return Result<ImportedSceneAssets, std::string>::makeError(
-          "SceneImporter::buildSceneAssets: failed to build scene meshes: " +
-          meshesResult.error());
-    }
-    assets.meshes = std::move(meshesResult.value());
-  }
-  auto materialsResult =
-      detail::loadMaterialInfoFromSourceFile(scene.sourcePath);
-  if (materialsResult.hasError()) {
-    return Result<ImportedSceneAssets, std::string>::makeError(
-        "SceneImporter::buildSceneAssets: failed to build scene materials: " +
-        materialsResult.error());
-  }
-  const ImportedMaterialSet &allMaterials = materialsResult.value();
-  assets.materials.materials.reserve(scene.materialAssets.size());
-  for (const ScenePrefabAssetRef &materialAsset : scene.materialAssets) {
-    if (materialAsset.sourceIndex < allMaterials.materials.size()) {
-      assets.materials.materials.push_back(
-          allMaterials.materials[materialAsset.sourceIndex]);
-    } else {
-      MaterialData fallback{};
-      fallback.name = std::string(materialAsset.sourceName);
-      assets.materials.materials.push_back(std::move(fallback));
-    }
-  }
-  return Result<ImportedSceneAssets, std::string>::makeResult(
-      std::move(assets));
-}
-
-Result<ImportedSceneAssets, std::string>
-SceneImporter::loadSceneAssetsFromFile(std::string_view path,
-                                       const SceneImportOptions &options,
-                                       std::pmr::memory_resource *memory) {
-  auto sceneResult = loadSceneFromFile(path, options, memory);
-  if (sceneResult.hasError()) {
-    return Result<ImportedSceneAssets, std::string>::makeError(
-        sceneResult.error());
-  }
-  return buildSceneAssets(sceneResult.value(), memory);
 }
 
 } // namespace nuri

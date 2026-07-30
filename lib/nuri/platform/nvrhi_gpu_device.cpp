@@ -34,6 +34,7 @@
 #include <mutex>
 #include <optional>
 #include <set>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <variant>
@@ -1232,6 +1233,120 @@ struct PendingAsyncUploadSubmission {
   bool containsTextureData = false;
   nvrhi::CommandQueue queue = nvrhi::CommandQueue::Graphics;
 };
+template <typename Pending> class CommandListSubmissionLane {
+public:
+  CommandListSubmissionLane() = default;
+  CommandListSubmissionLane(const CommandListSubmissionLane &) = delete;
+  CommandListSubmissionLane &
+  operator=(const CommandListSubmissionLane &) = delete;
+  CommandListSubmissionLane(CommandListSubmissionLane &&) = default;
+  CommandListSubmissionLane &operator=(CommandListSubmissionLane &&) = default;
+
+  void reserve(size_t count) {
+    pending_.reserve(count);
+    available_.reserve(count);
+  }
+  template <typename Create>
+  [[nodiscard]] nvrhi::CommandListHandle acquire(Create &&create) {
+    if (available_.empty()) {
+      return std::invoke(std::forward<Create>(create));
+    }
+    nvrhi::CommandListHandle result = std::move(available_.back());
+    available_.pop_back();
+    return result;
+  }
+  void submit(Pending &&pending) { pending_.push_back(std::move(pending)); }
+  void recycle(nvrhi::CommandListHandle &&commandList) {
+    available_.push_back(std::move(commandList));
+  }
+  template <typename IsComplete, typename BeforeRecycle>
+  void collectCompleted(IsComplete &&isComplete,
+                        BeforeRecycle &&beforeRecycle) {
+    size_t writeIndex = 0u;
+    for (Pending &pending : pending_) {
+      if (std::invoke(isComplete, pending)) {
+        std::invoke(beforeRecycle, pending);
+        recycle(std::move(pending.commandList));
+      } else {
+        if (&pending != &pending_[writeIndex]) {
+          pending_[writeIndex] = std::move(pending);
+        }
+        ++writeIndex;
+      }
+    }
+    pending_.resize(writeIndex);
+  }
+  [[nodiscard]] std::span<const Pending> pending() const noexcept {
+    return pending_;
+  }
+  void discardAvailable() { available_.clear(); }
+  void clear() {
+    pending_.clear();
+    available_.clear();
+  }
+
+private:
+  std::vector<Pending> pending_;
+  std::vector<nvrhi::CommandListHandle> available_;
+};
+template <typename Handle, typename Record> class HandleSlotLane {
+public:
+  [[nodiscard]] Handle reserveSlot() {
+    const SlotReservation slot = slots_.acquire();
+    if (records_.size() <= slot.index) {
+      records_.resize(static_cast<size_t>(slot.index) + 1u);
+    }
+    records_[slot.index] = {};
+    return Handle{.index = slot.index, .generation = slot.generation};
+  }
+  [[nodiscard]] Record *get(Handle handle) noexcept {
+    return isValid(handle) ? &records_[handle.index] : nullptr;
+  }
+  [[nodiscard]] const Record *get(Handle handle) const noexcept {
+    return isValid(handle) ? &records_[handle.index] : nullptr;
+  }
+  [[nodiscard]] bool isValid(Handle handle) const noexcept {
+    return handle.index < records_.size() &&
+           slots_.isValid(handle.index, handle.generation);
+  }
+  [[nodiscard]] Record &at(uint32_t index) noexcept { return records_[index]; }
+  [[nodiscard]] const Record &at(uint32_t index) const noexcept {
+    return records_[index];
+  }
+  [[nodiscard]] size_t size() const noexcept { return records_.size(); }
+  [[nodiscard]] uint32_t liveCount() const noexcept {
+    return slots_.liveCount();
+  }
+  [[nodiscard]] bool isLive(uint32_t index) const noexcept {
+    return slots_.isLive(index);
+  }
+  void release(uint32_t index) {
+    records_[index] = {};
+    slots_.release(index);
+  }
+  [[nodiscard]] std::optional<Record> take(Handle handle) {
+    if (!isValid(handle)) {
+      return std::nullopt;
+    }
+    Record result = std::move(records_[handle.index]);
+    release(handle.index);
+    return result;
+  }
+  void reserve(size_t count) {
+    slots_.reserve(count);
+    records_.reserve(count);
+  }
+  void clear() {
+    records_.clear();
+    slots_.clear();
+  }
+  [[nodiscard]] auto begin() noexcept { return records_.begin(); }
+  [[nodiscard]] auto end() noexcept { return records_.end(); }
+
+private:
+  SlotPool<UnmaskedNonZeroGenerationPolicy> slots_;
+  std::vector<Record> records_;
+};
 struct SubmissionRecord {
   SubmissionHandle handle{};
   uint64_t graphicsInstance = 0u;
@@ -1386,10 +1501,11 @@ struct GPUDeviceImpl {
   mutable std::mutex immediateMutex;
   std::mutex resourcePreparationMutex;
   std::mutex graphicsContextMutex;
-  std::vector<ActiveGraphicsRecordingContext> activeGraphicsContexts;
-  std::vector<RecordedGraphicsCommandBuffer> recordedGraphicsCommandBuffers;
-  std::vector<PendingGraphicsCommandList> pendingGraphicsCommandLists;
-  std::vector<nvrhi::CommandListHandle> availableGraphicsCommandLists;
+  HandleSlotLane<RecordingContextHandle, ActiveGraphicsRecordingContext>
+      activeGraphicsContexts;
+  HandleSlotLane<RecordedCommandBufferHandle, RecordedGraphicsCommandBuffer>
+      recordedGraphicsCommandBuffers;
+  CommandListSubmissionLane<PendingGraphicsCommandList> graphicsCommandLists;
   std::vector<PendingGpuTimingSubmission> pendingGpuTimingSubmissions;
   std::vector<NvrhiWholeFrameTimingSlot> availableWholeFrameTimingSlots;
   nvrhi::CommandListHandle pendingAsyncUploadCommandList{};
@@ -1402,15 +1518,12 @@ struct GPUDeviceImpl {
   uint64_t textureUploadCompletionWaits = 0u;
   BackendCreationTelemetry creationTelemetry{};
   bool trimAsyncUploadCommandListPoolAfterTextureUploads = false;
-  std::vector<PendingAsyncUploadSubmission> pendingAsyncUploadSubmissions;
-  std::vector<nvrhi::CommandListHandle> availableAsyncUploadCommandLists;
+  CommandListSubmissionLane<PendingAsyncUploadSubmission>
+      asyncUploadCommandLists;
   std::deque<GpuTimingReport> completedGpuTimingReports;
   GpuTimingReport latestCompletedGpuTimingReport{};
   uint64_t droppedGpuTimingReports = 0u;
-  SlotPool<UnmaskedNonZeroGenerationPolicy> recordingContextSlots;
-  SlotPool<UnmaskedNonZeroGenerationPolicy> recordedCommandBufferSlots;
-  SlotPool<UnmaskedNonZeroGenerationPolicy> submissionSlots;
-  std::vector<SubmissionRecord> submissions;
+  HandleSlotLane<SubmissionHandle, SubmissionRecord> submissions;
   std::unique_ptr<GeometryPool> geometryPool;
   bool loggedGpuTimingQueryWarning = false;
   bool loggedWholeFrameTimingQueryWarning = false;
@@ -1420,6 +1533,15 @@ struct GPUDeviceImpl {
 
 namespace {
 using Impl = GPUDeviceImpl;
+template <typename Function>
+void forEachResourceTable(Impl &impl, Function &&function) {
+  std::apply(
+      [&function](auto &...tables) { (std::invoke(function, tables), ...); },
+      std::tie(impl.buffers, impl.textures, impl.samplers, impl.shaders,
+               impl.renderPipelines, impl.computePipelines,
+               impl.meshletPipelines, impl.accelerationStructures,
+               impl.rayQueryBindings));
+}
 void collectRetiredResources(Impl &impl, uint64_t completedGraphics,
                              uint64_t completedCopy) {
   const auto resolve = [&impl](uint64_t recordingSerial,
@@ -1430,26 +1552,10 @@ void collectRetiredResources(Impl &impl, uint64_t completedGraphics,
   const auto collect = [&](auto &table) {
     table.collectRetired(resolve, completedGraphics, completedCopy);
   };
-  collect(impl.buffers);
-  collect(impl.textures);
-  collect(impl.samplers);
-  collect(impl.shaders);
-  collect(impl.renderPipelines);
-  collect(impl.computePipelines);
-  collect(impl.meshletPipelines);
-  collect(impl.accelerationStructures);
-  collect(impl.rayQueryBindings);
+  forEachResourceTable(impl, collect);
 }
 void releaseAllRetiredResourcesAfterIdle(Impl &impl) {
-  impl.buffers.releaseAllRetired();
-  impl.textures.releaseAllRetired();
-  impl.samplers.releaseAllRetired();
-  impl.shaders.releaseAllRetired();
-  impl.renderPipelines.releaseAllRetired();
-  impl.computePipelines.releaseAllRetired();
-  impl.meshletPipelines.releaseAllRetired();
-  impl.accelerationStructures.releaseAllRetired();
-  impl.rayQueryBindings.releaseAllRetired();
+  forEachResourceTable(impl, [](auto &table) { table.releaseAllRetired(); });
 }
 void invalidateCachedFramebuffers(Impl &impl, TextureHandle texture) {
   if (!nuri::isValid(texture)) {
@@ -1854,7 +1960,7 @@ waitForGraphicsQueueInstance(Impl &impl, uint64_t instance,
   return Result<bool, std::string>::makeResult(true);
 }
 void collectCompletedAsyncUploadSubmissions(Impl &impl) {
-  if (!impl.nvrhiDevice || impl.pendingAsyncUploadSubmissions.empty()) {
+  if (!impl.nvrhiDevice) {
     return;
   }
   const uint64_t completedGraphics =
@@ -1865,40 +1971,24 @@ void collectCompletedAsyncUploadSubmissions(Impl &impl) {
           ? impl.nvrhiDevice->queueGetCompletedInstance(
                 nvrhi::CommandQueue::Copy)
           : completedGraphics;
-  size_t writeIndex = 0u;
-  for (size_t readIndex = 0u;
-       readIndex < impl.pendingAsyncUploadSubmissions.size(); ++readIndex) {
-    PendingAsyncUploadSubmission &pending =
-        impl.pendingAsyncUploadSubmissions[readIndex];
-    const uint64_t completed = pending.queue == nvrhi::CommandQueue::Copy
-                                   ? completedCopy
-                                   : completedGraphics;
-    if (pending.submissionInstance <= completed) {
-      impl.availableAsyncUploadCommandLists.push_back(
-          std::move(pending.commandList));
-      continue;
-    }
-    if (pending.submissionInstance > completed) {
-      if (writeIndex != readIndex) {
-        impl.pendingAsyncUploadSubmissions[writeIndex] = std::move(pending);
-      }
-      ++writeIndex;
-    }
-  }
-  impl.pendingAsyncUploadSubmissions.resize(writeIndex);
+  impl.asyncUploadCommandLists.collectCompleted(
+      [completedGraphics,
+       completedCopy](const PendingAsyncUploadSubmission &pending) {
+        const uint64_t completed = pending.queue == nvrhi::CommandQueue::Copy
+                                       ? completedCopy
+                                       : completedGraphics;
+        return pending.submissionInstance <= completed;
+      },
+      [](PendingAsyncUploadSubmission &) {});
 }
 [[nodiscard]] nvrhi::CommandListHandle
 acquireAsyncUploadCommandList(Impl &impl) {
-  if (!impl.availableAsyncUploadCommandLists.empty()) {
-    nvrhi::CommandListHandle commandList =
-        std::move(impl.availableAsyncUploadCommandLists.back());
-    impl.availableAsyncUploadCommandLists.pop_back();
-    return commandList;
-  }
-  return impl.nvrhiDevice->createCommandList(
-      nvrhi::CommandListParameters{}.setQueueType(
-          impl.hasDedicatedAssetCopyQueue ? nvrhi::CommandQueue::Copy
-                                          : nvrhi::CommandQueue::Graphics));
+  return impl.asyncUploadCommandLists.acquire([&impl] {
+    return impl.nvrhiDevice->createCommandList(
+        nvrhi::CommandListParameters{}.setQueueType(
+            impl.hasDedicatedAssetCopyQueue ? nvrhi::CommandQueue::Copy
+                                            : nvrhi::CommandQueue::Graphics));
+  });
 }
 [[nodiscard]] nvrhi::CommandListHandle &
 ensurePendingAsyncUploadCommandList(Impl &impl) {
@@ -1923,10 +2013,9 @@ takePendingAsyncUploadCommandList(Impl &impl) {
   impl.pendingAsyncUploadTextureCount = 0u;
   return std::exchange(impl.pendingAsyncUploadCommandList, {});
 }
-uint64_t
-submitAsyncUploadCommandList(Impl &impl,
-                             const nvrhi::CommandListHandle &commandList,
-                             bool containsTextureData) {
+uint64_t submitAsyncUploadCommandList(Impl &impl,
+                                      nvrhi::CommandListHandle &&commandList,
+                                      bool containsTextureData) {
   const nvrhi::CommandQueue queue = impl.hasDedicatedAssetCopyQueue
                                         ? nvrhi::CommandQueue::Copy
                                         : nvrhi::CommandQueue::Graphics;
@@ -1939,9 +2028,9 @@ submitAsyncUploadCommandList(Impl &impl,
     impl.latestSubmittedInstance = instance;
     impl.latestAsyncUploadGraphicsInstance = instance;
   }
-  impl.pendingAsyncUploadSubmissions.push_back(
+  impl.asyncUploadCommandLists.submit(
       PendingAsyncUploadSubmission{.submissionInstance = instance,
-                                   .commandList = commandList,
+                                   .commandList = std::move(commandList),
                                    .containsTextureData = containsTextureData,
                                    .queue = queue});
   return instance;
@@ -1952,8 +2041,8 @@ void flushPendingAsyncUploadCommandList(Impl &impl,
   nvrhi::CommandListHandle commandList =
       takePendingAsyncUploadCommandList(impl);
   if (commandList) {
-    const uint64_t instance =
-        submitAsyncUploadCommandList(impl, commandList, containsTextureData);
+    const uint64_t instance = submitAsyncUploadCommandList(
+        impl, std::move(commandList), containsTextureData);
     if (queueGraphicsVisibility && impl.hasDedicatedAssetCopyQueue) {
       impl.nvrhiDevice->queueWaitForSemaphore(
           nvrhi::CommandQueue::Graphics,
@@ -3084,8 +3173,7 @@ void destroyVulkan(Impl &impl) {
   impl.availableWholeFrameTimingSlots.clear();
   impl.pendingGpuTimingSubmissions.clear();
   impl.pendingAsyncUploadCommandList = nullptr;
-  impl.pendingAsyncUploadSubmissions.clear();
-  impl.availableAsyncUploadCommandLists.clear();
+  impl.asyncUploadCommandLists.clear();
   for (ActiveGraphicsRecordingContext &context : impl.activeGraphicsContexts) {
     for (NvrhiOpaquePipelineStatisticsQuery &query :
          context.opaqueStatisticsQueries) {
@@ -3105,22 +3193,10 @@ void destroyVulkan(Impl &impl) {
   }
   impl.activeGraphicsContexts.clear();
   impl.recordedGraphicsCommandBuffers.clear();
-  impl.pendingGraphicsCommandLists.clear();
-  impl.availableGraphicsCommandLists.clear();
+  impl.graphicsCommandLists.clear();
   impl.submissions.clear();
-  impl.recordingContextSlots.clear();
-  impl.recordedCommandBufferSlots.clear();
-  impl.submissionSlots.clear();
   impl.cachedFramebuffers.clear();
-  impl.samplers.clear();
-  impl.buffers.clear();
-  impl.textures.clear();
-  impl.shaders.clear();
-  impl.renderPipelines.clear();
-  impl.computePipelines.clear();
-  impl.meshletPipelines.clear();
-  impl.accelerationStructures.clear();
-  impl.rayQueryBindings.clear();
+  forEachResourceTable(impl, [](auto &table) { table.clear(); });
   impl.framebufferTextures.clear();
   destroySwapchain(impl);
   impl.bufferReadbackStaging = nullptr;
@@ -3179,30 +3255,17 @@ using ActiveContextPtr =
 template <typename ImplType>
 [[nodiscard]] ActiveContextPtr<ImplType>
 findActiveGraphicsContextSlot(ImplType &impl, RecordingContextHandle handle) {
-  if (handle.index >= impl.activeGraphicsContexts.size() ||
-      !impl.recordingContextSlots.isValid(handle.index, handle.generation)) {
-    return nullptr;
-  }
-  auto &entry = impl.activeGraphicsContexts[handle.index];
-  if (!areSameHandle(entry.handle, handle)) {
-    return nullptr;
-  }
-  return &entry;
+  ActiveContextPtr<ImplType> entry = impl.activeGraphicsContexts.get(handle);
+  return entry != nullptr && areSameHandle(entry->handle, handle) ? entry
+                                                                  : nullptr;
 }
 [[nodiscard]] Result<SubmissionHandle, std::string>
 allocateSubmissionHandle(Impl &impl, uint64_t graphicsInstance,
                          uint64_t copyInstance = 0u,
                          uint64_t requiredRecordingSerial = 0u,
                          bool requiresGraphicsVisibility = false) {
-  const SlotReservation slot = impl.submissionSlots.acquire();
-  SubmissionHandle handle{
-      .index = slot.index,
-      .generation = slot.generation,
-  };
-  if (impl.submissions.size() <= slot.index) {
-    impl.submissions.resize(static_cast<size_t>(slot.index) + 1u);
-  }
-  impl.submissions[slot.index] = SubmissionRecord{
+  const SubmissionHandle handle = impl.submissions.reserveSlot();
+  *impl.submissions.get(handle) = SubmissionRecord{
       .handle = handle,
       .graphicsInstance = graphicsInstance,
       .copyInstance = copyInstance,
@@ -3221,14 +3284,14 @@ resolveSubmissionInstance(const Impl &impl, const SubmissionRecord &record) {
 }
 void collectCompletedSubmissionRecords(Impl &impl, uint64_t completedGraphics,
                                        uint64_t completedCopy) {
-  if (impl.submissionSlots.liveCount() == 0u) {
+  if (impl.submissions.liveCount() == 0u) {
     return;
   }
   for (uint32_t index = 0u; index < impl.submissions.size(); ++index) {
-    if (!impl.submissionSlots.isLive(index)) {
+    if (!impl.submissions.isLive(index)) {
       continue;
     }
-    SubmissionRecord &record = impl.submissions[index];
+    SubmissionRecord &record = impl.submissions.at(index);
     const std::optional<uint64_t> resolvedGraphics =
         resolveSubmissionInstance(impl, record);
     if (resolvedGraphics.has_value() &&
@@ -3236,30 +3299,18 @@ void collectCompletedSubmissionRecords(Impl &impl, uint64_t completedGraphics,
         record.copyInstance <= completedCopy &&
         (record.copyInstance == 0u || !record.requiresGraphicsVisibility ||
          record.graphicsVisibilityQueued)) {
-      record = {};
-      impl.submissionSlots.release(index);
-      continue;
+      impl.submissions.release(index);
     }
   }
 }
 void collectCompletedGraphicsCommandLists(Impl &impl, uint64_t completed) {
-  size_t writeIndex = 0u;
-  for (size_t readIndex = 0u;
-       readIndex < impl.pendingGraphicsCommandLists.size(); ++readIndex) {
-    PendingGraphicsCommandList &pending =
-        impl.pendingGraphicsCommandLists[readIndex];
-    if (pending.submissionInstance <= completed) {
-      pending.framebuffers.clear();
-      impl.availableGraphicsCommandLists.push_back(
-          std::move(pending.commandList));
-      continue;
-    }
-    if (writeIndex != readIndex) {
-      impl.pendingGraphicsCommandLists[writeIndex] = std::move(pending);
-    }
-    ++writeIndex;
-  }
-  impl.pendingGraphicsCommandLists.resize(writeIndex);
+  impl.graphicsCommandLists.collectCompleted(
+      [completed](const PendingGraphicsCommandList &pending) {
+        return pending.submissionInstance <= completed;
+      },
+      [](PendingGraphicsCommandList &pending) {
+        pending.framebuffers.clear();
+      });
 }
 [[nodiscard]] bool textureUsageIsUAV(TextureUsage usage) {
   return usage == TextureUsage::Storage ||
@@ -3970,46 +4021,6 @@ textureShaderReadState(const TextureResource &texture) {
   }
   return state;
 }
-[[nodiscard]] nvrhi::ResourceStates
-textureComputeDependencyState(const TextureResource &texture) {
-  return texture.desc.usage == TextureUsage::Storage
-             ? nvrhi::ResourceStates::UnorderedAccess
-             : textureShaderReadState(texture);
-}
-void requestTextureDependencyStates(Impl &impl,
-                                    nvrhi::ICommandList &commandList,
-                                    std::span<const TextureHandle> textures,
-                                    bool computeDependency) {
-  for (const TextureHandle handle : textures) {
-    if (!nuri::isValid(handle)) {
-      continue;
-    }
-    TextureResource *texture = impl.textures.get(handle);
-    const nvrhi::ResourceStates state =
-        computeDependency ? textureComputeDependencyState(*texture)
-                          : textureShaderReadState(*texture);
-    commandList.setTextureState(texture->texture.Get(), nvrhi::AllSubresources,
-                                state);
-  }
-}
-void requestBufferDependencyStates(Impl &impl, nvrhi::ICommandList &commandList,
-                                   std::span<const BufferHandle> buffers,
-                                   bool computeDependency) {
-  const nvrhi::ResourceStates state =
-      computeDependency ? (nvrhi::ResourceStates::ShaderResource |
-                           nvrhi::ResourceStates::UnorderedAccess)
-                        : nvrhi::ResourceStates::ShaderResource;
-  for (const BufferHandle handle : buffers) {
-    if (!nuri::isValid(handle)) {
-      continue;
-    }
-    BufferResource *buffer = impl.buffers.get(handle);
-    if (buffer->immutable && !computeDependency) {
-      continue;
-    }
-    commandList.setBufferState(buffer->buffer.Get(), state);
-  }
-}
 [[nodiscard]] TextureDimensions
 textureDimensionsFromHandle(const nvrhi::TextureHandle &texture) {
   if (!texture) {
@@ -4021,15 +4032,7 @@ textureDimensionsFromHandle(const nvrhi::TextureHandle &texture) {
 }
 [[nodiscard]] Result<bool, std::string>
 recordComputeDispatches(Impl &impl, nvrhi::ICommandList &commandList,
-                        std::span<const ComputeDispatchItem> dispatches,
-                        bool dependencyStatesPreplanned) {
-  const auto dependencyAccessMode = [](const ComputeDispatchItem &dispatch,
-                                       size_t index) {
-    return dispatch.dependencyBufferAccessModes.empty() ||
-                   index >= dispatch.dependencyBufferAccessModes.size()
-               ? (RenderGraphAccessMode::Read | RenderGraphAccessMode::Write)
-               : dispatch.dependencyBufferAccessModes[index];
-  };
+                        std::span<const ComputeDispatchItem> dispatches) {
   for (size_t dispatchIndex = 0u; dispatchIndex < dispatches.size();
        ++dispatchIndex) {
     const ComputeDispatchItem &dispatch = dispatches[dispatchIndex];
@@ -4055,66 +4058,6 @@ recordComputeDispatches(Impl &impl, nvrhi::ICommandList &commandList,
     } else if (nuri::isValid(dispatch.rayQueryBinding)) {
       return Result<bool, std::string>::makeError(
           "non-ray-query dispatch declares a direct TLAS binding");
-    }
-    if (!dependencyStatesPreplanned) {
-      requestBufferDependencyStates(impl, commandList,
-                                    dispatch.dependencyBuffers, true);
-      requestTextureDependencyStates(impl, commandList,
-                                     dispatch.dependencyTextures, true);
-      commandList.commitBarriers();
-    }
-    for (size_t i = 0u; i < dispatch.dependencyBuffers.size(); ++i) {
-      const BufferHandle handle = dispatch.dependencyBuffers[i];
-      if (!nuri::isValid(handle)) {
-        continue;
-      }
-      bool firstCurrentUse = true;
-      for (size_t priorIndex = 0u; priorIndex < i; ++priorIndex) {
-        if (areSameHandle(dispatch.dependencyBuffers[priorIndex], handle)) {
-          firstCurrentUse = false;
-          break;
-        }
-      }
-      if (!firstCurrentUse) {
-        continue;
-      }
-      RenderGraphAccessMode currentMode = dependencyAccessMode(dispatch, i);
-      for (size_t duplicateIndex = i + 1u;
-           duplicateIndex < dispatch.dependencyBuffers.size();
-           ++duplicateIndex) {
-        if (areSameHandle(dispatch.dependencyBuffers[duplicateIndex], handle)) {
-          currentMode =
-              currentMode | dependencyAccessMode(dispatch, duplicateIndex);
-        }
-      }
-      RenderGraphAccessMode previousMode = RenderGraphAccessMode::None;
-      bool foundPreviousUse = false;
-      for (size_t previousDispatchIndex = dispatchIndex;
-           previousDispatchIndex > 0u && !foundPreviousUse;
-           --previousDispatchIndex) {
-        const ComputeDispatchItem &previousDispatch =
-            dispatches[previousDispatchIndex - 1u];
-        for (size_t previousBufferIndex = 0u;
-             previousBufferIndex < previousDispatch.dependencyBuffers.size();
-             ++previousBufferIndex) {
-          if (!areSameHandle(
-                  previousDispatch.dependencyBuffers[previousBufferIndex],
-                  handle)) {
-            continue;
-          }
-          previousMode =
-              previousMode |
-              dependencyAccessMode(previousDispatch, previousBufferIndex);
-          foundPreviousUse = true;
-        }
-      }
-      if (!foundPreviousUse ||
-          (!hasAccessFlag(previousMode, RenderGraphAccessMode::Write) &&
-           !hasAccessFlag(currentMode, RenderGraphAccessMode::Write))) {
-        continue;
-      }
-      BufferResource *buffer = impl.buffers.get(handle);
-      nvrhi::utils::BufferUavBarrier(&commandList, buffer->buffer.Get());
     }
     nvrhi::ComputeState state{};
     state.setPipeline(pipeline->pipeline.Get());
@@ -4157,11 +4100,6 @@ recordMeshDispatches(Impl &impl, nvrhi::ICommandList &commandList,
                        NURI_PROFILER_COLOR_CMD_DISPATCH);
     MeshletPipelineResource *pipeline =
         impl.meshletPipelines.get(dispatch.pipeline);
-    requestBufferDependencyStates(impl, commandList, dispatch.dependencyBuffers,
-                                  false);
-    requestTextureDependencyStates(impl, commandList,
-                                   dispatch.dependencyTextures, false);
-    commandList.commitBarriers();
     const PipelineVariantKey variantKey = makePipelineVariantKey(dispatch);
     nvrhi::IMeshletPipeline *variant =
         findPipelineVariant(*pipeline, variantKey);
@@ -4457,7 +4395,7 @@ recordMeshDispatches(Impl &impl, nvrhi::ICommandList &commandList,
     return Result<bool, std::string>::makeResult(true);
   }
   auto preDispatchResult =
-      recordComputeDispatches(impl, commandList, pass.preDispatches, true);
+      recordComputeDispatches(impl, commandList, pass.preDispatches);
   if (preDispatchResult.hasError()) {
     return preDispatchResult;
   }
@@ -4586,16 +4524,6 @@ recordMeshDispatches(Impl &impl, nvrhi::ICommandList &commandList,
                 .height = static_cast<float>(dimensions.height),
                 .minDepth = 0.0f,
                 .maxDepth = 1.0f};
-  }
-  {
-    NURI_PROFILER_ZONE("GPUDevice.record_pass_dependencies",
-                       NURI_PROFILER_COLOR_BARRIER);
-    requestBufferDependencyStates(impl, commandList, pass.dependencyBuffers,
-                                  false);
-    requestTextureDependencyStates(impl, commandList, pass.dependencyTextures,
-                                   false);
-    commandList.commitBarriers();
-    NURI_PROFILER_ZONE_END();
   }
   VkQueryPool opaqueStatisticsQueryPool = VK_NULL_HANDLE;
   VkCommandBuffer opaqueStatisticsCommandBuffer = VK_NULL_HANDLE;
@@ -4847,15 +4775,11 @@ std::unique_ptr<GPUDevice> GPUDevice::create(Window &window,
   auto device = std::unique_ptr<GPUDevice>(new GPUDevice());
   device->impl_ = std::make_unique<Impl>();
   Impl &impl = *device->impl_;
-  impl.recordingContextSlots.reserve(kMaxGraphicsRecordingContexts);
-  impl.recordedCommandBufferSlots.reserve(kMaxGraphicsRecordingContexts);
-  impl.submissionSlots.reserve(kSwapchainFramesInFlight + 1u);
   impl.activeGraphicsContexts.reserve(kMaxGraphicsRecordingContexts);
   impl.recordedGraphicsCommandBuffers.reserve(kMaxGraphicsRecordingContexts);
-  impl.pendingGraphicsCommandLists.reserve(kSwapchainFramesInFlight + 1u);
-  impl.availableGraphicsCommandLists.reserve(kSwapchainFramesInFlight + 1u);
-  impl.pendingAsyncUploadSubmissions.reserve(kSwapchainFramesInFlight + 1u);
-  impl.availableAsyncUploadCommandLists.reserve(kSwapchainFramesInFlight + 1u);
+  impl.submissions.reserve(kSwapchainFramesInFlight + 1u);
+  impl.graphicsCommandLists.reserve(kSwapchainFramesInFlight + 1u);
+  impl.asyncUploadCommandLists.reserve(kSwapchainFramesInFlight + 1u);
   impl.window = &window;
   impl.glfwWindow = static_cast<GLFWwindow *>(window.nativeHandle());
   impl.requestedPresentMode = requestedPresentModeFromEnvironment();
@@ -6096,10 +6020,10 @@ Result<bool, std::string> GPUDevice::beginFrame(uint64_t frameIndex) {
                        NURI_PROFILER_COLOR_CMD_COPY);
     collectCompletedAsyncUploadSubmissions(*impl_);
     if (impl_->trimAsyncUploadCommandListPoolAfterTextureUploads) {
-      impl_->availableAsyncUploadCommandLists.clear();
+      impl_->asyncUploadCommandLists.discardAvailable();
       bool textureUploadPending = impl_->pendingAsyncUploadTextureCount != 0u;
       for (const PendingAsyncUploadSubmission &pending :
-           impl_->pendingAsyncUploadSubmissions) {
+           impl_->asyncUploadCommandLists.pending()) {
         textureUploadPending =
             textureUploadPending || pending.containsTextureData;
       }
@@ -6211,27 +6135,19 @@ Result<bool, std::string> GPUDevice::prepareFrameOutput() {
 Result<RecordingContextHandle, std::string>
 GPUDevice::acquireGraphicsRecordingContext(uint32_t workerIndex) {
   std::lock_guard lock(impl_->graphicsContextMutex);
-  const SlotReservation slot = impl_->recordingContextSlots.acquire();
-  const uint32_t index = slot.index;
-  RecordingContextHandle handle{
-      .index = index,
-      .generation = slot.generation,
-  };
-  if (impl_->activeGraphicsContexts.size() <= index) {
-    impl_->activeGraphicsContexts.resize(static_cast<size_t>(index) + 1u);
-  }
-  nvrhi::CommandListHandle commandList{};
-  if (!impl_->availableGraphicsCommandLists.empty()) {
-    commandList = std::move(impl_->availableGraphicsCommandLists.back());
-    impl_->availableGraphicsCommandLists.pop_back();
-  } else {
-    NURI_PROFILER_ZONE("GPUDevice.create_command_list",
-                       NURI_PROFILER_COLOR_CREATE);
-    commandList = impl_->nvrhiDevice->createCommandList();
-    NURI_PROFILER_ZONE_END();
-  }
+  const RecordingContextHandle handle =
+      impl_->activeGraphicsContexts.reserveSlot();
+  nvrhi::CommandListHandle commandList =
+      impl_->graphicsCommandLists.acquire([this] {
+        nvrhi::CommandListHandle created{};
+        NURI_PROFILER_ZONE("GPUDevice.create_command_list",
+                           NURI_PROFILER_COLOR_CREATE);
+        created = impl_->nvrhiDevice->createCommandList();
+        NURI_PROFILER_ZONE_END();
+        return created;
+      });
   if (!commandList) {
-    impl_->recordingContextSlots.release(index);
+    impl_->activeGraphicsContexts.release(handle.index);
     return Result<RecordingContextHandle, std::string>::makeError(
         "Failed to create command list");
   }
@@ -6241,9 +6157,9 @@ GPUDevice::acquireGraphicsRecordingContext(uint32_t workerIndex) {
     commandList->open();
     NURI_PROFILER_ZONE_END();
   }
-  impl_->activeGraphicsContexts[index] = ActiveGraphicsRecordingContext{
+  *impl_->activeGraphicsContexts.get(handle) = ActiveGraphicsRecordingContext{
       .handle = handle,
-      .commandList = commandList,
+      .commandList = std::move(commandList),
       .framebuffers = {},
       .timingQueries = {},
       .recordingSerial = impl_->recordingRetirement.beginRecording(),
@@ -6327,19 +6243,10 @@ Result<bool, std::string> GPUDevice::recordGraphicsBarriers(
   return Result<bool, std::string>::makeResult(true);
 }
 
-Result<bool, std::string> GPUDevice::retainGraphicsRecordingReferences(
-    RecordingContextHandle ctx, const GraphicsRecordingReferences &references) {
-  if (!impl_) {
-    return Result<bool, std::string>::makeResult(true);
-  }
-  std::lock_guard lock(impl_->graphicsContextMutex);
-  ActiveGraphicsRecordingContext *entry =
-      findActiveGraphicsContextSlot(*impl_, ctx);
-  if (entry == nullptr || !entry->commandList) {
-    return Result<bool, std::string>::makeError(
-        "GPUDevice::retainGraphicsRecordingReferences: unknown recording "
-        "context");
-  }
+namespace {
+Result<bool, std::string> retainGraphicsRecordingReferencesLocked(
+    GPUDeviceImpl &impl, ActiveGraphicsRecordingContext &entry,
+    const GraphicsRecordingReferences &references) {
   const auto validate =
       []<typename Table, typename Handle>(
           const Table &table, std::span<const Handle> handles,
@@ -6352,73 +6259,94 @@ Result<bool, std::string> GPUDevice::retainGraphicsRecordingReferences(
     }
     return std::nullopt;
   };
-  if (const auto error =
-          validate(impl_->buffers, references.buffers, "buffer")) {
+  if (const auto error = validate(impl.buffers, references.buffers, "buffer")) {
     return Result<bool, std::string>::makeError(*error);
   }
   if (const auto error =
-          validate(impl_->textures, references.textures, "texture")) {
+          validate(impl.textures, references.textures, "texture")) {
     return Result<bool, std::string>::makeError(*error);
   }
-  if (const auto error = validate(impl_->accelerationStructures,
+  if (const auto error =
+          validate(impl.samplers, references.samplers, "sampler")) {
+    return Result<bool, std::string>::makeError(*error);
+  }
+  if (const auto error = validate(impl.accelerationStructures,
                                   references.accelerationStructures,
                                   "acceleration-structure")) {
     return Result<bool, std::string>::makeError(*error);
   }
   if (const auto error =
-          validate(impl_->renderPipelines, references.renderPipelines,
+          validate(impl.renderPipelines, references.renderPipelines,
                    "render-pipeline")) {
     return Result<bool, std::string>::makeError(*error);
   }
   if (const auto error =
-          validate(impl_->computePipelines, references.computePipelines,
+          validate(impl.computePipelines, references.computePipelines,
                    "compute-pipeline")) {
     return Result<bool, std::string>::makeError(*error);
   }
   if (const auto error =
-          validate(impl_->meshletPipelines, references.meshletPipelines,
+          validate(impl.meshletPipelines, references.meshletPipelines,
                    "meshlet-pipeline")) {
     return Result<bool, std::string>::makeError(*error);
   }
   if (const auto error =
-          validate(impl_->rayQueryBindings, references.rayQueryBindings,
+          validate(impl.rayQueryBindings, references.rayQueryBindings,
                    "ray-query-binding")) {
     return Result<bool, std::string>::makeError(*error);
   }
   for (const RayQueryBindingHandle handle : references.rayQueryBindings) {
-    const RayQueryBindingResource *binding =
-        impl_->rayQueryBindings.get(handle);
-    if (!impl_->computePipelines.isValid(binding->pipeline) ||
-        !impl_->accelerationStructures.isValid(
-            binding->accelerationStructure)) {
+    const RayQueryBindingResource *binding = impl.rayQueryBindings.get(handle);
+    if (!impl.computePipelines.isValid(binding->pipeline) ||
+        !impl.accelerationStructures.isValid(binding->accelerationStructure)) {
       return Result<bool, std::string>::makeError(
           "GPUDevice::retainGraphicsRecordingReferences: ray-query binding "
           "dependency is invalid");
     }
   }
-  const uint64_t serial = entry->recordingSerial;
+  const uint64_t serial = entry.recordingSerial;
   const auto mark = [serial]<typename Table, typename Handle>(
                         Table &table, std::span<const Handle> handles) {
     for (const Handle handle : handles) {
       (void)table.markRecordingUse(handle, serial);
     }
   };
-  mark(impl_->buffers, references.buffers);
-  mark(impl_->textures, references.textures);
-  mark(impl_->accelerationStructures, references.accelerationStructures);
-  mark(impl_->renderPipelines, references.renderPipelines);
-  mark(impl_->computePipelines, references.computePipelines);
-  mark(impl_->meshletPipelines, references.meshletPipelines);
-  mark(impl_->rayQueryBindings, references.rayQueryBindings);
+  mark(impl.buffers, references.buffers);
+  mark(impl.textures, references.textures);
+  mark(impl.samplers, references.samplers);
+  mark(impl.accelerationStructures, references.accelerationStructures);
+  mark(impl.renderPipelines, references.renderPipelines);
+  mark(impl.computePipelines, references.computePipelines);
+  mark(impl.meshletPipelines, references.meshletPipelines);
+  mark(impl.rayQueryBindings, references.rayQueryBindings);
   for (const RayQueryBindingHandle handle : references.rayQueryBindings) {
-    const RayQueryBindingResource *binding =
-        impl_->rayQueryBindings.get(handle);
-    (void)impl_->computePipelines.markRecordingUse(binding->pipeline, serial);
-    (void)impl_->accelerationStructures.markRecordingUse(
+    const RayQueryBindingResource *binding = impl.rayQueryBindings.get(handle);
+    (void)impl.computePipelines.markRecordingUse(binding->pipeline, serial);
+    (void)impl.accelerationStructures.markRecordingUse(
         binding->accelerationStructure, serial);
   }
   return Result<bool, std::string>::makeResult(true);
 }
+
+Result<bool, std::string>
+recordGraphicsRangeLocked(GPUDeviceImpl &impl,
+                          ActiveGraphicsRecordingContext &entry,
+                          std::span<const GraphicsRecordingStep> steps) {
+  for (const GraphicsRecordingStep &step : steps) {
+    recordGraphicsBarriersLocked(impl, entry, step.barriers);
+    if (step.pass == nullptr) {
+      continue;
+    }
+    auto passResult = recordRenderPass(
+        impl, &entry.framebuffers, &entry.timingQueries,
+        &entry.opaqueStatisticsQueries, *entry.commandList, *step.pass);
+    if (passResult.hasError()) {
+      return passResult;
+    }
+  }
+  return Result<bool, std::string>::makeResult(true);
+}
+} // namespace
 
 Result<bool, std::string>
 GPUDevice::recordGraphicsPass(RecordingContextHandle ctx,
@@ -6460,19 +6388,27 @@ GPUDevice::recordGraphicsRange(RecordingContextHandle ctx,
     return Result<bool, std::string>::makeError(
         "GPUDevice::recordGraphicsRange: unknown recording context");
   }
-  for (const GraphicsRecordingStep &step : steps) {
-    recordGraphicsBarriersLocked(*impl_, *entry, step.barriers);
-    if (step.pass == nullptr) {
-      continue;
-    }
-    auto passResult = recordRenderPass(
-        *impl_, &entry->framebuffers, &entry->timingQueries,
-        &entry->opaqueStatisticsQueries, *entry->commandList, *step.pass);
-    if (passResult.hasError()) {
-      return passResult;
-    }
+  return recordGraphicsRangeLocked(*impl_, *entry, steps);
+}
+
+Result<bool, std::string> GPUDevice::recordGraphicsRangeWithReferences(
+    RecordingContextHandle ctx, std::span<const GraphicsRecordingStep> steps,
+    const GraphicsRecordingReferences &references) {
+  if (!impl_) {
+    return recordGraphicsRange(ctx, steps);
   }
-  return Result<bool, std::string>::makeResult(true);
+  std::lock_guard lock(impl_->graphicsContextMutex);
+  ActiveGraphicsRecordingContext *entry =
+      findActiveGraphicsContextSlot(*impl_, ctx);
+  if (entry == nullptr || !entry->commandList) {
+    return Result<bool, std::string>::makeError(
+        "GPUDevice::recordGraphicsRangeWithReferences: unknown recording "
+        "context");
+  }
+  auto retain =
+      retainGraphicsRecordingReferencesLocked(*impl_, *entry, references);
+  return retain.hasError() ? retain
+                           : recordGraphicsRangeLocked(*impl_, *entry, steps);
 }
 
 Result<RecordedCommandBufferHandle, std::string>
@@ -6491,25 +6427,17 @@ GPUDevice::finishGraphicsRecordingContext(RecordingContextHandle ctx) {
     active->commandList->close();
     NURI_PROFILER_ZONE_END();
   }
-  const SlotReservation slot = impl_->recordedCommandBufferSlots.acquire();
-  const uint32_t index = slot.index;
-  RecordedCommandBufferHandle handle{
-      .index = index,
-      .generation = slot.generation,
-  };
-  if (impl_->recordedGraphicsCommandBuffers.size() <= index) {
-    impl_->recordedGraphicsCommandBuffers.resize(static_cast<size_t>(index) +
-                                                 1u);
-  }
-  impl_->recordedGraphicsCommandBuffers[index] = RecordedGraphicsCommandBuffer{
-      .handle = handle,
-      .commandList = active->commandList,
-      .framebuffers = std::move(active->framebuffers),
-      .timingQueries = std::move(active->timingQueries),
-      .opaqueStatisticsQueries = std::move(active->opaqueStatisticsQueries),
-      .recordingSerial = active->recordingSerial};
-  impl_->activeGraphicsContexts[ctx.index] = ActiveGraphicsRecordingContext{};
-  impl_->recordingContextSlots.release(ctx.index);
+  const RecordedCommandBufferHandle handle =
+      impl_->recordedGraphicsCommandBuffers.reserveSlot();
+  *impl_->recordedGraphicsCommandBuffers.get(handle) =
+      RecordedGraphicsCommandBuffer{
+          .handle = handle,
+          .commandList = std::move(active->commandList),
+          .framebuffers = std::move(active->framebuffers),
+          .timingQueries = std::move(active->timingQueries),
+          .opaqueStatisticsQueries = std::move(active->opaqueStatisticsQueries),
+          .recordingSerial = active->recordingSerial};
+  impl_->activeGraphicsContexts.release(ctx.index);
   return Result<RecordedCommandBufferHandle, std::string>::makeResult(handle);
 }
 
@@ -6531,19 +6459,16 @@ GPUDevice::discardGraphicsRecordingContext(RecordingContextHandle ctx) {
   }
   (void)impl_->recordingRetirement.resolveRecording(active->recordingSerial,
                                                     0u);
-  impl_->activeGraphicsContexts[ctx.index] = ActiveGraphicsRecordingContext{};
-  impl_->recordingContextSlots.release(ctx.index);
+  impl_->activeGraphicsContexts.release(ctx.index);
   return Result<bool, std::string>::makeResult(true);
 }
 
 Result<bool, std::string> GPUDevice::discardRecordedGraphicsCommandBuffer(
     RecordedCommandBufferHandle commandBuffer) {
   std::lock_guard lock(impl_->graphicsContextMutex);
-  if (commandBuffer.index < impl_->recordedGraphicsCommandBuffers.size() &&
-      impl_->recordedCommandBufferSlots.isValid(commandBuffer.index,
-                                                commandBuffer.generation)) {
-    RecordedGraphicsCommandBuffer &recorded =
-        impl_->recordedGraphicsCommandBuffers[commandBuffer.index];
+  if (std::optional<RecordedGraphicsCommandBuffer> owned =
+          impl_->recordedGraphicsCommandBuffers.take(commandBuffer)) {
+    RecordedGraphicsCommandBuffer &recorded = *owned;
     const uint64_t recordingSerial = recorded.recordingSerial;
     for (NvrhiOpaquePipelineStatisticsQuery &query :
          recorded.opaqueStatisticsQueries) {
@@ -6553,10 +6478,7 @@ Result<bool, std::string> GPUDevice::discardRecordedGraphicsCommandBuffer(
     }
     nvrhi::CommandListHandle reusableCommandList =
         std::move(recorded.commandList);
-    recorded = {};
-    impl_->availableGraphicsCommandLists.push_back(
-        std::move(reusableCommandList));
-    impl_->recordedCommandBufferSlots.release(commandBuffer.index);
+    impl_->graphicsCommandLists.recycle(std::move(reusableCommandList));
     (void)impl_->recordingRetirement.resolveRecording(recordingSerial, 0u);
     return Result<bool, std::string>::makeResult(true);
   }
@@ -6602,9 +6524,7 @@ GPUDevice::submitRecordedGraphicsFrame(
   nvrhiCommandLists.reserve(commandBuffers.size() + 3u);
   for (size_t i = 0u; i < commandBuffers.size(); ++i) {
     const RecordedCommandBufferHandle handle = commandBuffers[i];
-    if (handle.index >= impl_->recordedGraphicsCommandBuffers.size() ||
-        !impl_->recordedCommandBufferSlots.isValid(handle.index,
-                                                   handle.generation) ||
+    if (!impl_->recordedGraphicsCommandBuffers.isValid(handle) ||
         matchedSlots[handle.index] != 0u) {
       return Result<SubmittedGraphicsFrame, std::string>::makeError(
           "GPUDevice::submitRecordedGraphicsFrame: unknown recorded "
@@ -6613,11 +6533,12 @@ GPUDevice::submitRecordedGraphicsFrame(
     matchedSlots[handle.index] = 1u;
     matchedIndices[i] = handle.index;
     nvrhiCommandLists.push_back(
-        impl_->recordedGraphicsCommandBuffers[handle.index].commandList.Get());
+        impl_->recordedGraphicsCommandBuffers.at(handle.index)
+            .commandList.Get());
   }
   size_t timingQueryCount = 0u;
   for (const size_t matchedIndex : matchedIndices) {
-    timingQueryCount += impl_->recordedGraphicsCommandBuffers[matchedIndex]
+    timingQueryCount += impl_->recordedGraphicsCommandBuffers.at(matchedIndex)
                             .timingQueries.size();
   }
   std::vector<NvrhiTimingQuery> timingQueries;
@@ -6625,7 +6546,7 @@ GPUDevice::submitRecordedGraphicsFrame(
   std::vector<NvrhiOpaquePipelineStatisticsQuery> opaqueStatisticsQueries;
   for (const size_t matchedIndex : matchedIndices) {
     RecordedGraphicsCommandBuffer &recorded =
-        impl_->recordedGraphicsCommandBuffers[matchedIndex];
+        impl_->recordedGraphicsCommandBuffers.at(matchedIndex);
     if (!recorded.timingQueries.empty()) {
       timingQueries.insert(
           timingQueries.end(),
@@ -6678,7 +6599,8 @@ GPUDevice::submitRecordedGraphicsFrame(
   if (frameUploadCommandList) {
     if (impl_->hasDedicatedAssetCopyQueue) {
       frameCopyInstance = submitAsyncUploadCommandList(
-          *impl_, frameUploadCommandList, frameUploadContainsTextureData);
+          *impl_, std::move(frameUploadCommandList),
+          frameUploadContainsTextureData);
       impl_->nvrhiDevice->queueWaitForSemaphore(
           nvrhi::CommandQueue::Graphics,
           impl_->nvrhiDevice->getQueueSemaphore(nvrhi::CommandQueue::Copy),
@@ -6702,13 +6624,13 @@ GPUDevice::submitRecordedGraphicsFrame(
   impl_->latestSubmittedInstance = instance;
   for (const size_t matchedIndex : matchedIndices) {
     const uint64_t recordingSerial =
-        impl_->recordedGraphicsCommandBuffers[matchedIndex].recordingSerial;
+        impl_->recordedGraphicsCommandBuffers.at(matchedIndex).recordingSerial;
     (void)impl_->recordingRetirement.resolveRecording(recordingSerial,
                                                       instance);
   }
   if (frameUploadCommandList && !impl_->hasDedicatedAssetCopyQueue) {
     impl_->latestAsyncUploadGraphicsInstance = instance;
-    impl_->pendingAsyncUploadSubmissions.push_back(PendingAsyncUploadSubmission{
+    impl_->asyncUploadCommandLists.submit(PendingAsyncUploadSubmission{
         .submissionInstance = instance,
         .commandList = std::move(frameUploadCommandList),
         .containsTextureData = frameUploadContainsTextureData,
@@ -6735,15 +6657,14 @@ GPUDevice::submitRecordedGraphicsFrame(
   }
   for (const size_t index : matchedIndices) {
     RecordedGraphicsCommandBuffer &recorded =
-        impl_->recordedGraphicsCommandBuffers[index];
+        impl_->recordedGraphicsCommandBuffers.at(index);
     const uint32_t handleIndex = recorded.handle.index;
-    impl_->pendingGraphicsCommandLists.push_back(PendingGraphicsCommandList{
+    impl_->graphicsCommandLists.submit(PendingGraphicsCommandList{
         .submissionInstance = instance,
         .commandList = std::move(recorded.commandList),
         .framebuffers = std::move(recorded.framebuffers),
     });
-    recorded = {};
-    impl_->recordedCommandBufferSlots.release(handleIndex);
+    impl_->recordedGraphicsCommandBuffers.release(handleIndex);
   }
   auto submission =
       allocateSubmissionHandle(*impl_, instance, frameCopyInstance);
@@ -6796,20 +6717,18 @@ bool GPUDevice::isSubmissionComplete(SubmissionHandle handle) const {
   if (handle.generation == 0u) {
     return true;
   }
-  if (handle.index < impl_->submissions.size() &&
-      impl_->submissionSlots.isValid(handle.index, handle.generation)) {
-    const SubmissionRecord &record = impl_->submissions[handle.index];
+  if (const SubmissionRecord *record = impl_->submissions.get(handle)) {
     const std::optional<uint64_t> resolvedGraphics =
-        resolveSubmissionInstance(*impl_, record);
+        resolveSubmissionInstance(*impl_, *record);
     if (!resolvedGraphics.has_value() ||
         impl_->nvrhiDevice->queueGetCompletedInstance(
             nvrhi::CommandQueue::Graphics) < *resolvedGraphics) {
       return false;
     }
-    return record.copyInstance == 0u ||
+    return record->copyInstance == 0u ||
            (impl_->hasDedicatedAssetCopyQueue &&
             impl_->nvrhiDevice->queueGetCompletedInstance(
-                nvrhi::CommandQueue::Copy) >= record.copyInstance);
+                nvrhi::CommandQueue::Copy) >= record->copyInstance);
   }
   return true;
 }
@@ -6820,11 +6739,9 @@ GPUDevice::makeSubmissionVisibleToGraphics(SubmissionHandle handle) {
     return Result<bool, std::string>::makeResult(true);
   }
   std::lock_guard lock(impl_->immediateMutex);
-  if (handle.index < impl_->submissions.size() &&
-      impl_->submissionSlots.isValid(handle.index, handle.generation)) {
-    SubmissionRecord &record = impl_->submissions[handle.index];
-    if (!record.requiresGraphicsVisibility || record.copyInstance == 0u ||
-        record.graphicsVisibilityQueued) {
+  if (SubmissionRecord *record = impl_->submissions.get(handle)) {
+    if (!record->requiresGraphicsVisibility || record->copyInstance == 0u ||
+        record->graphicsVisibilityQueued) {
       return Result<bool, std::string>::makeResult(true);
     }
     if (!impl_->hasDedicatedAssetCopyQueue) {
@@ -6835,14 +6752,14 @@ GPUDevice::makeSubmissionVisibleToGraphics(SubmissionHandle handle) {
     const uint64_t completedCopy =
         impl_->nvrhiDevice->queueGetCompletedInstance(
             nvrhi::CommandQueue::Copy);
-    if (completedCopy < record.copyInstance) {
+    if (completedCopy < record->copyInstance) {
       return Result<bool, std::string>::makeResult(false);
     }
     impl_->nvrhiDevice->queueWaitForSemaphore(
         nvrhi::CommandQueue::Graphics,
         impl_->nvrhiDevice->getQueueSemaphore(nvrhi::CommandQueue::Copy),
-        record.copyInstance);
-    record.graphicsVisibilityQueued = true;
+        record->copyInstance);
+    record->graphicsVisibilityQueued = true;
     return Result<bool, std::string>::makeResult(true);
   }
   return Result<bool, std::string>::makeResult(true);
@@ -6856,8 +6773,8 @@ Result<bool, std::string> GPUDevice::submitComputeDispatches(
   std::lock_guard lock(impl_->immediateMutex);
   flushPendingAsyncUploadCommandList(*impl_);
   impl_->immediateCommandList->open();
-  auto result = recordComputeDispatches(*impl_, *impl_->immediateCommandList,
-                                        dispatches, false);
+  auto result =
+      recordComputeDispatches(*impl_, *impl_->immediateCommandList, dispatches);
   impl_->immediateCommandList->close();
   if (result.hasError()) {
     return result;
@@ -6919,7 +6836,7 @@ Result<SubmissionHandle, std::string> GPUDevice::submitBackgroundBufferCopies(
   }
   commandList->close();
   const uint64_t instance =
-      submitAsyncUploadCommandList(*impl_, commandList, false);
+      submitAsyncUploadCommandList(*impl_, std::move(commandList), false);
   return impl_->hasDedicatedAssetCopyQueue
              ? allocateSubmissionHandle(*impl_, 0u, instance, 0u, true)
              : allocateSubmissionHandle(*impl_, instance);
@@ -6941,8 +6858,8 @@ Result<SubmissionHandle, std::string> GPUDevice::submitPendingUploads() {
         *impl_, impl_->latestAsyncUploadGraphicsInstance,
         impl_->latestAsyncUploadCopyInstance, 0u, true);
   }
-  const uint64_t instance =
-      submitAsyncUploadCommandList(*impl_, commandList, containsTextureData);
+  const uint64_t instance = submitAsyncUploadCommandList(
+      *impl_, std::move(commandList), containsTextureData);
   return impl_->hasDedicatedAssetCopyQueue
              ? allocateSubmissionHandle(*impl_, 0u, instance, 0u, true)
              : allocateSubmissionHandle(*impl_, instance);

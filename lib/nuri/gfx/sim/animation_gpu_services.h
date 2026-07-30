@@ -3,7 +3,7 @@
 #include "nuri/core/result.h"
 #include "nuri/defines.h"
 #include "nuri/gfx/gpu_device.h"
-#include "nuri/gfx/owned_gpu_resource.h"
+#include "nuri/gfx/pipeline/owned_program_bundle.h"
 #include "nuri/resources/gpu/buffer.h"
 #include <array>
 #include <filesystem>
@@ -66,16 +66,11 @@ public:
 
 private:
   [[nodiscard]] ComputePipelineHandle pipeline(Program program) const noexcept;
-  [[nodiscard]] Result<bool, std::string> createShaders();
-  [[nodiscard]] Result<bool, std::string> createPipelines();
-  void destroyPipelines() noexcept;
-  void destroyShaders() noexcept;
   GPUDevice &gpu_;
   std::filesystem::path shaderRoot_;
   std::pmr::memory_resource *memory_ = std::pmr::get_default_resource();
   static constexpr size_t kProgramCount = static_cast<size_t>(Program::Count);
-  std::array<OwnedShaderHandle, kProgramCount> shaders_{};
-  std::array<OwnedComputePipelineHandle, kProgramCount> pipelines_{};
+  OwnedProgramBundle programs_{};
   bool initialized_ = false;
 };
 

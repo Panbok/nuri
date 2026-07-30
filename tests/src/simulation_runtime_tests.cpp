@@ -36,15 +36,15 @@ TEST(SimulationRuntimeTests, ControllerReusesSlotsWithNewGeneration) {
   nuri::SceneRuntimeHost runtime;
   runtime.bindScene(&scene);
 
-  auto firstResult = runtime.simulations().createSimulation(
+  auto firstResult = runtime.createSimulation(
       makeNodeSimulationDesc(scene.graph().rootNode()));
   ASSERT_FALSE(firstResult.hasError()) << firstResult.error();
   const nuri::SimulationHandle first = firstResult.value();
 
-  EXPECT_TRUE(runtime.simulations().destroySimulation(first));
-  EXPECT_FALSE(runtime.simulations().destroySimulation(first));
+  EXPECT_TRUE(runtime.destroySimulation(first));
+  EXPECT_FALSE(runtime.destroySimulation(first));
 
-  auto secondResult = runtime.simulations().createSimulation(
+  auto secondResult = runtime.createSimulation(
       makeNodeSimulationDesc(scene.graph().rootNode()));
   ASSERT_FALSE(secondResult.hasError()) << secondResult.error();
   const nuri::SimulationHandle second = secondResult.value();
@@ -53,8 +53,8 @@ TEST(SimulationRuntimeTests, ControllerReusesSlotsWithNewGeneration) {
   EXPECT_NE(nuri::generationOf(first), nuri::generationOf(second));
 
   nuri::SimulationState state = nuri::SimulationState::Stopped;
-  EXPECT_FALSE(runtime.simulations().getState(first, state));
-  EXPECT_TRUE(runtime.simulations().getState(second, state));
+  EXPECT_FALSE(runtime.getState(first, state));
+  EXPECT_TRUE(runtime.getState(second, state));
   EXPECT_EQ(state, nuri::SimulationState::Running);
 }
 
@@ -64,17 +64,17 @@ TEST(SimulationRuntimeTests, RebindingNonEmptySceneRebuildsBindingTable) {
 
   nuri::SceneRuntimeHost runtime;
   runtime.bindScene(&firstScene);
-  auto firstSimulation = runtime.simulations().createSimulation(
+  auto firstSimulation = runtime.createSimulation(
       makeNodeSimulationDesc(firstScene.graph().rootNode()));
   ASSERT_FALSE(firstSimulation.hasError()) << firstSimulation.error();
 
   runtime.bindScene(&secondScene);
-  auto secondSimulation = runtime.simulations().createSimulation(
+  auto secondSimulation = runtime.createSimulation(
       makeNodeSimulationDesc(secondScene.graph().rootNode()));
   ASSERT_FALSE(secondSimulation.hasError()) << secondSimulation.error();
 
   nuri::SimulationStats stats;
-  ASSERT_TRUE(runtime.simulations().getStats(secondSimulation.value(), stats));
+  ASSERT_TRUE(runtime.getStats(secondSimulation.value(), stats));
   EXPECT_FALSE(stats.faulted);
 }
 
@@ -83,7 +83,7 @@ TEST(SimulationRuntimeTests, TickHonorsPauseResumeDisableAndSingleStep) {
   nuri::SceneRuntimeHost runtime;
   runtime.bindScene(&scene);
 
-  auto createResult = runtime.simulations().createSimulation(
+  auto createResult = runtime.createSimulation(
       makeNodeSimulationDesc(scene.graph().rootNode()));
   ASSERT_FALSE(createResult.hasError()) << createResult.error();
   const nuri::SimulationHandle handle = createResult.value();
@@ -97,7 +97,7 @@ TEST(SimulationRuntimeTests, TickHonorsPauseResumeDisableAndSingleStep) {
   EXPECT_TRUE(tickResult.anySimulationRan);
 
   nuri::SimulationStats stats;
-  ASSERT_TRUE(runtime.simulations().getStats(handle, stats));
+  ASSERT_TRUE(runtime.getStats(handle, stats));
   EXPECT_EQ(stats.executedStepCount, 1u);
   EXPECT_EQ(stats.executedSubstepCount, 1u);
   EXPECT_EQ(stats.phaseExecutionCounts[0], 1u);
@@ -106,36 +106,36 @@ TEST(SimulationRuntimeTests, TickHonorsPauseResumeDisableAndSingleStep) {
   EXPECT_EQ(stats.phaseExecutionCounts[3], 1u);
   EXPECT_EQ(stats.phaseExecutionCounts[4], 1u);
 
-  EXPECT_TRUE(runtime.simulations().pause(handle));
+  EXPECT_TRUE(runtime.pause(handle));
   tickResult = runtime.tick({.frameDeltaSeconds = fixedDelta,
                              .absoluteTimeSeconds = fixedDelta * 2.0,
                              .frameIndex = 2u});
   EXPECT_EQ(tickResult.executedSteps, 1u);
-  ASSERT_TRUE(runtime.simulations().getStats(handle, stats));
+  ASSERT_TRUE(runtime.getStats(handle, stats));
   EXPECT_EQ(stats.executedStepCount, 1u);
 
-  EXPECT_TRUE(runtime.simulations().requestSingleStep(handle));
+  EXPECT_TRUE(runtime.requestSingleStep(handle));
   tickResult = runtime.tick({.frameDeltaSeconds = fixedDelta,
                              .absoluteTimeSeconds = fixedDelta * 3.0,
                              .frameIndex = 3u});
   EXPECT_EQ(tickResult.executedSteps, 1u);
-  ASSERT_TRUE(runtime.simulations().getStats(handle, stats));
+  ASSERT_TRUE(runtime.getStats(handle, stats));
   EXPECT_EQ(stats.executedStepCount, 2u);
   EXPECT_EQ(stats.executedSubstepCount, 2u);
   EXPECT_TRUE(stats.paused);
 
   nuri::SimulationState state = nuri::SimulationState::Stopped;
-  ASSERT_TRUE(runtime.simulations().getState(handle, state));
+  ASSERT_TRUE(runtime.getState(handle, state));
   EXPECT_EQ(state, nuri::SimulationState::Paused);
 
-  EXPECT_TRUE(runtime.simulations().setSubstepCount(handle, 2u));
-  EXPECT_TRUE(runtime.simulations().setSolverIterationCount(handle, 3u));
-  EXPECT_TRUE(runtime.simulations().resume(handle));
+  EXPECT_TRUE(runtime.setSubstepCount(handle, 2u));
+  EXPECT_TRUE(runtime.setSolverIterationCount(handle, 3u));
+  EXPECT_TRUE(runtime.resume(handle));
   tickResult = runtime.tick({.frameDeltaSeconds = fixedDelta,
                              .absoluteTimeSeconds = fixedDelta * 4.0,
                              .frameIndex = 4u});
   EXPECT_EQ(tickResult.executedSteps, 1u);
-  ASSERT_TRUE(runtime.simulations().getStats(handle, stats));
+  ASSERT_TRUE(runtime.getStats(handle, stats));
   EXPECT_EQ(stats.executedStepCount, 3u);
   EXPECT_EQ(stats.executedSubstepCount, 4u);
   EXPECT_EQ(stats.phaseExecutionCounts[0], 3u);
@@ -144,13 +144,13 @@ TEST(SimulationRuntimeTests, TickHonorsPauseResumeDisableAndSingleStep) {
   EXPECT_EQ(stats.phaseExecutionCounts[3], 4u);
   EXPECT_EQ(stats.phaseExecutionCounts[4], 3u);
 
-  EXPECT_TRUE(runtime.simulations().setEnabled(handle, false));
-  EXPECT_FALSE(runtime.simulations().requestSingleStep(handle));
+  EXPECT_TRUE(runtime.setEnabled(handle, false));
+  EXPECT_FALSE(runtime.requestSingleStep(handle));
   tickResult = runtime.tick({.frameDeltaSeconds = fixedDelta,
                              .absoluteTimeSeconds = fixedDelta * 5.0,
                              .frameIndex = 5u});
   EXPECT_EQ(tickResult.executedSteps, 1u);
-  ASSERT_TRUE(runtime.simulations().getStats(handle, stats));
+  ASSERT_TRUE(runtime.getStats(handle, stats));
   EXPECT_EQ(stats.executedStepCount, 3u);
   EXPECT_FALSE(stats.paused);
   EXPECT_FALSE(stats.enabled);
@@ -163,40 +163,38 @@ TEST(SimulationRuntimeTests, ParamsRoundTripAndValidationBehaveAsExpected) {
 
   constexpr std::array<std::byte, 3u> kInitialParams = {
       std::byte{0x01}, std::byte{0x02}, std::byte{0x03}};
-  auto createResult = runtime.simulations().createSimulation(
+  auto createResult = runtime.createSimulation(
       makeNodeSimulationDesc(scene.graph().rootNode(), kInitialParams));
   ASSERT_FALSE(createResult.hasError()) << createResult.error();
   const nuri::SimulationHandle handle = createResult.value();
 
   nuri::SimulationDesc desc;
-  ASSERT_TRUE(runtime.simulations().getDesc(handle, desc));
+  ASSERT_TRUE(runtime.getDesc(handle, desc));
   EXPECT_TRUE(bytesEqual(desc.initialParams, kInitialParams));
 
   constexpr std::array<std::byte, 2u> kUpdatedParams = {std::byte{0x0A},
                                                         std::byte{0x0B}};
-  EXPECT_TRUE(runtime.simulations().setParams(handle, kUpdatedParams));
-  ASSERT_TRUE(runtime.simulations().getDesc(handle, desc));
+  EXPECT_TRUE(runtime.setParams(handle, kUpdatedParams));
+  ASSERT_TRUE(runtime.getDesc(handle, desc));
   EXPECT_TRUE(bytesEqual(desc.initialParams, kUpdatedParams));
 
-  EXPECT_TRUE(
-      runtime.simulations().setParams(handle, std::span<const std::byte>{}));
-  ASSERT_TRUE(runtime.simulations().getDesc(handle, desc));
+  EXPECT_TRUE(runtime.setParams(handle, std::span<const std::byte>{}));
+  ASSERT_TRUE(runtime.getDesc(handle, desc));
   EXPECT_TRUE(desc.initialParams.empty());
 
   nuri::SimulationStats stats;
-  ASSERT_TRUE(runtime.simulations().getStats(handle, stats));
+  ASSERT_TRUE(runtime.getStats(handle, stats));
   EXPECT_EQ(stats.paramsSizeBytes, 0u);
 
-  EXPECT_TRUE(runtime.simulations().setTimeScale(handle, 0.0f));
-  EXPECT_FALSE(runtime.simulations().setTimeScale(handle, -1.0f));
+  EXPECT_TRUE(runtime.setTimeScale(handle, 0.0f));
+  EXPECT_FALSE(runtime.setTimeScale(handle, -1.0f));
 
   nuri::SimulationDesc invalidDesc;
   invalidDesc.kind = nuri::SimulationKind::Custom;
   invalidDesc.binding.primaryTarget =
       nuri::SimulationBindingTarget::makeNode(scene.graph().rootNode());
   invalidDesc.timeScale = -1.0f;
-  const auto invalidResult =
-      runtime.simulations().createSimulation(invalidDesc);
+  const auto invalidResult = runtime.createSimulation(invalidDesc);
   EXPECT_TRUE(invalidResult.hasError());
 }
 
@@ -206,7 +204,7 @@ TEST(SimulationRuntimeTests,
   nuri::SceneRuntimeHost runtime;
   runtime.bindScene(&scene);
 
-  auto createResult = runtime.simulations().createSimulation(
+  auto createResult = runtime.createSimulation(
       makeNodeSimulationDesc(scene.graph().rootNode()));
   ASSERT_FALSE(createResult.hasError()) << createResult.error();
   const nuri::SimulationHandle handle = createResult.value();
@@ -230,13 +228,13 @@ TEST(SimulationRuntimeTests,
   EXPECT_TRUE(tickResult.anySimulationRan);
 
   nuri::SimulationStats stats;
-  ASSERT_TRUE(runtime.simulations().getStats(handle, stats));
+  ASSERT_TRUE(runtime.getStats(handle, stats));
   EXPECT_EQ(stats.executedStepCount, 2u);
 
   nuri::RenderScene scene2;
   nuri::SceneRuntimeHost runtime2;
   runtime2.bindScene(&scene2);
-  createResult = runtime2.simulations().createSimulation(
+  createResult = runtime2.createSimulation(
       makeNodeSimulationDesc(scene2.graph().rootNode()));
   ASSERT_FALSE(createResult.hasError()) << createResult.error();
 
@@ -266,7 +264,7 @@ TEST(SimulationRuntimeTests, InvalidBindingFaultsAfterSceneTopologyChanges) {
   const nuri::NodeId boundNode = nodeResult.value();
 
   auto createResult =
-      runtime.simulations().createSimulation(makeNodeSimulationDesc(boundNode));
+      runtime.createSimulation(makeNodeSimulationDesc(boundNode));
   ASSERT_FALSE(createResult.hasError()) << createResult.error();
   const nuri::SimulationHandle handle = createResult.value();
 
@@ -275,12 +273,12 @@ TEST(SimulationRuntimeTests, InvalidBindingFaultsAfterSceneTopologyChanges) {
       {.frameDeltaSeconds = 0.0, .absoluteTimeSeconds = 0.0, .frameIndex = 1u});
 
   nuri::SimulationStats stats;
-  ASSERT_TRUE(runtime.simulations().getStats(handle, stats));
+  ASSERT_TRUE(runtime.getStats(handle, stats));
   EXPECT_TRUE(stats.faulted);
   EXPECT_FALSE(stats.lastFaultReason.empty());
 
   nuri::SimulationState state = nuri::SimulationState::Running;
-  ASSERT_TRUE(runtime.simulations().getState(handle, state));
+  ASSERT_TRUE(runtime.getState(handle, state));
   EXPECT_EQ(state, nuri::SimulationState::Stopped);
 }
 

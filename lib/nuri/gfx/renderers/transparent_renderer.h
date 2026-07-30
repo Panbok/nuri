@@ -57,7 +57,6 @@ private:
   static_assert(sizeof(FrameData) == 488,
                 "TransparentRenderer::FrameData must match shader layout");
   using PushConstants = ForwardMeshPushConstants;
-  using MeshDrawTemplate = SceneDrawRecord;
   struct FixedDrawEntry {
     DrawItem draw{};
     uint32_t dependencyOffset = 0;
@@ -68,7 +67,6 @@ private:
   Result<bool, std::string> ensurePipelines(Format colorFormat,
                                             Format depthFormat);
   void rebuildSceneCache(const SceneDrawDatabase &database,
-                         const RenderScene &scene,
                          bool excludeTransmissionBlend);
   Result<bool, std::string> collectContributorDraws(RenderFrameContext &frame);
   Result<bool, std::string> appendTransparentPass(
@@ -110,8 +108,10 @@ private:
   bool initialized_ = false;
   bool transparentUsesJitteredProjection_ = true;
   ForwardSceneDrawCache sceneCache_;
+  const SceneDrawDatabase *sceneDrawDatabase_ = nullptr;
+  uint64_t cachedDrawDatabaseGeneration_ = std::numeric_limits<uint64_t>::max();
   bool cachedExcludeTransmissionBlend_ = true;
-  std::pmr::vector<MeshDrawTemplate> meshDrawTemplates_;
+  std::pmr::vector<uint32_t> selectedDrawIndices_;
   std::pmr::vector<TransparentStageSortableDraw> contributorSortableDraws_;
   std::pmr::vector<FixedDrawEntry> contributorFixedDraws_;
   std::pmr::vector<TextureHandle> contributorTextureReads_;
@@ -129,6 +129,7 @@ private:
   std::pmr::vector<DrawItem> pickDrawItems_;
   std::pmr::vector<TextureHandle> passTextureReads_;
   std::pmr::vector<BufferHandle> passDependencyBuffers_;
+  std::pmr::vector<SamplerHandle> passRecordingSamplers_;
   std::filesystem::path alphaPickFragmentPath_{};
 };
 

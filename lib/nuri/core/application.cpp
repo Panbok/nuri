@@ -125,7 +125,6 @@ void Application::run() {
     if (!newWidth || !newHeight) {
       width_ = newWidth;
       height_ = newHeight;
-      input_.endFrame();
       continue;
     }
     if (newWidth != width_ || newHeight != height_) {
@@ -149,7 +148,6 @@ void Application::run() {
       onDraw();
       NURI_PROFILER_ZONE_END();
     }
-    input_.endFrame();
   }
   NURI_LOG_DEBUG("Application::run: Application shutdown");
   gpu_->waitIdle();

@@ -88,22 +88,13 @@ struct NURI_API ScenePrefabLightSource {
   uint32_t sourceNodeIndex = kInvalidScenePrefabIndex;
 };
 
-struct NURI_API ScenePrefabAdaptedMesh {
-  explicit ScenePrefabAdaptedMesh(
-      std::pmr::memory_resource *memory = std::pmr::get_default_resource())
-      : mesh(memory) {}
-  uint32_t sourceSceneMeshIndex = kInvalidScenePrefabIndex;
-  uint32_t sourceMaterialIndex = kInvalidScenePrefabIndex;
-  MeshData mesh;
-};
-
 struct NURI_API ScenePrefab {
   explicit ScenePrefab(
       std::pmr::memory_resource *memory = std::pmr::get_default_resource())
       : nodes(memory), renderables(memory), meshAssets(memory),
         materialAssets(memory), lights(memory), skins(memory),
         animations(memory), sourcePath(memory), sourceSceneName(memory),
-        lightSources(memory), rootNodes(memory), adaptedMeshes(memory) {}
+        lightSources(memory), rootNodes(memory) {}
   std::pmr::vector<ScenePrefabNode> nodes;
   std::pmr::vector<ScenePrefabRenderable> renderables;
   std::pmr::vector<ScenePrefabAssetRef> meshAssets;
@@ -116,9 +107,6 @@ struct NURI_API ScenePrefab {
   MeshImportOptions importOptions{};
   std::pmr::vector<ScenePrefabLightSource> lightSources;
   std::pmr::vector<uint32_t> rootNodes;
-  std::pmr::vector<ScenePrefabAdaptedMesh> adaptedMeshes;
-  ImportedMaterialSet adaptedMaterials{};
-  std::vector<EmbeddedSceneTextureData> embeddedTextures{};
 };
 
 struct NURI_API ScenePrefabAssets {

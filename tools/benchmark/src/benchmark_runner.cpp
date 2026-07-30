@@ -3721,8 +3721,6 @@ void addRenderGraphTelemetryMetrics(BenchmarkFrameMeasurements &measurements,
            summary.transientBufferPhysicalAllocationCount);
   addCount("rendergraph.summary.command_resource_patch_count",
            summary.commandResourcePatchCount);
-  addCount("rendergraph.summary.resolved_dependency_buffer_slot_count",
-           summary.resolvedDependencyBufferSlotCount);
   addCount("rendergraph.summary.owned_pre_dispatch_count",
            summary.ownedPreDispatchCount);
   addCount("rendergraph.summary.owned_draw_item_count",
@@ -4667,7 +4665,7 @@ void buildFrameContext(RenderFrameContext &frameContext, RenderScene &scene,
   frameContext.presentationAA = planResult.value();
   auto cameraResult = temporalFrameService.prepareFrame(
       camera, static_cast<float>(width) / static_cast<float>(height),
-      resolvedSettings.antiAliasing, frameContext.presentationAA,
+      resolvedSettings->antiAliasing, frameContext.presentationAA,
       TemporalCameraFrameDesc{
           .renderExtent = glm::uvec2(width, height),
           .sceneContent = sceneContent,
@@ -4678,7 +4676,6 @@ void buildFrameContext(RenderFrameContext &frameContext, RenderScene &scene,
   frameContext.camera = cameraResult.value();
   frameContext.temporalFrameService = &temporalFrameService;
   settings.antiAliasing.debug.resetHistoryRequested = false;
-  resolvedSettings.antiAliasing.debug.resetHistoryRequested = false;
   frameContext.settings = std::move(resolvedSettings);
   frameContext.metrics = {};
   frameContext.metrics.frameIndex = frameContext.frameIndex;

@@ -334,7 +334,7 @@ private:
     SceneKey key{};
     AssetCpuTaskHandle manifestTask{};
     std::vector<uint8_t> materialPreparationFinished{};
-    std::optional<PreparedSceneManifest> manifest{};
+    std::optional<SceneImportProduct> manifest{};
     std::vector<ModelAssetHandle> models{};
     std::vector<MaterialAssetHandle> materials{};
     MaterialAssetHandle fallbackMaterial{};
@@ -389,7 +389,7 @@ private:
       GpuAssetCompletion<ModelAssetHandle, PreparedGpuModelData>;
   struct SceneManifestCompletion {
     SceneLoadHandle handle{};
-    std::optional<PreparedSceneManifest> manifest{};
+    std::optional<SceneImportProduct> manifest{};
     std::string error{};
     bool cancelled = false;
   };

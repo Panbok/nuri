@@ -273,19 +273,28 @@ Result<bool, std::string> GTAOPass::initialize() {
     samplers_[index] = result.value();
   }
   const std::filesystem::path shaderDir = resolveShaderDir(config_);
+  std::array<ShaderSpec, StageCount> shaderSpecs{};
   for (size_t index = 0; index < kGtaoShaderSpecs.size(); ++index) {
     const GtaoShaderSpec &spec = kGtaoShaderSpecs[index];
-    auto compiled =
-        compileShaderFile(gpu_, spec.name, (shaderDir / spec.file).string(),
-                          ShaderStage::Compute);
-    if (compiled.hasError())
-      return Result<bool, std::string>::makeError(compiled.error());
-    shaders_[index] = compiled.value();
-    auto pipeline = gpu_.createComputePipeline(
-        ComputePipelineDesc{.computeShader = shaders_[index]}, spec.name);
-    if (pipeline.hasError())
-      return Result<bool, std::string>::makeError(pipeline.error());
-    pipelines_[index] = pipeline.value();
+    shaderSpecs[index] = {.debugName = spec.name,
+                          .path = shaderDir / spec.file,
+                          .stage = ShaderStage::Compute};
+  }
+  auto shaders = program_.compileShaders(gpu_, shaderSpecs);
+  if (shaders.hasError()) {
+    return shaders;
+  }
+  std::array<ComputePipelineSpec, StageCount> pipelineSpecs{};
+  for (size_t index = 0; index < kGtaoShaderSpecs.size(); ++index) {
+    pipelineSpecs[index] = {
+        .debugName = kGtaoShaderSpecs[index].name,
+        .desc = {.computeShader = program_.shader(index)},
+    };
+  }
+  auto pipelines = program_.replaceComputePipelines(gpu_, pipelineSpecs);
+  if (pipelines.hasError()) {
+    program_.reset();
+    return pipelines;
   }
   return Result<bool, std::string>::makeResult(true);
 }
@@ -322,15 +331,11 @@ void GTAOPass::destroyResources() {
       gpu_.destroyTexture(texture);
     texture = {};
   }
-  for (ComputePipelineHandle &pipeline : pipelines_)
-    if (nuri::isValid(pipeline))
-      gpu_.destroyComputePipeline(pipeline);
+  program_.reset();
   for (SamplerHandle &sampler : samplers_)
     if (nuri::isValid(sampler))
       gpu_.destroySampler(sampler);
-  pipelines_.fill({});
   samplers_.fill({});
-  shaders_.fill({});
 }
 
 Result<bool, std::string> GTAOPass::build(FrameBuildContext &ctx) {
@@ -344,7 +349,7 @@ Result<bool, std::string> GTAOPass::build(FrameBuildContext &ctx) {
   }
   const AmbientOcclusionExecutionPlan &plan = ctx.frame.ambientOcclusion;
   const RenderSettings::AmbientOcclusionSettings &ao =
-      ctx.frame.settings.ambientOcclusion;
+      ctx.frame.settings->ambientOcclusion;
   const TextureDimensions dimensions = gpu_.getTextureDimensions(
       ctx.shared[FrameTextureSlot::SceneDepth].texture);
   const uint32_t width = std::max(dimensions.width, 1u);
@@ -509,6 +514,8 @@ Result<bool, std::string> GTAOPass::build(FrameBuildContext &ctx) {
     pointSamplerId = gpu_.getSamplerBindlessIndex(samplers_[PointClamp]);
     linearSamplerId = gpu_.getSamplerBindlessIndex(samplers_[LinearClamp]);
   }
+  const std::array temporalRecordingSamplers{samplers_[PointClamp],
+                                             samplers_[LinearClamp]};
   const bool temporalHistoryInvalidated = temporalPolicyChanged_;
   temporalPolicyChanged_ = false;
   if (temporalHistoryInvalidated) {
@@ -553,12 +560,11 @@ Result<bool, std::string> GTAOPass::build(FrameBuildContext &ctx) {
   const std::array depthDependencies{
       ctx.shared[FrameTextureSlot::SceneDepth].texture};
   const ComputeDispatchItem depthDispatch{
-      .pipeline = pipelines_[DepthPrefilter],
+      .pipeline = program_.computePipeline(DepthPrefilter),
       .dispatch = DispatchSize{.x = divRoundUp(width, 16u),
                                .y = divRoundUp(height, 16u),
                                .z = 1u},
       .pushConstants = pushConstants(depthPc),
-      .dependencyTextures = depthDependencies,
       .pushConstantTextureBindings = depthBindings,
       .debugLabel = "GTAO Depth Prefilter",
       .debugColor = kGTAODebugColor,
@@ -567,12 +573,15 @@ Result<bool, std::string> GTAOPass::build(FrameBuildContext &ctx) {
   depthPass.executionMode = RenderPassExecutionMode::ComputeOnly;
   depthPass.hasColorAttachment = false;
   depthPass.preDispatches = std::span(&depthDispatch, 1u);
-  depthPass.dependencyTextures = depthDependencies;
   depthPass.gpuTimingScope = GpuTimingScope::GTAOPrefilterEdges;
   depthPass.debugLabel = "GTAO Depth Prefilter Pass";
   depthPass.debugColor = kGTAODebugColor;
   [[maybe_unused]] const RenderGraphPassId depthPassId =
       ctx.graph.addGraphicsPass(depthPass).value();
+  (void)ctx.graph
+      .addImportedTextureReads(depthPassId, depthDependencies,
+                               depthPass.debugLabel)
+      .value();
   const EdgePushConstants edgePc{
       .depthTexId = 0u,
       .outputTexId = 0u,
@@ -588,7 +597,7 @@ Result<bool, std::string> GTAOPass::build(FrameBuildContext &ctx) {
           .graphTextureResourceIndex = transientTextures[kEdges].value,
           .access = RenderGraphAccessMode::Write}};
   const ComputeDispatchItem edgeDispatch{
-      .pipeline = pipelines_[Edge],
+      .pipeline = program_.computePipeline(Edge),
       .dispatch = fullDispatch,
       .pushConstants = pushConstants(edgePc),
       .pushConstantTextureBindings = edgeBindings,
@@ -617,16 +626,13 @@ Result<bool, std::string> GTAOPass::build(FrameBuildContext &ctx) {
         .projectionType =
             static_cast<uint32_t>(ctx.frame.camera.projectionType),
     };
-    const std::array reconstructDependencies{reconstructedNormalDebugTexture_};
-    constexpr std::array reconstructAccessModes{RenderGraphAccessMode::Write};
     const std::array reconstructBindings{PushConstantTextureBinding{
         .byteOffset = offsetof(ReconstructNormalsPushConstants, depthTexId),
         .graphTextureResourceIndex = transientTextures[0].value}};
     const ComputeDispatchItem reconstructDispatch{
-        .pipeline = pipelines_[ReconstructNormals],
+        .pipeline = program_.computePipeline(ReconstructNormals),
         .dispatch = fullDispatch,
         .pushConstants = pushConstants(reconstructPc),
-        .dependencyTextures = reconstructDependencies,
         .pushConstantTextureBindings = reconstructBindings,
         .debugLabel = "GTAO Reconstructed Normals Debug",
         .debugColor = kGTAODebugColor,
@@ -635,12 +641,15 @@ Result<bool, std::string> GTAOPass::build(FrameBuildContext &ctx) {
     reconstructPass.executionMode = RenderPassExecutionMode::ComputeOnly;
     reconstructPass.hasColorAttachment = false;
     reconstructPass.preDispatches = std::span(&reconstructDispatch, 1u);
-    reconstructPass.dependencyTextures = reconstructDependencies;
-    reconstructPass.dependencyTextureAccessModes = reconstructAccessModes;
     reconstructPass.debugLabel = "GTAO Reconstructed Normals Debug Pass";
     reconstructPass.debugColor = kGTAODebugColor;
     [[maybe_unused]] const RenderGraphPassId reconstructPassId =
         ctx.graph.addGraphicsPass(reconstructPass).value();
+    (void)ctx.graph
+        .addImportedTextureAccess(
+            reconstructPassId, reconstructedNormalDebugTexture_,
+            RenderGraphAccessMode::Write, reconstructPass.debugLabel)
+        .value();
     publishRequestedCapture(
         ctx.frame, gpu_, "material_normals", reconstructedNormalDebugTexture_,
         RenderCaptureValueKind::Normal,
@@ -692,11 +701,9 @@ Result<bool, std::string> GTAOPass::build(FrameBuildContext &ctx) {
     ++mainDependencyCount;
   }
   const ComputeDispatchItem mainDispatch{
-      .pipeline = pipelines_[Main],
+      .pipeline = program_.computePipeline(Main),
       .dispatch = workingDispatch,
       .pushConstants = pushConstants(mainPc),
-      .dependencyTextures = std::span<const TextureHandle>(
-          mainDependencies.data(), mainDependencyCount),
       .pushConstantTextureBindings = mainBindings,
       .debugLabel = "GTAO Main",
       .debugColor = kGTAODebugColor,
@@ -705,13 +712,18 @@ Result<bool, std::string> GTAOPass::build(FrameBuildContext &ctx) {
   mainPass.executionMode = RenderPassExecutionMode::ComputeOnly;
   mainPass.hasColorAttachment = false;
   mainPass.preDispatches = std::span(&mainDispatch, 1u);
-  mainPass.dependencyTextures = std::span<const TextureHandle>(
-      mainDependencies.data(), mainDependencyCount);
   mainPass.gpuTimingScope = GpuTimingScope::GTAOMain;
   mainPass.debugLabel = "GTAO Main Pass";
   mainPass.debugColor = kGTAODebugColor;
   [[maybe_unused]] const RenderGraphPassId mainPassId =
       ctx.graph.addGraphicsPass(mainPass).value();
+  (void)ctx.graph
+      .addImportedTextureReads(
+          mainPassId,
+          std::span<const TextureHandle>(mainDependencies.data(),
+                                         mainDependencyCount),
+          mainPass.debugLabel)
+      .value();
   auto finalTextureResult = ctx.graph.importTexture(
       ctx.shared[FrameTextureSlot::AmbientOcclusion].texture,
       "gtao_final_ambient_occlusion");
@@ -750,7 +762,7 @@ Result<bool, std::string> GTAOPass::build(FrameBuildContext &ctx) {
             .byteOffset = offsetof(DenoisePushConstants, edgeTexId),
             .graphTextureResourceIndex = transientTextures[kEdges].value}};
     const ComputeDispatchItem denoiseDispatch{
-        .pipeline = pipelines_[Denoise],
+        .pipeline = program_.computePipeline(Denoise),
         .dispatch = workingDispatch,
         .pushConstants = pushConstants(denoisePc),
         .pushConstantTextureBindings = denoiseBindings,
@@ -839,11 +851,9 @@ Result<bool, std::string> GTAOPass::build(FrameBuildContext &ctx) {
             .graphTextureResourceIndex = finalTexture.value,
             .access = RenderGraphAccessMode::Write}};
     const ComputeDispatchItem temporalDispatch{
-        .pipeline = pipelines_[Temporal],
+        .pipeline = program_.computePipeline(Temporal),
         .dispatch = fullDispatch,
         .pushConstants = pushConstants(temporalPc),
-        .dependencyTextures = std::span<const TextureHandle>(
-            temporalDependencies.data(), temporalDependencyCount),
         .pushConstantTextureBindings = temporalBindings,
         .debugLabel = temporalActive ? "GTAO Upscale Temporal" : "GTAO Upscale",
         .debugColor = kGTAODebugColor,
@@ -852,8 +862,10 @@ Result<bool, std::string> GTAOPass::build(FrameBuildContext &ctx) {
     temporalPass.executionMode = RenderPassExecutionMode::ComputeOnly;
     temporalPass.hasColorAttachment = false;
     temporalPass.preDispatches = std::span(&temporalDispatch, 1u);
-    temporalPass.dependencyTextures = std::span<const TextureHandle>(
-        temporalDependencies.data(), temporalDependencyCount);
+    temporalPass.recordingSamplers =
+        temporalActive
+            ? std::span<const SamplerHandle>(temporalRecordingSamplers)
+            : std::span<const SamplerHandle>{};
     temporalPass.gpuTimingScope = temporalActive ? GpuTimingScope::GTAOTemporal
                                                  : GpuTimingScope::GTAOUpscale;
     temporalPass.debugLabel =
@@ -861,6 +873,13 @@ Result<bool, std::string> GTAOPass::build(FrameBuildContext &ctx) {
     temporalPass.debugColor = kGTAODebugColor;
     [[maybe_unused]] const RenderGraphPassId temporalPassId =
         ctx.graph.addGraphicsPass(temporalPass).value();
+    (void)ctx.graph
+        .addImportedTextureReads(
+            temporalPassId,
+            std::span<const TextureHandle>(temporalDependencies.data(),
+                                           temporalDependencyCount),
+            temporalPass.debugLabel)
+        .value();
   }
   const auto publishTransientCapture =
       [&](size_t captureIndex, std::string_view name,
@@ -942,7 +961,7 @@ Result<bool, std::string> GTAOPass::build(FrameBuildContext &ctx) {
 
 Result<bool, std::string> GTAOPass::publishFrameData(FrameBuildContext &ctx) {
   const RenderSettings::AmbientOcclusionSettings &ao =
-      ctx.frame.settings.ambientOcclusion;
+      ctx.frame.settings->ambientOcclusion;
   int32_t framebufferWidth = 0;
   int32_t framebufferHeight = 0;
   gpu_.getFramebufferSize(framebufferWidth, framebufferHeight);

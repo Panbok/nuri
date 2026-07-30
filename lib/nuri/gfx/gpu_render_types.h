@@ -18,6 +18,15 @@ enum class RenderGraphAccessMode : uint8_t {
   Write = 1u << 1u,
 };
 
+struct NURI_API RenderGraphImportedBufferUse {
+  BufferHandle buffer{};
+  RenderGraphAccessMode access = RenderGraphAccessMode::Read;
+};
+struct NURI_API RenderGraphImportedTextureUse {
+  TextureHandle texture{};
+  RenderGraphAccessMode access = RenderGraphAccessMode::Read;
+};
+
 [[nodiscard]] constexpr RenderGraphAccessMode
 operator|(RenderGraphAccessMode lhs, RenderGraphAccessMode rhs) {
   return static_cast<RenderGraphAccessMode>(static_cast<uint8_t>(lhs) |
@@ -90,9 +99,6 @@ struct ComputeDispatchItem {
   RayQueryBindingHandle rayQueryBinding{};
   DispatchSize dispatch{};
   std::span<const std::byte> pushConstants{};
-  std::span<const BufferHandle> dependencyBuffers{};
-  std::span<const RenderGraphAccessMode> dependencyBufferAccessModes{};
-  std::span<const TextureHandle> dependencyTextures{};
   std::span<const PushConstantTextureBinding> pushConstantTextureBindings{};
   std::string_view debugLabel{};
   uint32_t debugColor = 0xffffffffu;
@@ -492,8 +498,6 @@ struct MeshDispatchItem {
   float depthBiasSlope = 0.0f;
   float depthBiasClamp = 0.0f;
   std::span<const std::byte> pushConstants{};
-  std::span<const BufferHandle> dependencyBuffers{};
-  std::span<const TextureHandle> dependencyTextures{};
   std::span<const PushConstantTextureBinding> pushConstantTextureBindings{};
   std::string_view debugLabel{};
   uint32_t debugColor = 0xffffffffu;
@@ -561,15 +565,13 @@ struct RenderPass {
   bool useViewport = false;
   Viewport viewport{};
   std::span<const ComputeDispatchItem> preDispatches{};
-  std::span<const BufferHandle> dependencyBuffers{};
-  std::span<const TextureHandle> dependencyTextures{};
+  std::span<const SamplerHandle> recordingSamplers{};
   std::span<const DrawItem> draws{};
   std::span<const MeshDispatchItem> meshDispatches{};
   std::span<const BufferCopyRegion> bufferCopies{};
   std::span<const TextureCopyItem> textureCopies{};
   std::span<const AccelerationStructureBuildItem> accelerationStructureBuilds{};
   ExternalTemporalDispatchItem externalTemporalDispatch{};
-  bool payloadBorrowed = false;
   bool drawBuffersPreResolved = false;
   GpuTimingScope gpuTimingScope = GpuTimingScope::None;
   std::string_view debugLabel{};
@@ -584,6 +586,7 @@ struct GraphicsRecordingStep {
 struct GraphicsRecordingReferences {
   std::span<const BufferHandle> buffers{};
   std::span<const TextureHandle> textures{};
+  std::span<const SamplerHandle> samplers{};
   std::span<const AccelerationStructureHandle> accelerationStructures{};
   std::span<const RenderPipelineHandle> renderPipelines{};
   std::span<const ComputePipelineHandle> computePipelines{};

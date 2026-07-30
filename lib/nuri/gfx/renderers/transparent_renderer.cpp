@@ -100,7 +100,7 @@ TransparentRenderer::TransparentRenderer(GPUDevice &gpu,
       memory_(resolveMemoryResource(memory)),
       instanceBuffers_(std::make_unique<ForwardInstanceBuffers>(
           gpu_, "transparent", memory_)),
-      sceneCache_(memory_), meshDrawTemplates_(memory_),
+      sceneCache_(memory_), selectedDrawIndices_(memory_),
       contributorSortableDraws_(memory_), contributorFixedDraws_(memory_),
       contributorTextureReads_(memory_), contributorDependencyBuffers_(memory_),
       drawPushConstants_(memory_), pickPushConstants_(memory_),
@@ -109,7 +109,8 @@ TransparentRenderer::TransparentRenderer(GPUDevice &gpu,
       transparentRunDrawItems_(memory_),
       transparentRunDependencyBuffers_(memory_),
       transparentCandidateDependencyBuffers_(memory_), pickDrawItems_(memory_),
-      passTextureReads_(memory_), passDependencyBuffers_(memory_) {
+      passTextureReads_(memory_), passDependencyBuffers_(memory_),
+      passRecordingSamplers_(memory_) {
   const std::filesystem::path basePath =
       !config_.pickFragment.empty() ? config_.pickFragment.parent_path()
                                     : config_.meshFragment.parent_path();
@@ -155,7 +156,7 @@ TransparentRenderer::prepareTransparentPasses(RenderFrameContext &frame) {
   instanceBuffers_->abandonPrepared();
   frame.metrics.transparent = {};
   resetFrameBuildState();
-  const RenderSettings &settings = frame.settings;
+  const RenderSettings &settings = frame.settings.facts();
   auto contributorResult = collectContributorDraws(frame);
   if (contributorResult.hasError())
     return contributorResult;
@@ -179,40 +180,24 @@ TransparentRenderer::prepareTransparentPasses(RenderFrameContext &frame) {
   if (initResult.hasError()) {
     return initResult;
   }
-  const MaterialTableSnapshot materialSnapshot =
-      frame.resources->materialSnapshot();
-  const bool topologyDirty =
-      sceneCache_.scene != frame.scene ||
-      sceneCache_.topologyVersion != frame.scene->topologyVersion();
-  const uint64_t modelMaterialBindingVersion =
-      frame.resources->modelMaterialBindingVersion();
-  const bool materialDirty =
-      topologyDirty ||
-      sceneCache_.materialVersion != materialSnapshot.version ||
-      sceneCache_.modelMaterialBindingVersion != modelMaterialBindingVersion;
+  sceneDrawDatabase_ = frame.sharedResources.sceneDrawDatabase;
+  if (sceneDrawDatabase_ == nullptr) {
+    return Result<bool, std::string>::makeError(
+        "TransparentRenderer: scene draw database is unavailable");
+  }
+  const bool databaseDirty =
+      cachedDrawDatabaseGeneration_ != sceneDrawDatabase_->generation();
   const bool transformDirty =
-      topologyDirty ||
+      databaseDirty ||
       sceneCache_.transformVersion != frame.scene->transformVersion();
   const bool excludeTransmissionBlend =
       frame.sharedResources.transparentTransmissionStageEnabled;
   const bool transmissionBlendPolicyDirty =
       cachedExcludeTransmissionBlend_ != excludeTransmissionBlend;
-  const uint64_t geometryMutationVersion = gpu_.geometryMutationVersion();
-  const bool geometryDirty =
-      geometryMutationVersion != 0u &&
-      geometryMutationVersion != sceneCache_.geometryMutationVersion;
-  const bool needsGeometryRebuild =
-      geometryDirty && !meshDrawTemplates_.empty();
-  if (topologyDirty || materialDirty || needsGeometryRebuild ||
-      transmissionBlendPolicyDirty) {
-    rebuildSceneCache(*frame.sharedResources.sceneDrawDatabase, *frame.scene,
-                      excludeTransmissionBlend);
-    sceneCache_.materialVersion = materialSnapshot.version;
-    sceneCache_.modelMaterialBindingVersion = modelMaterialBindingVersion;
-  } else if (geometryDirty) {
-    sceneCache_.geometryMutationVersion = geometryMutationVersion;
+  if (databaseDirty || transmissionBlendPolicyDirty) {
+    rebuildSceneCache(*sceneDrawDatabase_, excludeTransmissionBlend);
   }
-  if (meshDrawTemplates_.empty()) {
+  if (selectedDrawIndices_.empty()) {
     return publishContributors();
   }
   const std::span<const Renderable> renderables = frame.scene->renderables();
@@ -223,6 +208,8 @@ TransparentRenderer::prepareTransparentPasses(RenderFrameContext &frame) {
   }
   const ForwardSceneGpuData *sceneGpu =
       &*frame.sharedResources.forwardSceneGpuData;
+  passRecordingSamplers_.assign(sceneGpu->recordingSamplers.begin(),
+                                sceneGpu->recordingSamplers.end());
   const MaterialTableGpuData *materialGpu =
       &*frame.sharedResources.materialTableGpuData;
   const AnimationSceneFrameData *animationSceneData =
@@ -230,12 +217,15 @@ TransparentRenderer::prepareTransparentPasses(RenderFrameContext &frame) {
   collectForwardEnvironmentTextures(
       *frame.scene, *frame.resources,
       sceneCache_.environmentTextureAccessHandles);
-  if (materialDirty || sceneCache_.materialTextureAccessHandles.empty()) {
-    collectForwardMaterialTextures(*frame.resources, meshDrawTemplates_,
+  if (databaseDirty || sceneCache_.materialTextureAccessHandles.empty()) {
+    const auto selectedDraws =
+        selectedDrawIndices_ |
+        std::views::transform(
+            [this](uint32_t index) -> const SceneDrawRecord & {
+              return sceneDrawDatabase_->draws()[index];
+            });
+    collectForwardMaterialTextures(*frame.resources, selectedDraws,
                                    sceneCache_.materialTextureAccessHandles);
-  }
-  if (materialDirty) {
-    sceneCache_.materialVersion = materialSnapshot.version;
   }
   auto instanceBufferResult = instanceBuffers_->prepare(
       frame.frameIndex, std::max(gpu_.getSwapchainImageCount(), 1u),
@@ -277,13 +267,14 @@ TransparentRenderer::prepareTransparentPasses(RenderFrameContext &frame) {
   drawPushConstants_.clear();
   pickDrawItems_.clear();
   pickPushConstants_.clear();
-  meshSortableDraws_.reserve(meshDrawTemplates_.size());
-  drawPushConstants_.reserve(meshDrawTemplates_.size());
-  pickDrawItems_.reserve(meshDrawTemplates_.size());
-  pickPushConstants_.reserve(meshDrawTemplates_.size());
+  meshSortableDraws_.reserve(selectedDrawIndices_.size());
+  drawPushConstants_.reserve(selectedDrawIndices_.size());
+  pickDrawItems_.reserve(selectedDrawIndices_.size());
+  pickPushConstants_.reserve(selectedDrawIndices_.size());
   const uint32_t renderableCount = saturateToU32(renderables.size());
-  for (size_t i = 0; i < meshDrawTemplates_.size(); ++i) {
-    const MeshDrawTemplate &entry = meshDrawTemplates_[i];
+  for (size_t i = 0u; i < selectedDrawIndices_.size(); ++i) {
+    const uint32_t drawIndex = selectedDrawIndices_[i];
+    const SceneDrawRecord &entry = sceneDrawDatabase_->draws()[drawIndex];
     const std::optional<SubmeshLod> lod =
         resolveForwardLod(*entry.submesh, settings.opaque.forcedMeshLod);
     if (!lod.has_value()) {
@@ -436,7 +427,7 @@ Result<bool, std::string>
 TransparentRenderer::appendTransparentMainPass(RenderFrameContext &frame,
                                                RenderGraphBuilder &graph) {
   const AntiAliasingDebugView debugView =
-      frame.settings.antiAliasing.debug.view;
+      frame.settings->antiAliasing.debug.view;
   if (isAntiAliasingDebugOutputView(debugView)) {
     return Result<bool, std::string>::makeResult(true);
   }
@@ -570,22 +561,16 @@ TransparentRenderer::ensurePipelines(Format colorFormat, Format depthFormat) {
 }
 
 void TransparentRenderer::rebuildSceneCache(const SceneDrawDatabase &database,
-                                            const RenderScene &scene,
                                             bool excludeTransmissionBlend) {
-  meshDrawTemplates_.clear();
-  const auto append = [&](std::span<const uint32_t> indices) {
-    for (uint32_t index : indices) {
-      const SceneDrawRecord &draw = database.draws()[index];
-      if (draw.alphaBlended &&
-          !(draw.transmission && excludeTransmissionBlend)) {
-        meshDrawTemplates_.push_back(draw);
-      }
+  selectedDrawIndices_.clear();
+  for (const uint32_t index :
+       database.category(SceneDrawCategory::AlphaBlended)) {
+    const SceneDrawRecord &draw = database.draws()[index];
+    if (!(draw.transmission && excludeTransmissionBlend)) {
+      selectedDrawIndices_.push_back(index);
     }
-  };
-  append(database.category(SceneDrawCategory::AlphaBlended));
-  sceneCache_.scene = &scene;
-  sceneCache_.topologyVersion = scene.topologyVersion();
-  sceneCache_.geometryMutationVersion = gpu_.geometryMutationVersion();
+  }
+  cachedDrawDatabaseGeneration_ = database.generation();
   cachedExcludeTransmissionBlend_ = excludeTransmissionBlend;
 }
 
@@ -889,9 +874,10 @@ Result<bool, std::string> TransparentRenderer::appendTransparentDrawRun(
   }
   passDesc.draws = draws;
   std::pmr::vector<BufferHandle> preResolvedDrawBuffers(memory_);
-  preResolvedDrawBuffers.reserve(meshDrawTemplates_.size() * 3u +
+  preResolvedDrawBuffers.reserve(selectedDrawIndices_.size() * 3u +
                                  draws.size() * 2u + 8u);
-  for (const MeshDrawTemplate &entry : meshDrawTemplates_) {
+  for (const uint32_t drawIndex : selectedDrawIndices_) {
+    const SceneDrawRecord &entry = sceneDrawDatabase_->draws()[drawIndex];
     appendUniqueForwardHandle(preResolvedDrawBuffers, entry.baseVertexBuffer);
     appendUniqueForwardHandle(preResolvedDrawBuffers,
                               entry.baseVertexDecodeBuffer);
@@ -901,12 +887,17 @@ Result<bool, std::string> TransparentRenderer::appendTransparentDrawRun(
   passDesc.drawBuffersPreResolved = true;
   passDesc.preResolvedDrawBuffers = std::span<const BufferHandle>(
       preResolvedDrawBuffers.data(), preResolvedDrawBuffers.size());
-  passDesc.dependencyBuffers = dependencyBuffers;
+  passDesc.recordingSamplers = passRecordingSamplers_;
   passDesc.debugLabel = debugLabel;
   passDesc.debugColor = kTransparentPassDebugColor;
   auto addResult = graph.addGraphicsPass(passDesc);
   if (addResult.hasError()) {
     return Result<bool, std::string>::makeError(addResult.error());
+  }
+  auto bufferResult = graph.addImportedBufferReads(
+      addResult.value(), dependencyBuffers, passDesc.debugLabel);
+  if (bufferResult.hasError()) {
+    return Result<bool, std::string>::makeError(bufferResult.error());
   }
   for (const TextureHandle handle : textureReads) {
     auto importResult = graph.importTexture(handle, "transparent_texture_read");
@@ -952,9 +943,10 @@ TransparentRenderer::appendTransparentPickPass(RenderFrameContext &frame,
   pickDesc.draws =
       std::span<const DrawItem>(pickDrawItems_.data(), pickDrawItems_.size());
   std::pmr::vector<BufferHandle> preResolvedDrawBuffers(memory_);
-  preResolvedDrawBuffers.reserve(meshDrawTemplates_.size() * 3u +
+  preResolvedDrawBuffers.reserve(selectedDrawIndices_.size() * 3u +
                                  pickDrawItems_.size() * 2u + 8u);
-  for (const MeshDrawTemplate &entry : meshDrawTemplates_) {
+  for (const uint32_t drawIndex : selectedDrawIndices_) {
+    const SceneDrawRecord &entry = sceneDrawDatabase_->draws()[drawIndex];
     appendUniqueForwardHandle(preResolvedDrawBuffers, entry.baseVertexBuffer);
     appendUniqueForwardHandle(preResolvedDrawBuffers,
                               entry.baseVertexDecodeBuffer);
@@ -966,13 +958,17 @@ TransparentRenderer::appendTransparentPickPass(RenderFrameContext &frame,
   pickDesc.drawBuffersPreResolved = true;
   pickDesc.preResolvedDrawBuffers = std::span<const BufferHandle>(
       preResolvedDrawBuffers.data(), preResolvedDrawBuffers.size());
-  pickDesc.dependencyBuffers = std::span<const BufferHandle>(
-      passDependencyBuffers_.data(), passDependencyBuffers_.size());
+  pickDesc.recordingSamplers = passRecordingSamplers_;
   pickDesc.debugLabel = kTransparentPickPassLabel;
   pickDesc.debugColor = kTransparentPickPassDebugColor;
   auto addResult = graph.addGraphicsPass(pickDesc);
   if (addResult.hasError()) {
     return Result<bool, std::string>::makeError(addResult.error());
+  }
+  auto bufferResult = graph.addImportedBufferReads(
+      addResult.value(), passDependencyBuffers_, pickDesc.debugLabel);
+  if (bufferResult.hasError()) {
+    return Result<bool, std::string>::makeError(bufferResult.error());
   }
   for (const TextureHandle handle : sceneCache_.materialTextureAccessHandles) {
     auto importResult =
@@ -991,8 +987,10 @@ TransparentRenderer::appendTransparentPickPass(RenderFrameContext &frame,
 
 void TransparentRenderer::resetCachedState() {
   sceneCache_.reset();
+  sceneDrawDatabase_ = nullptr;
+  cachedDrawDatabaseGeneration_ = std::numeric_limits<uint64_t>::max();
   cachedExcludeTransmissionBlend_ = true;
-  meshDrawTemplates_.clear();
+  selectedDrawIndices_.clear();
 }
 
 void TransparentRenderer::resetFrameBuildState() {
@@ -1012,6 +1010,7 @@ void TransparentRenderer::resetFrameBuildState() {
   pickDrawItems_.clear();
   passTextureReads_.clear();
   passDependencyBuffers_.clear();
+  passRecordingSamplers_.clear();
   feedbackRefresh_ = {};
   transparentUsesJitteredProjection_ = true;
 }
@@ -1108,7 +1107,7 @@ void registerTransparentStages(RenderPipeline &pipeline, GPUDevice &gpu,
               },
       });
   const auto meshEnabled = [](const void *, const FrameBuildContext &ctx) {
-    return ctx.frame.settings.transparent.enabled;
+    return ctx.frame.settings->transparent.enabled;
   };
   pipeline.addStage(PipelineStageDesc{
       .componentName = "TransparentFeature",

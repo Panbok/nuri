@@ -312,20 +312,6 @@ private:
   Result<bool, std::string>
   ensureShadowResources(const RenderSettings::ShadowSettings &settings);
   Result<bool, std::string> ensureRingBufferCount(uint32_t requiredCount);
-  Result<bool, std::string>
-  ensureInstanceMatricesRingCapacity(size_t requiredBytes);
-  Result<bool, std::string>
-  ensureInstanceRemapRingCapacity(size_t requiredBytes);
-  Result<bool, std::string>
-  ensureShadowDrawPacketRingCapacity(size_t requiredBytes);
-  Result<bool, std::string> ensureShadowFrameRingCapacity(size_t requiredBytes);
-  Result<bool, std::string>
-  ensureSdsmReduceResultRingCount(uint32_t requiredCount);
-  Result<bool, std::string>
-  ensureSdsmReduceResultRingCapacity(size_t requiredBytes);
-  Result<bool, std::string> ensureRingCapacity(
-      BufferRingSlot slot, size_t requiredBytes, std::string_view debugName,
-      uint64_t FrameSlotState::*version, Storage storage = Storage::Device);
   void rebuildSceneCache(const SceneDrawDatabase &database);
   void rebuildStaticShadowCasterCache(const RenderScene &scene,
                                       const RenderSettings &settings);
@@ -392,8 +378,6 @@ private:
   std::pmr::vector<std::byte> shadowDrawPacketUploadBytes_;
   std::array<CascadeState, kMaxShadowCascades> cascadeStates_{};
   std::pmr::vector<RenderGraphImportedBufferUse> passBufferDependencies_;
-  std::pmr::vector<RenderGraphBufferUse> passBufferUses_;
-  std::pmr::vector<RenderGraphTextureUse> passTextureUses_;
   std::pmr::vector<BufferHandle> preResolvedDrawBuffers_;
   std::pmr::vector<RenderGraphImportedTextureUse> passTextureDependencies_;
   std::pmr::vector<RenderGraphImportedTextureUse> previewTextureDependencies_;

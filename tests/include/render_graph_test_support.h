@@ -329,8 +329,8 @@ public:
   createBuffer(const BufferDesc &desc, std::string_view debugName) override;
   Result<TextureHandle, std::string>
   createTexture(const TextureDesc &desc, std::string_view debugName) override;
-  Result<bool, std::string> retainGraphicsRecordingReferences(
-      RecordingContextHandle ctx,
+  Result<bool, std::string> recordGraphicsRangeWithReferences(
+      RecordingContextHandle ctx, std::span<const GraphicsRecordingStep> steps,
       const GraphicsRecordingReferences &references) override;
   Result<SubmittedGraphicsFrame, std::string> submitRecordedGraphicsFrame(
       std::span<const RecordedCommandBufferHandle> commandBuffers,
@@ -339,12 +339,11 @@ public:
   size_t lastSubmitPassCount = 0u;
   TextureHandle lastColorTexture{};
   TextureHandle lastDepthTexture{};
-  BufferHandle lastDependencyBuffer{};
-  BufferHandle lastPreDispatchDependencyBuffer{};
   BufferHandle lastDrawVertexBuffer{};
-  uint32_t retainReferencesCallCount = 0u;
+  uint32_t combinedRecordingCallCount = 0u;
   std::vector<BufferHandle> retainedBuffers{};
   std::vector<TextureHandle> retainedTextures{};
+  std::vector<SamplerHandle> retainedSamplers{};
   std::vector<AccelerationStructureHandle> retainedAccelerationStructures{};
   std::vector<RenderPipelineHandle> retainedRenderPipelines{};
   std::vector<ComputePipelineHandle> retainedComputePipelines{};

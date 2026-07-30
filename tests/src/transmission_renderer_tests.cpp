@@ -426,8 +426,7 @@ TEST(TransmissionRendererTest,
   ASSERT_FALSE(materialPrepare.hasError()) << materialPrepare.error();
   ASSERT_TRUE(materialPrepare.value());
   EXPECT_LE(gpu.bufferDeviceAddressCallCount, 2u);
-  EXPECT_EQ(renderer.sceneCache_.materialVersion,
-            resources.materialSnapshot().version);
+  EXPECT_EQ(renderer.drawDatabaseGeneration_, drawDatabase.generation());
 
   gpu.bumpGeometryMutationVersion();
   gpu.bufferDeviceAddressCallCount = 0u;
@@ -438,8 +437,7 @@ TEST(TransmissionRendererTest,
   ASSERT_FALSE(geometryPrepare.hasError()) << geometryPrepare.error();
   ASSERT_TRUE(geometryPrepare.value());
   EXPECT_GT(gpu.bufferDeviceAddressCallCount, 2u);
-  EXPECT_EQ(renderer.sceneCache_.geometryMutationVersion,
-            gpu.geometryMutationVersion());
+  EXPECT_EQ(renderer.drawDatabaseGeneration_, drawDatabase.generation());
 }
 
 TEST(TransmissionRendererTest,

@@ -66,7 +66,7 @@ SceneDrawDatabase::update(const RenderScene &scene,
       .materialBinding = resources.modelMaterialBindingVersion(),
       .geometry = geometryVersion,
   };
-  if (geometryVersion != 0 && sourceVersion_ == sourceVersion) {
+  if (sourceVersion_ == sourceVersion) {
     return Result<bool, std::string>::makeResult(false);
   }
   instances_.clear();

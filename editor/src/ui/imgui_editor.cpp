@@ -3555,8 +3555,7 @@ void drawShadowsWindow(
     const RenderFrameMetrics &frameMetrics,
     const std::optional<ShadowInspectResult> &shadowInspectResult,
     TextureHandle previewTexture,
-    std::vector<TextureHandle> &dependencyTextures,
-    std::vector<RenderGraphAccessMode> &dependencyTextureAccessModes) {
+    std::vector<RenderGraphImportedTextureUse> &textureUses) {
   if (!ImGui::Begin(kShadowsWindowName, &open)) {
     ImGui::End();
     return;
@@ -3564,8 +3563,7 @@ void drawShadowsWindow(
 
   drawShadowSettings(renderSettings.shadow, &shadowDebugFrameData);
   ImGui::Separator();
-  dependencyTextures.clear();
-  dependencyTextureAccessModes.clear();
+  textureUses.clear();
 
   if (!renderSettings.shadow.enabled) {
     ImGui::TextUnformatted("Shadows are disabled.");
@@ -3873,8 +3871,7 @@ void drawShadowsWindow(
     return;
   }
 
-  dependencyTextures.push_back(previewTexture);
-  dependencyTextureAccessModes.push_back(RenderGraphAccessMode::Read);
+  textureUses.push_back({.texture = previewTexture});
   ImGui::Text("Preview Format: %s",
               formatDisplayName(gpu.getTextureFormat(previewTexture)));
   const TextureDimensions previewDimensions =
@@ -4538,46 +4535,50 @@ resolveTelemetryPassName(const RenderGraphTelemetrySnapshot &snapshot,
                       : std::string_view(name.data(), name.size());
 }
 
-const char *commandResourcePatchTargetName(
-    RenderGraphPlan::CommandResourcePatchTarget target) {
-  using Target = RenderGraphPlan::CommandResourcePatchTarget;
-  switch (target) {
-  case Target::PassColor:
-    return "color";
-  case Target::PassColorResolve:
-    return "color_resolve";
-  case Target::PassDepth:
-    return "depth";
-  case Target::PassDepthResolve:
-    return "depth_resolve";
-  case Target::PassDependencyBuffer:
-    return "dependency_buffer";
-  case Target::PassDependencyTexture:
-    return "dependency_texture";
-  case Target::PreDispatchDependencyBuffer:
-    return "pre_dispatch_buffer";
-  case Target::DrawVertexBuffer:
-    return "draw_vertex";
-  case Target::DrawIndexBuffer:
-    return "draw_index";
-  case Target::DrawIndirectBuffer:
-    return "draw_indirect";
-  case Target::DrawIndirectCountBuffer:
-    return "draw_indirect_count";
-  case Target::MeshDispatchIndirectBuffer:
-    return "mesh_indirect";
-  case Target::MeshDispatchIndirectCountBuffer:
-    return "mesh_indirect_count";
-  case Target::BufferCopySource:
-    return "buffer_copy_source";
-  case Target::BufferCopyDestination:
-    return "buffer_copy_destination";
-  case Target::TextureCopySource:
-    return "texture_copy_source";
-  case Target::TextureCopyDestination:
-    return "texture_copy_destination";
-  }
-  return "unknown";
+struct CommandResourcePatchUiInfo {
+  uint32_t orderedPassIndex = UINT32_MAX;
+  uint32_t commandIndex = 0u;
+  uint32_t resourceIndex = UINT32_MAX;
+  const char *target = "unknown";
+  bool hasCommandIndex = false;
+  bool buffer = false;
+};
+
+CommandResourcePatchUiInfo
+commandResourcePatchUiInfo(const RenderGraphPlan::CommandResourcePatch &patch) {
+  return std::visit(
+      [](const auto &site) {
+    using Site = std::decay_t<decltype(site)>;
+    CommandResourcePatchUiInfo info{.orderedPassIndex = site.orderedPassIndex,
+                                    .resourceIndex = site.resourceIndex,
+                                    .hasCommandIndex =
+                                        requires {site.commandIndex; },
+};
+if constexpr (requires { site.commandIndex; })
+  info.commandIndex = site.commandIndex;
+#define NURI_PATCH_UI(TYPE, LABEL, IS_BUFFER)                                  \
+  if constexpr (std::is_same_v<Site, RenderGraphPlan::TYPE>) {                 \
+    info.target = LABEL;                                                       \
+    info.buffer = IS_BUFFER;                                                   \
+  } else
+NURI_PATCH_UI(PassColorTexturePatch, "color", false)
+NURI_PATCH_UI(PassColorResolveTexturePatch, "color_resolve", false)
+NURI_PATCH_UI(PassDepthTexturePatch, "depth", false)
+NURI_PATCH_UI(PassDepthResolveTexturePatch, "depth_resolve", false)
+NURI_PATCH_UI(DrawVertexBufferPatch, "draw_vertex", true)
+NURI_PATCH_UI(DrawIndexBufferPatch, "draw_index", true)
+NURI_PATCH_UI(DrawIndirectBufferPatch, "draw_indirect", true)
+NURI_PATCH_UI(DrawIndirectCountBufferPatch, "draw_indirect_count", true)
+NURI_PATCH_UI(MeshDispatchIndirectBufferPatch, "mesh_indirect", true)
+NURI_PATCH_UI(MeshDispatchIndirectCountBufferPatch, "mesh_indirect_count", true)
+NURI_PATCH_UI(BufferCopySourcePatch, "buffer_copy_source", true)
+NURI_PATCH_UI(BufferCopyDestinationPatch, "buffer_copy_destination", true)
+NURI_PATCH_UI(TextureCopySourcePatch, "texture_copy_source", false)
+NURI_PATCH_UI(TextureCopyDestinationPatch, "texture_copy_destination", false) {}
+#undef NURI_PATCH_UI
+return info;
+},
+      patch);
 }
 
 void syncTelemetryDumpPath(RenderGraphTelemetryUiState &state,
@@ -5059,10 +5060,6 @@ void drawTelemetrySummary(
   drawRow("Buffer Lifetimes", summary.transientBufferLifetimeCount);
   drawRow("Texture Physicals", summary.transientTexturePhysicalCount);
   drawRow("Buffer Physicals", summary.transientBufferPhysicalCount);
-  drawRow("Resolved Dependency Slots",
-          summary.resolvedDependencyBufferSlotCount);
-  drawRow("Resolved Pre-Dispatch Slots",
-          summary.resolvedPreDispatchDependencyBufferSlotCount);
   drawRow("Command Resource Patches", summary.commandResourcePatchCount);
 
   ImGui::EndTable();
@@ -5396,9 +5393,7 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
 
   drawTelemetryTableSection(
       "Bindings", "RenderGraphTelemetryBindings", 5,
-      !snapshot->plan.commandResourcePatches.empty() ||
-          !snapshot->plan.resolvedDependencyBufferResourceIndices.empty(),
-      220.0f, [&]() {
+      !snapshot->plan.commandResourcePatches.empty(), 220.0f, [&]() {
         ImGui::TableSetupColumn("Section", ImGuiTableColumnFlags_WidthFixed,
                                 110.0f);
         ImGui::TableSetupColumn("Pass", ImGuiTableColumnFlags_WidthFixed,
@@ -5411,54 +5406,29 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
         ImGui::TableHeadersRow();
         for (const RenderGraphPlan::CommandResourcePatch &patch :
              snapshot->plan.commandResourcePatches) {
+          const CommandResourcePatchUiInfo info =
+              commandResourcePatchUiInfo(patch);
           ImGui::TableNextRow();
           ImGui::TableNextColumn();
           ImGui::TextUnformatted("patch");
           ImGui::TableNextColumn();
-          ImGui::Text("%u", patch.orderedPassIndex);
+          ImGui::Text("%u", info.orderedPassIndex);
           ImGui::TableNextColumn();
-          if (patch.dependencyIndex != 0u) {
-            ImGui::Text("%u/%u", patch.commandIndex, patch.dependencyIndex);
-          } else {
-            ImGui::Text("%u", patch.commandIndex);
-          }
+          if (info.hasCommandIndex)
+            ImGui::Text("%u", info.commandIndex);
+          else
+            ImGui::TextUnformatted("-");
           ImGui::TableNextColumn();
-          ImGui::TextUnformatted(commandResourcePatchTargetName(patch.target));
+          ImGui::TextUnformatted(info.target);
           ImGui::TableNextColumn();
-          ImGui::Text("%s[%u]",
-                      patch.resourceKind == RenderGraphResourceKind::Buffer
-                          ? "buf"
-                          : "tex",
-                      patch.resourceIndex);
-        }
-        for (uint32_t slot = 0;
-             slot <
-             snapshot->plan.resolvedDependencyBufferResourceIndices.size();
-             ++slot) {
-          const uint32_t resource =
-              snapshot->plan.resolvedDependencyBufferResourceIndices[slot];
-          if (resource == UINT32_MAX) {
-            continue;
-          }
-          ImGui::TableNextRow();
-          ImGui::TableNextColumn();
-          ImGui::TextUnformatted("dep_slot");
-          ImGui::TableNextColumn();
-          ImGui::TextUnformatted("-");
-          ImGui::TableNextColumn();
-          ImGui::Text("%u", slot);
-          ImGui::TableNextColumn();
-          ImGui::TextUnformatted("resource_slot");
-          ImGui::TableNextColumn();
-          ImGui::Text("buf[%u]", resource);
+          ImGui::Text("%s[%u]", info.buffer ? "buf" : "tex",
+                      info.resourceIndex);
         }
       });
 
   drawTelemetryTableSection(
       "Ranges", "RenderGraphTelemetryRanges", 4,
-      !snapshot->plan.dependencyBufferRangesByPass.empty() ||
-          !snapshot->plan.preDispatchRangesByPass.empty() ||
-          !snapshot->plan.preDispatchDependencyRanges.empty() ||
+      !snapshot->plan.preDispatchRangesByPass.empty() ||
           !snapshot->plan.drawRangesByPass.empty(),
       220.0f, [&]() {
         ImGui::TableSetupColumn("Section", ImGuiTableColumnFlags_WidthFixed,
@@ -5470,38 +5440,12 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
         ImGui::TableSetupColumn("Count", ImGuiTableColumnFlags_WidthFixed,
                                 70.0f);
         ImGui::TableHeadersRow();
-        for (uint32_t i = 0;
-             i < snapshot->plan.dependencyBufferRangesByPass.size(); ++i) {
-          const auto &range = snapshot->plan.dependencyBufferRangesByPass[i];
-          ImGui::TableNextRow();
-          ImGui::TableNextColumn();
-          ImGui::TextUnformatted("dep_pass");
-          ImGui::TableNextColumn();
-          ImGui::Text("%u", i);
-          ImGui::TableNextColumn();
-          ImGui::Text("%u", range.offset);
-          ImGui::TableNextColumn();
-          ImGui::Text("%u", range.count);
-        }
         for (uint32_t i = 0; i < snapshot->plan.preDispatchRangesByPass.size();
              ++i) {
           const auto &range = snapshot->plan.preDispatchRangesByPass[i];
           ImGui::TableNextRow();
           ImGui::TableNextColumn();
           ImGui::TextUnformatted("pre_pass");
-          ImGui::TableNextColumn();
-          ImGui::Text("%u", i);
-          ImGui::TableNextColumn();
-          ImGui::Text("%u", range.offset);
-          ImGui::TableNextColumn();
-          ImGui::Text("%u", range.count);
-        }
-        for (uint32_t i = 0;
-             i < snapshot->plan.preDispatchDependencyRanges.size(); ++i) {
-          const auto &range = snapshot->plan.preDispatchDependencyRanges[i];
-          ImGui::TableNextRow();
-          ImGui::TableNextColumn();
-          ImGui::TextUnformatted("pre_dep");
           ImGui::TableNextColumn();
           ImGui::Text("%u", i);
           ImGui::TableNextColumn();
@@ -8015,8 +7959,7 @@ struct ImGuiEditor::Impl {
     ImGui::NewFrame();
     inspectorWindowVisible = false;
     inspectorWindowMinX = 0.0f;
-    uiDependencyTextures.clear();
-    uiDependencyTextureAccessModes.clear();
+    uiTextureUses.clear();
     drawMainMenuBar();
     drawDockspaceRoot();
   }
@@ -8205,8 +8148,7 @@ struct ImGuiEditor::Impl {
                          NURI_PROFILER_COLOR_CMD_DRAW);
       drawShadowsWindow(showShadowsWindow, renderSettings, gpu,
                         shadowDebugFrameData, frameMetrics, shadowInspectResult,
-                        shadowPreviewTexture, uiDependencyTextures,
-                        uiDependencyTextureAccessModes);
+                        shadowPreviewTexture, uiTextureUses);
       NURI_PROFILER_ZONE_END();
     }
     if (showCameraControllerWindow) {
@@ -8301,15 +8243,6 @@ struct ImGuiEditor::Impl {
       NURI_PROFILER_ZONE_END();
       return result;
     }();
-    if (passResult.hasValue()) {
-      RenderGraphGraphicsPassDesc &pass = passResult.value();
-      pass.dependencyTextures = std::span<const TextureHandle>(
-          uiDependencyTextures.data(), uiDependencyTextures.size());
-      pass.dependencyTextureAccessModes =
-          std::span<const RenderGraphAccessMode>(
-              uiDependencyTextureAccessModes.data(),
-              uiDependencyTextureAccessModes.size());
-    }
     return passResult;
   }
 
@@ -8420,8 +8353,7 @@ struct ImGuiEditor::Impl {
   std::vector<HierarchyVisibleRow> hierarchyVisibleRows{};
   std::vector<uint8_t> hierarchyNodeOpenFlags{};
   std::unordered_set<uint64_t> hierarchyOpenBatchKeys{};
-  std::vector<TextureHandle> uiDependencyTextures{};
-  std::vector<RenderGraphAccessMode> uiDependencyTextureAccessModes{};
+  std::vector<RenderGraphImportedTextureUse> uiTextureUses{};
   int hierarchySelectedRowIndex = -1;
   bool hierarchySceneRootOpen = true;
   std::vector<DeferredAnimationAction> deferredAnimationActions{};
@@ -8692,6 +8624,11 @@ void ImGuiEditor::beginFrame() { impl_->beginFrame(); }
 
 Result<RenderGraphGraphicsPassDesc, std::string> ImGuiEditor::endFrame() {
   return impl_->endFrame();
+}
+
+std::span<const RenderGraphImportedTextureUse>
+ImGuiEditor::textureUses() const noexcept {
+  return impl_->uiTextureUses;
 }
 
 } // namespace nuri

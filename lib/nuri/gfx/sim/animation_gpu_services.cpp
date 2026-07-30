@@ -17,18 +17,6 @@ constexpr std::array kAnimationPrograms{
                          "animation_pose_skin_palette"},
     AnimationProgramDesc{"animation_pose_skin.comp", "animation_pose_skin"},
 };
-Result<bool, std::string>
-createComputePipeline(GPUDevice &gpu, ShaderHandle shader,
-                      std::string_view debugName,
-                      OwnedComputePipelineHandle &outPipeline) {
-  auto result = gpu.createComputePipeline(
-      ComputePipelineDesc{.computeShader = shader}, debugName);
-  if (result.hasError()) {
-    return Result<bool, std::string>::makeError(result.error());
-  }
-  outPipeline.reset(gpu, result.value());
-  return Result<bool, std::string>::makeResult(true);
-}
 } // namespace
 
 AnimationGpuServices::AnimationGpuServices(GPUDevice &gpu,
@@ -37,77 +25,43 @@ AnimationGpuServices::AnimationGpuServices(GPUDevice &gpu,
     : gpu_(gpu), shaderRoot_(std::move(shaderRoot)),
       memory_(memory != nullptr ? memory : std::pmr::get_default_resource()) {}
 
-AnimationGpuServices::~AnimationGpuServices() {
-  destroyPipelines();
-  destroyShaders();
-}
+AnimationGpuServices::~AnimationGpuServices() = default;
 
 ComputePipelineHandle
 AnimationGpuServices::pipeline(Program program) const noexcept {
-  return pipelines_[static_cast<size_t>(program)].get();
+  return programs_.computePipeline(static_cast<size_t>(program));
 }
 
 Result<void, std::string> AnimationGpuServices::ensureInitialized() {
   if (initialized_) {
     return Result<void, std::string>::makeResult();
   }
-  auto shaderResult = createShaders();
+  std::array<ShaderSpec, kProgramCount> shaderSpecs{};
+  for (size_t index = 0u; index < kProgramCount; ++index) {
+    shaderSpecs[index] = ShaderSpec{
+        .debugName = "animation_pose",
+        .path = shaderRoot_ / std::string(kAnimationPrograms[index].shaderFile),
+        .stage = ShaderStage::Compute,
+    };
+  }
+  auto shaderResult = programs_.compileShaders(gpu_, shaderSpecs);
   if (shaderResult.hasError()) {
     return Result<void, std::string>::makeError(shaderResult.error());
   }
-  auto pipelineResult = createPipelines();
+  std::array<ComputePipelineSpec, kProgramCount> pipelineSpecs{};
+  for (size_t index = 0u; index < kProgramCount; ++index) {
+    pipelineSpecs[index] = ComputePipelineSpec{
+        .debugName = kAnimationPrograms[index].debugName,
+        .desc = {.computeShader = programs_.shader(index)},
+    };
+  }
+  auto pipelineResult = programs_.replaceComputePipelines(gpu_, pipelineSpecs);
   if (pipelineResult.hasError()) {
-    destroyShaders();
+    programs_.reset();
     return Result<void, std::string>::makeError(pipelineResult.error());
   }
   initialized_ = true;
   return Result<void, std::string>::makeResult();
-}
-
-Result<bool, std::string> AnimationGpuServices::createShaders() {
-  destroyShaders();
-  std::array<OwnedShaderHandle, kProgramCount> compiledShaders{};
-  for (size_t index = 0u; index < kAnimationPrograms.size(); ++index) {
-    const std::filesystem::path path =
-        shaderRoot_ / std::string(kAnimationPrograms[index].shaderFile);
-    auto result = compileShaderFile(gpu_, "animation_pose", path.string(),
-                                    ShaderStage::Compute);
-    if (result.hasError()) {
-      return Result<bool, std::string>::makeError(result.error());
-    }
-    compiledShaders[index].reset(gpu_, result.value());
-  }
-  shaders_ = std::move(compiledShaders);
-  return Result<bool, std::string>::makeResult(true);
-}
-
-Result<bool, std::string> AnimationGpuServices::createPipelines() {
-  destroyPipelines();
-  std::array<OwnedComputePipelineHandle, kProgramCount> pipelines{};
-  for (size_t index = 0u; index < kAnimationPrograms.size(); ++index) {
-    auto result = createComputePipeline(gpu_, shaders_[index].get(),
-                                        kAnimationPrograms[index].debugName,
-                                        pipelines[index]);
-    if (result.hasError()) {
-      return result;
-    }
-  }
-  pipelines_ = std::move(pipelines);
-  return Result<bool, std::string>::makeResult(true);
-}
-
-void AnimationGpuServices::destroyPipelines() noexcept {
-  for (auto handle = pipelines_.rbegin(); handle != pipelines_.rend();
-       ++handle) {
-    handle->reset();
-  }
-  initialized_ = false;
-}
-
-void AnimationGpuServices::destroyShaders() noexcept {
-  for (OwnedShaderHandle &shader : shaders_) {
-    shader.reset();
-  }
 }
 
 Result<std::unique_ptr<Buffer>, std::string>

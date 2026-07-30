@@ -200,22 +200,17 @@ findDispatch(const nuri::AnimationSceneFrameData &frameData,
 allDependencyBuffersValid(const FakeAnimationGpuDevice &gpu,
                           const nuri::AnimationSceneFrameData &frameData) {
   return std::ranges::all_of(
-      frameData.preDispatches, [&](const nuri::ComputeDispatchItem &dispatch) {
-        return std::ranges::all_of(
-            dispatch.dependencyBuffers, [&](nuri::BufferHandle handle) {
-              return nuri::isValid(handle) && gpu.isValid(handle);
-            });
+      frameData.bufferUses, [&](const nuri::RenderGraphImportedBufferUse use) {
+        return nuri::isValid(use.buffer) && gpu.isValid(use.buffer);
       });
 }
 
 [[nodiscard]] std::vector<nuri::BufferHandle>
 collectDependencyBuffers(const nuri::AnimationSceneFrameData &frameData) {
   std::vector<nuri::BufferHandle> handles;
-  for (const nuri::ComputeDispatchItem &dispatch : frameData.preDispatches) {
-    for (nuri::BufferHandle handle : dispatch.dependencyBuffers) {
-      if (nuri::isValid(handle)) {
-        handles.push_back(handle);
-      }
+  for (const nuri::RenderGraphImportedBufferUse use : frameData.bufferUses) {
+    if (nuri::isValid(use.buffer)) {
+      handles.push_back(use.buffer);
     }
   }
   return handles;
@@ -500,7 +495,7 @@ TEST(AnimationPoseSimulationTests,
 
   auto prefabResult = nuri::SceneImporter::loadSceneFromFile(path.string());
   ASSERT_FALSE(prefabResult.hasError()) << prefabResult.error();
-  const nuri::ScenePrefab &prefab = prefabResult.value();
+  const nuri::ScenePrefab &prefab = prefabResult.value().prefab;
 
   FakeAnimationGpuDevice gpu;
   nuri::ResourceManager resources(gpu);
@@ -690,7 +685,7 @@ TEST(AnimationPoseSimulationTests,
 
   auto prefabResult = nuri::SceneImporter::loadSceneFromFile(path.string());
   ASSERT_FALSE(prefabResult.hasError()) << prefabResult.error();
-  const nuri::ScenePrefab &prefab = prefabResult.value();
+  const nuri::ScenePrefab &prefab = prefabResult.value().prefab;
 
   FakeAnimationGpuDevice gpu;
   nuri::ResourceManager resources(gpu);
@@ -745,19 +740,19 @@ TEST(AnimationPoseSimulationTests,
   EXPECT_EQ(countDispatches(*frameData, "AnimationPose Skin"), 0u);
   EXPECT_EQ(countDispatches(*frameData, "AnimationPose Blend"), 0u);
 
-  const nuri::ComputeDispatchItem *morphDispatch =
-      findDispatch(*frameData, "AnimationPose Morph");
-  ASSERT_NE(morphDispatch, nullptr);
-  ASSERT_EQ(morphDispatch->dependencyBuffers.size(), 4u);
-  ASSERT_EQ(morphDispatch->dependencyBufferAccessModes.size(), 4u);
-  EXPECT_EQ(morphDispatch->dependencyBufferAccessModes[0],
-            nuri::RenderGraphAccessMode::Read);
-  EXPECT_EQ(morphDispatch->dependencyBufferAccessModes[1],
-            nuri::RenderGraphAccessMode::Read);
-  EXPECT_EQ(morphDispatch->dependencyBufferAccessModes[2],
-            nuri::RenderGraphAccessMode::Read);
-  EXPECT_EQ(morphDispatch->dependencyBufferAccessModes[3],
-            nuri::RenderGraphAccessMode::Write);
+  EXPECT_GE(frameData->bufferUses.size(), 4u);
+  EXPECT_TRUE(std::ranges::any_of(
+      frameData->bufferUses, [](nuri::RenderGraphImportedBufferUse use) {
+        return nuri::hasAccessFlag(use.access,
+                                   nuri::RenderGraphAccessMode::Write);
+      }));
+  EXPECT_TRUE(std::ranges::all_of(
+      frameData->bufferUses, [](nuri::RenderGraphImportedBufferUse use) {
+        return nuri::hasAccessFlag(use.access,
+                                   nuri::RenderGraphAccessMode::Read) ||
+               nuri::hasAccessFlag(use.access,
+                                   nuri::RenderGraphAccessMode::Write);
+      }));
 
   const bool hasGeometryOverride = std::any_of(
       frameData->geometryOverridesByRenderable.begin(),

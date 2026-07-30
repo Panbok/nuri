@@ -74,7 +74,7 @@ SceneLightingProvider::~SceneLightingProvider() {
 
 Result<uint32_t, std::string>
 SceneLightingProvider::resolveMaterialSamplerId(RenderFrameContext &frame) {
-  const RenderSettings &settings = frame.settings;
+  const RenderSettings &settings = frame.settings.facts();
   const RenderSettings::TextureFilteringSettings &filtering =
       settings.textureFiltering;
   const TextureFilterMode filterMode = filtering.mode;
@@ -158,7 +158,7 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
   uint32_t brdfLutTexId = kInvalidTextureBindlessIndex;
   uint32_t flags = 0u;
   const uint32_t cubemapSamplerId = gpu_.getCubemapSamplerBindlessIndex();
-  const RenderSettings &renderSettings = frame.settings;
+  const RenderSettings &renderSettings = frame.settings.facts();
   const uint32_t materialCoverageSamplerId =
       resolveDefaultMaterialSamplerId(gpu_, renderSettings.textureFiltering);
   const uint32_t materialDataSamplerId = materialCoverageSamplerId;
@@ -290,15 +290,17 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
       ctx.shared.shadowFrameGpuData.has_value()
           ? ctx.shared.shadowFrameGpuData->bufferAddress
           : 0u;
+  bool usingDisabledShadowFrameBuffer = false;
   if (shadowFrameBufferAddress == 0u) {
     auto disabledShadowResult = ensureDisabledShadowFrameBuffer();
     if (disabledShadowResult.hasError()) {
       return Result<bool, std::string>::makeError(disabledShadowResult.error());
     }
     shadowFrameBufferAddress = disabledShadowResult.value();
+    usingDisabledShadowFrameBuffer = true;
   }
   uint32_t shadowFlags = 0u;
-  const RenderSettings::ShadowSettings &shadowSettings = frame.settings.shadow;
+  const RenderSettings::ShadowSettings &shadowSettings = frame.settings->shadow;
   if (shadowSettings.enabled && directionalLightCount > 0u) {
     shadowFlags =
         kShadowFrameFlagEnabled | shadowDebugFrameFlags(shadowSettings.debug);
@@ -431,6 +433,34 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
   slot.hasFrameData = true;
   slot.frameData = frameData;
   slot.postTaaFrameData = postTaaFrameData;
+  forwardDependencyBuffers_.clear();
+  if (ddgiFrame != nullptr) {
+    forwardDependencyBuffers_.assign(ddgiFrame->dependencyBuffers.begin(),
+                                     ddgiFrame->dependencyBuffers.end());
+  }
+  if (usingDisabledShadowFrameBuffer) {
+    forwardDependencyBuffers_.push_back(disabledShadowFrameBuffer_->handle());
+  }
+  forwardRecordingSamplers_.clear();
+  const auto appendRecordingSampler = [this](SamplerHandle sampler) {
+    if (nuri::isValid(sampler) &&
+        std::ranges::find(forwardRecordingSamplers_, sampler) ==
+            forwardRecordingSamplers_.end()) {
+      forwardRecordingSamplers_.push_back(sampler);
+    }
+  };
+  if (frame.metrics.antiAliasing.taaMaterialMipBiasApplied) {
+    appendRecordingSampler(taaMaterialMipBiasSampler_);
+  }
+  appendRecordingSampler(ctx.shared.sceneDepthSampler);
+  if (ctx.shared.shadowFrameGpuData.has_value()) {
+    for (SamplerHandle sampler : ctx.shared.shadowFrameGpuData->samplers) {
+      appendRecordingSampler(sampler);
+    }
+  }
+  if (ddgiFrame != nullptr) {
+    appendRecordingSampler(ddgiFrame->sampler);
+  }
   ctx.shared.forwardSceneGpuData = ForwardSceneGpuData{
       .buffer = sceneDataBuffer,
       .frameData = frameData,
@@ -438,12 +468,11 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
       .frameDataAddress = sceneDataBaseAddress,
       .postTaaFrameDataAddress =
           sceneDataBaseAddress + layout.postTaaFrameDataOffset,
-      .indirectDependencyBuffers = ddgiFrame != nullptr
-                                       ? ddgiFrame->dependencyBuffers
-                                       : std::span<const BufferHandle>{},
+      .indirectDependencyBuffers = forwardDependencyBuffers_,
       .indirectDependencyTextures = ddgiFrame != nullptr
                                         ? ddgiFrame->dependencyTextures
                                         : std::span<const TextureHandle>{},
+      .recordingSamplers = forwardRecordingSamplers_,
   };
   return Result<bool, std::string>::makeResult(true);
 }

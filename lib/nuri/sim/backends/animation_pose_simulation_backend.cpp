@@ -9,9 +9,9 @@
 #include "nuri/sim/animation_pose_simulation.h"
 #define GLM_ENABLE_EXPERIMENTAL
 #include <array>
+#include <cstring>
 #include <glm/gtx/matrix_decompose.hpp>
 #include <optional>
-#include <variant>
 #include <vector>
 namespace nuri {
 namespace {
@@ -187,23 +187,30 @@ constexpr std::array kMorphDependencyAccess = {kRead, kRead, kRead, kWrite};
 constexpr std::array kSkinDependencyAccess = {kRead, kRead, kRead, kWrite};
 template <typename T, size_t N>
 void appendComputeDispatch(std::pmr::vector<ComputeDispatchItem> &out,
+                           std::pmr::vector<std::byte> &pushStorage,
+                           std::pmr::vector<RenderGraphImportedBufferUse> &uses,
                            ComputePipelineHandle pipeline, uint32_t x,
                            const T &pushConstants,
                            const std::array<BufferHandle, N> &dependencies,
                            size_t dependencyCount,
                            std::span<const RenderGraphAccessMode> accessModes,
                            std::string_view debugLabel, uint32_t debugColor) {
+  const size_t pushOffset = pushStorage.size();
+  pushStorage.resize(pushOffset + sizeof(T));
+  std::memcpy(pushStorage.data() + pushOffset, &pushConstants, sizeof(T));
   out.push_back(ComputeDispatchItem{
       .pipeline = pipeline,
       .dispatch = {.x = x, .y = 1u, .z = 1u},
-      .pushConstants =
-          std::as_bytes(std::span<const T>(&pushConstants, size_t{1u})),
-      .dependencyBuffers =
-          std::span<const BufferHandle>(dependencies.data(), dependencyCount),
-      .dependencyBufferAccessModes = accessModes,
+      .pushConstants = std::span<const std::byte>(pushStorage)
+                           .subspan(pushOffset, sizeof(T)),
       .debugLabel = debugLabel,
       .debugColor = debugColor,
   });
+  for (size_t i = 0; i < dependencyCount; ++i) {
+    if (nuri::isValid(dependencies[i])) {
+      uses.push_back({.buffer = dependencies[i], .access = accessModes[i]});
+    }
+  }
 }
 float wrapLoopTime(float timeSeconds, float durationSeconds) {
   if (!(durationSeconds > 0.0f)) {
@@ -388,32 +395,12 @@ struct AnimationPoseInstance {
   std::unique_ptr<Buffer> inverseBindMatricesBuffer;
   std::unique_ptr<Buffer> jointPaletteBuffer;
 };
-template <typename PushConstants, size_t DependencyCount>
-struct AnimationDispatchRecord {
-  PushConstants push{};
-  std::array<BufferHandle, DependencyCount> dependencies{};
-};
-using AnimationDispatch =
-    std::variant<AnimationDispatchRecord<SamplePushConstants, 4>,
-                 AnimationDispatchRecord<BlendPushConstants, 6>,
-                 AnimationDispatchRecord<WorldPushConstants, 4>,
-                 AnimationDispatchRecord<ScatterPushConstants, 4>,
-                 AnimationDispatchRecord<MorphPushConstants, 4>,
-                 AnimationDispatchRecord<SkinPalettePushConstants, 4>,
-                 AnimationDispatchRecord<SkinPushConstants, 4>>;
-
-template <typename Record>
-Record &appendAnimationDispatch(std::pmr::vector<AnimationDispatch> &records,
-                                Record record) {
-  records.emplace_back(std::move(record));
-  return std::get<Record>(records.back());
-}
 struct SceneFrameState {
   explicit SceneFrameState(
       std::pmr::memory_resource *memory = std::pmr::get_default_resource())
       : baseInstances(memory), geometryOverrides(memory),
         previousGeometryOverrides(memory), animatedRenderableIndices(memory),
-        preDispatches(memory), dispatchRecords(memory) {}
+        preDispatches(memory), dispatchPushBytes(memory), bufferUses(memory) {}
   std::array<std::unique_ptr<Buffer>, kAnimationSceneFrameHistorySlots>
       instanceMatricesBuffers;
   std::array<size_t, kAnimationSceneFrameHistorySlots>
@@ -424,7 +411,8 @@ struct SceneFrameState {
       previousGeometryOverrides;
   std::pmr::vector<uint32_t> animatedRenderableIndices;
   std::pmr::vector<ComputeDispatchItem> preDispatches;
-  std::pmr::vector<AnimationDispatch> dispatchRecords;
+  std::pmr::vector<std::byte> dispatchPushBytes;
+  std::pmr::vector<RenderGraphImportedBufferUse> bufferUses;
   uint64_t version = 0u;
   uint64_t preparedFrameIndex = std::numeric_limits<uint64_t>::max();
   size_t currentHistorySlot = 0u;
@@ -440,7 +428,8 @@ struct SceneFrameState {
   mutable AnimationSceneFrameData publishedData{};
   void resetTransientDispatchState() noexcept {
     preDispatches.clear();
-    dispatchRecords.clear();
+    dispatchPushBytes.clear();
+    bufferUses.clear();
     animatedRenderableIndices.clear();
   }
 };
@@ -1150,7 +1139,14 @@ AnimationPoseSimulationBackend::prepareSceneFrame(SceneRuntimeHost &host,
   sceneFrame.preDispatches.reserve(counts.sample + counts.blend + counts.world +
                                    counts.scatter + counts.morph +
                                    counts.palette + counts.skin);
-  sceneFrame.dispatchRecords.reserve(sceneFrame.preDispatches.capacity());
+  sceneFrame.dispatchPushBytes.reserve(
+      counts.sample * sizeof(SamplePushConstants) +
+      counts.blend * sizeof(BlendPushConstants) +
+      counts.world * sizeof(WorldPushConstants) +
+      counts.scatter * sizeof(ScatterPushConstants) +
+      counts.morph * sizeof(MorphPushConstants) +
+      counts.palette * sizeof(SkinPalettePushConstants) +
+      counts.skin * sizeof(SkinPushConstants));
   sceneFrame.animatedRenderableIndices.reserve(counts.animated);
   const uint64_t instanceMatricesAddress =
       services_->gpu().getBufferDeviceAddress(
@@ -1250,39 +1246,30 @@ AnimationPoseSimulationBackend::prepareSceneFrame(SceneRuntimeHost &host,
       if (clipGpu.channels.empty()) {
         return;
       }
-      const auto &dispatch = appendAnimationDispatch(
-          sceneFrame.dispatchRecords,
-          AnimationDispatchRecord<SamplePushConstants, 4>{
-              .push =
-                  {
-                      .channelsAddress =
-                          services_->gpu().getBufferDeviceAddress(
-                              clipGpu.channelsBuffer->handle()),
-                      .keyTimesAddress =
-                          services_->gpu().getBufferDeviceAddress(
-                              clipGpu.keyTimesBuffer->handle()),
-                      .valuesAddress = services_->gpu().getBufferDeviceAddress(
-                          clipGpu.valuesBuffer->handle()),
-                      .nodeStatesAddress =
-                          services_->gpu().getBufferDeviceAddress(
-                              clipGpu.sampledNodeStatesBuffer->handle()),
-                      .sampledWeightsAddress =
-                          services_->gpu().getBufferDeviceAddress(
-                              clipGpu.sampledWeightsBuffer->handle()),
-                      .sampleTimeSeconds = sampleTimeSeconds,
-                      .channelCount =
-                          static_cast<uint32_t>(clipGpu.channels.size()),
-                  },
-              .dependencies = {clipGpu.channelsBuffer->handle(),
-                               clipGpu.keyTimesBuffer->handle(),
-                               clipGpu.sampledNodeStatesBuffer->handle(),
-                               clipGpu.sampledWeightsBuffer->handle()},
-          });
+      const SamplePushConstants push{
+          .channelsAddress = services_->gpu().getBufferDeviceAddress(
+              clipGpu.channelsBuffer->handle()),
+          .keyTimesAddress = services_->gpu().getBufferDeviceAddress(
+              clipGpu.keyTimesBuffer->handle()),
+          .valuesAddress = services_->gpu().getBufferDeviceAddress(
+              clipGpu.valuesBuffer->handle()),
+          .nodeStatesAddress = services_->gpu().getBufferDeviceAddress(
+              clipGpu.sampledNodeStatesBuffer->handle()),
+          .sampledWeightsAddress = services_->gpu().getBufferDeviceAddress(
+              clipGpu.sampledWeightsBuffer->handle()),
+          .sampleTimeSeconds = sampleTimeSeconds,
+          .channelCount = static_cast<uint32_t>(clipGpu.channels.size()),
+      };
+      const std::array dependencies{clipGpu.channelsBuffer->handle(),
+                                    clipGpu.keyTimesBuffer->handle(),
+                                    clipGpu.sampledNodeStatesBuffer->handle(),
+                                    clipGpu.sampledWeightsBuffer->handle()};
       appendComputeDispatch(
-          sceneFrame.preDispatches, services_->samplePipeline(),
-          dispatchCount(dispatch.push.channelCount), dispatch.push,
-          dispatch.dependencies, dispatch.dependencies.size(),
-          kSampleDependencyAccess, "AnimationPose Sample", 0xff5599ffu);
+          sceneFrame.preDispatches, sceneFrame.dispatchPushBytes,
+          sceneFrame.bufferUses, services_->samplePipeline(),
+          dispatchCount(push.channelCount), push, dependencies,
+          dependencies.size(), kSampleDependencyAccess, "AnimationPose Sample",
+          0xff5599ffu);
     };
     if (!useSecondaryOnly) {
       appendSampleDispatch(primaryClipGpu, primarySampleTime);
@@ -1315,37 +1302,30 @@ AnimationPoseSimulationBackend::prepareSceneFrame(SceneRuntimeHost &host,
         nodeStatesBuffer = secondaryClipGpu->sampledNodeStatesBuffer->handle();
         sampledWeightsBuffer = secondaryClipGpu->sampledWeightsBuffer->handle();
       } else {
-        const auto &dispatch = appendAnimationDispatch(
-            sceneFrame.dispatchRecords,
-            AnimationDispatchRecord<BlendPushConstants, 6>{
-                .push =
-                    {
-                        .sourceNodeStatesAddressA = primaryNodeStatesAddress,
-                        .sourceNodeStatesAddressB = secondaryNodeStatesAddress,
-                        .outputNodeStatesAddress = blendedNodeStatesAddress,
-                        .sourceWeightsAddressA = primaryWeightsAddress,
-                        .sourceWeightsAddressB = secondaryWeightsAddress,
-                        .outputWeightsAddress = blendedWeightsAddress,
-                        .blendWeight = instance.params.blendWeight,
-                        .nodeCount = static_cast<uint32_t>(
-                            instance.baseNodeStates.size()),
-                        .weightCount =
-                            static_cast<uint32_t>(instance.baseWeights.size()),
-                    },
-                .dependencies =
-                    {primaryClipGpu.sampledNodeStatesBuffer->handle(),
-                     secondaryClipGpu->sampledNodeStatesBuffer->handle(),
-                     instance.blendedNodeStatesBuffer->handle(),
-                     primaryClipGpu.sampledWeightsBuffer->handle(),
-                     secondaryClipGpu->sampledWeightsBuffer->handle(),
-                     instance.blendedWeightsBuffer->handle()},
-            });
+        const BlendPushConstants push{
+            .sourceNodeStatesAddressA = primaryNodeStatesAddress,
+            .sourceNodeStatesAddressB = secondaryNodeStatesAddress,
+            .outputNodeStatesAddress = blendedNodeStatesAddress,
+            .sourceWeightsAddressA = primaryWeightsAddress,
+            .sourceWeightsAddressB = secondaryWeightsAddress,
+            .outputWeightsAddress = blendedWeightsAddress,
+            .blendWeight = instance.params.blendWeight,
+            .nodeCount = static_cast<uint32_t>(instance.baseNodeStates.size()),
+            .weightCount = static_cast<uint32_t>(instance.baseWeights.size()),
+        };
+        const std::array dependencies{
+            primaryClipGpu.sampledNodeStatesBuffer->handle(),
+            secondaryClipGpu->sampledNodeStatesBuffer->handle(),
+            instance.blendedNodeStatesBuffer->handle(),
+            primaryClipGpu.sampledWeightsBuffer->handle(),
+            secondaryClipGpu->sampledWeightsBuffer->handle(),
+            instance.blendedWeightsBuffer->handle()};
         appendComputeDispatch(
-            sceneFrame.preDispatches, services_->blendPipeline(),
-            dispatchCount(
-                std::max(dispatch.push.nodeCount, dispatch.push.weightCount)),
-            dispatch.push, dispatch.dependencies, dispatch.dependencies.size(),
-            kBlendDependencyAccess, "AnimationPose Blend", 0xff6688ffu);
+            sceneFrame.preDispatches, sceneFrame.dispatchPushBytes,
+            sceneFrame.bufferUses, services_->blendPipeline(),
+            dispatchCount(std::max(push.nodeCount, push.weightCount)), push,
+            dependencies, dependencies.size(), kBlendDependencyAccess,
+            "AnimationPose Blend", 0xff6688ffu);
         nodeStatesAddress = blendedNodeStatesAddress;
         sampledWeightsAddress = blendedWeightsAddress;
         nodeStatesBuffer = instance.blendedNodeStatesBuffer->handle();
@@ -1356,33 +1336,26 @@ AnimationPoseSimulationBackend::prepareSceneFrame(SceneRuntimeHost &host,
          depthBucketIndex < instance.depthBucketStarts.size();
          ++depthBucketIndex) {
       const uint32_t nodeCount = instance.depthBucketCounts[depthBucketIndex];
-      const auto &dispatch = appendAnimationDispatch(
-          sceneFrame.dispatchRecords,
-          AnimationDispatchRecord<WorldPushConstants, 4>{
-              .push =
-                  {
-                      .nodeStatesAddress = nodeStatesAddress,
-                      .nodeMetaAddress =
-                          services_->gpu().getBufferDeviceAddress(
-                              instance.nodeMetaBuffer->handle()),
-                      .depthOrderedNodesAddress =
-                          services_->gpu().getBufferDeviceAddress(
-                              instance.depthOrderedNodesBuffer->handle()),
-                      .worldMatricesAddress = worldMatricesAddress,
-                      .rootTransform = rootTransform,
-                      .nodeStart = instance.depthBucketStarts[depthBucketIndex],
-                      .nodeCount = nodeCount,
-                  },
-              .dependencies = {nodeStatesBuffer,
-                               instance.nodeMetaBuffer->handle(),
-                               instance.depthOrderedNodesBuffer->handle(),
-                               instance.worldMatricesBuffer->handle()},
-          });
+      const WorldPushConstants push{
+          .nodeStatesAddress = nodeStatesAddress,
+          .nodeMetaAddress = services_->gpu().getBufferDeviceAddress(
+              instance.nodeMetaBuffer->handle()),
+          .depthOrderedNodesAddress = services_->gpu().getBufferDeviceAddress(
+              instance.depthOrderedNodesBuffer->handle()),
+          .worldMatricesAddress = worldMatricesAddress,
+          .rootTransform = rootTransform,
+          .nodeStart = instance.depthBucketStarts[depthBucketIndex],
+          .nodeCount = nodeCount,
+      };
+      const std::array dependencies{nodeStatesBuffer,
+                                    instance.nodeMetaBuffer->handle(),
+                                    instance.depthOrderedNodesBuffer->handle(),
+                                    instance.worldMatricesBuffer->handle()};
       appendComputeDispatch(
-          sceneFrame.preDispatches, services_->worldPipeline(),
-          dispatchCount(nodeCount), dispatch.push, dispatch.dependencies,
-          dispatch.dependencies.size(), kWorldDependencyAccess,
-          "AnimationPose World", 0xff33aa55u);
+          sceneFrame.preDispatches, sceneFrame.dispatchPushBytes,
+          sceneFrame.bufferUses, services_->worldPipeline(),
+          dispatchCount(nodeCount), push, dependencies, dependencies.size(),
+          kWorldDependencyAccess, "AnimationPose World", 0xff33aa55u);
     }
     if (!instance.renderableBindings.empty()) {
       for (const AnimationRenderableBindingGpu &binding :
@@ -1390,32 +1363,25 @@ AnimationPoseSimulationBackend::prepareSceneFrame(SceneRuntimeHost &host,
         sceneFrame.animatedRenderableIndices.push_back(
             binding.runtimeRenderableIndex);
       }
-      const auto &dispatch = appendAnimationDispatch(
-          sceneFrame.dispatchRecords,
-          AnimationDispatchRecord<ScatterPushConstants, 4>{
-              .push =
-                  {
-                      .renderableBindingsAddress =
-                          services_->gpu().getBufferDeviceAddress(
-                              instance.renderableBindingsBuffer->handle()),
-                      .worldMatricesAddress = worldMatricesAddress,
-                      .instanceMatricesAddress = instanceMatricesAddress,
-                      .bindingCount = static_cast<uint32_t>(
-                          instance.renderableBindings.size()),
-                  },
-              .dependencies =
-                  {instance.renderableBindingsBuffer->handle(),
-                   instance.worldMatricesBuffer->handle(),
-                   sceneFrame
-                       .instanceMatricesBuffers[sceneFrame.currentHistorySlot]
-                       ->handle(),
-                   BufferHandle{}},
-          });
+      const ScatterPushConstants push{
+          .renderableBindingsAddress = services_->gpu().getBufferDeviceAddress(
+              instance.renderableBindingsBuffer->handle()),
+          .worldMatricesAddress = worldMatricesAddress,
+          .instanceMatricesAddress = instanceMatricesAddress,
+          .bindingCount =
+              static_cast<uint32_t>(instance.renderableBindings.size()),
+      };
+      const std::array dependencies{
+          instance.renderableBindingsBuffer->handle(),
+          instance.worldMatricesBuffer->handle(),
+          sceneFrame.instanceMatricesBuffers[sceneFrame.currentHistorySlot]
+              ->handle(),
+          BufferHandle{}};
       appendComputeDispatch(
-          sceneFrame.preDispatches, services_->scatterPipeline(),
-          dispatchCount(dispatch.push.bindingCount), dispatch.push,
-          dispatch.dependencies, size_t{3u}, kScatterDependencyAccess,
-          "AnimationPose Scatter", 0xff33cc88u);
+          sceneFrame.preDispatches, sceneFrame.dispatchPushBytes,
+          sceneFrame.bufferUses, services_->scatterPipeline(),
+          dispatchCount(push.bindingCount), push, dependencies, size_t{3u},
+          kScatterDependencyAccess, "AnimationPose Scatter", 0xff33cc88u);
     }
     for (AnimatedRenderableState &animated : instance.animatedRenderables) {
       BufferHandle overrideBuffer{};
@@ -1455,29 +1421,25 @@ AnimationPoseSimulationBackend::prepareSceneFrame(SceneRuntimeHost &host,
         const uint64_t paletteAddress = services_->gpu().getBufferDeviceAddress(
             instance.jointPaletteBuffer->handle(),
             static_cast<size_t>(animated.paletteOffset) * sizeof(glm::mat4));
-        const auto &dispatch = appendAnimationDispatch(
-            sceneFrame.dispatchRecords,
-            AnimationDispatchRecord<SkinPalettePushConstants, 4>{
-                .push =
-                    {
-                        .worldMatricesAddress = worldMatricesAddress,
-                        .jointNodeIndicesAddress = jointNodeAddress,
-                        .inverseBindMatricesAddress = inverseBindAddress,
-                        .paletteAddress = paletteAddress,
-                        .renderableNodeIndex = animated.nodeIndex,
-                        .jointCount = animated.jointCount,
-                    },
-                .dependencies = {instance.worldMatricesBuffer->handle(),
-                                 instance.jointNodeIndicesBuffer->handle(),
-                                 instance.inverseBindMatricesBuffer->handle(),
-                                 instance.jointPaletteBuffer->handle()},
-            });
+        const SkinPalettePushConstants push{
+            .worldMatricesAddress = worldMatricesAddress,
+            .jointNodeIndicesAddress = jointNodeAddress,
+            .inverseBindMatricesAddress = inverseBindAddress,
+            .paletteAddress = paletteAddress,
+            .renderableNodeIndex = animated.nodeIndex,
+            .jointCount = animated.jointCount,
+        };
+        const std::array dependencies{
+            instance.worldMatricesBuffer->handle(),
+            instance.jointNodeIndicesBuffer->handle(),
+            instance.inverseBindMatricesBuffer->handle(),
+            instance.jointPaletteBuffer->handle()};
         appendComputeDispatch(
-            sceneFrame.preDispatches, services_->skinPalettePipeline(),
-            dispatchCount(animated.jointCount), dispatch.push,
-            dispatch.dependencies, dispatch.dependencies.size(),
-            kSkinPaletteDependencyAccess, "AnimationPose SkinPalette",
-            0xffaa55ccu);
+            sceneFrame.preDispatches, sceneFrame.dispatchPushBytes,
+            sceneFrame.bufferUses, services_->skinPalettePipeline(),
+            dispatchCount(animated.jointCount), push, dependencies,
+            dependencies.size(), kSkinPaletteDependencyAccess,
+            "AnimationPose SkinPalette", 0xffaa55ccu);
       }
       if (animated.hasMorph) {
         const uint64_t outputVertexAddress =
@@ -1485,32 +1447,25 @@ AnimationPoseSimulationBackend::prepareSceneFrame(SceneRuntimeHost &host,
                 currentMorphOutput->handle());
         const uint64_t morphDeltaAddress =
             services_->gpu().getBufferDeviceAddress(animated.morphDeltaBuffer);
-        const auto &dispatch = appendAnimationDispatch(
-            sceneFrame.dispatchRecords,
-            AnimationDispatchRecord<MorphPushConstants, 4>{
-                .push =
-                    {
-                        .sourceVertexAddress = animated.sourceVertexAddress,
-                        .outputVertexAddress = outputVertexAddress,
-                        .morphDeltaAddress = morphDeltaAddress,
-                        .weightAddress = sampledWeightsAddress,
-                        .weightOffset =
-                            instance.nodeMeta[animated.nodeIndex].weightOffset,
-                        .weightCount =
-                            instance.nodeMeta[animated.nodeIndex].weightCount,
-                        .morphTargetCount = animated.morphTargetCount,
-                        .vertexCount = animated.vertexCount,
-                    },
-                .dependencies = {animated.sourceVertexBuffer,
-                                 animated.morphDeltaBuffer,
-                                 sampledWeightsBuffer,
-                                 currentMorphOutput->handle()},
-            });
+        const MorphPushConstants push{
+            .sourceVertexAddress = animated.sourceVertexAddress,
+            .outputVertexAddress = outputVertexAddress,
+            .morphDeltaAddress = morphDeltaAddress,
+            .weightAddress = sampledWeightsAddress,
+            .weightOffset = instance.nodeMeta[animated.nodeIndex].weightOffset,
+            .weightCount = instance.nodeMeta[animated.nodeIndex].weightCount,
+            .morphTargetCount = animated.morphTargetCount,
+            .vertexCount = animated.vertexCount,
+        };
+        const std::array dependencies{
+            animated.sourceVertexBuffer, animated.morphDeltaBuffer,
+            sampledWeightsBuffer, currentMorphOutput->handle()};
         appendComputeDispatch(
-            sceneFrame.preDispatches, services_->morphPipeline(),
-            dispatchCount(animated.vertexCount), dispatch.push,
-            dispatch.dependencies, dispatch.dependencies.size(),
-            kMorphDependencyAccess, "AnimationPose Morph", 0xffaa7733u);
+            sceneFrame.preDispatches, sceneFrame.dispatchPushBytes,
+            sceneFrame.bufferUses, services_->morphPipeline(),
+            dispatchCount(animated.vertexCount), push, dependencies,
+            dependencies.size(), kMorphDependencyAccess, "AnimationPose Morph",
+            0xffaa7733u);
         if (!animated.hasSkin) {
           overrideBuffer = currentMorphOutput->handle();
         }
@@ -1532,26 +1487,22 @@ AnimationPoseSimulationBackend::prepareSceneFrame(SceneRuntimeHost &host,
         const uint64_t paletteAddress = services_->gpu().getBufferDeviceAddress(
             instance.jointPaletteBuffer->handle(),
             static_cast<size_t>(animated.paletteOffset) * sizeof(glm::mat4));
-        const auto &dispatch = appendAnimationDispatch(
-            sceneFrame.dispatchRecords,
-            AnimationDispatchRecord<SkinPushConstants, 4>{
-                .push =
-                    {
-                        .sourceVertexAddress = skinSourceAddress,
-                        .outputVertexAddress = outputVertexAddress,
-                        .skinInfluenceAddress = skinInfluenceAddress,
-                        .paletteAddress = paletteAddress,
-                        .vertexCount = animated.vertexCount,
-                    },
-                .dependencies = {skinSourceBuffer, animated.skinInfluenceBuffer,
-                                 instance.jointPaletteBuffer->handle(),
-                                 currentSkinOutput->handle()},
-            });
+        const SkinPushConstants push{
+            .sourceVertexAddress = skinSourceAddress,
+            .outputVertexAddress = outputVertexAddress,
+            .skinInfluenceAddress = skinInfluenceAddress,
+            .paletteAddress = paletteAddress,
+            .vertexCount = animated.vertexCount,
+        };
+        const std::array dependencies{
+            skinSourceBuffer, animated.skinInfluenceBuffer,
+            instance.jointPaletteBuffer->handle(), currentSkinOutput->handle()};
         appendComputeDispatch(
-            sceneFrame.preDispatches, services_->skinPipeline(),
-            dispatchCount(animated.vertexCount), dispatch.push,
-            dispatch.dependencies, dispatch.dependencies.size(),
-            kSkinDependencyAccess, "AnimationPose Skin", 0xffcc8844u);
+            sceneFrame.preDispatches, sceneFrame.dispatchPushBytes,
+            sceneFrame.bufferUses, services_->skinPipeline(),
+            dispatchCount(animated.vertexCount), push, dependencies,
+            dependencies.size(), kSkinDependencyAccess, "AnimationPose Skin",
+            0xffcc8844u);
         overrideBuffer = currentSkinOutput->handle();
       }
       sceneFrame.geometryOverrides[animated.runtimeRenderableIndex] =
@@ -1648,6 +1599,7 @@ AnimationPoseSimulationBackend::currentSceneFrameData() const noexcept {
   frameData.preDispatches = std::span<const ComputeDispatchItem>(
       impl_->sceneFrame.preDispatches.data(),
       impl_->sceneFrame.preDispatches.size());
+  frameData.bufferUses = impl_->sceneFrame.bufferUses;
   frameData.geometryOverridesByRenderable =
       std::span<const AnimatedRenderableGeometryOverride>(
           impl_->sceneFrame.geometryOverrides.data(),

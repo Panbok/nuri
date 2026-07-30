@@ -108,6 +108,7 @@ private:
   bool initialized_ = false;
   bool loggedTransparentFeedbackFallbackWarning_ = false;
   ForwardSceneDrawCache sceneCache_;
+  uint64_t drawDatabaseGeneration_ = std::numeric_limits<uint64_t>::max();
   EnvironmentHandles cachedEnvironmentHandles_{};
   bool environmentTextureAccessCacheValid_ = false;
   bool materialTextureAccessCacheValid_ = false;
@@ -122,6 +123,7 @@ private:
   std::pmr::vector<TextureHandle> blendedTextureReads_;
   std::pmr::vector<BufferHandle> passDependencyBuffers_;
   std::pmr::vector<BufferHandle> blendedDependencyBuffers_;
+  std::pmr::vector<SamplerHandle> passRecordingSamplers_;
   std::pmr::vector<RenderGraphAccessMode> passDependencyBufferAccessModes_;
   std::pmr::vector<BufferHandle> preResolvedTemplateBuffers_;
   std::pmr::vector<BufferHandle> cachedPreResolvedDrawBuffers_;

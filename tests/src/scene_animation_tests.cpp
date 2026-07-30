@@ -91,7 +91,7 @@ TEST(SceneAnimationTests, AnimatedMorphCubeImportsWeightAnimationAndTangents) {
 
   auto prefabResult = nuri::SceneImporter::loadSceneFromFile(path.string());
   ASSERT_FALSE(prefabResult.hasError()) << prefabResult.error();
-  const nuri::ScenePrefab &prefab = prefabResult.value();
+  const nuri::ScenePrefab &prefab = prefabResult.value().prefab;
 
   ASSERT_EQ(prefab.animations.size(), 1u);
   EXPECT_EQ(prefab.animations[0].name, "Square");
@@ -107,14 +107,10 @@ TEST(SceneAnimationTests, AnimatedMorphCubeImportsWeightAnimationAndTangents) {
   EXPECT_FLOAT_EQ(prefab.nodes[channel.targetNodeIndex].morphWeights[0], 0.0f);
   EXPECT_FLOAT_EQ(prefab.nodes[channel.targetNodeIndex].morphWeights[1], 0.0f);
 
-  auto sceneAssetsResult =
-      nuri::SceneImporter::loadSceneAssetsFromFile(path.string());
-  ASSERT_FALSE(sceneAssetsResult.hasError()) << sceneAssetsResult.error();
-  ASSERT_EQ(sceneAssetsResult.value().meshes.size(), 1u);
-  const nuri::MeshData &mesh = sceneAssetsResult.value().meshes[0];
+  ASSERT_EQ(prefabResult.value().meshes.size(), 1u);
+  const nuri::MeshData &mesh = prefabResult.value().meshes[0].mesh;
   ASSERT_EQ(mesh.morphTargets.size(), 2u);
-  ASSERT_FALSE(mesh.submeshes.empty());
-  const uint32_t morphVertexCount = mesh.submeshes[0].vertexCount;
+  const uint32_t morphVertexCount = static_cast<uint32_t>(mesh.vertices.size());
   ASSERT_GT(morphVertexCount, 0u);
   for (const nuri::MorphTarget &target : mesh.morphTargets) {
     EXPECT_EQ(target.positionDeltas.size(), morphVertexCount);
@@ -129,7 +125,7 @@ TEST(SceneAnimationTests, FoxImportsSkinPayloadAndSkinIndices) {
 
   auto prefabResult = nuri::SceneImporter::loadSceneFromFile(path.string());
   ASSERT_FALSE(prefabResult.hasError()) << prefabResult.error();
-  const nuri::ScenePrefab &prefab = prefabResult.value();
+  const nuri::ScenePrefab &prefab = prefabResult.value().prefab;
 
   ASSERT_EQ(prefab.skins.size(), 1u);
   ASSERT_EQ(prefab.skins[0].jointNodeIndices.size(), 24u);

@@ -20,11 +20,7 @@ struct ForwardSceneDrawCache {
 
   void reset() {
     scene = nullptr;
-    topologyVersion = std::numeric_limits<uint64_t>::max();
-    materialVersion = std::numeric_limits<uint64_t>::max();
-    modelMaterialBindingVersion = std::numeric_limits<uint64_t>::max();
     transformVersion = std::numeric_limits<uint64_t>::max();
-    geometryMutationVersion = std::numeric_limits<uint64_t>::max();
     instanceMatrices.clear();
     instanceRemap.clear();
     materialTextureAccessHandles.clear();
@@ -32,11 +28,7 @@ struct ForwardSceneDrawCache {
   }
 
   const RenderScene *scene = nullptr;
-  uint64_t topologyVersion = std::numeric_limits<uint64_t>::max();
-  uint64_t materialVersion = std::numeric_limits<uint64_t>::max();
-  uint64_t modelMaterialBindingVersion = std::numeric_limits<uint64_t>::max();
   uint64_t transformVersion = std::numeric_limits<uint64_t>::max();
-  uint64_t geometryMutationVersion = std::numeric_limits<uint64_t>::max();
   std::pmr::vector<InstanceData> instanceMatrices;
   std::pmr::vector<uint32_t> instanceRemap;
   std::pmr::vector<TextureHandle> materialTextureAccessHandles;

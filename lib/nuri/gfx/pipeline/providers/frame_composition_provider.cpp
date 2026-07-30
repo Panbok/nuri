@@ -174,7 +174,7 @@ FrameCompositionProvider::prepare(FrameBuildContext &ctx) {
   ctx.shared[FrameHistoryTextureSlot::ExposureRead].graph = {};
   ctx.shared[FrameHistoryTextureSlot::ExposureWrite].graph = {};
   ctx.shared.exposureHistoryValid = false;
-  const RenderSettings &settings = ctx.frame.settings;
+  const RenderSettings &settings = ctx.frame.settings.facts();
   if (isRenderCaptureRequested(ctx.frame, "final_color")) {
     ctx.shared.textureRequirements |=
         FrameTextureRequirementFlags::PresentCapture;

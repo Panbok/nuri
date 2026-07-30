@@ -191,7 +191,7 @@ bool previousDepthPyramidCameraStable(const RenderFrameContext &frame) {
   return levelCount;
 }
 void logOpaqueVisibilityCounters(const RenderFrameContext &frame) {
-  if (!frame.settings.visibility.debug.logCounters) {
+  if (!frame.settings->visibility.debug.logCounters) {
     return;
   }
   const VisibilityFrameMetrics &visibility = frame.metrics.visibility;
@@ -541,7 +541,51 @@ struct IndirectGroupKeyHash {
 OpaqueRenderer::OpaqueRenderer(GPUDevice &gpu, OpaqueRendererConfig config,
                                std::pmr::memory_resource *memory)
     : gpu_(gpu), config_(std::move(config)),
-      bufferRings_(gpu, BufferRingCount, resolveMemoryResource(memory)),
+      bufferRings_(
+          gpu,
+          {{BufferUsage::Storage, Storage::Device, sizeof(InstanceData), 1u,
+            "opaque_instance_matrices_buffer"},
+           {BufferUsage::Storage, Storage::HostVisible, sizeof(InstanceData),
+            1u, "opaque_previous_instance_matrices_buffer"},
+           {BufferUsage::Storage, Storage::HostVisible, sizeof(uint32_t), 1u,
+            "opaque_velocity_instance_flags_buffer"},
+           {BufferUsage::Storage, Storage::HostVisible,
+            sizeof(VelocityFrameGpuData), 1u,
+            "opaque_velocity_frame_data_buffer"},
+           {BufferUsage::Storage, Storage::HostVisible,
+            sizeof(VelocityRenderableGeometryGpuData), 1u,
+            "opaque_velocity_geometry_buffer"},
+           {BufferUsage::Storage, Storage::HostVisible, sizeof(uint32_t), 1u,
+            "opaque_instance_remap_buffer"},
+           {BufferUsage::Storage | BufferUsage::Indirect, Storage::HostVisible,
+            kMaxDrawItemsForIndirectPath * (kIndirectCountHeaderBytes +
+                                            sizeof(DrawIndexedIndirectCommand)),
+            1u, "opaque_indirect_commands_buffer"},
+           {BufferUsage::Storage, Storage::HostVisible,
+            sizeof(MeshletBatchGpuData), sizeof(MeshletBatchGpuData),
+            "opaque_meshlet_batch_buffer"},
+           {BufferUsage::Storage, Storage::HostVisible,
+            sizeof(VisibilityCandidateGpu), 1u,
+            "opaque_visibility_candidate_buffer"},
+           {BufferUsage::Storage, Storage::HostVisible,
+            sizeof(VisibilityPassGpuData), 1u, "opaque_visibility_pass_buffer"},
+           {BufferUsage::Storage, Storage::HostVisible, sizeof(uint32_t), 1u,
+            "opaque_visibility_visible_index_buffer"},
+           {BufferUsage::Storage, Storage::HostVisible,
+            sizeof(VisibilityCounterGpuData), 1u,
+            "opaque_visibility_counter_buffer"},
+           {BufferUsage::Storage, Storage::HostVisible,
+            kMaxDrawItemsForIndirectPath *
+                sizeof(VisibilityMeshletDispatchGpuData),
+            1u, "opaque_visibility_meshlet_dispatch_buffer"},
+           {BufferUsage::Storage | BufferUsage::Indirect, Storage::Device,
+            kMaxDrawItemsForIndirectPath * sizeof(uint32_t) * 3u,
+            sizeof(uint32_t) * 3u,
+            "opaque_visibility_meshlet_indirect_commands"},
+           {BufferUsage::Storage, Storage::Device,
+            sizeof(CompactedMeshletGpuData), 1u,
+            "opaque_meshlet_compaction_buffer"}},
+          resolveMemoryResource(memory)),
       singleInstanceBatchCaches_(resolveMemoryResource(memory)),
       staticBatchCache_(resolveMemoryResource(memory)),
       renderableTemplates_(std::pmr::new_delete_resource()),
@@ -634,7 +678,6 @@ OpaqueRenderer::OpaqueRenderer(GPUDevice &gpu, OpaqueRendererConfig config,
       passDependencyBufferAccessModes_(resolveMemoryResource(memory)),
       preResolvedDecodeBuffers_(std::pmr::new_delete_resource()),
       preResolvedDrawBuffers_(resolveMemoryResource(memory)),
-      dispatchDependencyBuffers_(resolveMemoryResource(memory)),
       passDependencyTextures_(resolveMemoryResource(memory)),
       mainPassDependencyBuffers_(resolveMemoryResource(memory)),
       mainPassDependencyBufferAccessModes_(resolveMemoryResource(memory)),
@@ -778,17 +821,14 @@ void OpaqueRenderer::onDetach() {
            transmissionVisibilityDepthPushConstants_,
            depthPyramidPushConstants_, depthPyramidDrawItems_);
   clearAll(meshletMainStream_.dispatches, meshletMainStream_.constants,
-           meshletBatchGpuData_, meshletMainStream_.dependencies);
+           meshletBatchGpuData_);
   clearAll(meshletNormalPrepassStream_.dispatches,
            meshletNormalPrepassStream_.constants,
-           meshletNormalPrepassStream_.dependencies,
            meshletNormalPrepassDependencyBuffers_);
   clearAll(meshletNormalPrepassDependencyBufferAccessModes_,
-           meshletVelocityStream_.dispatches, meshletVelocityStream_.constants,
-           meshletVelocityStream_.dependencies);
+           meshletVelocityStream_.dispatches, meshletVelocityStream_.constants);
   clearAll(meshletReactiveMaskStream_.dispatches,
            meshletReactiveMaskStream_.constants,
-           meshletReactiveMaskStream_.dependencies,
            depthPyramidDependencyTextures_);
   clearAll(preDispatches_, mainPreDispatches_, visibilityGpuDispatches_,
            visibilityGpuCandidates_);
@@ -811,8 +851,8 @@ void OpaqueRenderer::onDetach() {
            cachedVisibleTemplateBatchIndices_, visibleBatchActiveRemap_);
   clearAll(cachedVisibleBatchEntries_, passDependencyBuffers_,
            passDependencyBufferAccessModes_, preResolvedDecodeBuffers_);
-  clearAll(preResolvedDrawBuffers_, dispatchDependencyBuffers_,
-           passDependencyTextures_, mainPassDependencyBuffers_);
+  clearAll(preResolvedDrawBuffers_, passDependencyTextures_,
+           mainPassDependencyBuffers_);
   clearAll(mainPassDependencyBufferAccessModes_, mainPassDependencyTextures_,
            mainPassDependencyTextureAccessModes_,
            velocityPassDependencyBuffers_);
@@ -863,11 +903,12 @@ void OpaqueRenderer::onResize(uint32_t, uint32_t) {
 void OpaqueRenderer::publishFrameData(RenderFrameContext &frame) {
   frame.sharedResources.sceneDepthSamplerId =
       gpu_.getDefaultSamplerBindlessIndex();
+  frame.sharedResources.sceneDepthSampler = {};
   frame.sharedResources.sceneDepthPyramidLevelCount = 0u;
   frame.sharedResources.sceneDepthPyramidTextures = {};
   frame.sharedResources.sceneDepthPyramidSourceFrameIndex.reset();
   frame.sharedResources.sceneDepthPyramidSourceViewProj.reset();
-  const RenderSettings &settings = frame.settings;
+  const RenderSettings &settings = frame.settings.facts();
   if (!settings.opaque.enabled) {
     return;
   }
@@ -881,6 +922,7 @@ void OpaqueRenderer::publishFrameData(RenderFrameContext &frame) {
   }
   frame.sharedResources.sceneDepthSamplerId =
       gpu_.getSamplerBindlessIndex(sceneDepthSampler_);
+  frame.sharedResources.sceneDepthSampler = sceneDepthSampler_;
   frame.sharedResources.sceneDepthPyramidLevelCount =
       sceneDepthPyramidLevelCount_;
   frame.sharedResources.sceneDepthPyramidTextures = sceneDepthPyramidTextures_;
@@ -1107,8 +1149,31 @@ Result<bool, std::string> OpaqueRenderer::appendGpuVisibilityMainPass(
       static_cast<size_t>(candidateCount) * sizeof(VisibilityCandidateGpu);
   const size_t visibleIndexBytes =
       static_cast<size_t>(visibleCapacity) * sizeof(uint32_t);
-  auto ringResult =
-      ensureVisibilityGpuRingCapacity(candidateBytes, visibleIndexBytes);
+  const size_t sceneCandidateCount = std::max(
+      {visibilityCandidateGpuData_.size(), visibilityCandidates_.size(),
+       meshDrawTemplates_.size(), size_t{1u}});
+  auto ringResult = bufferRings_.ensureRole(
+      VisibilityCandidateRing,
+      std::max(candidateBytes,
+               sceneCandidateCount * sizeof(VisibilityCandidateGpu)));
+  if (ringResult.hasError()) {
+    return ringResult;
+  }
+  ringResult = bufferRings_.ensureRole(VisibilityPassRing,
+                                       sizeof(VisibilityPassGpuData));
+  if (ringResult.hasError()) {
+    return ringResult;
+  }
+  ringResult = bufferRings_.ensureRole(
+      VisibilityVisibleIndexRing,
+      std::max(visibleIndexBytes, sceneCandidateCount * sizeof(uint32_t)),
+      [this](size_t i) { invalidateVisibilityReadbackSlot(i); });
+  if (ringResult.hasError()) {
+    return ringResult;
+  }
+  ringResult = bufferRings_.ensureRole(
+      VisibilityCounterRing, sizeof(VisibilityCounterGpuData),
+      [this](size_t i) { invalidateVisibilityReadbackSlot(i); });
   if (ringResult.hasError()) {
     return ringResult;
   }
@@ -1367,12 +1432,6 @@ Result<bool, std::string> OpaqueRenderer::appendGpuVisibilityMainPass(
         std::as_bytes(std::span<const VisibilityGpuPushConstants>(
             visibilityGpuPushConstants_.data(),
             visibilityGpuPushConstants_.size()));
-    dispatch.dependencyBuffers =
-        std::span<const BufferHandle>(visibilityGpuDependencyBuffers_.data(),
-                                      visibilityGpuDependencyBuffers_.size());
-    dispatch.dependencyTextures =
-        std::span<const TextureHandle>(visibilityGpuDependencyTextures_.data(),
-                                       visibilityGpuDependencyTextures_.size());
     dispatch.debugLabel = "Opaque Visibility Cull";
     dispatch.debugColor = kComputeDispatchColor;
     visibilityGpuDispatches_.push_back(dispatch);
@@ -1390,12 +1449,6 @@ Result<bool, std::string> OpaqueRenderer::appendGpuVisibilityMainPass(
       dispatch.pushConstants =
           std::as_bytes(std::span<const VisibilityIndirectDrawPushConstants>(
               &pushConstants, 1u));
-      dispatch.dependencyBuffers =
-          std::span<const BufferHandle>(visibilityGpuDependencyBuffers_.data(),
-                                        visibilityGpuDependencyBuffers_.size());
-      dispatch.dependencyTextures = std::span<const TextureHandle>(
-          visibilityGpuDependencyTextures_.data(),
-          visibilityGpuDependencyTextures_.size());
       dispatch.debugLabel = "Opaque Visibility Indirect Draw";
       dispatch.debugColor = kComputeDispatchColor;
       visibilityGpuDispatches_.push_back(dispatch);
@@ -1407,6 +1460,10 @@ Result<bool, std::string> OpaqueRenderer::appendGpuVisibilityMainPass(
   visibilityPass.desc.hasColorAttachment = false;
   visibilityPass.desc.preDispatches = std::span<const ComputeDispatchItem>(
       visibilityGpuDispatches_.data(), visibilityGpuDispatches_.size());
+  if (occlusionAvailable) {
+    visibilityPass.desc.recordingSamplers =
+        std::span<const SamplerHandle>(&sceneDepthSampler_, 1u);
+  }
   for (size_t index = 0u; index < visibilityGpuDependencyBuffers_.size();
        ++index) {
     visibilityPass.bufferUses.push_back({
@@ -1423,7 +1480,6 @@ Result<bool, std::string> OpaqueRenderer::appendGpuVisibilityMainPass(
   visibilityPass.desc.debugColor = kComputeDispatchColor;
   visibilityPass.desc.gpuTimingScope = GpuTimingScope::Opaque;
   visibilityPass.desc.markImplicitOutputSideEffect = true;
-  visibilityPass.desc.borrowPayload = false;
   visibilityPass.phase = PreparedPassPhase::PreLighting;
   return Result<bool, std::string>::makeResult(true);
 }
@@ -1456,7 +1512,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     pendingShadowInspectRequest_ = frame.shadowInspectRequest;
     frame.shadowInspectRequest.reset();
   }
-  const RenderSettings &settings = frame.settings;
+  const RenderSettings &settings = frame.settings.facts();
   if (!settings.opaque.enabled) {
     return Result<bool, std::string>::makeResult(true);
   }
@@ -1757,8 +1813,14 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   if (staticBuffers.hasError()) {
     return staticBuffers;
   }
-  auto matricesResult = ensureInstanceMatricesRingCapacity(
-      std::max(instanceCount * sizeof(InstanceData), sizeof(InstanceData)));
+  const size_t instanceMatrixBytes =
+      std::max(instanceCount, instanceMatricesCpuCache_.size()) *
+      sizeof(InstanceData);
+  auto matricesResult = bufferRings_.ensureRole(
+      InstanceMatricesRing, instanceMatrixBytes, [this](size_t i) {
+        frameSlotStates_[i].matricesUploadVersion =
+            std::numeric_limits<uint64_t>::max();
+      });
   if (matricesResult.hasError()) {
     return matricesResult;
   }
@@ -1854,28 +1916,28 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
           ? frame.sharedResources[FrameTextureSlot::MsaaSceneDepth].texture
           : sceneDepthTexture;
   if (needsVelocityInstanceBufferUpload) {
-    auto previousMatricesResult = ensurePreviousInstanceMatricesRingCapacity(
-        std::max(instanceCount * sizeof(InstanceData), sizeof(InstanceData)));
+    auto previousMatricesResult = bufferRings_.ensureRole(
+        PreviousInstanceMatricesRing, instanceCount * sizeof(InstanceData));
     if (previousMatricesResult.hasError()) {
       return previousMatricesResult;
     }
-    auto velocityFlagsResult = ensureVelocityInstanceFlagsRingCapacity(
-        std::max(instanceCount * sizeof(uint32_t), sizeof(uint32_t)));
+    auto velocityFlagsResult = bufferRings_.ensureRole(
+        VelocityInstanceFlagsRing, instanceCount * sizeof(uint32_t));
     if (velocityFlagsResult.hasError()) {
       return velocityFlagsResult;
     }
   }
   if (hasTaaVelocityInstances) {
-    auto velocityFrameResult =
-        ensureVelocityFrameDataRingCapacity(sizeof(VelocityFrameGpuData));
+    auto velocityFrameResult = bufferRings_.ensureRole(
+        VelocityFrameDataRing, sizeof(VelocityFrameGpuData));
     if (velocityFrameResult.hasError()) {
       return velocityFrameResult;
     }
   }
   if (needsVelocityGeometryUpload) {
-    auto velocityGeometryResult = ensureVelocityGeometryRingCapacity(
-        std::max(instanceCount * sizeof(VelocityRenderableGeometryGpuData),
-                 sizeof(VelocityRenderableGeometryGpuData)));
+    auto velocityGeometryResult = bufferRings_.ensureRole(
+        VelocityGeometryRing,
+        instanceCount * sizeof(VelocityRenderableGeometryGpuData));
     if (velocityGeometryResult.hasError()) {
       return velocityGeometryResult;
     }
@@ -3034,8 +3096,12 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     }
     NURI_PROFILER_ZONE_END();
   }
-  auto remapCapacityResult = ensureInstanceRemapRingCapacity(
-      std::max(remapCount * sizeof(uint32_t), sizeof(uint32_t)));
+  const size_t remapBytes =
+      std::max(remapCount, meshDrawTemplates_.size()) * sizeof(uint32_t);
+  auto remapCapacityResult =
+      bufferRings_.ensureRole(InstanceRemapRing, remapBytes, [this](size_t i) {
+        frameSlotStates_[i].remapUploadSignature = kInvalidDrawSignature;
+      });
   if (remapCapacityResult.hasError()) {
     return remapCapacityResult;
   }
@@ -3521,7 +3587,6 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
                        NURI_PROFILER_COLOR_CMD_DISPATCH);
     preDispatches_.clear();
     mainPreDispatches_.clear();
-    dispatchDependencyBuffers_.clear();
     passDependencyBuffers_.clear();
     passDependencyBufferAccessModes_.clear();
     preResolvedDrawBuffers_.clear();
@@ -3574,17 +3639,22 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       if (useComputePass) {
         if (instanceCentersPhaseBuffer_ &&
             instanceCentersPhaseBuffer_->valid()) {
-          appendUniqueDependency(dispatchDependencyBuffers_,
-                                 instanceCentersPhaseBuffer_->handle());
+          appendUniqueDependency(passDependencyBuffers_,
+                                 passDependencyBufferAccessModes_,
+                                 instanceCentersPhaseBuffer_->handle(),
+                                 RenderGraphAccessMode::Read);
         }
         if (instanceBaseMatricesBuffer_ &&
             instanceBaseMatricesBuffer_->valid()) {
-          appendUniqueDependency(dispatchDependencyBuffers_,
-                                 instanceBaseMatricesBuffer_->handle());
+          appendUniqueDependency(passDependencyBuffers_,
+                                 passDependencyBufferAccessModes_,
+                                 instanceBaseMatricesBuffer_->handle(),
+                                 RenderGraphAccessMode::Read);
         }
         appendUniqueDependency(
-            dispatchDependencyBuffers_,
-            bufferRings_.handle(InstanceMatricesRing, frameSlot));
+            passDependencyBuffers_, passDependencyBufferAccessModes_,
+            bufferRings_.handle(InstanceMatricesRing, frameSlot),
+            RenderGraphAccessMode::Write);
         const uint32_t dispatchX = static_cast<uint32_t>(
             (instanceCount + (kComputeWorkgroupSize - 1)) /
             kComputeWorkgroupSize);
@@ -3595,9 +3665,6 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         dispatch.pushConstants = std::span<const std::byte>(
             reinterpret_cast<const std::byte *>(&computePushConstants_),
             sizeof(computePushConstants_));
-        dispatch.dependencyBuffers =
-            std::span<const BufferHandle>(dispatchDependencyBuffers_.data(),
-                                          dispatchDependencyBuffers_.size());
         dispatch.debugLabel = "Opaque Instance Compute";
         dispatch.debugColor = kComputeDispatchColor;
         preDispatches_.push_back(dispatch);
@@ -3705,20 +3772,16 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   normalPrepassDrawItems_.clear();
   meshletDepthPrepassStream_.dispatches.clear();
   meshletDepthPrepassStream_.constants.clear();
-  meshletDepthPrepassStream_.dependencies.clear();
   meshletDepthPrepassDependencyBuffers_.clear();
   meshletDepthPrepassDependencyBufferAccessModes_.clear();
   meshletNormalPrepassStream_.dispatches.clear();
   meshletNormalPrepassStream_.constants.clear();
-  meshletNormalPrepassStream_.dependencies.clear();
   meshletNormalPrepassDependencyBuffers_.clear();
   meshletNormalPrepassDependencyBufferAccessModes_.clear();
   meshletVelocityStream_.dispatches.clear();
   meshletVelocityStream_.constants.clear();
-  meshletVelocityStream_.dependencies.clear();
   meshletReactiveMaskStream_.dispatches.clear();
   meshletReactiveMaskStream_.constants.clear();
-  meshletReactiveMaskStream_.dependencies.clear();
   visibilityMeshletDispatchGpuData_.clear();
   visibilityMeshletCandidateMap_.clear();
   visibilityIndirectMeshDispatchPushConstants_.clear();
@@ -4079,9 +4142,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         (meshletNormalPrepassEnabled ? 1u : 0u) +
         (temporalMotionRequired ? 1u : 0u) + (reactiveMaskRequired ? 1u : 0u);
     const size_t descriptorCapacity = descriptorCount * descriptorPassCount;
-    auto batchBufferResult = ensureMeshletBatchRingCapacity(
-        std::max(descriptorCapacity * sizeof(MeshletBatchGpuData),
-                 sizeof(MeshletBatchGpuData)));
+    auto batchBufferResult = bufferRings_.ensureRole(
+        MeshletBatchRing, descriptorCapacity * sizeof(MeshletBatchGpuData));
     if (batchBufferResult.hasError()) {
       return batchBufferResult;
     }
@@ -4139,8 +4201,9 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   uint64_t meshletVisibilityCounterBufferAddress = 0u;
   uint32_t meshletCounterFlags = 0u;
   if (meshletActive) {
-    auto counterResult =
-        ensureVisibilityCounterRingCapacity(sizeof(VisibilityCounterGpuData));
+    auto counterResult = bufferRings_.ensureRole(
+        VisibilityCounterRing, sizeof(VisibilityCounterGpuData),
+        [this](size_t i) { invalidateVisibilityReadbackSlot(i); });
     if (counterResult.hasError()) {
       return counterResult;
     }
@@ -4176,8 +4239,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   const auto buildMeshletDispatches =
       [&](std::pmr::vector<MeshDispatchItem> &dispatchItems,
           std::pmr::vector<MeshletPushConstants> &pushConstants,
-          std::pmr::vector<MeshletDispatchDependencyBuffers>
-              &dispatchDependencyBuffers,
+          std::pmr::vector<BufferHandle> &passDependencyBuffers,
+          std::pmr::vector<RenderGraphAccessMode> &passDependencyAccessModes,
           MeshletPipelineHandle singleSidedPipeline,
           MeshletPipelineHandle doubleSidedPipeline,
           MeshletPipelineHandle alphaPipeline,
@@ -4193,7 +4256,6 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
           MeshletSourceFilter sourceFilter) -> uint64_t {
     dispatchItems.clear();
     pushConstants.clear();
-    dispatchDependencyBuffers.clear();
     uint64_t dispatchSignature = hashCombine64(kFnvOffsetBasis64, 0x4d455348u);
     dispatchSignature = hashCombine64(
         dispatchSignature,
@@ -4240,20 +4302,16 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       const auto &cachedDispatches = staticBatchCache_.meshletDispatches;
       const auto &cachedPushConstants =
           staticBatchCache_.meshletPushConstantsTemplates;
-      const auto &cachedDependencyBuffers =
-          staticBatchCache_.meshletDispatchDependencyBuffers;
       dispatchItems = cachedDispatches;
       pushConstants = cachedPushConstants;
-      dispatchDependencyBuffers.clear();
-      dispatchDependencyBuffers.reserve(cachedDependencyBuffers.size());
-      for (const MeshletDispatchDependencyBuffers &cachedDependencies :
-           cachedDependencyBuffers) {
-        dispatchDependencyBuffers.emplace_back(
-            dispatchDependencyBuffers.get_allocator().resource());
-        dispatchDependencyBuffers.back().buffers.assign(
-            cachedDependencies.buffers.begin(),
-            cachedDependencies.buffers.end());
+      for (const BufferHandle handle :
+           staticBatchCache_.meshletAddressBackingBuffers) {
+        appendUniqueDependency(passDependencyBuffers, passDependencyAccessModes,
+                               handle, RenderGraphAccessMode::Read);
       }
+      appendUniqueDependency(passDependencyBuffers, passDependencyAccessModes,
+                             meshletBatchBufferHandle,
+                             RenderGraphAccessMode::Read);
       for (size_t i = 0; i < pushConstants.size(); ++i) {
         MeshletPushConstants &constants = pushConstants[i];
         constants.frameDataAddress = frameDataAddress;
@@ -4274,8 +4332,6 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         dispatchItems[i].pushConstants = std::span<const std::byte>(
             reinterpret_cast<const std::byte *>(&pushConstants[i]),
             sizeof(MeshletPushConstants));
-        dispatchItems[i].dependencyBuffers =
-            dispatchDependencyBuffers[i].span();
       }
       meshletBatchGpuData_ = staticBatchCache_.meshletBatchGpuData;
       return cachedCandidateCount;
@@ -4287,11 +4343,12 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     }
     struct MeshletBuildSource {
       MeshletBatchGpuData batch{};
-      std::array<BufferHandle, 1> dependencies{};
       MeshletPipelineHandle pipeline{};
       uint32_t candidateCount = 0u;
     };
     std::pmr::vector<MeshletBuildSource> sources(
+        drawItems_.get_allocator().resource());
+    std::pmr::vector<BufferHandle> addressBackingBuffers(
         drawItems_.get_allocator().resource());
     sources.reserve(drawItems_.size());
     uint64_t totalCandidateCount = 0;
@@ -4382,14 +4439,19 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
               : (info.doubleSided ? doubleSidedPipeline : singleSidedPipeline);
       sources.push_back(MeshletBuildSource{
           .batch = batch,
-          .dependencies = {draw.vertexBuffer},
           .pipeline = selectedPipeline,
           .candidateCount = candidateCount,
       });
+      appendUniqueDependency(addressBackingBuffers, draw.vertexBuffer);
+      appendUniqueDependency(passDependencyBuffers, passDependencyAccessModes,
+                             draw.vertexBuffer, RenderGraphAccessMode::Read);
     }
     if (sources.empty()) {
       return totalCandidateCount;
     }
+    appendUniqueDependency(passDependencyBuffers, passDependencyAccessModes,
+                           meshletBatchBufferHandle,
+                           RenderGraphAccessMode::Read);
     constexpr uint64_t kExactMeshletDispatchCandidateThreshold = 10u * 1024u;
     const bool useExactMeshletDispatches =
         useExactMeshletDispatchGroups &&
@@ -4398,18 +4460,6 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
                                  MeshletPipelineHandle rhs) noexcept {
       return lhs.index == rhs.index && lhs.generation == rhs.generation;
     };
-    const auto appendMeshletDependency =
-        [](MeshletDispatchDependencyBuffers &dependencies,
-           PmrHashSet<uint64_t> &dependencyKeys, BufferHandle handle) {
-          if (!nuri::isValid(handle)) {
-            return;
-          }
-          const uint64_t key = foldHandle(handle.index, handle.generation);
-          if (!dependencyKeys.insert(key).second) {
-            return;
-          }
-          dependencies.buffers.push_back(handle);
-        };
     const auto meshletTaskGroupCount = [](uint32_t candidateCount) {
       return (candidateCount + kOpaqueMeshletTaskCandidatesPerGroup - 1u) /
              kOpaqueMeshletTaskCandidatesPerGroup;
@@ -4521,13 +4571,6 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
                   ++exactEnd;
                 }
                 const size_t groupBatchBase = meshletBatchGpuData_.size();
-                MeshletDispatchDependencyBuffers exactDependencies(
-                    dispatchDependencyBuffers.get_allocator().resource());
-                PmrHashSet<uint64_t> exactDependencyKeys(
-                    dispatchDependencyBuffers.get_allocator().resource());
-                exactDependencyKeys.reserve(
-                    std::min(exactEnd - exactBegin + 1u,
-                             kMaxMeshDispatchDependencyResources));
                 uint32_t groupBatchCount = 0u;
                 for (size_t sourceCursor = exactBegin; sourceCursor < exactEnd;
                      ++sourceCursor) {
@@ -4535,14 +4578,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
                       bucketedSourceIndices[sourceCursor];
                   const MeshletBuildSource &source = sources[sourceIndex];
                   meshletBatchGpuData_.push_back(source.batch);
-                  for (const BufferHandle handle : source.dependencies) {
-                    appendMeshletDependency(exactDependencies,
-                                            exactDependencyKeys, handle);
-                  }
                   ++groupBatchCount;
                 }
-                appendMeshletDependency(exactDependencies, exactDependencyKeys,
-                                        meshletBatchBufferHandle);
                 const uint32_t maxGroupsY = maxTaskGroupsYFor(groupsX);
                 uint32_t emittedBatches = 0u;
                 while (emittedBatches < groupBatchCount) {
@@ -4592,12 +4629,6 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
                   dispatch.debugLabel = debugLabel;
                   dispatch.debugColor = debugColor;
                   dispatchItems.push_back(dispatch);
-                  dispatchDependencyBuffers.emplace_back(
-                      dispatchDependencyBuffers.get_allocator().resource());
-                  MeshletDispatchDependencyBuffers &dependencies =
-                      dispatchDependencyBuffers.back();
-                  dependencies.buffers.assign(exactDependencies.buffers.begin(),
-                                              exactDependencies.buffers.end());
                   emittedBatches += groupsY;
                 }
                 exactBegin = exactEnd;
@@ -4605,13 +4636,6 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
               continue;
             }
             const size_t groupBatchBase = meshletBatchGpuData_.size();
-            MeshletDispatchDependencyBuffers groupDependencies(
-                dispatchDependencyBuffers.get_allocator().resource());
-            PmrHashSet<uint64_t> groupDependencyKeys(
-                dispatchDependencyBuffers.get_allocator().resource());
-            groupDependencyKeys.reserve(
-                std::min(sourceEnd - sourceBegin + 1u,
-                         kMaxMeshDispatchDependencyResources));
             uint32_t groupBatchCount = 0u;
             uint32_t groupsX = 0u;
             for (size_t sourceCursor = sourceBegin; sourceCursor < sourceEnd;
@@ -4621,15 +4645,9 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
               const uint32_t taskGroupCount = meshletTaskGroupCount(
                   sourceCandidateSpanForDispatch(source, candidateOffset));
               meshletBatchGpuData_.push_back(source.batch);
-              for (const BufferHandle handle : source.dependencies) {
-                appendMeshletDependency(groupDependencies, groupDependencyKeys,
-                                        handle);
-              }
               groupsX = std::max(groupsX, taskGroupCount);
               ++groupBatchCount;
             }
-            appendMeshletDependency(groupDependencies, groupDependencyKeys,
-                                    meshletBatchBufferHandle);
             const uint32_t maxGroupsY = maxTaskGroupsYFor(groupsX);
             uint32_t emittedBatches = 0u;
             while (emittedBatches < groupBatchCount) {
@@ -4677,12 +4695,6 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
               dispatch.debugLabel = debugLabel;
               dispatch.debugColor = debugColor;
               dispatchItems.push_back(dispatch);
-              dispatchDependencyBuffers.emplace_back(
-                  dispatchDependencyBuffers.get_allocator().resource());
-              MeshletDispatchDependencyBuffers &dependencies =
-                  dispatchDependencyBuffers.back();
-              dependencies.buffers.assign(groupDependencies.buffers.begin(),
-                                          groupDependencies.buffers.end());
               emittedBatches += groupsY;
             }
           }
@@ -4698,31 +4710,18 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       dispatchItems[i].pushConstants = std::span<const std::byte>(
           reinterpret_cast<const std::byte *>(&pushConstants[i]),
           sizeof(MeshletPushConstants));
-      dispatchItems[i].dependencyBuffers = dispatchDependencyBuffers[i].span();
     }
     if (allowStaticMeshletDispatchCache) {
       auto &cachedDispatches = staticBatchCache_.meshletDispatches;
       auto &cachedPushConstants =
           staticBatchCache_.meshletPushConstantsTemplates;
-      auto &cachedDependencyBuffers =
-          staticBatchCache_.meshletDispatchDependencyBuffers;
       auto &cachedBatchGpuData = staticBatchCache_.meshletBatchGpuData;
       cachedDispatches = dispatchItems;
       cachedPushConstants = pushConstants;
       for (MeshDispatchItem &cachedDispatch : cachedDispatches) {
         cachedDispatch.pushConstants = {};
-        cachedDispatch.dependencyBuffers = {};
-        cachedDispatch.dependencyTextures = {};
       }
-      cachedDependencyBuffers.clear();
-      cachedDependencyBuffers.reserve(dispatchDependencyBuffers.size());
-      for (const MeshletDispatchDependencyBuffers &dependencies :
-           dispatchDependencyBuffers) {
-        cachedDependencyBuffers.emplace_back(
-            cachedDependencyBuffers.get_allocator().resource());
-        cachedDependencyBuffers.back().buffers.assign(
-            dependencies.buffers.begin(), dependencies.buffers.end());
-      }
+      staticBatchCache_.meshletAddressBackingBuffers = addressBackingBuffers;
       cachedBatchGpuData = meshletBatchGpuData_;
       staticBatchCache_.meshletCandidateCount = totalCandidateCount;
       staticBatchCache_.meshletDispatchSignature = dispatchSignature;
@@ -4742,7 +4741,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
                            RenderGraphAccessMode::Read);
     buildMeshletDispatches(meshletDepthPrepassStream_.dispatches,
                            meshletDepthPrepassStream_.constants,
-                           meshletDepthPrepassStream_.dependencies,
+                           meshletDepthPrepassDependencyBuffers_,
+                           meshletDepthPrepassDependencyBufferAccessModes_,
                            selectMeshletDepthPipeline(coverage, false, false),
                            selectMeshletDepthPipeline(coverage, false, true),
                            selectMeshletDepthPipeline(coverage, true, false),
@@ -4789,8 +4789,9 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     buildMeshletDispatches(
         meshletNormalPrepassStream_.dispatches,
         meshletNormalPrepassStream_.constants,
-        meshletNormalPrepassStream_.dependencies, singleSidedInputPipeline,
-        doubleSidedInputPipeline, alphaInputPipeline,
+        meshletNormalPrepassDependencyBuffers_,
+        meshletNormalPrepassDependencyBufferAccessModes_,
+        singleSidedInputPipeline, doubleSidedInputPipeline, alphaInputPipeline,
         alphaDoubleSidedInputPipeline, normalPrepassCompare,
         meshletNormalPrepassWritesDepth,
         materialNormalInput ? "OpaqueMeshletNormals" : "OpaqueMeshletGTAODepth",
@@ -5023,6 +5024,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     }
     pass.desc.importedBufferUses = pass.bufferUses;
     pass.desc.importedTextureUses = pass.textureUses;
+    pass.desc.recordingSamplers = sceneGpu->recordingSamplers;
     pass.desc.draws = draws;
     pass.desc.meshDispatches = meshDispatches;
     pass.desc.drawBuffersPreResolved = true;
@@ -5050,10 +5052,10 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     }
     pass.desc.importedBufferUses = pass.bufferUses;
     pass.desc.importedTextureUses = pass.textureUses;
+    pass.desc.recordingSamplers = sceneGpu->recordingSamplers;
     pass.desc.debugLabel = debugLabel;
     pass.desc.debugColor = kComputeDispatchColor;
     pass.desc.gpuTimingScope = timingScope;
-    pass.desc.borrowPayload = false;
     return pass;
   };
   bool pickPassSubmitted = false;
@@ -5094,7 +5096,6 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     pickPass.depthTextureHandle = sceneDepthTexture;
     pickPass.desc.preDispatches = std::span<const ComputeDispatchItem>(
         preDispatches_.data(), preDispatches_.size());
-    pickPass.desc.borrowPayload = preDispatches_.empty();
     pickPass.phase = PreparedPassPhase::Pick;
     pickPass.kind = PreparedPassKind::Pick;
     inFlightPickReadback_ = InFlightPickReadback{
@@ -5120,7 +5121,6 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     }
     depthPass.desc.gpuTimingScope = GpuTimingScope::OpaqueDepth;
     depthPass.desc.markImplicitOutputSideEffect = true;
-    depthPass.desc.borrowPayload = pickPassSubmitted || preDispatches_.empty();
     depthPass.phase = PreparedPassPhase::PreLighting;
     depthPass.kind = PreparedPassKind::Depth;
     depthPass.publishesDepth = true;
@@ -5144,7 +5144,6 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     }
     depthPass.desc.gpuTimingScope = GpuTimingScope::OpaqueDepth;
     depthPass.desc.markImplicitOutputSideEffect = true;
-    depthPass.desc.borrowPayload = pickPassSubmitted || preDispatches_.empty();
     depthPass.phase = PreparedPassPhase::PreLighting;
     depthPass.kind = PreparedPassKind::Depth;
     depthPass.publishesDepth = true;
@@ -5168,9 +5167,6 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
                                                preDispatches_.size());
     }
     visibilityDepthPass.desc.gpuTimingScope = GpuTimingScope::Opaque;
-    visibilityDepthPass.desc.borrowPayload =
-        pickPassSubmitted || depthPrepassEnabled ||
-        meshletDepthPrepassEnabled || preDispatches_.empty();
     visibilityDepthPass.phase = PreparedPassPhase::PreLighting;
     visibilityDepthPass.kind = PreparedPassKind::TransmissionDepth;
   }
@@ -5220,9 +5216,6 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     }
     normalPass.desc.gpuTimingScope = GpuTimingScope::OpaqueNormal;
     normalPass.desc.markImplicitOutputSideEffect = true;
-    normalPass.desc.borrowPayload = !meshletNormalPrepassWritesDepth ||
-                                    preDispatchSubmittedBeforeNormal ||
-                                    preDispatches_.empty();
     normalPass.phase = PreparedPassPhase::PreLighting;
     normalPass.kind = PreparedPassKind::Normal;
     normalPass.publishesDepth = meshletNormalPrepassWritesDepth;
@@ -5265,9 +5258,6 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     }
     normalPass.desc.gpuTimingScope = GpuTimingScope::OpaqueNormal;
     normalPass.desc.markImplicitOutputSideEffect = true;
-    normalPass.desc.borrowPayload = !hasClassicNormalDepthPrepass ||
-                                    preDispatchSubmittedBeforeNormal ||
-                                    preDispatches_.empty();
     normalPass.phase = PreparedPassPhase::PreLighting;
     normalPass.kind = PreparedPassKind::Normal;
     normalPass.publishesDepth = hasClassicNormalDepthPrepass;
@@ -5324,16 +5314,18 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
                                      .clearColor = {1.0f, 1.0f, 0.0f, 0.0f}};
       verificationPass.colorTextureHandle =
           currentFrameDepthVerificationTexture_;
-      verificationPass.desc.dependencyTextures = std::span<const TextureHandle>(
-          &depthPyramidDependencyTextures_.back(), 1u);
+      verificationPass.textureUses.push_back(
+          {.texture = depthPyramidDependencyTextures_.back()});
+      verificationPass.desc.importedTextureUses = verificationPass.textureUses;
       verificationPass.desc.draws =
           std::span<const DrawItem>(&depthPyramidDrawItems_.back(), 1u);
+      verificationPass.desc.recordingSamplers =
+          std::span<const SamplerHandle>(&sceneDepthSampler_, 1u);
       verificationPass.desc.drawBuffersPreResolved = true;
       verificationPass.desc.gpuTimingScope = GpuTimingScope::OpaqueDepth;
       verificationPass.desc.debugLabel =
           "Opaque Current-Frame Depth Verification";
       verificationPass.desc.debugColor = kOpaquePassDebugColor;
-      verificationPass.desc.borrowPayload = true;
       verificationPass.phase = PreparedPassPhase::PreLighting;
       currentDepthVerificationBuilt = true;
     }
@@ -5363,15 +5355,17 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
                                 .storeOp = StoreOp::Store,
                                 .clearColor = {1.0f, 1.0f, 0.0f, 0.0f}};
       pyramidPass.colorTextureHandle = destinationTexture;
-      pyramidPass.desc.dependencyTextures = std::span<const TextureHandle>(
-          &depthPyramidDependencyTextures_.back(), 1u);
+      pyramidPass.textureUses.push_back(
+          {.texture = depthPyramidDependencyTextures_.back()});
+      pyramidPass.desc.importedTextureUses = pyramidPass.textureUses;
       pyramidPass.desc.draws =
           std::span<const DrawItem>(&depthPyramidDrawItems_.back(), 1u);
+      pyramidPass.desc.recordingSamplers =
+          std::span<const SamplerHandle>(&sceneDepthSampler_, 1u);
       pyramidPass.desc.drawBuffersPreResolved = true;
       pyramidPass.desc.gpuTimingScope = GpuTimingScope::OpaqueDepth;
       pyramidPass.desc.debugLabel = "Opaque Depth MinMax Pyramid";
       pyramidPass.desc.debugColor = kOpaquePassDebugColor;
-      pyramidPass.desc.borrowPayload = true;
       pyramidPass.phase = PreparedPassPhase::PreLighting;
       pyramidPass.kind = PreparedPassKind::DepthPyramid;
       pyramidPass.depthPyramidLevel = level;
@@ -5414,18 +5408,13 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
           reinterpret_cast<const std::byte *>(
               &shadowSdsmReducePushConstants_.back()),
           sizeof(ShadowSdsmReducePushConstants));
-      dispatch.dependencyBuffers = std::span<const BufferHandle>(
-          shadowSdsmReduceDependencyBuffers_.data(),
-          shadowSdsmReduceDependencyBuffers_.size());
-      dispatch.dependencyTextures = std::span<const TextureHandle>(
-          shadowSdsmReduceDependencyTextures_.data(),
-          shadowSdsmReduceDependencyTextures_.size());
       dispatch.debugLabel = "Shadow SDSM Reduce";
       dispatch.debugColor = kComputeDispatchColor;
       shadowSdsmReduceDispatches_.push_back(dispatch);
       PreparedGraphPass &reducePass = makeDispatchPass(
-          shadowSdsmReduceDispatches_, {}, shadowSdsmReduceDependencyTextures_,
-          dispatch.debugLabel, GpuTimingScope::ShadowSdsm);
+          shadowSdsmReduceDispatches_, shadowSdsmReduceDependencyBuffers_,
+          shadowSdsmReduceDependencyTextures_, dispatch.debugLabel,
+          GpuTimingScope::ShadowSdsm);
       reducePass.desc.executionMode = RenderPassExecutionMode::ComputeOnly;
       reducePass.desc.hasColorAttachment = false;
       reducePass.desc.markImplicitOutputSideEffect = true;
@@ -5442,6 +5431,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   const size_t mainPassIndex = out.size();
   PreparedGraphPass &pass =
       out.emplace_back(drawItems_.get_allocator().resource());
+  pass.desc.recordingSamplers = sceneGpu->recordingSamplers;
   pass.desc.color = {.loadOp = LoadOp::Clear,
                      .storeOp = StoreOp::Store,
                      .clearColor = {kClearColorWhite, kClearColorWhite,
@@ -5575,7 +5565,6 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   }
   meshletMainStream_.dispatches.clear();
   meshletMainStream_.constants.clear();
-  meshletMainStream_.dependencies.clear();
   meshletCompactionWorkItems_.clear();
   meshletCompactionPushConstants_.clear();
   meshletCompactionDispatches_.clear();
@@ -5617,7 +5606,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         meshletVisibilityCounterBufferAddress != 0u;
     const uint64_t mainCandidateCount = buildMeshletDispatches(
         meshletMainStream_.dispatches, meshletMainStream_.constants,
-        meshletMainStream_.dependencies,
+        mainPassDependencyBuffers_, mainPassDependencyBufferAccessModes_,
         selectMeshletScenePipeline(meshletPreTaskCompactionEligible, coverage,
                                    false, false),
         selectMeshletScenePipeline(meshletPreTaskCompactionEligible, coverage,
@@ -5664,14 +5653,19 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         const size_t compactRecordBytes =
             compactRecordCount * sizeof(CompactedMeshletGpuData);
         const size_t commandBytes = dispatchCount * kMeshDispatchCommandBytes;
-        auto indirectRingResult = ensureVisibilityMeshletIndirectRingCapacity(
-            workItemCount * sizeof(MeshletCompactionWorkItemGpuData),
-            commandBytes);
+        auto indirectRingResult = bufferRings_.ensureRole(
+            VisibilityMeshletDispatchRing,
+            workItemCount * sizeof(MeshletCompactionWorkItemGpuData));
         if (indirectRingResult.hasError()) {
           return indirectRingResult;
         }
-        auto compactRingResult = ensureMeshletCompactionRingCapacity(
-            compactRecordOffset + compactRecordBytes);
+        indirectRingResult = bufferRings_.ensureRole(
+            VisibilityMeshletIndirectCommandRing, commandBytes);
+        if (indirectRingResult.hasError()) {
+          return indirectRingResult;
+        }
+        auto compactRingResult = bufferRings_.ensureRole(
+            MeshletCompactionRing, compactRecordOffset + compactRecordBytes);
         if (compactRingResult.hasError()) {
           return compactRingResult;
         }
@@ -5796,14 +5790,6 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
                 RenderGraphAccessMode::Read | RenderGraphAccessMode::Write);
             meshletCompactionFinalizeDependencyBuffers_.assign(
                 {compactBuffer, commandBuffer, meshletVisibilityCounterBuffer});
-            for (const MeshletDispatchDependencyBuffers &dependencies :
-                 meshletMainStream_.dependencies) {
-              for (const BufferHandle handle : dependencies.buffers) {
-                appendUniqueDependency(mainPassDependencyBuffers_,
-                                       mainPassDependencyBufferAccessModes_,
-                                       handle, RenderGraphAccessMode::Read);
-              }
-            }
             for (uint32_t level = 0u;
                  level < meshletOcclusion.pyramidLevelCount; ++level) {
               appendUniqueDependency(
@@ -5826,14 +5812,6 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
                 reinterpret_cast<const std::byte *>(
                     &meshletCompactionPushConstants_[0]),
                 sizeof(MeshletCompactionPushConstants));
-            compactionDispatch.dependencyBuffers =
-                std::span<const BufferHandle>(
-                    meshletCompactionDependencyBuffers_.data(),
-                    meshletCompactionDependencyBuffers_.size());
-            compactionDispatch.dependencyTextures =
-                std::span<const TextureHandle>(
-                    meshletCompactionDependencyTextures_.data(),
-                    meshletCompactionDependencyTextures_.size());
             compactionDispatch.debugLabel =
                 "Opaque Meshlet Pre-Task Compaction";
             compactionDispatch.debugColor = kComputeDispatchColor;
@@ -5846,10 +5824,6 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
                     &meshletCompactionPushConstants_[1]),
                 sizeof(MeshletCompactionPushConstants));
             finalizeDispatch.debugLabel = "Opaque Meshlet Compaction Finalize";
-            finalizeDispatch.dependencyBuffers = std::span<const BufferHandle>(
-                meshletCompactionFinalizeDependencyBuffers_.data(),
-                meshletCompactionFinalizeDependencyBuffers_.size());
-            finalizeDispatch.dependencyTextures = {};
             meshletCompactionDispatches_.push_back(finalizeDispatch);
             ComputeDispatchItem publishDispatch = finalizeDispatch;
             publishDispatch.dispatch = {.x = 1u, .y = 1u, .z = 1u};
@@ -5859,17 +5833,11 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
                 sizeof(MeshletCompactionPushConstants));
             publishDispatch.debugLabel =
                 "Opaque Meshlet Compaction Metrics Finalize";
-            publishDispatch.dependencyBuffers = std::span<const BufferHandle>(
-                meshletCompactionFinalizeDependencyBuffers_.data() + 2u, 1u);
             meshletCompactionDispatches_.push_back(publishDispatch);
             uint32_t patchedRecordBase = 0u;
             for (size_t i = 0; i < dispatchCount; ++i) {
               MeshDispatchItem &meshDispatch = meshletMainStream_.dispatches[i];
               MeshletPushConstants &constants = meshletMainStream_.constants[i];
-              for (const BufferHandle handle : {compactBuffer, commandBuffer}) {
-                appendUniqueDependency(
-                    meshletMainStream_.dependencies[i].buffers, handle);
-              }
               const uint64_t dispatchRecordCapacity =
                   static_cast<uint64_t>(meshDispatch.groupsX) *
                   meshDispatch.groupsY * meshDispatch.groupsZ *
@@ -5884,8 +5852,6 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
               meshDispatch.pushConstants = std::span<const std::byte>(
                   reinterpret_cast<const std::byte *>(&constants),
                   sizeof(constants));
-              meshDispatch.dependencyBuffers =
-                  meshletMainStream_.dependencies[i].span();
               meshDispatch.command = MeshDispatchCommandType::Indirect;
               meshDispatch.indirectBuffer = commandBuffer;
               meshDispatch.indirectBufferOffset =
@@ -5924,8 +5890,14 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
             candidateMapCount <=
                 static_cast<size_t>(std::numeric_limits<uint32_t>::max());
         if (candidateMapAddressable) {
-          auto indirectRingResult = ensureVisibilityMeshletIndirectRingCapacity(
-              dispatchMetadataBytes + candidateMapBytes,
+          auto indirectRingResult = bufferRings_.ensureRole(
+              VisibilityMeshletDispatchRing,
+              dispatchMetadataBytes + candidateMapBytes);
+          if (indirectRingResult.hasError()) {
+            return indirectRingResult;
+          }
+          indirectRingResult = bufferRings_.ensureRole(
+              VisibilityMeshletIndirectCommandRing,
               dispatchCount * kMeshDispatchCommandBytes);
           if (indirectRingResult.hasError()) {
             return indirectRingResult;
@@ -6045,6 +6017,14 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
               visibilityMeshletGpuDependencyBufferAccessModes_.push_back(
                   RenderGraphAccessMode::Read);
             }
+            for (size_t i = 0u;
+                 i < visibilityMeshletGpuDependencyBuffers_.size(); ++i) {
+              appendUniqueDependency(
+                  mainPassDependencyBuffers_,
+                  mainPassDependencyBufferAccessModes_,
+                  visibilityMeshletGpuDependencyBuffers_[i],
+                  visibilityMeshletGpuDependencyBufferAccessModes_[i]);
+            }
             visibilityMeshletGpuDispatches_.clear();
             ComputeDispatchItem dispatch{};
             dispatch.pipeline =
@@ -6058,9 +6038,6 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
                 std::span<const VisibilityIndirectMeshDispatchPushConstants>(
                     visibilityIndirectMeshDispatchPushConstants_.data(),
                     visibilityIndirectMeshDispatchPushConstants_.size()));
-            dispatch.dependencyBuffers = std::span<const BufferHandle>(
-                visibilityMeshletGpuDependencyBuffers_.data(),
-                visibilityMeshletGpuDependencyBuffers_.size());
             dispatch.debugLabel = "Opaque Visibility Indirect Mesh Dispatch";
             dispatch.debugColor = kComputeDispatchColor;
             visibilityMeshletGpuDispatches_.push_back(dispatch);
@@ -6219,7 +6196,6 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
                             visibilityMeshletGpuDispatches_.end());
   pass.desc.preDispatches = std::span<const ComputeDispatchItem>(
       mainPreDispatches_.data(), mainPreDispatches_.size());
-  pass.desc.borrowPayload = mainPreDispatches_.empty();
   pass.kind = PreparedPassKind::Main;
   const TextureHandle sceneColorTarget =
       msaaSelected
@@ -6309,8 +6285,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     if (potentialReactiveDraws > 0u) {
       buildMeshletDispatches(
           meshletReactiveMaskStream_.dispatches,
-          meshletReactiveMaskStream_.constants,
-          meshletReactiveMaskStream_.dependencies,
+          meshletReactiveMaskStream_.constants, reactivePassDependencyBuffers_,
+          reactivePassDependencyBufferAccessModes_,
           pipelines_.meshletReactiveMask[0], pipelines_.meshletReactiveMask[1],
           {}, {}, CompareOp::LessEqual, false, "OpaqueMeshletReactiveMask",
           0xff33cc88, MeshletOcclusionSource::Disabled, 0u, 0u,
@@ -6343,12 +6319,11 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
                                    .clearDepth = kClearDepthOne,
                                    .clearStencil = 0};
         reactivePass.depthTextureHandle = sceneDepthTexture;
-        reactivePass.desc.dependencyTextureAccessModes =
-            std::span<const RenderGraphAccessMode>(
-                mainPassDependencyTextureAccessModes_.data(),
-                passDependencyTextures_.size());
+        for (size_t i = 0; i < reactivePass.textureUses.size(); ++i) {
+          reactivePass.textureUses[i].access =
+              mainPassDependencyTextureAccessModes_[i];
+        }
         reactivePass.desc.gpuTimingScope = GpuTimingScope::ReactiveMask;
-        reactivePass.desc.borrowPayload = true;
         reactivePass.phase = presentationAA.gtaoTemporal
                                  ? PreparedPassPhase::PreLighting
                                  : PreparedPassPhase::MainLighting;
@@ -6442,12 +6417,11 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
                                  .clearDepth = kClearDepthOne,
                                  .clearStencil = 0};
       reactivePass.depthTextureHandle = sceneDepthTexture;
-      reactivePass.desc.dependencyTextureAccessModes =
-          std::span<const RenderGraphAccessMode>(
-              mainPassDependencyTextureAccessModes_.data(),
-              passDependencyTextures_.size());
+      for (size_t i = 0; i < reactivePass.textureUses.size(); ++i) {
+        reactivePass.textureUses[i].access =
+            mainPassDependencyTextureAccessModes_[i];
+      }
       reactivePass.desc.gpuTimingScope = GpuTimingScope::ReactiveMask;
-      reactivePass.desc.borrowPayload = true;
       reactivePass.phase = presentationAA.gtaoTemporal
                                ? PreparedPassPhase::PreLighting
                                : PreparedPassPhase::MainLighting;
@@ -6523,7 +6497,6 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       velocityPass.colorTextureHandle =
           frame.sharedResources[FrameTextureSlot::MotionVector].texture;
       velocityPass.desc.gpuTimingScope = GpuTimingScope::Velocity;
-      velocityPass.desc.borrowPayload = true;
       velocityPass.phase = gtaoTemporalVelocityRequested
                                ? PreparedPassPhase::PreLighting
                                : PreparedPassPhase::MainLighting;
@@ -6546,7 +6519,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       !depthMotionVectorPassBuilt) {
     buildMeshletDispatches(
         meshletVelocityStream_.dispatches, meshletVelocityStream_.constants,
-        meshletVelocityStream_.dependencies, pipelines_.meshletVelocity[0],
+        velocityPassDependencyBuffers_,
+        velocityPassDependencyBufferAccessModes_, pipelines_.meshletVelocity[0],
         pipelines_.meshletVelocity[1], {}, {}, CompareOp::LessEqual, false,
         "OpaqueMeshletVelocity", 0xff44aaff, MeshletOcclusionSource::Disabled,
         0u, 0u, velocityFrameDataAddress, false, false, MeshletSourceFilter{});
@@ -6578,12 +6552,11 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
                                  .clearDepth = kClearDepthOne,
                                  .clearStencil = 0};
       velocityPass.depthTextureHandle = sceneDepthTexture;
-      velocityPass.desc.dependencyTextureAccessModes =
-          std::span<const RenderGraphAccessMode>(
-              mainPassDependencyTextureAccessModes_.data(),
-              passDependencyTextures_.size());
+      for (size_t i = 0; i < velocityPass.textureUses.size(); ++i) {
+        velocityPass.textureUses[i].access =
+            mainPassDependencyTextureAccessModes_[i];
+      }
       velocityPass.desc.gpuTimingScope = GpuTimingScope::Velocity;
-      velocityPass.desc.borrowPayload = true;
       velocityPass.phase = gtaoTemporalVelocityRequested
                                ? PreparedPassPhase::PreLighting
                                : PreparedPassPhase::MainLighting;
@@ -6660,12 +6633,11 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
                                  .clearDepth = kClearDepthOne,
                                  .clearStencil = 0};
       velocityPass.depthTextureHandle = sceneDepthTexture;
-      velocityPass.desc.dependencyTextureAccessModes =
-          std::span<const RenderGraphAccessMode>(
-              mainPassDependencyTextureAccessModes_.data(),
-              passDependencyTextures_.size());
+      for (size_t i = 0; i < velocityPass.textureUses.size(); ++i) {
+        velocityPass.textureUses[i].access =
+            mainPassDependencyTextureAccessModes_[i];
+      }
       velocityPass.desc.gpuTimingScope = GpuTimingScope::Velocity;
-      velocityPass.desc.borrowPayload = true;
       velocityPass.phase = gtaoTemporalVelocityRequested
                                ? PreparedPassPhase::PreLighting
                                : PreparedPassPhase::MainLighting;
@@ -6745,11 +6717,10 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
                               .clearDepth = kClearDepthOne,
                               .clearStencil = 0};
     inspectPass.depthTextureHandle = sceneDepthTexture;
-    inspectPass.desc.dependencyTextureAccessModes =
-        std::span<const RenderGraphAccessMode>(
-            mainPassDependencyTextureAccessModes_.data(),
-            mainPassDependencyTextureAccessModes_.size());
-    inspectPass.desc.borrowPayload = true;
+    for (size_t i = 0; i < inspectPass.textureUses.size(); ++i) {
+      inspectPass.textureUses[i].access =
+          mainPassDependencyTextureAccessModes_[i];
+    }
     inFlightShadowInspectReadback_ =
         InFlightShadowInspectReadback{.request = *pendingShadowInspectRequest_,
                                       .submissionFrame = frame.frameIndex};
@@ -6831,7 +6802,7 @@ bool OpaqueRenderer::hasPreparedOpaquePickPasses() const noexcept {
 
 bool OpaqueRenderer::shouldPublishSceneDepthGraphTexture(
     const RenderFrameContext &frame) const {
-  const RenderSettings &settings = frame.settings;
+  const RenderSettings &settings = frame.settings.facts();
   if (isRenderCaptureRequested(frame, "scene_depth")) {
     return true;
   }
@@ -6997,7 +6968,7 @@ void OpaqueRenderer::appendPreparedGraphPass(RenderFrameContext &frame,
             RenderCaptureValueKind::LinearHdrColor,
             RenderCaptureLifetimeClass::FrameSharedRingTexture, "linear_hdr",
             "hdr_color", pass.desc.debugLabel);
-        if (frame.settings.shadow.debug.visualizeShadowFactor) {
+        if (frame.settings->shadow.debug.visualizeShadowFactor) {
           publishRequestedCapture(
               frame, gpu_, "shadow_factor",
               frame.sharedResources[FrameTextureSlot::SceneColor].texture,
@@ -7015,7 +6986,7 @@ void OpaqueRenderer::appendPreparedGraphPass(RenderFrameContext &frame,
           RenderCaptureValueKind::LinearHdrColor,
           RenderCaptureLifetimeClass::FrameSharedRingTexture, "linear_hdr",
           "hdr_color", pass.desc.debugLabel);
-      if (frame.settings.shadow.debug.visualizeShadowFactor) {
+      if (frame.settings->shadow.debug.visualizeShadowFactor) {
         publishRequestedCapture(
             frame, gpu_, "shadow_factor",
             frame.sharedResources[FrameTextureSlot::SceneColor].texture,
@@ -7291,8 +7262,11 @@ OpaqueRenderer::buildIndirectDraws(uint32_t frameSlot, size_t remapCount,
       indirectPackCache_.valid &&
       indirectPackCache_.drawSignature == drawSignature;
   if (canReusePackedCommands) {
-    auto indirectCapacityResult = ensureIndirectCommandRingCapacity(
-        std::max(indirectPackCache_.requiredBytes, kIndirectCountHeaderBytes));
+    auto indirectCapacityResult = bufferRings_.ensureRole(
+        IndirectCommandRing, indirectPackCache_.requiredBytes,
+        [this](size_t i) {
+          frameSlotStates_[i].indirectUploadSignature = kInvalidDrawSignature;
+        });
     if (indirectCapacityResult.hasError()) {
       return indirectCapacityResult;
     }
@@ -7400,8 +7374,10 @@ OpaqueRenderer::rebuildIndirectPack(uint32_t frameSlot,
   }
   packedRequiredBytes =
       std::max(packedRequiredBytes, kIndirectCountHeaderBytes);
-  auto packedCapacityResult =
-      ensureIndirectCommandRingCapacity(packedRequiredBytes);
+  auto packedCapacityResult = bufferRings_.ensureRole(
+      IndirectCommandRing, packedRequiredBytes, [this](size_t i) {
+        frameSlotStates_[i].indirectUploadSignature = kInvalidDrawSignature;
+      });
   if (packedCapacityResult.hasError()) {
     return packedCapacityResult;
   }
@@ -7796,211 +7772,12 @@ OpaqueRenderer::ensureRingBufferCount(uint32_t requiredCount) {
   return Result<bool, std::string>::makeResult(true);
 }
 
-Result<bool, std::string>
-OpaqueRenderer::ensureInstanceMatricesRingCapacity(size_t requiredBytes) {
-  const size_t sceneInstanceBytes =
-      std::max(instanceMatricesCpuCache_.size(), size_t{1u}) *
-      sizeof(InstanceData);
-  return bufferRings_.ensureRole(
-      InstanceMatricesRing,
-      BufferDesc{.usage = BufferUsage::Storage,
-                 .storage = Storage::Device,
-                 .size = std::max({requiredBytes, sceneInstanceBytes,
-                                   sizeof(InstanceData)})},
-      "opaque_instance_matrices_buffer", [this](size_t i) {
-        frameSlotStates_[i].matricesUploadVersion =
-            std::numeric_limits<uint64_t>::max();
-      });
-}
-
-Result<bool, std::string> OpaqueRenderer::ensureDynamicRingCapacity(
-    BufferRingSlot role, size_t requiredBytes, size_t minimumBytes,
-    std::string_view debugNamePrefix, Storage storage) {
-  return bufferRings_.ensureRole(
-      role,
-      BufferDesc{.usage = BufferUsage::Storage,
-                 .storage = storage,
-                 .size = std::max(requiredBytes, minimumBytes)},
-      debugNamePrefix);
-}
-
-Result<bool, std::string>
-OpaqueRenderer::ensurePreviousInstanceMatricesRingCapacity(
-    size_t requiredBytes) {
-  return ensureDynamicRingCapacity(
-      PreviousInstanceMatricesRing, requiredBytes, sizeof(InstanceData),
-      "opaque_previous_instance_matrices_buffer", Storage::HostVisible);
-}
-
-Result<bool, std::string>
-OpaqueRenderer::ensureVelocityInstanceFlagsRingCapacity(size_t requiredBytes) {
-  return ensureDynamicRingCapacity(
-      VelocityInstanceFlagsRing, requiredBytes, sizeof(uint32_t),
-      "opaque_velocity_instance_flags_buffer", Storage::HostVisible);
-}
-
-Result<bool, std::string>
-OpaqueRenderer::ensureVelocityFrameDataRingCapacity(size_t requiredBytes) {
-  return ensureDynamicRingCapacity(
-      VelocityFrameDataRing, requiredBytes, sizeof(VelocityFrameGpuData),
-      "opaque_velocity_frame_data_buffer", Storage::HostVisible);
-}
-
-Result<bool, std::string>
-OpaqueRenderer::ensureVelocityGeometryRingCapacity(size_t requiredBytes) {
-  return ensureDynamicRingCapacity(VelocityGeometryRing, requiredBytes,
-                                   sizeof(VelocityRenderableGeometryGpuData),
-                                   "opaque_velocity_geometry_buffer",
-                                   Storage::HostVisible);
-}
-
-Result<bool, std::string>
-OpaqueRenderer::ensureMeshletBatchRingCapacity(size_t requiredBytes) {
-  const size_t requested =
-      ((std::max(requiredBytes, sizeof(MeshletBatchGpuData)) +
-        sizeof(MeshletBatchGpuData) - 1u) /
-       sizeof(MeshletBatchGpuData)) *
-      sizeof(MeshletBatchGpuData);
-  return bufferRings_.ensureRole(MeshletBatchRing,
-                                 BufferDesc{.usage = BufferUsage::Storage,
-                                            .storage = Storage::HostVisible,
-                                            .size = requested},
-                                 "opaque_meshlet_batch_buffer");
-}
-
-Result<bool, std::string>
-OpaqueRenderer::ensureVisibilityGpuRingCapacity(size_t candidateBytes,
-                                                size_t visibleIndexBytes) {
-  const size_t sceneCandidateCount = std::max(
-      {visibilityCandidateGpuData_.size(), visibilityCandidates_.size(),
-       meshDrawTemplates_.size(), size_t{1u}});
-  const size_t sceneCandidateBytes =
-      sceneCandidateCount * sizeof(VisibilityCandidateGpu);
-  const size_t sceneVisibleIndexBytes = sceneCandidateCount * sizeof(uint32_t);
-  auto candidateResult = ensureDynamicRingCapacity(
-      VisibilityCandidateRing, std::max(candidateBytes, sceneCandidateBytes),
-      sizeof(VisibilityCandidateGpu), "opaque_visibility_candidate_buffer",
-      Storage::HostVisible);
-  if (candidateResult.hasError()) {
-    return candidateResult;
-  }
-  auto passResult = ensureDynamicRingCapacity(
-      VisibilityPassRing, sizeof(VisibilityPassGpuData),
-      sizeof(VisibilityPassGpuData), "opaque_visibility_pass_buffer",
-      Storage::HostVisible);
-  if (passResult.hasError()) {
-    return passResult;
-  }
-  auto visibleResult = ensureVisibilityVisibleIndexRingCapacity(
-      std::max(visibleIndexBytes, sceneVisibleIndexBytes));
-  if (visibleResult.hasError()) {
-    return visibleResult;
-  }
-  return ensureVisibilityCounterRingCapacity(sizeof(VisibilityCounterGpuData));
-}
-
-Result<bool, std::string>
-OpaqueRenderer::ensureVisibilityMeshletIndirectRingCapacity(
-    size_t dispatchBytes, size_t commandBytes) {
-  const size_t maxDispatchBytes =
-      kMaxDrawItemsForIndirectPath * sizeof(VisibilityMeshletDispatchGpuData);
-  auto dispatchResult = ensureDynamicRingCapacity(
-      VisibilityMeshletDispatchRing, std::max(dispatchBytes, maxDispatchBytes),
-      sizeof(VisibilityMeshletDispatchGpuData),
-      "opaque_visibility_meshlet_dispatch_buffer", Storage::HostVisible);
-  if (dispatchResult.hasError()) {
-    return dispatchResult;
-  }
-  return ensureVisibilityMeshletIndirectCommandRingCapacity(commandBytes);
-}
-
-Result<bool, std::string>
-OpaqueRenderer::ensureMeshletCompactionRingCapacity(size_t requiredBytes) {
-  return ensureDynamicRingCapacity(
-      MeshletCompactionRing, requiredBytes, sizeof(CompactedMeshletGpuData),
-      "opaque_meshlet_compaction_buffer", Storage::Device);
-}
-
-Result<bool, std::string>
-OpaqueRenderer::ensureVisibilityMeshletIndirectCommandRingCapacity(
-    size_t requiredBytes) {
-  constexpr size_t kMeshDispatchCommandBytes = sizeof(uint32_t) * 3u;
-  constexpr size_t kMaxMeshDispatchCommandBytes =
-      kMaxDrawItemsForIndirectPath * kMeshDispatchCommandBytes;
-  const size_t requested = ((std::max({requiredBytes, kMeshDispatchCommandBytes,
-                                       kMaxMeshDispatchCommandBytes}) +
-                             kMeshDispatchCommandBytes - 1u) /
-                            kMeshDispatchCommandBytes) *
-                           kMeshDispatchCommandBytes;
-  return bufferRings_.ensureRole(
-      VisibilityMeshletIndirectCommandRing,
-      BufferDesc{.usage = BufferUsage::Storage | BufferUsage::Indirect,
-                 .storage = Storage::Device,
-                 .size = requested},
-      "opaque_visibility_meshlet_indirect_commands");
-}
-
-Result<bool, std::string>
-OpaqueRenderer::ensureVisibilityVisibleIndexRingCapacity(size_t requiredBytes) {
-  return bufferRings_.ensureRole(
-      VisibilityVisibleIndexRing,
-      BufferDesc{.usage = BufferUsage::Storage,
-                 .storage = Storage::HostVisible,
-                 .size = std::max(requiredBytes, sizeof(uint32_t))},
-      "opaque_visibility_visible_index_buffer",
-      [this](size_t i) { invalidateVisibilityReadbackSlot(i); });
-}
-
-Result<bool, std::string>
-OpaqueRenderer::ensureVisibilityCounterRingCapacity(size_t requiredBytes) {
-  return bufferRings_.ensureRole(
-      VisibilityCounterRing,
-      BufferDesc{.usage = BufferUsage::Storage,
-                 .storage = Storage::HostVisible,
-                 .size =
-                     std::max(requiredBytes, sizeof(VisibilityCounterGpuData))},
-      "opaque_visibility_counter_buffer",
-      [this](size_t i) { invalidateVisibilityReadbackSlot(i); });
-}
-
 void OpaqueRenderer::invalidateVisibilityReadbackSlot(size_t i) {
   frameSlotStates_[i].visibilityPublishedFrame =
       std::numeric_limits<uint64_t>::max();
   frameSlotStates_[i].expectedVisibleCount = 0u;
   frameSlotStates_[i].expectedVisibleHash = kFnvOffsetBasis64;
   frameSlotStates_[i].expectedVisibleListValid = 0u;
-}
-
-Result<bool, std::string>
-OpaqueRenderer::ensureInstanceRemapRingCapacity(size_t requiredBytes) {
-  const size_t sceneRemapBytes =
-      std::max(meshDrawTemplates_.size(), size_t{1u}) * sizeof(uint32_t);
-  return bufferRings_.ensureRole(
-      InstanceRemapRing,
-      BufferDesc{
-          .usage = BufferUsage::Storage,
-          .storage = Storage::HostVisible,
-          .size = std::max({requiredBytes, sceneRemapBytes, sizeof(uint32_t)})},
-      "opaque_instance_remap_buffer", [this](size_t i) {
-        frameSlotStates_[i].remapUploadSignature = kInvalidDrawSignature;
-      });
-}
-
-Result<bool, std::string>
-OpaqueRenderer::ensureIndirectCommandRingCapacity(size_t requiredBytes) {
-  constexpr size_t kIndirectCommandBytesPerDraw =
-      kIndirectCountHeaderBytes + sizeof(DrawIndexedIndirectCommand);
-  constexpr size_t kMaxIndirectCommandBytes =
-      kMaxDrawItemsForIndirectPath * kIndirectCommandBytesPerDraw;
-  return bufferRings_.ensureRole(
-      IndirectCommandRing,
-      BufferDesc{.usage = BufferUsage::Storage | BufferUsage::Indirect,
-                 .storage = Storage::HostVisible,
-                 .size = std::max({requiredBytes, kIndirectCountHeaderBytes,
-                                   kMaxIndirectCommandBytes})},
-      "opaque_indirect_commands_buffer", [this](size_t i) {
-        frameSlotStates_[i].indirectUploadSignature = kInvalidDrawSignature;
-      });
 }
 
 void OpaqueRenderer::rebuildSceneCache(const SceneDrawDatabase &database,
@@ -9280,7 +9057,7 @@ void OpaqueRenderer::invalidateStaticBatchCache() {
   staticBatchCache_.meshletBatchInfos.clear();
   staticBatchCache_.meshletDispatches.clear();
   staticBatchCache_.meshletPushConstantsTemplates.clear();
-  staticBatchCache_.meshletDispatchDependencyBuffers.clear();
+  staticBatchCache_.meshletAddressBackingBuffers.clear();
   staticBatchCache_.meshletBatchGpuData.clear();
   staticBatchCache_.remap.clear();
   boundStaticBatchGeneration_ = 0;
@@ -9458,7 +9235,7 @@ void addOpaqueStage(RenderPipeline &pipeline, std::string_view componentName,
       .state = &renderer,
       .enabled =
           [](const void *state, const FrameBuildContext &ctx) {
-            return ctx.frame.settings.opaque.enabled &&
+            return ctx.frame.settings->opaque.enabled &&
                    (static_cast<const OpaqueRenderer *>(state)->*Ready)();
           },
       .build =

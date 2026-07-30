@@ -561,7 +561,7 @@ AssetSystem::requestScene(const SceneLoadRequest &request) {
       node.request.debugName.empty() ? workerPath : node.request.debugName,
       SceneManifestCompletion{.handle = handle},
       [workerPath, workerOptions] {
-        return prepareSceneManifest(workerPath, workerOptions);
+        return SceneImporter::loadSceneFromFile(workerPath, workerOptions);
       },
       [this](SceneManifestCompletion completion) {
         pushCompletion(std::move(completion));

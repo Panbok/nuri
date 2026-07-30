@@ -237,8 +237,8 @@ void loadImportedLightsForScene(std::string_view sceneName,
     return;
   }
 
-  outLights.assign(loadResult.value().lights.begin(),
-                   loadResult.value().lights.end());
+  outLights.assign(loadResult.value().prefab.lights.begin(),
+                   loadResult.value().prefab.lights.end());
 }
 
 static void

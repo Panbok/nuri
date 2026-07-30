@@ -10,7 +10,6 @@ set(NURI_RENDERER_SOURCES
   nuri/core/log.cpp
   nuri/core/runtime_config.cpp
   nuri/core/thread_priority.cpp
-  nuri/gfx/debug_draw_3d.cpp
   nuri/gfx/ddgi/ddgi_atlas.cpp
   nuri/gfx/ddgi/ddgi_coverage.cpp
   nuri/gfx/ddgi/ddgi_dirty_regions.cpp

@@ -148,12 +148,12 @@ TEST(DynamicBufferRingTest, BusyPreferredLaneGrowsUntilSubmissionCompletes) {
 TEST(DynamicBufferRoleRingTest,
      KeepsRolesAlignedAndReusesOnlyCompletedSubmissionLanes) {
   FailingBufferGPUDevice gpu;
-  DynamicBufferRoleRing ring(gpu, 2u);
+  DynamicBufferRoleRing ring(
+      gpu, {{BufferUsage::Storage, Storage::Device, 256u, 1u, "role_zero"},
+            {BufferUsage::Storage, Storage::Device, 512u, 1u, "role_one"}});
   ASSERT_TRUE(ring.ensureLaneCount(1u).hasValue());
-  ASSERT_TRUE(
-      ring.ensureRole(0u, storageBufferDesc(256u), "role_zero").hasValue());
-  ASSERT_TRUE(
-      ring.ensureRole(1u, storageBufferDesc(512u), "role_one").hasValue());
+  ASSERT_TRUE(ring.ensureRole(0u, 256u).hasValue());
+  ASSERT_TRUE(ring.ensureRole(1u, 512u).hasValue());
 
   ASSERT_TRUE(gpu.beginFrame(0u).hasValue());
   auto first = ring.acquire(0u, 1u);

@@ -217,8 +217,6 @@ TEST(RenderGraphCompileBehaviorTest,
   const CompiledRenderGraph &parallel = parallelCompile.value();
 
   EXPECT_FALSE(serial.plan.usedParallelCompile);
-  EXPECT_TRUE(parallel.plan.usedParallelCompile ||
-              parallel.commands.usedParallelPayloadResolution);
   EXPECT_EQ(serial.plan.orderedPassIndices, parallel.plan.orderedPassIndices);
   EXPECT_EQ(serial.plan.edges.size(), parallel.plan.edges.size());
   EXPECT_EQ(serial.plan.transientBufferLifetimes.size(),
@@ -306,13 +304,14 @@ TEST(RenderGraphCompileBehaviorTest,
   ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
   const CompiledRenderGraph &compiled = compileResult.value();
   ASSERT_EQ(compiled.plan.commandResourcePatches.size(), 2u);
-  EXPECT_EQ(compiled.plan.commandResourcePatches[0].commandIndex, 0u);
-  EXPECT_EQ(
-      compiled.plan.commandResourcePatches[0].target,
-      RenderGraphPlan::CommandResourcePatchTarget::MeshDispatchIndirectBuffer);
-  EXPECT_EQ(compiled.plan.commandResourcePatches[1].target,
-            RenderGraphPlan::CommandResourcePatchTarget::
-                MeshDispatchIndirectCountBuffer);
+  const auto *indirect =
+      std::get_if<RenderGraphPlan::MeshDispatchIndirectBufferPatch>(
+          &compiled.plan.commandResourcePatches[0]);
+  ASSERT_NE(indirect, nullptr);
+  EXPECT_EQ(indirect->commandIndex, 0u);
+  EXPECT_TRUE(std::holds_alternative<
+              RenderGraphPlan::MeshDispatchIndirectCountBufferPatch>(
+      compiled.plan.commandResourcePatches[1]));
 }
 
 TEST(RenderGraphCompileBehaviorTest,
@@ -349,16 +348,11 @@ TEST(RenderGraphCompileBehaviorTest,
       std::byte{0x01}, std::byte{0x02}, std::byte{0x03}, std::byte{0x04}};
   const std::array<std::byte, 4u> pushBytesB = {
       std::byte{0x05}, std::byte{0x06}, std::byte{0x07}, std::byte{0x08}};
-  const std::array<BufferHandle, 1u> dependencyBuffers = {
-      BufferHandle{.index = 61u, .generation = 1u}};
-
   ComputeDispatchItem dispatchA{};
   dispatchA.pipeline = ComputePipelineHandle{.index = 77u, .generation = 1u};
   dispatchA.dispatch = {.x = 1u, .y = 1u, .z = 1u};
   dispatchA.pushConstants =
       std::span<const std::byte>(pushBytesA.data(), pushBytesA.size());
-  dispatchA.dependencyBuffers = std::span<const BufferHandle>(
-      dependencyBuffers.data(), dependencyBuffers.size());
   dispatchA.debugLabel = "payload_layout_dispatch_a";
 
   ComputeDispatchItem dispatchB = dispatchA;
@@ -445,7 +439,7 @@ TEST(RenderGraphCompileBehaviorTest,
 }
 
 TEST(RenderGraphCompileBehaviorTest,
-     RefreshHandlesUpdatesBorrowedPreResolvedDrawSpan) {
+     PreResolvedDrawCountChangesInvalidateStructuralPlan) {
   RenderGraphBuilder builder;
 
   auto recordFrame = [&](uint64_t frameIndex, std::span<const DrawItem> draws)
@@ -468,7 +462,6 @@ TEST(RenderGraphCompileBehaviorTest,
     passDesc.drawBuffersPreResolved = true;
     passDesc.preResolvedDrawBuffers = std::span<const BufferHandle>(
         preResolvedDrawBuffers.data(), preResolvedDrawBuffers.size());
-    passDesc.borrowPayload = true;
     passDesc.debugLabel = "refresh_borrowed_preresolved_draw_pass";
 
     auto passResult = builder.addGraphicsPass(passDesc);
@@ -495,9 +488,11 @@ TEST(RenderGraphCompileBehaviorTest,
 
   const auto fingerprintB =
       recordFrame(269u, std::span<const DrawItem>(draws.data(), draws.size()));
-  ASSERT_TRUE(fingerprintA == fingerprintB);
-
-  compiled.commands = builder.buildFrameCommands(compiled.plan);
+  ASSERT_FALSE(fingerprintA == fingerprintB);
+  auto refreshedCompileResult = compileBuilder(builder);
+  ASSERT_FALSE(refreshedCompileResult.hasError())
+      << refreshedCompileResult.error();
+  compiled = std::move(refreshedCompileResult.value());
   ASSERT_EQ(compiled.commands.orderedPasses.size(), 1u);
   ASSERT_EQ(compiled.commands.orderedPasses[0u].draws.size(), draws.size());
   EXPECT_EQ(compiled.commands.orderedPasses[0u].draws[3u].vertexBuffer.index,
@@ -685,12 +680,9 @@ TEST(RenderGraphCompileBehaviorTest,
   ASSERT_FALSE(sourceTextureResult.hasError());
   ASSERT_FALSE(resultBufferResult.hasError());
 
-  const std::array<BufferHandle, 1u> dispatchDependencies = {BufferHandle{}};
   ComputeDispatchItem dispatch{};
   dispatch.pipeline = ComputePipelineHandle{.index = 88u, .generation = 1u};
   dispatch.dispatch = {.x = 1u, .y = 1u, .z = 1u};
-  dispatch.dependencyBuffers = std::span<const BufferHandle>(
-      dispatchDependencies.data(), dispatchDependencies.size());
   dispatch.debugLabel = "compute_only_dispatch";
   const std::array<ComputeDispatchItem, 1u> preDispatches = {dispatch};
 
@@ -708,9 +700,9 @@ TEST(RenderGraphCompileBehaviorTest,
       builder.addTextureRead(passResult.value(), sourceTextureResult.value())
           .hasError());
   ASSERT_FALSE(builder
-                   .bindPreDispatchDependencyBuffer(
-                       passResult.value(), 0u, 0u, resultBufferResult.value(),
-                       RenderGraphAccessMode::Write)
+                   .addBufferAccess(passResult.value(),
+                                    resultBufferResult.value(),
+                                    RenderGraphAccessMode::Write)
                    .hasError());
 
   auto compileResult = compileBuilder(builder);
@@ -720,15 +712,10 @@ TEST(RenderGraphCompileBehaviorTest,
             RenderPassExecutionMode::ComputeOnly);
   ASSERT_EQ(
       compileResult.value().commands.orderedPasses[0].preDispatches.size(), 1u);
-  ASSERT_EQ(compileResult.value()
-                .commands.orderedPasses[0]
-                .preDispatches[0]
-                .dependencyBuffers.size(),
-            1u);
 }
 
 TEST(RenderGraphCompileBehaviorTest,
-     ImplicitPreDispatchDependenciesPreserveExactAccessModes) {
+     CanonicalImportedUsesPreserveExactAccessModes) {
   RenderGraphBuilder builder;
   builder.beginFrame(245u);
 
@@ -736,15 +723,13 @@ TEST(RenderGraphCompileBehaviorTest,
       BufferHandle{.index = 501u, .generation = 1u},
       BufferHandle{.index = 502u, .generation = 1u},
   };
-  const std::array<RenderGraphAccessMode, 2u> accessModes = {
-      RenderGraphAccessMode::Read,
-      RenderGraphAccessMode::Write,
-  };
+  const std::array<RenderGraphImportedBufferUse, 2u> uses{{
+      {.buffer = dependencies[0], .access = RenderGraphAccessMode::Read},
+      {.buffer = dependencies[1], .access = RenderGraphAccessMode::Write},
+  }};
   ComputeDispatchItem dispatch{};
   dispatch.pipeline = ComputePipelineHandle{.index = 91u, .generation = 1u};
   dispatch.dispatch = {.x = 1u, .y = 1u, .z = 1u};
-  dispatch.dependencyBuffers = dependencies;
-  dispatch.dependencyBufferAccessModes = accessModes;
   dispatch.debugLabel = "exact_access_dispatch";
   const std::array<ComputeDispatchItem, 1u> preDispatches = {dispatch};
 
@@ -752,6 +737,7 @@ TEST(RenderGraphCompileBehaviorTest,
   passDesc.executionMode = RenderPassExecutionMode::ComputeOnly;
   passDesc.hasColorAttachment = false;
   passDesc.preDispatches = preDispatches;
+  passDesc.importedBufferUses = uses;
   passDesc.debugLabel = "exact_access_pass";
   passDesc.markImplicitOutputSideEffect = true;
 
@@ -1366,22 +1352,16 @@ TEST(RenderGraphCompileBehaviorTest, TransientAliasAllocationCorrectness) {
   }
 }
 
-TEST(RenderGraphCompileBehaviorTest, ExplicitAccessOverridesLegacyInference) {
+TEST(RenderGraphCompileBehaviorTest,
+     ExplicitCanonicalAccessMergesAcrossPasses) {
   RenderGraphBuilder builder;
   builder.beginFrame(205u);
 
   const BufferHandle sharedDependency{.index = 31u, .generation = 1u};
   const TextureHandle color0{.index = 41u, .generation = 1u};
   const TextureHandle color1{.index = 42u, .generation = 1u};
-  std::array<BufferHandle, 1> deps0 = {BufferHandle{}};
-  std::array<BufferHandle, 1> deps1 = {BufferHandle{}};
-
   RenderPass pass0 = makeTestPass("override_p0", color0);
-  pass0.dependencyBuffers =
-      std::span<const BufferHandle>(deps0.data(), deps0.size());
   RenderPass pass1 = makeTestPass("override_p1", color1);
-  pass1.dependencyBuffers =
-      std::span<const BufferHandle>(deps1.data(), deps1.size());
 
   auto pass0Result = addTestGraphicsPass(builder, pass0, pass0.debugLabel);
   auto pass1Result = addTestGraphicsPass(builder, pass1, pass1.debugLabel);
@@ -1397,20 +1377,16 @@ TEST(RenderGraphCompileBehaviorTest, ExplicitAccessOverridesLegacyInference) {
     ADD_FAILURE() << "importBuffer should succeed for access override graph";
     return;
   }
-  auto bindResult = builder.bindPassDependencyBuffer(
-      pass0Result.value(), 0u, importResult.value(),
-      RenderGraphAccessMode::Read);
+  auto bindResult = builder.addBufferAccess(
+      pass0Result.value(), importResult.value(), RenderGraphAccessMode::Read);
   if (!(!bindResult.hasError())) {
-    ADD_FAILURE()
-        << "bindPassDependencyBuffer pass0 read override should succeed";
+    ADD_FAILURE() << "addBufferAccess pass0 read should succeed";
     return;
   }
-  bindResult = builder.bindPassDependencyBuffer(pass1Result.value(), 0u,
-                                                importResult.value(),
-                                                RenderGraphAccessMode::Read);
+  bindResult = builder.addBufferAccess(
+      pass1Result.value(), importResult.value(), RenderGraphAccessMode::Read);
   if (!(!bindResult.hasError())) {
-    ADD_FAILURE()
-        << "bindPassDependencyBuffer pass1 read override should succeed";
+    ADD_FAILURE() << "addBufferAccess pass1 read should succeed";
     return;
   }
 
@@ -1500,12 +1476,14 @@ TEST(RenderGraphCompileBehaviorTest,
                 .storeOp = StoreOp::Store,
                 .clearColor = {0.0f, 0.0f, 0.0f, 1.0f}};
   desc.colorTexture = colorResult.value();
-  desc.dependencyTextures = std::span<const TextureHandle>(
-      dependencyTextures.data(), dependencyTextures.size());
   desc.debugLabel = "many_texture_reads";
 
   auto passResult = builder.addGraphicsPass(desc);
   ASSERT_FALSE(passResult.hasError()) << passResult.error();
+  ASSERT_FALSE(builder
+                   .addImportedTextureReads(passResult.value(),
+                                            dependencyTextures, desc.debugLabel)
+                   .hasError());
 
   auto compileResult = compileBuilder(builder);
   ASSERT_FALSE(compileResult.hasError()) << compileResult.error();

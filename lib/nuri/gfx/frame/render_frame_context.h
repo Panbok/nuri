@@ -964,8 +964,9 @@ struct RenderSettings {
   DDGISettings ddgi{};
 };
 
-struct ResolvedRenderSettings final : RenderSettings {
-  ResolvedRenderSettings() = default;
+class ResolvedRenderSettings final {
+public:
+  ResolvedRenderSettings();
   ResolvedRenderSettings(const ResolvedRenderSettings &) = default;
   ResolvedRenderSettings(ResolvedRenderSettings &&) = default;
 
@@ -980,9 +981,15 @@ struct ResolvedRenderSettings final : RenderSettings {
   [[nodiscard]] static ResolvedRenderSettings
   fromAuthored(const RenderSettings &source);
 
+  [[nodiscard]] const RenderSettings *operator->() const noexcept {
+    return &values_;
+  }
+  [[nodiscard]] const RenderSettings &facts() const noexcept { return values_; }
+
 private:
   explicit ResolvedRenderSettings(RenderSettings &&settings)
-      : RenderSettings(std::move(settings)) {}
+      : values_(std::move(settings)) {}
+  RenderSettings values_{};
 };
 
 [[nodiscard]] inline uint64_t ddgiProductProfileFingerprint(
@@ -1301,12 +1308,12 @@ struct AmbientOcclusionExecutionPlan {
 };
 
 [[nodiscard]] inline AmbientOcclusionExecutionPlan
-resolveAmbientOcclusionExecutionPlan(const RenderSettings &settings,
+resolveAmbientOcclusionExecutionPlan(const ResolvedRenderSettings &settings,
                                      CoverageMode coverage,
                                      uint32_t outputWidth,
                                      uint32_t outputHeight) noexcept {
   const RenderSettings::AmbientOcclusionSettings &ao =
-      settings.ambientOcclusion;
+      settings->ambientOcclusion;
   AmbientOcclusionExecutionPlan plan{};
   plan.active = ao.active;
   plan.temporal = ao.active && ao.temporalAccumulation;
@@ -1328,13 +1335,6 @@ resolveAmbientOcclusionExecutionPlan(const RenderSettings &settings,
   plan.workingWidth = half ? (plan.outputWidth + 1u) / 2u : plan.outputWidth;
   plan.workingHeight = half ? (plan.outputHeight + 1u) / 2u : plan.outputHeight;
   return plan;
-}
-
-[[nodiscard]] inline bool
-isAmbientOcclusionActive(const RenderSettings &settings) noexcept {
-  RenderSettings::AmbientOcclusionSettings ao = settings.ambientOcclusion;
-  sanitizeAmbientOcclusionSettings(ao, settings.opaque, settings.antiAliasing);
-  return ao.active;
 }
 
 [[nodiscard]] inline uint32_t
@@ -2080,6 +2080,7 @@ static_assert(sizeof(ShadowFrameGpuData) == 400u);
 struct ShadowFrameGpuDataHandle {
   BufferHandle buffer{};
   uint64_t bufferAddress = 0u;
+  std::array<SamplerHandle, 2u> samplers{};
 };
 
 struct ShadowSdsmGpuReduceTargetHandle {
@@ -2238,11 +2239,13 @@ struct ForwardSceneGpuData {
   uint64_t postTaaFrameDataAddress = 0;
   std::span<const BufferHandle> indirectDependencyBuffers{};
   std::span<const TextureHandle> indirectDependencyTextures{};
+  std::span<const SamplerHandle> recordingSamplers{};
 };
 
 struct DDGIFrameGpuDataHandle {
   BufferHandle buffer{};
   uint64_t bufferAddress = 0u;
+  SamplerHandle sampler{};
   std::span<const BufferHandle> dependencyBuffers{};
   std::span<const TextureHandle> dependencyTextures{};
   uint32_t activeVolumeCount = 0u;
@@ -3292,6 +3295,7 @@ struct FrameSharedResources {
   uint32_t shadowCompareSamplerId = kInvalidShadowBindlessIndex;
   uint32_t sceneDepthPyramidLevelCount = 0;
   uint32_t sceneDepthSamplerId = 0;
+  SamplerHandle sceneDepthSampler{};
   TextureHandle sceneColorHalfResTexture{};
   TextureHandle sceneColorQuarterResTexture{};
   bool historyColorReadValid = false;
@@ -3443,6 +3447,9 @@ ResolvedRenderSettings::fromAuthored(const RenderSettings &source) {
   sanitizeDDGISettings(resolved.ddgi);
   return ResolvedRenderSettings(std::move(resolved));
 }
+
+inline ResolvedRenderSettings::ResolvedRenderSettings()
+    : ResolvedRenderSettings(fromAuthored(RenderSettings{})) {}
 
 [[nodiscard]] inline bool
 isRenderCaptureRequested(const RenderFrameContext &frame,

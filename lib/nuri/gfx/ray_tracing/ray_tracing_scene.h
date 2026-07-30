@@ -207,6 +207,7 @@ private:
   uint64_t transformVersion_ = 0u;
   uint64_t deformationVersion_ = 0u;
   uint64_t geometryMutationVersion_ = 0u;
+  uint64_t drawDatabaseGeneration_ = UINT64_MAX;
   uint64_t asScratchHighWaterBytes_ = 0u;
   uint64_t animationVersion_ = 0u;
   uint64_t consumedRebuildEpoch_ = 0u;

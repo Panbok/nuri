@@ -42,6 +42,8 @@ private:
   GPUDevice &gpu_;
   DynamicBufferRing sceneDataBuffers_;
   std::vector<Slot> slots_;
+  std::vector<BufferHandle> forwardDependencyBuffers_;
+  std::vector<SamplerHandle> forwardRecordingSamplers_;
   std::unique_ptr<Buffer> disabledShadowFrameBuffer_;
   SamplerHandle taaMaterialMipBiasSampler_{};
   SamplerDesc taaMaterialMipBiasSamplerDesc_{};

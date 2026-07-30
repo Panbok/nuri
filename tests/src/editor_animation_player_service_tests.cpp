@@ -167,7 +167,7 @@ createServiceTestContext(const std::filesystem::path &path,
     return nuri::Result<std::unique_ptr<ServiceTestContext>,
                         std::string>::makeError(prefabResult.error());
   }
-  ctx->prefab = std::move(prefabResult.value());
+  ctx->prefab = std::move(prefabResult.value().prefab);
 
   auto assetsResult = ctx->resources.acquireScenePrefabAssets(ctx->prefab);
   if (assetsResult.hasError()) {

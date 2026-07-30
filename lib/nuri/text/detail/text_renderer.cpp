@@ -769,11 +769,13 @@ Result<bool, std::string> TextRenderer::append3DGraphPass(
   }
   desc.draws =
       std::span<const DrawItem>(worldDraws_.data(), worldDraws_.size());
-  desc.dependencyBuffers =
-      std::span<const BufferHandle>(&glyphDependencyBuffer_, 1u);
   desc.debugLabel = "Text3D Pass";
   desc.debugColor = 0xff44cc88u;
   const RenderGraphPassId pass = graph.addGraphicsPass(desc).value();
+  (void)graph
+      .addImportedBufferAccess(pass, glyphDependencyBuffer_,
+                               RenderGraphAccessMode::Read, desc.debugLabel)
+      .value();
   for (const TextureHandle texture : worldTransparentTextureReadList_) {
     [[maybe_unused]] const bool read =
         graph
@@ -900,11 +902,13 @@ TextRenderer::append2DGraphPass(RenderFrameContext &frame,
                    .minDepth = 0.0f,
                    .maxDepth = 1.0f};
   desc.draws = std::span<const DrawItem>(uiDraws_.data(), uiDraws_.size());
-  desc.dependencyBuffers =
-      std::span<const BufferHandle>(&glyphDependencyBuffer_, 1u);
   desc.debugLabel = "Text2D Pass";
   desc.debugColor = 0xffcc8844u;
   const RenderGraphPassId pass = graph.addGraphicsPass(desc).value();
+  (void)graph
+      .addImportedBufferAccess(pass, glyphDependencyBuffer_,
+                               RenderGraphAccessMode::Read, desc.debugLabel)
+      .value();
   for (const GlyphBatch &batch : glyphBatches_) {
     if (batch.domain == TextDomain::Ui) {
       (void)graph

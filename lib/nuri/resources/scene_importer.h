@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <glm/glm.hpp>
+#include <memory>
 #include <memory_resource>
 #include <string>
 #include <string_view>
@@ -17,7 +18,6 @@ namespace nuri {
 
 struct NURI_API SceneImportOptions {
   MeshImportOptions assetBuildOptions{};
-  bool adaptAssetSources = false;
 };
 
 struct NURI_API ImportedLightInfo {
@@ -28,27 +28,29 @@ struct NURI_API ImportedLightInfo {
 
 using ImportedLightSet = std::vector<ImportedLightInfo>;
 
-struct NURI_API ImportedSceneAssets {
-  explicit ImportedSceneAssets(
+struct NURI_API ScenePrefabAdaptedMesh {
+  explicit ScenePrefabAdaptedMesh(
       std::pmr::memory_resource *memory = std::pmr::get_default_resource())
-      : meshes(memory) {}
-  std::pmr::vector<MeshData> meshes;
-  ImportedMaterialSet materials{};
+      : mesh(memory) {}
+  uint32_t sourceSceneMeshIndex = kInvalidScenePrefabIndex;
+  uint32_t sourceMaterialIndex = kInvalidScenePrefabIndex;
+  MeshData mesh;
+};
+
+struct NURI_API SceneImportProduct {
+  ScenePrefab prefab{};
+  std::vector<ScenePrefabAdaptedMesh> meshes{};
+  std::vector<MaterialData> materials{};
+  std::shared_ptr<const std::vector<EmbeddedSceneTextureData>>
+      embeddedTextures{};
 };
 
 class NURI_API SceneImporter {
 public:
   [[nodiscard]] static Result<ImportedLightSet, std::string>
   loadLightsFromFile(std::string_view path);
-  [[nodiscard]] static Result<ScenePrefab, std::string> loadSceneFromFile(
-      std::string_view path, const SceneImportOptions &options = {},
-      std::pmr::memory_resource *memory = std::pmr::get_default_resource());
-  [[nodiscard]] static Result<ImportedSceneAssets, std::string>
-  buildSceneAssets(
-      const ScenePrefab &scene,
-      std::pmr::memory_resource *memory = std::pmr::get_default_resource());
-  [[nodiscard]] static Result<ImportedSceneAssets, std::string>
-  loadSceneAssetsFromFile(
+  [[nodiscard]] static Result<SceneImportProduct, std::string>
+  loadSceneFromFile(
       std::string_view path, const SceneImportOptions &options = {},
       std::pmr::memory_resource *memory = std::pmr::get_default_resource());
 };

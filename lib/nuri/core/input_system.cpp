@@ -25,8 +25,6 @@ void InputSystem::beginFrame() {
   scrollDelta_ = glm::dvec2(0.0, 0.0);
 }
 
-void InputSystem::endFrame() {}
-
 bool InputSystem::isKeyDown(Key key) const {
   const size_t idx = keyIndex(key);
   return idx < keyDown_.size() ? keyDown_.test(idx) : false;

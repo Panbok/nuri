@@ -272,22 +272,13 @@ TEST(RenderGraphMetadataTest, MultiPassRangeMetadataIntegrity) {
   const RenderGraphBufferId transientA = transientAResult.value();
   const RenderGraphBufferId transientB = transientBResult.value();
 
-  std::array<BufferHandle, 2> pass0Deps = {BufferHandle{}, BufferHandle{}};
-  std::array<BufferHandle, 1> pass0Dispatch0Deps = {BufferHandle{}};
-  std::array<BufferHandle, 1> pass0Dispatch1Deps = {BufferHandle{}};
   ComputeDispatchItem pass0Dispatch0{};
-  pass0Dispatch0.dependencyBuffers = std::span<const BufferHandle>(
-      pass0Dispatch0Deps.data(), pass0Dispatch0Deps.size());
   ComputeDispatchItem pass0Dispatch1{};
-  pass0Dispatch1.dependencyBuffers = std::span<const BufferHandle>(
-      pass0Dispatch1Deps.data(), pass0Dispatch1Deps.size());
   std::array<ComputeDispatchItem, 2> pass0PreDispatches = {pass0Dispatch0,
                                                            pass0Dispatch1};
   std::array<DrawItem, 2> pass0Draws = {DrawItem{}, DrawItem{}};
 
   RenderPass pass0{};
-  pass0.dependencyBuffers =
-      std::span<const BufferHandle>(pass0Deps.data(), pass0Deps.size());
   pass0.preDispatches = std::span<const ComputeDispatchItem>(
       pass0PreDispatches.data(), pass0PreDispatches.size());
   pass0.draws = std::span<const DrawItem>(pass0Draws.data(), pass0Draws.size());
@@ -308,38 +299,6 @@ TEST(RenderGraphMetadataTest, MultiPassRangeMetadataIntegrity) {
   }
 
   const RenderGraphPassId pass0Id = pass0Result.value();
-  auto bindResult = builder.bindPassDependencyBuffer(
-      pass0Id, 0u, transientA,
-      RenderGraphAccessMode::Read | RenderGraphAccessMode::Write);
-  if (bindResult.hasError()) {
-    ADD_FAILURE() << "bindPassDependencyBuffer pass0 slot0 should succeed";
-    return;
-  }
-  bindResult = builder.bindPassDependencyBuffer(
-      pass0Id, 1u, transientB,
-      RenderGraphAccessMode::Read | RenderGraphAccessMode::Write);
-  if (bindResult.hasError()) {
-    ADD_FAILURE() << "bindPassDependencyBuffer pass0 slot1 should succeed";
-    return;
-  }
-
-  auto bindPreResult = builder.bindPreDispatchDependencyBuffer(
-      pass0Id, 0u, 0u, transientA,
-      RenderGraphAccessMode::Read | RenderGraphAccessMode::Write);
-  if (bindPreResult.hasError()) {
-    ADD_FAILURE() << "bindPreDispatchDependencyBuffer pass0 dispatch0 should "
-                     "succeed";
-    return;
-  }
-  bindPreResult = builder.bindPreDispatchDependencyBuffer(
-      pass0Id, 1u, 0u, transientB,
-      RenderGraphAccessMode::Read | RenderGraphAccessMode::Write);
-  if (bindPreResult.hasError()) {
-    ADD_FAILURE() << "bindPreDispatchDependencyBuffer pass0 dispatch1 should "
-                     "succeed";
-    return;
-  }
-
   auto bindDrawResult = builder.bindDrawBuffer(
       pass0Id, 0u, RenderGraphDrawBufferBindingTarget::Vertex, transientA,
       RenderGraphAccessMode::Read);
@@ -367,27 +326,12 @@ TEST(RenderGraphMetadataTest, MultiPassRangeMetadataIntegrity) {
     ADD_FAILURE() << "expected two ordered passes";
     return;
   }
-  if (!(compiled.plan.dependencyBufferRangesByPass.size() == 2u)) {
-    ADD_FAILURE() << "dependency range table should have two entries";
-    return;
-  }
   if (!(compiled.plan.preDispatchRangesByPass.size() == 2u)) {
     ADD_FAILURE() << "pre-dispatch range table should have two entries";
     return;
   }
   if (!(compiled.plan.drawRangesByPass.size() == 2u)) {
     ADD_FAILURE() << "draw range table should have two entries";
-    return;
-  }
-
-  const auto pass0DepRange = compiled.plan.dependencyBufferRangesByPass[0u];
-  const auto pass1DepRange = compiled.plan.dependencyBufferRangesByPass[1u];
-  if (!(pass0DepRange.count == 2u)) {
-    ADD_FAILURE() << "pass0 dependency range should have two slots";
-    return;
-  }
-  if (!(pass1DepRange.count == 0u)) {
-    ADD_FAILURE() << "pass1 dependency range should be empty";
     return;
   }
 
@@ -413,35 +357,27 @@ TEST(RenderGraphMetadataTest, MultiPassRangeMetadataIntegrity) {
     return;
   }
 
-  if (!(compiled.plan.commandResourcePatches.size() == 6u)) {
-    ADD_FAILURE() << "expected six command resource patches";
+  if (!(compiled.plan.commandResourcePatches.size() == 2u)) {
+    ADD_FAILURE() << "expected two draw resource patches";
     return;
   }
 
   for (const auto &binding : compiled.plan.commandResourcePatches) {
-    if (!(binding.orderedPassIndex == 0u)) {
+    const bool valid = std::visit(
+        [&](const auto &site) {
+          using Site = std::decay_t<decltype(site)>;
+          if constexpr (std::is_same_v<
+                            Site, RenderGraphPlan::DrawVertexBufferPatch> ||
+                        std::is_same_v<Site,
+                                       RenderGraphPlan::DrawIndexBufferPatch>)
+            return site.orderedPassIndex == 0u &&
+                   site.commandIndex < pass0DrawRange.count;
+          else
+            return false;
+        },
+        binding);
+    if (!valid) {
       ADD_FAILURE() << "resource patch should reference pass0";
-      return;
-    }
-    if (binding.target ==
-            RenderGraphPlan::CommandResourcePatchTarget::PassDependencyBuffer &&
-        !(binding.dependencyIndex < pass0DepRange.count)) {
-      ADD_FAILURE() << "dependency patch slot should be in pass0 range";
-      return;
-    }
-    if (binding.target == RenderGraphPlan::CommandResourcePatchTarget::
-                              PreDispatchDependencyBuffer &&
-        !(binding.commandIndex < pass0PreRange.count)) {
-      ADD_FAILURE() << "pre-dispatch patch should be in pass0 range";
-      return;
-    }
-    const auto target = binding.target;
-    const bool drawPatch =
-        target ==
-            RenderGraphPlan::CommandResourcePatchTarget::DrawVertexBuffer ||
-        target == RenderGraphPlan::CommandResourcePatchTarget::DrawIndexBuffer;
-    if (drawPatch && !(binding.commandIndex < pass0DrawRange.count)) {
-      ADD_FAILURE() << "draw patch should be in pass0 range";
       return;
     }
   }

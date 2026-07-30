@@ -4,6 +4,7 @@
 #include "nuri/defines.h"
 #include "nuri/gfx/frame/render_frame_context.h"
 #include "nuri/gfx/gpu_device.h"
+#include "nuri/gfx/pipeline/owned_program_bundle.h"
 #include "nuri/gfx/pipeline/render_pipeline.h"
 #include "nuri/resources/gpu/texture.h"
 #include <array>
@@ -20,9 +21,7 @@ class RenderPipeline;
 using FrameCompositionFeatureConfig = RuntimeCompositeConfig;
 
 struct NURI_API FullscreenPassResources {
-  ShaderHandle vertexShader{};
-  ShaderHandle fragmentShader{};
-  RenderPipelineHandle pipelineHandle{};
+  OwnedProgramBundle program{};
   Format pipelineColorFormat = Format::Count;
   std::filesystem::path vertexPath{};
   std::filesystem::path fragmentPath{};
