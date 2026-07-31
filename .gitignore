@@ -14,16 +14,3 @@ __pycache__/
 /logs/*.log
 /docs/
 /.scratch/
-/.codex/*
-!/.codex/skills/
-/.codex/skills/*
-!/.codex/skills/nuri-benchmarks/
-!/.codex/skills/nuri-benchmarks/**
-!/.codex/skills/nuri-snapshots/
-!/.codex/skills/nuri-snapshots/**
-!/.codex/skills/nuri-autotests/
-!/.codex/skills/nuri-autotests/**
-!/.codex/skills/nuri-renderer-design/
-!/.codex/skills/nuri-renderer-design/**
-!/.codex/skills/compress-codebase/
-!/.codex/skills/compress-codebase/**
